@@ -3,12 +3,16 @@
   // keyboard-interactive. Secrets live in this component only until they are
   // sent, then the fields are cleared.
   import { displayPath, type Prompt, type PromptAnswer } from "../api";
+  import { sanitizeRemote } from "../keys";
   import Modal from "./Modal.svelte";
 
   let { prompt, alias, onanswer }: { prompt: Prompt; alias: string | undefined; onanswer: (a: PromptAnswer) => void } =
     $props();
 
   let armed = $state(false);
+  let armedAt = $state(0);
+  /** A bare `y` counts only well after arming (no "yesterday" typed on). */
+  const Y_DELAY = 150;
   let secret = $state("");
   let remember = $state(false);
   let confirm = $state("");
@@ -51,7 +55,7 @@
       return;
     }
     if (kind.kind === "unknown_host_key" && !unusual && !e.metaKey && !e.ctrlKey) {
-      if (e.key === "y") submit();
+      if (e.key === "y" && performance.now() - armedAt >= Y_DELAY) submit();
       else if (e.key === "n") cancel();
     }
   }
@@ -61,7 +65,7 @@
   );
 </script>
 
-<Modal bind:armed onescape={cancel}>
+<Modal bind:armed bind:armedAt onescape={cancel}>
   {#snippet title()}
     {#if kind.kind === "unknown_host_key"}{unusual ? "Unusual host key" : "New host key"}
     {:else if kind.kind === "password"}Password
@@ -110,12 +114,17 @@
         <span>Remember in the system keyring</span>
       </label>
     {:else}
-      {#each [kind.name, kind.instructions].filter((t) => t.trim()) as text (text)}
-        <p>{text.trim()}</p>
-      {/each}
+      {@const message = [kind.name, kind.instructions].map((t) => sanitizeRemote(t, 512, true)).filter(Boolean)}
+      {#if message.length}
+        <!-- Text written by the server, not by Portico. -->
+        <div class="server">
+          <span class="server-label">Message from {alias ?? "the server"}</span>
+          {#each message as text, i (i)}<p>{text}</p>{/each}
+        </div>
+      {/if}
       {#each kind.prompts as p, i (i)}
         <label class="field">
-          <span>{p.text.trim() || `Answer ${i + 1}`}</span>
+          <span>{sanitizeRemote(p.text, 128) || `Answer ${i + 1}`}</span>
           <input
             data-autofocus={i === 0 ? "" : undefined}
             type={p.echo ? "text" : "password"}
@@ -164,7 +173,18 @@
     outline: none;
     transition: border-color var(--motion-fast) var(--ease-standard);
   }
-  .field input:focus { border-color: var(--accent); }
+  .field input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .server {
+    display: grid;
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-4);
+    border-left: 2px solid var(--border-strong);
+    background: var(--bg-elevated);
+    border-radius: var(--radius-sm);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .server-label { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: 0.04em; }
   .check {
     display: flex;
     align-items: center;

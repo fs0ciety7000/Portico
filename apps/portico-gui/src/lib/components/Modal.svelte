@@ -1,15 +1,18 @@
 <script lang="ts">
   // Modal shell: scrim, focus trap, focus restored on close, Esc to dismiss.
-  // `armed` stays false for ARM_DELAY after opening: a keystroke already in
-  // flight (typed into the shell) can never answer a security question.
+  // `armed` becomes true only after ARM_DELAY *without any keystroke*: a
+  // user still typing into a shell (in this tab or another) can never answer
+  // a security question or type into a password field by accident.
   import { onMount, type Snippet } from "svelte";
   import { fade, scale } from "svelte/transition";
+  import { dur } from "../motion";
 
   let {
     title,
     tone = "default",
     labelledBy = "modal-title",
     armed = $bindable(false),
+    armedAt = $bindable(0),
     onescape,
     children,
     footer,
@@ -18,6 +21,8 @@
     tone?: "default" | "danger";
     labelledBy?: string;
     armed?: boolean;
+    /** `performance.now()` when the dialog armed. */
+    armedAt?: number;
     onescape: () => void;
     children: Snippet;
     footer: Snippet;
@@ -31,7 +36,20 @@
     const focusField = () => (dialog.querySelector<HTMLElement>("[data-autofocus]") ?? dialog).focus();
     // Nothing reaches the views behind the dialog, even if the webview left
     // the focus there (WebKitGTK may ignore an early focus()).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      armed = true;
+      armedAt = performance.now();
+      const el = document.activeElement;
+      if (!dialog.contains(el) || el === dialog) focusField();
+    };
+    const restart = () => {
+      clearTimeout(timer);
+      timer = setTimeout(arm, ARM_DELAY);
+    };
     const guard = (e: KeyboardEvent) => {
+      // Still typing: wait for a pause before arming.
+      if (!armed) restart();
       if (dialog.contains(e.target as Node)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -43,11 +61,7 @@
     window.addEventListener("keydown", guard, true);
     // The dialog takes the keyboard at once; its first field only once armed.
     dialog.focus();
-    const timer = setTimeout(() => {
-      armed = true;
-      const el = document.activeElement;
-      if (!dialog.contains(el) || el === dialog) focusField();
-    }, ARM_DELAY);
+    restart();
     return () => {
       window.removeEventListener("keydown", guard, true);
       clearTimeout(timer);
@@ -82,7 +96,7 @@
   }
 </script>
 
-<div class="scrim" transition:fade={{ duration: 120 }}></div>
+<div class="scrim" transition:fade={{ duration: dur("fast") }}></div>
 <div class="center">
   <div
     class="modal"
@@ -93,7 +107,7 @@
     tabindex="-1"
     bind:this={dialog}
     {onkeydown}
-    transition:scale={{ start: 0.97, duration: 160 }}
+    transition:scale={{ start: 0.97, duration: dur("base") }}
   >
     <header id={labelledBy}>{@render title()}</header>
     <div class="body">{@render children()}</div>
@@ -121,7 +135,7 @@
     background: var(--bg-overlay);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-lg);
-    box-shadow: 0 24px 64px rgb(0 0 0 / 0.5);
+    box-shadow: var(--shadow-overlay);
     outline: none;
   }
   .modal.danger {
@@ -183,7 +197,7 @@
   .modal :global(button.secondary:hover:not(:disabled)) { background: var(--bg-elevated); }
   .modal :global(dl) {
     display: grid;
-    grid-template-columns: 110px 1fr;
+    grid-template-columns: max-content minmax(0, 1fr);
     gap: var(--space-2) var(--space-4);
     margin: var(--space-2) 0 0;
     padding: var(--space-3) var(--space-4);
@@ -198,6 +212,13 @@
     color: var(--text-primary);
     word-break: break-all;
     user-select: text;
+  }
+  /* Fingerprints are compared character by character: never wrap them. */
+  .modal :global(dd.fingerprint) {
+    white-space: nowrap;
+    word-break: normal;
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
   .modal :global(p) { margin: 0; }
   .modal :global(.title-host) { color: var(--text-muted); font-weight: 450; }

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use portico_core::engine::PromptResponse;
+use portico_core::engine::{PromptResponse, PtySize};
 use portico_core::hosts::HostEntry;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,26 @@ pub(crate) struct ThemeDto {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
+}
+
+/// Terminal size from the view: cells, and pixels when known (0 otherwise).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub(crate) struct PtySizeDto {
+    pub cols: u16,
+    pub rows: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl From<PtySizeDto> for PtySize {
+    fn from(s: PtySizeDto) -> Self {
+        Self {
+            cols: s.cols.max(1),
+            rows: s.rows.max(1),
+            pixel_width: s.width,
+            pixel_height: s.height,
+        }
+    }
 }
 
 /// Answer to a prompt, as sent by the webview.

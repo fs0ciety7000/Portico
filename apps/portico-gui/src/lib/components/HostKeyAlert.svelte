@@ -2,6 +2,7 @@
   // Changed host key: blocking, red, informative. There is deliberately no
   // way to accept the new key from here.
   import { displayPath } from "../api";
+  import { shellQuote } from "../keys";
   import type { Alert } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
 
@@ -11,7 +12,13 @@
   let copied = $state(false);
 
   const target = $derived(alert.port === 22 ? alert.host : `[${alert.host}]:${alert.port}`);
-  const fix = $derived(`ssh-keygen -R '${target}'`);
+  const file = $derived(displayPath(alert.known_hosts_file));
+  // Quoted for the shell; `-f` when the key lives in another file than the default.
+  const fix = $derived(
+    `ssh-keygen -R ${shellQuote(target)}${file === "~/.ssh/known_hosts" ? "" : ` -f ${shellQuote(alert.known_hosts_file)}`}`,
+  );
+  /** Offer a one-click copy only for plain host names. */
+  const copyable = $derived(/^[A-Za-z0-9._:[\]-]+$/.test(target));
 
   async function copy() {
     try {
@@ -38,14 +45,16 @@
   <p class="danger">Someone could be intercepting this connection (man-in-the-middle). Portico refused to connect.</p>
   <dl>
     <dt>Key type</dt><dd>{alert.algorithm}</dd>
-    <dt>Expected</dt><dd>{alert.expected_fingerprint}</dd>
-    <dt>Received</dt><dd class="received">{alert.fingerprint}</dd>
-    <dt>Recorded in</dt><dd>{displayPath(alert.known_hosts_file)}:{alert.known_hosts_line}</dd>
+    <dt>Expected</dt><dd class="fingerprint">{alert.expected_fingerprint}</dd>
+    <dt>Received</dt><dd class="fingerprint received">{alert.fingerprint}</dd>
+    <dt>Recorded in</dt><dd>{file}:{alert.known_hosts_line}</dd>
   </dl>
   <p>Only if the server's administrator confirms the new key, remove the old one, then connect again:</p>
   <div class="fix">
     <code>{fix}</code>
-    <button class="copy" onclick={copy} aria-label="Copy command">{copied ? "Copied" : "Copy"}</button>
+    {#if copyable}
+      <button class="copy" onclick={copy} aria-label="Copy command">{copied ? "Copied" : "Copy"}</button>
+    {/if}
   </div>
 
   {#snippet footer()}

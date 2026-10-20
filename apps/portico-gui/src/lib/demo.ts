@@ -212,7 +212,7 @@ export const demoBackend: Backend = {
     emit({ type: "prompt_resolved", id });
     resolve?.(answer);
   },
-  async openTerminal(session, _cols, _rows, onData) {
+  async openTerminal(session, _size, onData) {
     const s = sessions.get(session);
     if (!s || s.closed) throw { code: "session_ended", message: "session ended", hint: null } satisfies ErrorSummary;
     if (!s.connected && !(await new Promise<boolean>((r) => s.waiters.push(r)))) {

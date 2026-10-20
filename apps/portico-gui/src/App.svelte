@@ -3,7 +3,8 @@
   import { fly } from "svelte/transition";
   import { describe, formatRtt, isTauri, setHome, type Host, type ThemeInfo } from "./lib/api";
   import { backend } from "./lib/backend";
-  import { appShortcut, isMac, kbd } from "./lib/keys";
+  import { appShortcut, isMac, kbd, tabKbd } from "./lib/keys";
+  import { dur } from "./lib/motion";
   import { workspace } from "./lib/state/workspace.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -90,24 +91,32 @@
 
   const commands: Command[] = $derived([
     { id: "search", title: "Search hosts", shortcut: "/", run: () => ((workspace.active = null), queueMicrotask(() => searchEl?.focus())) },
-    { id: "connect", title: "Connect to selected host", shortcut: "↵", run: connectSelected },
     ...(tab
       ? [
           { id: "new-tab", title: `New tab on ${tab.alias}`, shortcut: kbd("T"), run: () => void workspace.duplicate() },
           { id: "close-tab", title: "Close tab", shortcut: kbd("W"), run: () => void workspace.close() },
+          { id: "copy", title: "Copy selection", shortcut: isMac ? "⌘C" : kbd("C"), run: copy },
+          { id: "paste", title: "Paste", shortcut: isMac ? "⌘V" : kbd("V"), run: () => void paste() },
           { id: "reconnect", title: `Reconnect ${tab.alias}`, run: () => void workspace.reconnect(tab.key) },
           { id: "disconnect", title: `Disconnect ${tab.alias}`, run: () => void workspace.disconnect(tab.alias) },
         ]
-      : []),
-    { id: "home", title: "Go to hosts", shortcut: kbd("0"), run: () => (workspace.active = null) },
+      : [{ id: "connect", title: "Connect to selected host", shortcut: "↵", run: connectSelected }]),
+    { id: "home", title: "Go to hosts", shortcut: tabKbd(0), run: () => (workspace.active = null) },
     ...workspace.tabs.map((t, i) => ({
       id: `tab-${t.key}`,
       title: `Go to ${t.alias}`,
       hint: t.title || undefined,
-      shortcut: i < 9 ? kbd(String(i + 1)) : undefined,
+      shortcut: i < 9 ? tabKbd(i + 1) : undefined,
       run: () => (workspace.active = t.key),
     })),
-    { id: "reload", title: "Reload ~/.ssh/config", shortcut: kbd("R"), run: load },
+    ...(workspace.tabs.length
+      ? [
+          { id: "next-tab", title: "Next tab", shortcut: "Ctrl-Tab", run: () => workspace.cycle(1) },
+          { id: "prev-tab", title: "Previous tab", shortcut: "Ctrl-Shift-Tab", run: () => workspace.cycle(-1) },
+        ]
+      : []),
+    { id: "reload", title: "Reload ~/.ssh/config", shortcut: isMac ? "⌘R" : "Ctrl-R", run: load },
+    { id: "theme", title: "Next theme", shortcut: "t", hint: theme?.name, run: cycleTheme },
     ...themes.map((t, i) => ({ id: `theme-${t.id}`, title: `Theme: ${t.name}`, hint: t.description, run: () => (themeIndex = i) })),
   ]);
 
@@ -204,9 +213,10 @@
   <footer class="statusbar">
     {#if tab}
       <span class="session" data-status={tabStatus.status}>
-        <span class="dot" class:busy={tabStatus.busy}></span>
+        <span class="dot" class:busy={tabStatus.busy} class:hollow={!!tab.end}></span>
         <span class="alias">{tab.alias}</span>
-        <span>{tabStatus.label}</span>
+        {#if tab.end}<span class="ended">{tab.end.kind === "closed" ? "Shell closed" : "Shell exited"}</span>{/if}
+        <span>{tab.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
         {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected"}
           <span class="rtt mono" class:slow={tabStatus.status === "warning"}>{formatRtt(tabSession.latencyMs)}</span>
         {/if}
@@ -216,7 +226,7 @@
       <span class="hints">
         <span class="optional"><kbd>{kbd("T")}</kbd> new tab</span>
         <span class="optional"><kbd>{kbd("W")}</kbd> close</span>
-        <span class="optional"><kbd>{kbd("0")}</kbd> hosts</span>
+        <span class="optional"><kbd>{tabKbd(0)}</kbd> hosts</span>
         <span><kbd>{kbd("K")}</kbd> commands</span>
       </span>
     {:else}
@@ -230,7 +240,10 @@
         <span><kbd>{kbd("K")}</kbd> commands</span>
       </span>
     {/if}
-    <span class="theme-name">{theme?.name ?? ""}</span>
+    <span class="theme-name">
+      {#if !isTauri()}<span class="demo" title="Browser preview with a simulated engine">Demo</span>{/if}
+      {theme?.name ?? ""}
+    </span>
   </footer>
 </div>
 
@@ -247,14 +260,17 @@
 {/if}
 
 {#if workspace.toast}
-  <div class="toast" role="alert" transition:fly={{ y: 12, duration: 180 }}>
-    <strong>{workspace.toast.message}</strong>
-    {#if workspace.toast.hint}<span>{workspace.toast.hint}</span>{/if}
+  {@const toast = workspace.toast}
+  <div class="toast" data-tone={toast.tone} role={toast.tone === "error" ? "alert" : "status"} transition:fly={{ y: 12, duration: dur("base") }}>
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      {#if toast.tone === "error"}<circle cx="8" cy="8" r="6.25" /><path d="M8 4.75v3.75M8 11.1v.1" />
+      {:else}<circle cx="8" cy="8" r="6.25" /><path d="M8 7.25v4M8 4.9v.1" />{/if}
+    </svg>
+    <div class="toast-text">
+      <strong>{toast.message}</strong>
+      {#if toast.hint}<span>{toast.hint}</span>{/if}
+    </div>
   </div>
-{/if}
-
-{#if !isTauri()}
-  <span class="demo-badge" title="Browser preview with a simulated engine">Demo</span>
 {/if}
 
 <style>
@@ -338,7 +354,9 @@
   .session[data-status="warning"] { --c: var(--status-warning); }
   .session[data-status="error"] { --c: var(--status-error); }
   .session .dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
-  .session .dot.busy { animation: pulse 1.2s var(--ease-standard) infinite; }
+  .session .dot.hollow { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+  .session .dot.busy { animation: pulse var(--motion-loop) var(--ease-standard) infinite; }
+  .session .ended { color: var(--text-primary); }
   .session .alias { color: var(--text-primary); font-weight: 550; }
   .rtt { color: var(--text-muted); }
   .rtt.slow { color: var(--status-warning); }
@@ -349,33 +367,43 @@
     100% { box-shadow: 0 0 0 4px transparent; }
   }
   .toast {
+    --c: var(--status-error);
     position: fixed;
     right: var(--space-5);
     bottom: calc(28px + var(--space-4));
-    display: grid;
-    gap: var(--space-1);
-    max-width: 400px;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    max-width: 420px;
     padding: var(--space-3) var(--space-4);
     background: var(--bg-overlay);
-    border: 1px solid color-mix(in srgb, var(--status-error) 45%, transparent);
-    border-left: 3px solid var(--status-error);
+    border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+    border-left: 3px solid var(--c);
     border-radius: var(--radius-md);
-    box-shadow: 0 12px 32px rgb(0 0 0 / 0.4);
+    box-shadow: var(--shadow-raised);
     z-index: 30;
   }
+  .toast[data-tone="info"] { --c: var(--border-strong); }
+  .toast svg {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    margin-top: 2px;
+    fill: none;
+    stroke: var(--c);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+  }
+  .toast[data-tone="info"] svg { stroke: var(--text-secondary); }
+  .toast-text { display: grid; gap: var(--space-1); }
   .toast strong { font-weight: 550; }
   .toast span { color: var(--text-secondary); font-size: var(--text-sm); }
-  .demo-badge {
-    position: fixed;
-    left: var(--space-3);
-    bottom: calc(28px + var(--space-3));
-    padding: 2px var(--space-2);
+  .demo {
+    margin-right: var(--space-2);
+    padding: 0 var(--space-2);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-pill);
-    color: var(--text-muted);
-    font-size: var(--text-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    pointer-events: none;
   }
 </style>

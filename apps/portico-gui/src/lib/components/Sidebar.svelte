@@ -189,8 +189,11 @@
   .dot[data-status="connected"] { --c: var(--status-connected); }
   .dot[data-status="warning"] { --c: var(--status-warning); }
   .dot[data-status="error"] { --c: var(--status-error); }
-  .dot.busy { animation: blink 1s var(--ease-standard) infinite alternate; }
-  @keyframes blink { to { opacity: 0.35; } }
+  .dot.busy { animation: pulse var(--motion-loop) var(--ease-standard) infinite; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent); }
+    100% { box-shadow: 0 0 0 5px transparent; }
+  }
   .alias { font-weight: 550; }
   .star { color: var(--accent); font-size: var(--text-xs); }
   .target {
@@ -207,7 +210,7 @@
     height: 34px;
     background: linear-gradient(90deg, var(--bg-elevated), var(--bg-selected), var(--bg-elevated));
     background-size: 200% 100%;
-    animation: shimmer 1.4s var(--ease-standard) infinite;
+    animation: shimmer var(--motion-loop) var(--ease-standard) infinite;
   }
   @keyframes shimmer {
     from { background-position: 100% 0; }

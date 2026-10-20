@@ -4,7 +4,9 @@
 > de `apps/portico-gui/src/App.svelte` (GUI). Toute modification de raccourci met à jour ce fichier.
 > `⌘` désigne `Cmd` sur macOS. Sur Linux, le modificateur de l'app est `Ctrl` dans la liste des hôtes et
 > **`Ctrl-Shift`** dès qu'un terminal a le focus (`Ctrl-T`, `Ctrl-W`, `Ctrl-K`… appartiennent au shell, à vim, à tmux),
-> comme GNOME Terminal. `Ctrl-Shift` fonctionne partout, c'est ce que l'UI affiche.
+> comme GNOME Terminal. `Ctrl-Shift` fonctionne partout, c'est ce que l'UI affiche. Les onglets numérotés passent par
+> **`Alt-1`…`Alt-9`** (`Ctrl-Shift-2` et `-6` sont `Ctrl-@` et `Ctrl-^`, utilisés par emacs et vim).
+> Les lettres sont reconnues par le caractère produit (AZERTY, Dvorak, Bépo) ; les chiffres par la touche physique.
 
 ## Liste des hôtes
 
@@ -17,7 +19,7 @@
 | Vider la recherche | `Ctrl-U` (ou `Esc` hors recherche) | `Esc` |
 | Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `↵`, double-clic |
 | Se déconnecter (hôte sélectionné) | `d` | `d` |
-| Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | `⌘1`…`⌘9`, `Ctrl-Tab` / `Ctrl-Shift-Tab` |
+| Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | `⌘1`…`⌘9` (Linux : `Alt-1`…`9`), `Ctrl-Tab` / `Ctrl-Shift-Tab` |
 | Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | — |
 | Palette de commandes | — | `⌘K` |
 | Recharger `~/.ssh/config` | `r` | `⌘R` (Linux : `Ctrl-R`) |
@@ -63,12 +65,13 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app ci
 |---|---|---|
 | Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `⌘T` | `Ctrl-Shift-T` |
 | Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `⌘W` | `Ctrl-Shift-W` |
-| Onglet n / liste des hôtes | `⌘1`…`⌘9` / `⌘0` | `Ctrl-Shift-1`…`9` / `Ctrl-Shift-0` |
+| Onglet n / liste des hôtes | `⌘1`…`⌘9` / `⌘0` | `Alt-1`…`Alt-9` / `Alt-0` |
 | Onglet suivant / précédent | `Ctrl-Tab` / `Ctrl-Shift-Tab`, `⌘]` / `⌘[` | `Ctrl-Tab` / `Ctrl-Shift-Tab` |
 | Palette de commandes | `⌘K` | `Ctrl-Shift-K` |
 | Copier la sélection / coller | `⌘C` / `⌘V` | `Ctrl-Shift-C` / `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
 | Reconnecter un onglet terminé ou en échec | `↵` | `↵` |
-| Annuler une connexion en cours | `Esc` | `Esc` |
+| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` | `Esc` |
+| Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer | `←` `→`, `Home` / `End`, `Suppr` | idem |
 | Fermer un onglet (souris) | clic milieu sur l'onglet | clic milieu sur l'onglet |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.

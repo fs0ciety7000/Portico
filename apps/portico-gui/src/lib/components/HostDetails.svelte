@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
+  import { dur } from "../motion";
   import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
   import { kbd } from "../keys";
@@ -23,7 +24,7 @@
 <section class="details">
   {#if host}
     {#key host.alias}
-      <div class="content" in:fly={{ y: 6, duration: 180 }}>
+      <div class="content" in:fly={{ y: 6, duration: dur("base") }}>
         <header>
           <div>
             <h1>{host.alias}</h1>
@@ -98,20 +99,24 @@
   }
   header {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: flex-start;
-    gap: var(--space-5);
+    gap: var(--space-4) var(--space-5);
+  }
+  @media (max-width: 1100px) {
+    .details { padding: var(--space-5); }
   }
   h1 {
     margin: 0;
     font-family: var(--font-display);
     font-weight: 500;
-    font-size: 34px;
+    font-size: var(--text-display);
     letter-spacing: 0.01em;
   }
   .target { margin: var(--space-1) 0 0; color: var(--text-secondary); }
   .port { color: var(--text-muted); }
-  .actions { display: flex; align-items: center; gap: var(--space-3); }
+  .actions { display: flex; flex-shrink: 0; align-items: center; gap: var(--space-3); }
 
   button.primary {
     display: inline-flex;

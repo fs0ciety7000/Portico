@@ -31,6 +31,7 @@
   .badge {
     --c: var(--status-idle);
     display: inline-flex;
+    white-space: nowrap;
     align-items: center;
     gap: var(--space-2);
     height: 24px;
@@ -57,7 +58,7 @@
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent);
   }
   .dot.busy {
-    animation: pulse 1.2s var(--ease-standard) infinite;
+    animation: pulse var(--motion-loop) var(--ease-standard) infinite;
   }
   .latency {
     color: var(--text-muted);

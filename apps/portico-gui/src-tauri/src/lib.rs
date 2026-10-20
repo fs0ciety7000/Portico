@@ -10,14 +10,19 @@ mod dto;
 mod terminals;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use portico_core::{Engine, EngineConfig};
+use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager, RunEvent};
 
 use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
 pub const ENGINE_EVENT: &str = "engine://event";
+
+/// Longest wait for sessions to close when quitting.
+const EXIT_GRACE: Duration = Duration::from_millis(500);
 
 #[allow(clippy::missing_panics_doc)] // Tauri's builder reports fatal startup errors itself
 pub fn run() {
@@ -53,6 +58,19 @@ pub fn run() {
             app.manage(Arc::new(Terminals::default()));
             Ok(())
         })
+        // A (re)loading page has lost every Channel and dialog: close what
+        // the previous page opened instead of leaving shells and prompts
+        // with no UI.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
+                    terminals.close_all();
+                }
+                if let Some(engine) = webview.try_state::<Engine>() {
+                    engine.disconnect_all();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_hosts,
             commands::search_hosts,
@@ -76,15 +94,27 @@ pub fn run() {
             std::process::exit(1);
         }
     };
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event {
-            // Close channels and sessions cleanly (EOF, CLOSE, DISCONNECT).
+    let mut closing = false;
+    app.run(move |handle, event| {
+        if let RunEvent::ExitRequested { api, .. } = event {
+            if closing {
+                return;
+            }
+            // Hold the exit until sessions have closed cleanly (channel
+            // EOF/CLOSE, SSH DISCONNECT), half a second at most.
+            closing = true;
+            api.prevent_exit();
             if let Some(terminals) = handle.try_state::<Arc<Terminals>>() {
                 terminals.close_all();
             }
-            if let Some(engine) = handle.try_state::<Engine>() {
-                engine.shutdown();
-            }
+            let engine = handle.try_state::<Engine>().map(|e| e.inner().clone());
+            let handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(engine) = engine {
+                    engine.shutdown_and_wait(EXIT_GRACE).await;
+                }
+                handle.exit(0);
+            });
         }
     });
 }

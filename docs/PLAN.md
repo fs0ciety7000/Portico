@@ -55,7 +55,7 @@
 - Reporté : interop Dropbear en CI ; ticket upstream russh (abandon d'un `Signer`, vérification au re-key) ;
   sélection et copie à la souris (le terminal hôte reste utilisable avec `Shift`)
 
-### 1c. PTY et terminal GUI *(Opus pour le composant Terminal, puis Sonnet)*
+### 1c. PTY et terminal GUI ✅ *(Opus)*
 - `xterm.js` + addon WebGL (repli DOM) + `fit`, octets via `tauri::ipc::Channel<Vec<u8>>`
 - **Spike perf** WebKitGTK et WKWebView (débit et latence) : décision sur le renderer
 - Onglets, modales de prompt (la commande `respond_prompt` existe déjà), reconnexion
@@ -115,10 +115,52 @@
 | 0 Fondations | ✅ | 35 | couverte par la revue 1a | ✅ (captures TUI et GUI) |
 | 1a Transport et auth | ✅ | 82 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
 | 1b Terminal TUI | ✅ | 103 + interop (shell réel) | ✅ (voir ci-dessous) | ✅ (tmux 80×24 et 110×28) |
-| 1c Terminal GUI | 🔜 | | | |
+| 1c Terminal GUI | ✅ | 106 + 3 GUI + interop | ✅ (voir ci-dessous) | ✅ (captures démo 3 thèmes + app réelle WebKitGTK) |
 | 2 SFTP / tunnels | ⏳ | | | |
 | 3 Clés / secrets / snippets | ⏳ | | | |
 | 4 Finition | ⏳ | | | |
+
+## Revues de la phase 1c (2026-10-20)
+
+Vérifié sur l'app réelle (WebKitGTK sous Xvfb, sshd local) : connexion directe et via bastion, passphrase avec
+nouvel essai, clé modifiée (alerte), `vim`, `top`, resize, flot `base64 /dev/urandom` (mémoire stable, `Ctrl-C`
+immédiat), 1 M lignes en 1,9 s, 3 000 caractères tapés dans l'ordre, rechargement de page qui ferme les sessions,
+dernier onglet qui déconnecte.
+
+### `agent-security` : 0 CRITIQUE/ÉLEVÉ, 2 MOYEN, 7 FAIBLE, tous traités
+| Gravité | Constat | Suite donnée |
+|---|---|---|
+| MOYEN | Un utilisateur qui tape encore (autre onglet) pouvait valider une clé hôte avec `y` ou envoyer du texte comme mot de passe | Armement après 400 ms sans frappe, `y` 150 ms après l'armement |
+| MOYEN | Entrée terminal réordonnable (flush parallèles, commandes async indépendantes) | Boucle d'envoi unique, vérifiée (3 000 caractères) |
+| FAIBLE | Acks non plafonnés, compteurs partagés entre reconnexions | Plafond aux octets envoyés + test, compteurs par ouverture |
+| FAIBLE | Liens OSC 8 avec le gestionnaire par défaut | Liens inertes jusqu'au post-MVP |
+| FAIBLE | Textes keyboard-interactive non assainis (phishing de passphrase) | Assainis, plafonnés, étiquetés « Message from … » |
+| FAIBLE | Commande `ssh-keygen -R` mal quotée, fichier ignoré | Quotage POSIX, `-f` si autre fichier, copie seulement pour un nom simple |
+| FAIBLE | Réponses du terminal perdues avant l'id | Mises en file puis envoyées |
+| FAIBLE | Capabilities trop larges, drag de fenêtre absent | Réduites au strict nécessaire, drag autorisé |
+| FAIBLE | Sortie sans fermeture propre | `prevent_exit` + `shutdown_and_wait` (500 ms) |
+
+### `agent-ssh-protocols` : 1 BLOQUANT, 6 IMPORTANT, 6 MINEUR, tous traités
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : fermer un onglet pendant la connexion n'annulait rien (prompts orphelins, `known_hosts` encore écrivable) | `disconnect` annule le jeton, prompts retirés par garde `Drop` + test |
+| Rechargement de page : PTY, sessions et forwarders laissés vivants | `on_page_load` → `close_all` + `disconnect_all`, vérifié sur l'app réelle |
+| Ordre d'entrée, taille PTY figée pendant l'auth, fin de terminal perdue avant l'id | Boucle unique, taille réconciliée après ouverture (pixels inclus), fins précoces mémorisées |
+| `macOptionIsMeta` bloquant `|[]{}~` sur claviers Mac non US ; raccourcis sur `e.code` (AZERTY) | `Option` normal, lettres via `e.key` |
+| MINEUR : `Ctrl-Shift-2/6` volés à emacs/vim, sortie non propre, emoji coupé, tampon 64 Mio, reconnexions créant des sessions | `Alt-n`, sortie propre, découpe sûre, `MAX_INPUT` 64 Kio, réutilisation de la session vivante |
+
+### `agent-design-review` : 1 BLOQUANT, 8 IMPORTANT, tous traités
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : transitions Svelte ignorant `prefers-reduced-motion`, durées en dur | `dur()` lit les tokens et renvoie 0 en mouvement réduit |
+| Onglet actif masqué quand la barre déborde, anneau de focus rogné | Défilement après mise en page, fondus de bord, Hosts épinglé, anneau intérieur, tabindex itinérant |
+| Statut contradictoire après `exit` | Grammaire unique : couleur = session, remplissage = shell attaché (onglet, barre, bandeau) |
+| Empreintes coupées en plein milieu | Une ligne, colonne de libellés `max-content` |
+| En-tête des détails cassé à 900 px | `flex-wrap`, badge `nowrap`, padding réduit |
+| « Retry » primaire sur clé modifiée | `Close` primaire, `Retry` secondaire, `Show details` rouvre l'alerte |
+| Basalt : accent = `status-connecting` | Nouvelle teinte + test ΔE sur les trois thèmes (a aussi corrigé Obsidian) |
+| Polices non embarquées | `@fontsource`, xterm créé après chargement |
+| Polish : ombres/tailles/pulse en dur, palette, toast, `Esc`, focus du champ, badge démo | Tokens, palette complétée, toast avec ton et icône, `Esc` → hôtes, anneau 2 px, badge dans la barre |
 
 ## Revues de la phase 1b (2026-10-20)
 

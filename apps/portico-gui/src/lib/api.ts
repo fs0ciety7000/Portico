@@ -90,6 +90,14 @@ export type EngineEvent =
   | { type: "prompt_resolved"; id: number }
   | { type: "tunnel" | "sftp" | "log" };
 
+/** Mirrors `dto::PtySizeDto`: cells and pixels. */
+export interface PtySize {
+  cols: number;
+  rows: number;
+  width: number;
+  height: number;
+}
+
 export type PromptAnswer =
   | { kind: "accept_host_key" }
   | { kind: "secret"; value: string; remember: boolean }
@@ -107,10 +115,11 @@ export const api = {
   disconnect: (session: number) => invoke<void>("disconnect", { session }),
   respondPrompt: (prompt: number, answer: PromptAnswer) => invoke<void>("respond_prompt", { prompt, answer }),
   /** Opens a PTY (waits for the session); raw output arrives on `output`. */
-  openTerminal: (session: number, cols: number, rows: number, output: Channel<ArrayBuffer>) =>
-    invoke<number>("open_terminal", { session, cols, rows, output }),
+  openTerminal: (session: number, size: PtySize, output: Channel<ArrayBuffer>) =>
+    invoke<number>("open_terminal", { session, size, output }),
   terminalInput: (id: number, data: string, binary: boolean) => invoke<void>("terminal_input", { id, data, binary }),
-  terminalResize: (id: number, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
+  terminalResize: (id: number, cols: number, rows: number, width: number, height: number) =>
+    invoke<void>("terminal_resize", { id, size: { cols, rows, width, height } }),
   /** Flow control: `total` bytes of output have been parsed by xterm.js. */
   terminalAck: (id: number, total: number) => invoke<void>("terminal_ack", { id, total }),
   closeTerminal: (id: number) => invoke<void>("close_terminal", { id }),

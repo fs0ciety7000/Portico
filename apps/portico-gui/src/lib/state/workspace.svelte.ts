@@ -43,8 +43,13 @@ class Workspace {
   active: number | null = $state(null);
   prompts: Prompt[] = $state([]);
   alerts: Alert[] = $state([]);
-  toast: ErrorSummary | null = $state(null);
+  toast: (ErrorSummary & { tone: "error" | "info" }) | null = $state(null);
   #toastTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Last changed-key alert per session ("Show details" on the failure card). */
+  #alertBySession = new Map<number, Alert>();
+  /** End of terminals whose id the view does not know yet (the event can
+   * overtake the `open_terminal` reply). */
+  #earlyEnds = new Map<number, TabEnd>();
 
   /** Latest session per host alias (host list, details). */
   byAlias: Record<string, SessionInfo> = $derived.by(() => {
@@ -58,8 +63,8 @@ class Workspace {
 
   activeTab: Tab | undefined = $derived(this.tabs.find((t) => t.key === this.active));
 
-  notify(e: unknown) {
-    this.toast = asError(e);
+  notify(e: unknown, tone: "error" | "info" = "error") {
+    this.toast = { ...asError(e), tone };
     clearTimeout(this.#toastTimer);
     this.#toastTimer = setTimeout(() => (this.toast = null), 5000);
   }
@@ -102,13 +107,20 @@ class Workspace {
     }
   }
 
-  /** Reopens a shell in an ended or failed tab (new session if needed). */
+  /** Reopens a shell in an ended or failed tab: same session if it is still
+   * up, else the host's live session, else a new one. */
   async reconnect(key: number) {
     const tab = this.tabs.find((t) => t.key === key);
     if (!tab) return;
     if (!isLive(this.sessions[tab.session])) {
-      const session = await this.#connect(tab.alias);
+      const live = this.byAlias[tab.alias];
+      const session = live && isLive(live) ? live.id : await this.#connect(tab.alias);
       if (session === null) return;
+      if (!this.tabs.some((t) => t.key === key)) {
+        // Closed meanwhile: do not leave the new session behind.
+        if (!this.tabs.some((t) => t.session === session)) await backend.disconnect(session).catch(() => {});
+        return;
+      }
       tab.session = session;
     }
     tab.terminal = null;
@@ -126,7 +138,8 @@ class Workspace {
       const next = this.tabs[Math.min(index, this.tabs.length - 1)];
       this.active = next ? next.key : null;
     }
-    if (tab.terminal !== null && !tab.end) await backend.closeTerminal(tab.terminal).catch(() => {});
+    // Idempotent; also releases a channel whose server never sent CLOSE.
+    if (tab.terminal !== null) await backend.closeTerminal(tab.terminal).catch(() => {});
     // The last tab of a session disconnects it (also cancels a connection in flight).
     if (!this.tabs.some((t) => t.session === tab.session) && isLive(this.sessions[tab.session])) {
       await backend.disconnect(tab.session).catch((e) => this.notify(e));
@@ -161,6 +174,26 @@ class Workspace {
     this.alerts.shift();
   }
 
+  /** Shows a session's changed-key alert again. */
+  showAlert(session: number) {
+    const alert = this.#alertBySession.get(session);
+    if (alert && !this.alerts.includes(alert)) this.alerts.push(alert);
+  }
+
+  hasAlert(session: number): boolean {
+    return this.#alertBySession.has(session);
+  }
+
+  /** Called by a view once its terminal id is known. */
+  attach(tab: Tab, terminal: number) {
+    tab.terminal = terminal;
+    const end = this.#earlyEnds.get(terminal);
+    if (end) {
+      this.#earlyEnds.delete(terminal);
+      tab.end = end;
+    }
+  }
+
   aliasOf(session: number | null): string | undefined {
     return session === null ? undefined : this.sessions[session]?.alias;
   }
@@ -184,17 +217,25 @@ class Workspace {
         } else if (e.kind === "latency") {
           s.latencyMs = durationMs(e.rtt);
         } else if (e.kind === "host_key_changed") {
-          const { kind: _kind, ...alert } = e;
-          this.alerts.push({ ...alert, alias: s.alias });
+          const { kind: _kind, ...rest } = e;
+          const alert = { ...rest, alias: s.alias };
+          this.#alertBySession.set(ev.id, alert);
+          this.alerts.push(alert);
         }
         return;
       }
       case "terminal": {
-        const tab = this.tabs.find((t) => t.terminal === ev.id);
-        if (!tab) return;
         const e = ev.event;
-        if (e.kind === "exited") tab.end = { kind: "exited", status: e.status, signal: e.signal };
-        else if (e.kind === "closed") tab.end ??= { kind: "closed" };
+        if (e.kind === "opened") return;
+        const tab = this.tabs.find((t) => t.terminal === ev.id);
+        const end: TabEnd = e.kind === "exited" ? { kind: "exited", status: e.status, signal: e.signal } : { kind: "closed" };
+        if (!tab) {
+          // Possibly a view still waiting for its id: keep the first end.
+          if (!this.#earlyEnds.has(ev.id)) this.#earlyEnds.set(ev.id, end);
+          return;
+        }
+        if (e.kind === "exited") tab.end = end;
+        else tab.end ??= end;
         return;
       }
       case "prompt":

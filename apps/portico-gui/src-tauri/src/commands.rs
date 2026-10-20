@@ -7,18 +7,19 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use portico_core::engine::{ConnectRequest, PtySize};
+use portico_core::engine::ConnectRequest;
 use portico_core::ids::{PromptId, SessionId};
 use portico_core::search::HostSearch;
 use portico_core::{Engine, ErrorSummary};
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
-use crate::dto::{HostDto, PromptAnswerDto, ThemeDto};
+use crate::dto::{HostDto, PromptAnswerDto, PtySizeDto, ThemeDto};
 use crate::terminals::Terminals;
 
-/// Largest input accepted in one call (a paste is split by the view).
-const MAX_INPUT: usize = 1024 * 1024;
+/// Largest input accepted in one call (the view splits pastes into 64 KiB
+/// chunks); with the engine's bounded queue this caps buffered input.
+const MAX_INPUT: usize = 64 * 1024;
 
 #[tauri::command]
 pub(crate) async fn list_hosts(engine: State<'_, Engine>) -> Result<Vec<HostDto>, ErrorSummary> {
@@ -100,18 +101,11 @@ pub(crate) async fn open_terminal(
     engine: State<'_, Engine>,
     terminals: State<'_, Arc<Terminals>>,
     session: u64,
-    cols: u16,
-    rows: u16,
+    size: PtySizeDto,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, ErrorSummary> {
-    let size = PtySize {
-        cols: cols.max(1),
-        rows: rows.max(1),
-        pixel_width: 0,
-        pixel_height: 0,
-    };
     let handle = engine
-        .open_terminal(SessionId::from_raw(session), size)
+        .open_terminal(SessionId::from_raw(session), size.into())
         .await
         .map_err(|e| e.summary())?;
     Ok(terminals.attach(handle, output))
@@ -152,16 +146,10 @@ pub(crate) async fn terminal_input(
 pub(crate) fn terminal_resize(
     terminals: State<'_, Arc<Terminals>>,
     id: u64,
-    cols: u16,
-    rows: u16,
+    size: PtySizeDto,
 ) -> Result<(), ErrorSummary> {
     let inputs = terminals.inputs(id).ok_or_else(terminal_gone)?;
-    inputs.resize(PtySize {
-        cols: cols.max(1),
-        rows: rows.max(1),
-        pixel_width: 0,
-        pixel_height: 0,
-    });
+    inputs.resize(size.into());
     Ok(())
 }
 

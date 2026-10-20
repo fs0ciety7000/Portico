@@ -8,6 +8,15 @@ importers:
 
   .:
     dependencies:
+      '@fontsource-variable/inter':
+        specifier: 5.2.8
+        version: 5.2.8
+      '@fontsource/cormorant-garamond':
+        specifier: 5.2.8
+        version: 5.2.8
+      '@fontsource/jetbrains-mono':
+        specifier: 5.2.8
+        version: 5.2.8
       '@tauri-apps/api':
         specifier: ~2.12.4
         version: 2.12.4
@@ -44,6 +53,15 @@ importers:
         version: 8.3.4
 
 packages:
+
+  '@fontsource-variable/inter@5.2.8':
+    resolution: {integrity: sha512-kOfP2D+ykbcX/P3IFnokOhVRNoTozo5/JxhAIVYLpea/UBmCQ/YWPBfWIDuBImXX/15KH+eKh4xpEUyS2sQQGQ==}
+
+  '@fontsource/cormorant-garamond@5.2.8':
+    resolution: {integrity: sha512-ylx8F6QQ0cyhS/fyeAqv3SlZNr+y3Cvt/AOd1e2hVA62Eg86vPqjugN7l5rsh6pnjbwHRaPNZWh98hyT7sasAQ==}
+
+  '@fontsource/jetbrains-mono@5.2.8':
+    resolution: {integrity: sha512-6w8/SG4kqvIMu7xd7wt6x3idn1Qux3p9N62s6G3rfldOUYHpWcc2FKrqf+Vo44jRvqWj2oAtTHrZXEP23oSKwQ==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -518,6 +536,12 @@ packages:
     resolution: {integrity: sha512-msJxIvYDYcoNL+PJsu+7qmpDWsYmAxTY+2TNYXXF0hzBzBk0BMecOqDOG/EckUoKCuKwObfbugIl8QpqHDXeFA==}
 
 snapshots:
+
+  '@fontsource-variable/inter@5.2.8': {}
+
+  '@fontsource/cormorant-garamond@5.2.8': {}
+
+  '@fontsource/jetbrains-mono@5.2.8': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

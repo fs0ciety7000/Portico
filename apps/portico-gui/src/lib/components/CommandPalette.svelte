@@ -10,6 +10,7 @@
 
 <script lang="ts">
   import { fade, scale } from "svelte/transition";
+  import { dur } from "../motion";
 
   let { open = $bindable(false), commands }: { open?: boolean; commands: Command[] } = $props();
 
@@ -46,8 +47,8 @@
 </script>
 
 {#if open}
-  <div class="scrim" transition:fade={{ duration: 120 }} onclick={() => (open = false)} role="presentation"></div>
-  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" transition:scale={{ start: 0.97, duration: 160 }}>
+  <div class="scrim" transition:fade={{ duration: dur("fast") }} onclick={() => (open = false)} role="presentation"></div>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" transition:scale={{ start: 0.97, duration: dur("base") }}>
     <input bind:this={input} bind:value={query} {onkeydown} placeholder="Type a command…" spellcheck="false" oninput={() => (active = 0)} />
     <ul>
       {#each filtered as cmd, i (cmd.id)}
@@ -81,7 +82,7 @@
     background: var(--bg-overlay);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-lg);
-    box-shadow: 0 24px 64px rgb(0 0 0 / 0.45);
+    box-shadow: var(--shadow-overlay);
     overflow: hidden;
   }
   input {
@@ -96,7 +97,7 @@
     font: inherit;
     font-size: var(--text-md);
   }
-  ul { list-style: none; margin: 0; padding: var(--space-2); max-height: 320px; overflow-y: auto; }
+  ul { list-style: none; margin: 0; padding: var(--space-2); max-height: calc(36px * 8 + var(--space-2) * 2); overflow-y: auto; }
   li {
     display: flex;
     align-items: center;

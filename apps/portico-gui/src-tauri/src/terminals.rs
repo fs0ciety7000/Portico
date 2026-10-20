@@ -14,6 +14,7 @@
 //! [`Terminals`]: the webview can only reach terminals it opened.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use portico_core::engine::{TerminalHandle, TerminalInputs};
@@ -29,6 +30,15 @@ struct Entry {
     inputs: TerminalInputs,
     /// Total bytes the view has finished parsing.
     acked: watch::Sender<u64>,
+    /// Total bytes sent to the view (acks can never exceed it).
+    sent: Arc<AtomicU64>,
+}
+
+/// New acknowledged total: monotonic and capped at what was really sent, so
+/// a buggy or hostile view can neither lower it nor switch flow control off.
+fn next_ack(current: u64, claimed: u64, sent: u64) -> Option<u64> {
+    let total = claimed.min(sent);
+    (total > current).then_some(total)
 }
 
 /// Open terminals, by raw [`portico_core::ids::TerminalId`].
@@ -48,14 +58,15 @@ impl Terminals {
 
     pub(crate) fn ack(&self, id: u64, total: u64) {
         if let Some(e) = self.lock().get(&id) {
-            // Monotonic: a stale or bogus ack can never unlock more.
-            e.acked.send_if_modified(|current| {
-                let advance = total > *current;
-                if advance {
-                    *current = total;
-                }
-                advance
-            });
+            let sent = e.sent.load(Ordering::Acquire);
+            e.acked
+                .send_if_modified(|current| match next_ack(*current, total, sent) {
+                    Some(next) => {
+                        *current = next;
+                        true
+                    }
+                    None => false,
+                });
         }
     }
 
@@ -80,16 +91,18 @@ impl Terminals {
     ) -> u64 {
         let id = handle.id.get();
         let (acked_tx, acked_rx) = watch::channel(0);
+        let sent = Arc::new(AtomicU64::new(0));
         self.lock().insert(
             id,
             Entry {
                 inputs: handle.input.clone(),
                 acked: acked_tx,
+                sent: Arc::clone(&sent),
             },
         );
         let this = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            forward(handle, channel, acked_rx).await;
+            forward(handle, channel, acked_rx, &sent).await;
             this.close(id);
         });
         id
@@ -100,6 +113,7 @@ async fn forward(
     mut handle: TerminalHandle,
     channel: Channel<InvokeResponseBody>,
     mut acked: watch::Receiver<u64>,
+    sent_total: &AtomicU64,
 ) {
     let mut sent: u64 = 0;
     loop {
@@ -122,9 +136,27 @@ async fn forward(
             }
         }
         sent = sent.saturating_add(u64::try_from(buf.len()).unwrap_or(u64::MAX));
+        sent_total.store(sent, Ordering::Release);
+        // `send` rarely fails even when the page is gone (Tauri queues the
+        // data); a reloading page is handled by `close_all` on page load.
         if channel.send(InvokeResponseBody::Raw(buf)).is_err() {
-            // The view is gone: dropping the handle closes the channel.
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acks_are_monotonic_and_capped_at_sent() {
+        assert_eq!(next_ack(0, 100, 1000), Some(100));
+        // Stale (smaller) totals change nothing.
+        assert_eq!(next_ack(100, 50, 1000), None);
+        assert_eq!(next_ack(100, 100, 1000), None);
+        // Bogus totals cannot exceed what was sent.
+        assert_eq!(next_ack(0, u64::MAX, 0), None);
+        assert_eq!(next_ack(10, u64::MAX, 600), Some(600));
     }
 }
