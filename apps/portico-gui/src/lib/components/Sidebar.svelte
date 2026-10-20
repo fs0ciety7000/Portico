@@ -1,5 +1,6 @@
 <script lang="ts">
   import { describe, type Host, type SessionView } from "../api";
+  import { kbd } from "../keys";
 
   let {
     hosts,
@@ -56,7 +57,7 @@
       autocomplete="off"
       aria-label="Search hosts"
     />
-    <kbd>⌘K</kbd>
+    <kbd>{kbd("K")}</kbd>
   </label>
 
   <div class="section-title">Hosts <span class="count">{hosts.length}</span></div>

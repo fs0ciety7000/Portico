@@ -1,0 +1,184 @@
+<script lang="ts">
+  // Engine prompts: new host key (TOFU), password, key passphrase,
+  // keyboard-interactive. Secrets live in this component only until they are
+  // sent, then the fields are cleared.
+  import { displayPath, type Prompt, type PromptAnswer } from "../api";
+  import Modal from "./Modal.svelte";
+
+  let { prompt, alias, onanswer }: { prompt: Prompt; alias: string | undefined; onanswer: (a: PromptAnswer) => void } =
+    $props();
+
+  let armed = $state(false);
+  let secret = $state("");
+  let remember = $state(false);
+  let confirm = $state("");
+  // Keyboard-interactive answers, one per prompt.
+  let answers: string[] = $state([]);
+
+  const kind = $derived(prompt.kind);
+  const unusual = $derived(kind.kind === "unknown_host_key" && kind.other_algorithms.length > 0);
+
+  function reply(answer: PromptAnswer) {
+    if (!armed) return;
+    onanswer(answer);
+    secret = "";
+    answers = [];
+    confirm = "";
+  }
+
+  const cancel = () => reply({ kind: "cancel" });
+
+  function submit() {
+    switch (kind.kind) {
+      case "unknown_host_key":
+        if (!unusual || confirm.trim().toLowerCase() === "yes") reply({ kind: "accept_host_key" });
+        return;
+      case "password":
+      case "key_passphrase":
+        reply({ kind: "secret", value: secret, remember });
+        return;
+      case "keyboard_interactive":
+        reply({ kind: "answers", values: kind.prompts.map((_, i) => answers[i] ?? "") });
+        return;
+    }
+  }
+
+  function onkeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      // Host keys: Enter never trusts a key unless it was typed "yes".
+      if (kind.kind !== "unknown_host_key" || unusual) submit();
+      return;
+    }
+    if (kind.kind === "unknown_host_key" && !unusual && !e.metaKey && !e.ctrlKey) {
+      if (e.key === "y") submit();
+      else if (e.key === "n") cancel();
+    }
+  }
+
+  const target = $derived(
+    kind.kind === "unknown_host_key" ? (kind.port === 22 ? kind.host : `[${kind.host}]:${kind.port}`) : "",
+  );
+</script>
+
+<Modal bind:armed onescape={cancel}>
+  {#snippet title()}
+    {#if kind.kind === "unknown_host_key"}{unusual ? "Unusual host key" : "New host key"}
+    {:else if kind.kind === "password"}Password
+    {:else if kind.kind === "key_passphrase"}Key passphrase
+    {:else}Authentication{/if}
+    {#if alias}<span class="title-host"> · {alias}</span>{/if}
+  {/snippet}
+
+  <div class="content" role="presentation" {onkeydown}>
+    {#if kind.kind === "unknown_host_key"}
+      <p class="lead">First connection to <span class="mono">{target}</span>.</p>
+      <p>Verify this fingerprint with the server's administrator before trusting it.</p>
+      <dl>
+        <dt>Key type</dt><dd>{kind.algorithm}</dd>
+        <dt>Fingerprint</dt><dd class="fingerprint">{kind.fingerprint}</dd>
+      </dl>
+      {#if unusual}
+        <p class="warning">
+          This host is already known with another key type ({kind.other_algorithms.join(", ")}). This is unusual.
+        </p>
+        <label class="field">
+          <span>Type <strong>yes</strong> to trust it</span>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input data-autofocus bind:value={confirm} autocomplete="off" spellcheck="false" />
+        </label>
+      {:else}
+        <button class="focus-sink" data-autofocus aria-label="Host key decision" tabindex="-1"></button>
+      {/if}
+    {:else if kind.kind === "password" || kind.kind === "key_passphrase"}
+      <p class="lead">
+        {#if kind.kind === "password"}Sign in as <span class="mono">{kind.user}</span> on
+          <span class="mono">{kind.host}</span>.
+        {:else}Unlock <span class="mono">{displayPath(kind.key_path)}</span>.{/if}
+      </p>
+      {#if kind.attempt > 1}
+        <p class="retry" role="alert">
+          Incorrect {kind.kind === "password" ? "password" : "passphrase"}, try again ({kind.attempt}/{kind.attempts}).
+        </p>
+      {/if}
+      <label class="field">
+        <span>{kind.kind === "password" ? "Password" : "Passphrase"}</span>
+        <input data-autofocus type="password" bind:value={secret} autocomplete="off" spellcheck="false" />
+      </label>
+      <label class="check">
+        <input type="checkbox" bind:checked={remember} />
+        <span>Remember in the system keyring</span>
+      </label>
+    {:else}
+      {#each [kind.name, kind.instructions].filter((t) => t.trim()) as text (text)}
+        <p>{text.trim()}</p>
+      {/each}
+      {#each kind.prompts as p, i (i)}
+        <label class="field">
+          <span>{p.text.trim() || `Answer ${i + 1}`}</span>
+          <input
+            data-autofocus={i === 0 ? "" : undefined}
+            type={p.echo ? "text" : "password"}
+            bind:value={answers[i]}
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+      {/each}
+    {/if}
+  </div>
+
+  {#snippet footer()}
+    {#if kind.kind === "unknown_host_key" && !unusual}
+      <button class="secondary" disabled={!armed} onclick={cancel}>Refuse <kbd>N</kbd></button>
+      <button class="primary" disabled={!armed} onclick={submit}>Trust &amp; remember <kbd>Y</kbd></button>
+    {:else if kind.kind === "unknown_host_key"}
+      <button class="secondary" disabled={!armed} onclick={cancel}>Refuse <kbd>Esc</kbd></button>
+      <button class="primary" disabled={!armed || confirm.trim().toLowerCase() !== "yes"} onclick={submit}>
+        Trust <kbd>↵</kbd>
+      </button>
+    {:else}
+      <button class="secondary" disabled={!armed} onclick={cancel}>Cancel <kbd>Esc</kbd></button>
+      <button class="primary" disabled={!armed} onclick={submit}>Continue <kbd>↵</kbd></button>
+    {/if}
+  {/snippet}
+</Modal>
+
+<style>
+  .content { display: grid; gap: var(--space-3); }
+  .lead { color: var(--text-primary); }
+  .fingerprint { font-weight: 600; letter-spacing: 0.01em; }
+  .warning { color: var(--status-warning); }
+  .retry { color: var(--status-error); font-size: var(--text-sm); }
+  .field { display: grid; gap: var(--space-1); }
+  .field span { color: var(--text-muted); font-size: var(--text-sm); }
+  .field input {
+    height: 34px;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font: inherit;
+    font-family: var(--font-mono);
+    outline: none;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .field input:focus { border-color: var(--accent); }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+  }
+  .check input { accent-color: var(--accent); }
+  .focus-sink {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0 !important;
+    border: 0;
+    opacity: 0;
+  }
+</style>

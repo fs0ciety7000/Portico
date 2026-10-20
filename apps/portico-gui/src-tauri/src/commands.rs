@@ -4,13 +4,21 @@
 // Tauri injects `State` (and deserialized arguments) by value.
 #![allow(clippy::needless_pass_by_value)]
 
-use portico_core::engine::ConnectRequest;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use portico_core::engine::{ConnectRequest, PtySize};
 use portico_core::ids::{PromptId, SessionId};
 use portico_core::search::HostSearch;
 use portico_core::{Engine, ErrorSummary};
 use tauri::State;
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 use crate::dto::{HostDto, PromptAnswerDto, ThemeDto};
+use crate::terminals::Terminals;
+
+/// Largest input accepted in one call (a paste is split by the view).
+const MAX_INPUT: usize = 1024 * 1024;
 
 #[tauri::command]
 pub(crate) async fn list_hosts(engine: State<'_, Engine>) -> Result<Vec<HostDto>, ErrorSummary> {
@@ -33,6 +41,12 @@ pub(crate) async fn search_hosts(
         .collect())
 }
 
+/// Home directory, so the view can show `~/…` paths.
+#[tauri::command]
+pub(crate) fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok()
+}
+
 #[tauri::command]
 pub(crate) fn list_themes() -> Vec<ThemeDto> {
     portico_theme::THEMES
@@ -46,8 +60,12 @@ pub(crate) fn list_themes() -> Vec<ThemeDto> {
 }
 
 /// Starts a session; progress arrives on `engine://event`.
+///
+/// `async` on purpose: the engine spawns the session task, which needs the
+/// Tokio runtime that Tauri runs async commands on (sync commands run on the
+/// main thread, outside any runtime).
 #[tauri::command]
-pub(crate) fn connect(engine: State<'_, Engine>, alias: String) -> Result<u64, ErrorSummary> {
+pub(crate) async fn connect(engine: State<'_, Engine>, alias: String) -> Result<u64, ErrorSummary> {
     let id = engine
         .connect(ConnectRequest::new(alias))
         .map_err(|e| e.summary())?;
@@ -73,4 +91,96 @@ pub(crate) fn respond_prompt(
     engine
         .respond(PromptId::from_raw(prompt), answer.into())
         .map_err(|e| e.summary())
+}
+
+/// Opens a PTY on `session` (waits for it to be connected). Output is streamed
+/// as raw bytes on `output`; the view acknowledges them with `terminal_ack`.
+#[tauri::command]
+pub(crate) async fn open_terminal(
+    engine: State<'_, Engine>,
+    terminals: State<'_, Arc<Terminals>>,
+    session: u64,
+    cols: u16,
+    rows: u16,
+    output: Channel<InvokeResponseBody>,
+) -> Result<u64, ErrorSummary> {
+    let size = PtySize {
+        cols: cols.max(1),
+        rows: rows.max(1),
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let handle = engine
+        .open_terminal(SessionId::from_raw(session), size)
+        .await
+        .map_err(|e| e.summary())?;
+    Ok(terminals.attach(handle, output))
+}
+
+/// Keystrokes or pasted text. `binary` input (xterm.js `onBinary`, e.g. mouse
+/// reports) carries one byte per UTF-16 code unit.
+#[tauri::command]
+pub(crate) async fn terminal_input(
+    terminals: State<'_, Arc<Terminals>>,
+    id: u64,
+    data: String,
+    binary: bool,
+) -> Result<(), ErrorSummary> {
+    let inputs = terminals.inputs(id).ok_or_else(terminal_gone)?;
+    let bytes = if binary {
+        // Code units above 0xFF are not valid binary input: drop them.
+        data.chars()
+            .filter_map(|c| u8::try_from(u32::from(c)).ok())
+            .collect::<Vec<u8>>()
+    } else {
+        data.into_bytes()
+    };
+    if bytes.len() > MAX_INPUT {
+        return Err(ErrorSummary {
+            code: "input_too_large".into(),
+            message: format!("input of {} bytes is too large", bytes.len()),
+            hint: None,
+        });
+    }
+    inputs
+        .send(Bytes::from(bytes))
+        .await
+        .map_err(|_| terminal_gone())
+}
+
+#[tauri::command]
+pub(crate) fn terminal_resize(
+    terminals: State<'_, Arc<Terminals>>,
+    id: u64,
+    cols: u16,
+    rows: u16,
+) -> Result<(), ErrorSummary> {
+    let inputs = terminals.inputs(id).ok_or_else(terminal_gone)?;
+    inputs.resize(PtySize {
+        cols: cols.max(1),
+        rows: rows.max(1),
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    Ok(())
+}
+
+/// The view finished parsing `total` bytes of output (flow control).
+#[tauri::command]
+pub(crate) fn terminal_ack(terminals: State<'_, Arc<Terminals>>, id: u64, total: u64) {
+    terminals.ack(id, total);
+}
+
+/// Closes the PTY channel (EOF + CLOSE); the session stays connected.
+#[tauri::command]
+pub(crate) fn close_terminal(terminals: State<'_, Arc<Terminals>>, id: u64) {
+    terminals.close(id);
+}
+
+fn terminal_gone() -> ErrorSummary {
+    ErrorSummary {
+        code: "terminal_closed".into(),
+        message: "this terminal is closed".into(),
+        hint: None,
+    }
 }

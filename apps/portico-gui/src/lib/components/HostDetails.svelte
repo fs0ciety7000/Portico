@@ -2,6 +2,7 @@
   import { fly } from "svelte/transition";
   import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
+  import { kbd } from "../keys";
 
   let {
     host,
@@ -84,7 +85,7 @@
     <div class="placeholder">
       <img src="/portico-mark.svg" alt="" width="72" height="72" />
       <p>Select a host to see its effective configuration.</p>
-      <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect · <kbd>⌘K</kbd> commands</p>
+      <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect · <kbd>{kbd("K")}</kbd> commands</p>
     </div>
   {/if}
 </section>

@@ -4169,6 +4169,7 @@ dependencies = [
 name = "portico-gui"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "portico-core",
  "portico-theme",
  "secrecy",

@@ -1,5 +1,7 @@
 //! Serializable views sent to the webview (camelCase for TypeScript).
 
+use std::path::{Path, PathBuf};
+
 use portico_core::engine::PromptResponse;
 use portico_core::hosts::HostEntry;
 use secrecy::SecretString;
@@ -32,20 +34,29 @@ impl From<&HostEntry> for HostDto {
             user: r.user.clone(),
             port: r.port,
             proxy_jump: r.proxy_jump.iter().map(|j| j.host.clone()).collect(),
-            identity_files: r
-                .identity_files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect(),
+            identity_files: r.identity_files.iter().map(|p| display_path(p)).collect(),
             local_forwards: r.local_forwards.clone(),
             remote_forwards: r.remote_forwards.clone(),
             tags: h.meta.tags.clone(),
             group: h.meta.group.clone(),
             favorite: h.meta.favorite,
-            source: format!("{}:{}", h.source.file.display(), h.source.line),
+            source: format!("{}:{}", display_path(&h.source.file), h.source.line),
             warnings: r.warnings.iter().map(|w| w.message.clone()).collect(),
         }
     }
+}
+
+/// `~/…` for paths under the home directory (shorter, and does not expose
+/// the account's home path in screenshots).
+fn display_path(path: &Path) -> String {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(|rest| format!("~/{}", rest.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +107,19 @@ impl From<PromptAnswerDto> for PromptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_paths_are_shortened() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            display_path(&Path::new(&home).join(".ssh/config")),
+            "~/.ssh/config"
+        );
+        assert_eq!(
+            display_path(Path::new("/etc/ssh/ssh_config")),
+            "/etc/ssh/ssh_config"
+        );
+    }
 
     #[test]
     fn prompt_answer_dto_debug_is_redacted() {

@@ -2,14 +2,19 @@
 //!
 //! The Rust side stays thin: commands translate IPC calls into `Engine`
 //! calls, and a forwarder task re-emits every `EngineEvent` to the webview as
-//! the `engine://event` event. PTY bytes will use `tauri::ipc::Channel`
-//! (ordered, binary) per terminal, never the global event bus.
+//! the `engine://event` event. PTY bytes use a `tauri::ipc::Channel` per
+//! terminal (ordered, binary, flow-controlled), never the global event bus.
 
 mod commands;
 mod dto;
+mod terminals;
+
+use std::sync::Arc;
 
 use portico_core::{Engine, EngineConfig};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, RunEvent};
+
+use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
 pub const ENGINE_EVENT: &str = "engine://event";
@@ -23,7 +28,7 @@ pub fn run() {
         )
         .init();
 
-    let result = tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let engine = Engine::new(EngineConfig::discover()?);
             let mut events = engine.subscribe();
@@ -45,20 +50,41 @@ pub fn run() {
                 }
             });
             app.manage(engine);
+            app.manage(Arc::new(Terminals::default()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_hosts,
             commands::search_hosts,
             commands::list_themes,
+            commands::home_dir,
             commands::connect,
             commands::disconnect,
             commands::respond_prompt,
+            commands::open_terminal,
+            commands::terminal_input,
+            commands::terminal_resize,
+            commands::terminal_ack,
+            commands::close_terminal,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(e) = result {
-        tracing::error!(error = %e, "Portico failed to start");
-        std::process::exit(1);
-    }
+    let app = match app {
+        Ok(app) => app,
+        Err(e) => {
+            tracing::error!(error = %e, "Portico failed to start");
+            std::process::exit(1);
+        }
+    };
+    app.run(|handle, event| {
+        if let RunEvent::Exit = event {
+            // Close channels and sessions cleanly (EOF, CLOSE, DISCONNECT).
+            if let Some(terminals) = handle.try_state::<Arc<Terminals>>() {
+                terminals.close_all();
+            }
+            if let Some(engine) = handle.try_state::<Engine>() {
+                engine.shutdown();
+            }
+        }
+    });
 }

@@ -1,5 +1,5 @@
 // Typed bridge to the Rust commands (apps/portico-gui/src-tauri/src/commands.rs).
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface Host {
@@ -47,21 +47,48 @@ export interface Duration {
   nanos: number;
 }
 
+/** Mirrors `portico_core::events::PromptKind`. */
+export type PromptKind =
+  | { kind: "unknown_host_key"; host: string; port: number; algorithm: string; fingerprint: string; other_algorithms: string[] }
+  | { kind: "password"; user: string; host: string; attempt: number; attempts: number }
+  | { kind: "key_passphrase"; key_path: string; attempt: number; attempts: number }
+  | { kind: "keyboard_interactive"; name: string; instructions: string; prompts: { text: string; echo: boolean }[] };
+
+export interface Prompt {
+  id: number;
+  session: number | null;
+  kind: PromptKind;
+}
+
+export interface HostKeyChanged {
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+  expected_fingerprint: string;
+  known_hosts_file: string;
+  known_hosts_line: number;
+}
+
+export type SessionEvent =
+  | ({ kind: "phase" } & Phase)
+  | { kind: "latency"; rtt: Duration }
+  | { kind: "started"; alias: string }
+  | { kind: "banner"; text: string }
+  | ({ kind: "host_key_changed" } & HostKeyChanged);
+
+export type TerminalEvent =
+  | { kind: "opened" }
+  | { kind: "exited"; status: number | null; signal: string | null }
+  | { kind: "closed" };
+
 /** Mirrors `portico_core::events::EngineEvent` (only the variants the UI uses). */
 export type EngineEvent =
-  | {
-      type: "session";
-      id: number;
-      event:
-        | ({ kind: "phase" } & Phase)
-        | { kind: "latency"; rtt: Duration }
-        | { kind: "started"; alias: string }
-        | { kind: "banner"; text: string }
-        | { kind: "host_key_changed"; host: string; fingerprint: string; expected_fingerprint: string };
-    }
-  | { type: "prompt"; id: number; session: number | null; kind: { kind: string } }
+  | { type: "session"; id: number; event: SessionEvent }
+  | { type: "terminal"; id: number; session: number; event: TerminalEvent }
+  | ({ type: "prompt" } & Prompt)
   | { type: "prompt_resolved"; id: number }
-  | { type: string };
+  | { type: "tunnel" | "sftp" | "log" };
 
 export type PromptAnswer =
   | { kind: "accept_host_key" }
@@ -75,12 +102,36 @@ export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),
   searchHosts: (query: string) => invoke<Host[]>("search_hosts", { query }),
   listThemes: () => invoke<ThemeInfo[]>("list_themes"),
+  homeDir: () => invoke<string | null>("home_dir"),
   connect: (alias: string) => invoke<number>("connect", { alias }),
   disconnect: (session: number) => invoke<void>("disconnect", { session }),
   respondPrompt: (prompt: number, answer: PromptAnswer) => invoke<void>("respond_prompt", { prompt, answer }),
+  /** Opens a PTY (waits for the session); raw output arrives on `output`. */
+  openTerminal: (session: number, cols: number, rows: number, output: Channel<ArrayBuffer>) =>
+    invoke<number>("open_terminal", { session, cols, rows, output }),
+  terminalInput: (id: number, data: string, binary: boolean) => invoke<void>("terminal_input", { id, data, binary }),
+  terminalResize: (id: number, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
+  /** Flow control: `total` bytes of output have been parsed by xterm.js. */
+  terminalAck: (id: number, total: number) => invoke<void>("terminal_ack", { id, total }),
+  closeTerminal: (id: number) => invoke<void>("close_terminal", { id }),
   onEngineEvent: (cb: (event: EngineEvent) => void): Promise<UnlistenFn> =>
     listen<EngineEvent>("engine://event", (e) => cb(e.payload)),
 };
+
+let home: string | null = null;
+
+/** Called once at startup; `displayPath` then shortens home paths to `~`. */
+export function setHome(dir: string | null) {
+  home = dir ? dir.replace(/\/+$/, "") : null;
+}
+
+export function displayPath(path: string): string {
+  return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
+}
+
+export function durationMs(d: Duration): number {
+  return d.secs * 1000 + d.nanos / 1e6;
+}
 
 export function asError(e: unknown): ErrorSummary {
   if (e && typeof e === "object" && "message" in e) return e as ErrorSummary;
@@ -126,7 +177,9 @@ export function describe(view: SessionView | undefined): { status: Status; label
     case "disconnecting":
       return { status: "idle", label: "Disconnecting", busy: true };
     case "failed":
-      return { status: "error", label: `Failed · ${p.error.code.replaceAll("_", " ")}`, busy: false };
+      // A refusal the user chose is not an error.
+      if (p.error.code === "host_key_rejected") return { status: "idle", label: "Refused", busy: false };
+      return { status: "error", label: "Failed", busy: false };
     default:
       return { status: "idle", label: "Disconnected", busy: false };
   }

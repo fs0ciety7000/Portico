@@ -178,6 +178,11 @@ impl TerminalInputs {
     pub fn is_closed(&self) -> bool {
         self.close.is_cancelled()
     }
+
+    /// Resolves once the terminal is closed (by any side).
+    pub async fn closed(&self) {
+        self.close.cancelled().await;
+    }
 }
 
 /// Data-plane endpoints of one PTY channel. Owned by exactly one UI view;
