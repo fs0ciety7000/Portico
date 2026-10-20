@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" role="img" aria-label="Portico">
+  <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="square">
+    <path d="M20 34 H124"/><path d="M28 48 H116"/>
+    <path d="M38 48 V128"/><path d="M106 48 V128"/>
+    <path d="M56 128 V92 A16 16 0 0 1 88 92 V128"/>
+    <path d="M20 138 H124"/>
+  </g>
+  <text x="160" y="112" font-family="Cormorant Garamond, Iowan Old Style, Georgia, serif" font-size="76" letter-spacing="14" fill="currentColor">PORTICO</text>
+</svg>

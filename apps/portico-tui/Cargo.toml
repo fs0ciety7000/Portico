@@ -1,0 +1,28 @@
+[package]
+name = "portico-tui"
+description = "Portico terminal user interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "portico"
+path = "src/main.rs"
+
+[dependencies]
+portico-core.workspace = true
+portico-theme.workspace = true
+tokio.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+alacritty_terminal.workspace = true
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

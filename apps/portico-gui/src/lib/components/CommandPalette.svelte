@@ -1,0 +1,112 @@
+<script lang="ts" module>
+  export interface Command {
+    id: string;
+    title: string;
+    hint?: string;
+    shortcut?: string;
+    run: () => void;
+  }
+</script>
+
+<script lang="ts">
+  import { fade, scale } from "svelte/transition";
+
+  let { open = $bindable(false), commands }: { open?: boolean; commands: Command[] } = $props();
+
+  let query = $state("");
+  let active = $state(0);
+  let input: HTMLInputElement | undefined = $state();
+
+  const filtered = $derived(
+    commands.filter((c) => c.title.toLowerCase().includes(query.trim().toLowerCase())),
+  );
+
+  $effect(() => {
+    if (open) {
+      query = "";
+      active = 0;
+      queueMicrotask(() => input?.focus());
+    }
+  });
+
+  function run(cmd: Command | undefined) {
+    if (!cmd) return;
+    open = false;
+    cmd.run();
+  }
+
+  function onkeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") open = false;
+    else if (e.key === "ArrowDown") active = Math.min(active + 1, filtered.length - 1);
+    else if (e.key === "ArrowUp") active = Math.max(active - 1, 0);
+    else if (e.key === "Enter") run(filtered[active]);
+    else return;
+    e.preventDefault();
+  }
+</script>
+
+{#if open}
+  <div class="scrim" transition:fade={{ duration: 120 }} onclick={() => (open = false)} role="presentation"></div>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" transition:scale={{ start: 0.97, duration: 160 }}>
+    <input bind:this={input} bind:value={query} {onkeydown} placeholder="Type a command…" spellcheck="false" oninput={() => (active = 0)} />
+    <ul>
+      {#each filtered as cmd, i (cmd.id)}
+        <li class:active={i === active} onmouseenter={() => (active = i)} onclick={() => run(cmd)} onkeydown={() => {}} role="option" aria-selected={i === active}>
+          <span class="title">{cmd.title}</span>
+          {#if cmd.hint}<span class="hint">{cmd.hint}</span>{/if}
+          {#if cmd.shortcut}<kbd>{cmd.shortcut}</kbd>{/if}
+        </li>
+      {:else}
+        <li class="empty">No command found</li>
+      {/each}
+    </ul>
+  </div>
+{/if}
+
+<style>
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--bg-base) 55%, transparent);
+    backdrop-filter: blur(2px);
+    z-index: 10;
+  }
+  .palette {
+    position: fixed;
+    top: 14vh;
+    left: 50%;
+    width: min(560px, calc(100vw - 32px));
+    transform: translateX(-50%);
+    z-index: 11;
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 24px 64px rgb(0 0 0 / 0.45);
+    overflow: hidden;
+  }
+  input {
+    width: 100%;
+    height: 48px;
+    padding: 0 var(--space-4);
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--text-md);
+  }
+  ul { list-style: none; margin: 0; padding: var(--space-2); max-height: 320px; overflow-y: auto; }
+  li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    height: 36px;
+    padding: 0 var(--space-3);
+    border-radius: var(--radius-md);
+  }
+  li.active { background: var(--bg-selected); }
+  .title { flex: 1; }
+  .hint { color: var(--text-muted); font-size: var(--text-sm); }
+  .empty { color: var(--text-muted); }
+</style>

@@ -1,0 +1,7 @@
+/target
+**/node_modules
+apps/portico-gui/dist
+apps/portico-gui/src-tauri/gen
+.DS_Store
+*.log
+.env

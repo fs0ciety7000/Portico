@@ -1,0 +1,19 @@
+[package]
+name = "portico-theme"
+description = "Portico design tokens: one source of truth for the TUI (ratatui) and the GUI (generated CSS)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[[bin]]
+name = "export-tokens"
+path = "src/bin/export_tokens.rs"
+
+[lints]
+workspace = true
