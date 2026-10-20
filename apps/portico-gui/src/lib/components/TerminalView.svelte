@@ -434,9 +434,9 @@
   .card h2 {
     margin: 0;
     font-family: var(--font-display);
-    font-weight: 500;
+    font-weight: 600;
     font-size: var(--text-display-sm);
-    letter-spacing: 0.01em;
+    letter-spacing: -0.015em;
   }
   .card.failure {
     background: var(--bg-overlay);

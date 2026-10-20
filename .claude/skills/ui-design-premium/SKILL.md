@@ -11,7 +11,7 @@ Un **portique** : entablement, colonnes, arche. Le design en garde l'idée de **
 Les mots-clés sont *architectural, minéral, calme, précis*. Pas de dégradés criards, pas de glassmorphism gratuit, pas d'emoji dans l'UI.
 
 - La marque se compose du logo `design/portico-mark.svg` (trait seul, accent sur fond sombre) et du wordmark `PORTICO`
-  en serif espacé (`--font-display`, `letter-spacing` d'au moins 0.3em).
+  en capitales espacées (`--font-display` = Geist, graisse 500, `letter-spacing` d'environ 0.28em).
 - **Un seul accent par thème**, réservé au focus, à la sélection, à l'action primaire et à la marque.
 - **La couleur saturée = le sens** : les statuts sont la seule couleur vive de l'écran.
 
@@ -43,7 +43,7 @@ Un nouveau thème doit passer ces tests.
   Dans les panneaux, le padding horizontal vaut au moins `--space-3`.
 - Rayons : `sm` 4 (kbd, tags), `md` 8 (inputs, lignes, boutons), `lg` 12 (modales), `pill` (badges).
 - Polices : UI en **Inter** à 13 px de base ; terminal et données techniques (hôtes, chemins, ports, empreintes) en **JetBrains Mono** ;
-  titres d'hôte et wordmark en **Cormorant Garamond**, avec parcimonie.
+  titres d'hôte (graisse 600, approche légèrement négative) et wordmark en **Geist**, avec parcimonie.
 - On utilise les **chiffres tabulaires** (`tnum`) pour latence, tailles et progression.
 - La hiérarchie passe d'abord par la **taille et l'espace**, ensuite par la graisse (450/550/600), et en dernier par la couleur.
 - Les hauteurs de ligne sont régulières : 34 px pour les listes, 32 px pour les boutons, 24 px pour les badges.

@@ -11,9 +11,9 @@ importers:
       '@fontsource-variable/inter':
         specifier: 5.2.8
         version: 5.2.8
-      '@fontsource/cormorant-garamond':
-        specifier: 5.2.8
-        version: 5.2.8
+      '@fontsource/geist-sans':
+        specifier: 5.2.5
+        version: 5.2.5
       '@fontsource/jetbrains-mono':
         specifier: 5.2.8
         version: 5.2.8
@@ -57,8 +57,8 @@ packages:
   '@fontsource-variable/inter@5.2.8':
     resolution: {integrity: sha512-kOfP2D+ykbcX/P3IFnokOhVRNoTozo5/JxhAIVYLpea/UBmCQ/YWPBfWIDuBImXX/15KH+eKh4xpEUyS2sQQGQ==}
 
-  '@fontsource/cormorant-garamond@5.2.8':
-    resolution: {integrity: sha512-ylx8F6QQ0cyhS/fyeAqv3SlZNr+y3Cvt/AOd1e2hVA62Eg86vPqjugN7l5rsh6pnjbwHRaPNZWh98hyT7sasAQ==}
+  '@fontsource/geist-sans@5.2.5':
+    resolution: {integrity: sha512-anllOHyJbElRs9fV15TeDRqAeb1IKm4bSknPl6ZMoyPTx1BBy7logudcUwpNjmQLkzn4Q0JGQLRCUKJYoyST6A==}
 
   '@fontsource/jetbrains-mono@5.2.8':
     resolution: {integrity: sha512-6w8/SG4kqvIMu7xd7wt6x3idn1Qux3p9N62s6G3rfldOUYHpWcc2FKrqf+Vo44jRvqWj2oAtTHrZXEP23oSKwQ==}
@@ -539,7 +539,7 @@ snapshots:
 
   '@fontsource-variable/inter@5.2.8': {}
 
-  '@fontsource/cormorant-garamond@5.2.8': {}
+  '@fontsource/geist-sans@5.2.5': {}
 
   '@fontsource/jetbrains-mono@5.2.8': {}
 

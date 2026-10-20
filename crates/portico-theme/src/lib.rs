@@ -118,8 +118,10 @@ pub const EASING_EMPHASIZED: &str = "cubic-bezier(0.3, 0, 0, 1.0)";
 pub const FONT_UI: &str = "\"Inter Variable\", Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif";
 pub const FONT_MONO: &str =
     "\"JetBrains Mono\", \"SF Mono\", \"Cascadia Code\", Menlo, \"DejaVu Sans Mono\", monospace";
-/// Display face for the wordmark and large titles only.
-pub const FONT_DISPLAY: &str = "\"Cormorant Garamond\", \"Iowan Old Style\", Georgia, serif";
+/// Display face for the wordmark and large titles only: a crisp grotesque,
+/// distinct from the UI face by its proportions and tracking.
+pub const FONT_DISPLAY: &str =
+    "\"Geist Sans\", Geist, \"Inter Variable\", Inter, -apple-system, system-ui, sans-serif";
 
 /// Type scale (GUI px). `display*` are for host titles in the display face.
 pub const TYPE_SCALE: [(&str, u16); 8] = [

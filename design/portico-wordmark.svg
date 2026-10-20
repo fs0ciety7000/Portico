@@ -5,5 +5,5 @@
     <path d="M56 128 V92 A16 16 0 0 1 88 92 V128"/>
     <path d="M20 138 H124"/>
   </g>
-  <text x="160" y="112" font-family="Cormorant Garamond, Iowan Old Style, Georgia, serif" font-size="76" letter-spacing="14" fill="currentColor">PORTICO</text>
+  <text x="160" y="112" font-family="Geist Sans, Geist, Inter, system-ui, sans-serif" font-weight="500" font-size="64" letter-spacing="18" fill="currentColor">PORTICO</text>
 </svg>

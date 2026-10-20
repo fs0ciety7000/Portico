@@ -3,6 +3,7 @@
   import { dur } from "../motion";
   import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
+  import Mark from "./Mark.svelte";
   import { kbd } from "../keys";
 
   let {
@@ -84,7 +85,7 @@
     {/key}
   {:else}
     <div class="placeholder">
-      <img src="/portico-mark.svg" alt="" width="72" height="72" />
+      <Mark size={56} />
       <p>Select a host to see its effective configuration.</p>
       <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect · <kbd>{kbd("K")}</kbd> commands</p>
     </div>
@@ -110,9 +111,9 @@
   h1 {
     margin: 0;
     font-family: var(--font-display);
-    font-weight: 500;
+    font-weight: 600;
     font-size: var(--text-display);
-    letter-spacing: 0.01em;
+    letter-spacing: -0.015em;
   }
   .target { margin: var(--space-1) 0 0; color: var(--text-secondary); }
   .port { color: var(--text-muted); }
@@ -197,5 +198,5 @@
     color: var(--text-secondary);
     text-align: center;
   }
-  .placeholder img { opacity: 0.85; margin-bottom: var(--space-3); }
+  .placeholder :global(svg) { opacity: 0.85; margin-bottom: var(--space-3); }
 </style>

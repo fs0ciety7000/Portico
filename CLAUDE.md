@@ -35,7 +35,7 @@ Claude n'est pas qu'un exécutant. Sur Portico, il :
 ## 3. Identité visuelle et exigences design
 
 **Direction** : minimalisme architectural. Le logo est un portique : un entablement sur deux colonnes
-qui encadrent une arche (`design/portico-mark.svg`), accompagné d'un wordmark serif espacé
+qui encadrent une arche (`design/portico-mark.svg`), accompagné d'un wordmark en capitales espacées (Geist)
 (`design/portico-wordmark.svg`). L'ensemble doit faire premium, rester sobre, être monochrome
 et adapté au mode sombre.
 

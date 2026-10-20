@@ -9,6 +9,7 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
+  import Mark from "./lib/components/Mark.svelte";
   import TerminalView from "./lib/components/TerminalView.svelte";
   import PromptDialog from "./lib/components/PromptDialog.svelte";
   import HostKeyAlert from "./lib/components/HostKeyAlert.svelte";
@@ -185,7 +186,7 @@
 <div class="shell">
   <header class="titlebar" class:mac={isMac} data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
-      <img src="/portico-mark.svg" alt="" width="18" height="18" />
+      <Mark size={16} />
       <span class="wordmark">PORTICO</span>
     </div>
     <TabBar hostCount={allHosts.length} />
@@ -293,7 +294,8 @@
   .wordmark {
     font-family: var(--font-display);
     font-size: var(--text-md);
-    letter-spacing: 0.32em;
+    font-weight: 500;
+    letter-spacing: 0.28em;
     color: var(--text-primary);
   }
   .palette-trigger {
