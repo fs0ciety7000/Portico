@@ -181,9 +181,7 @@ async fn openssh_interop() {
     };
     let mut term = env.engine.open_terminal(id, size).await.unwrap();
     term.input
-        .send(portico_core::engine::TerminalInput::Data(
-            bytes::Bytes::from_static(b"echo portico-$((40+2))\r"),
-        ))
+        .send(bytes::Bytes::from_static(b"echo portico-$((40+2))\r"))
         .await
         .unwrap();
     let mut seen = Vec::new();

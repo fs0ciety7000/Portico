@@ -205,7 +205,8 @@ pub(crate) async fn run(
 
 /// One authenticated transport and its "closed by peer" signal.
 struct Link {
-    handle: client::Handle<ClientHandler>,
+    /// Shared so channel openings can run in their own tasks.
+    handle: Arc<client::Handle<ClientHandler>>,
     closed: CancellationToken,
 }
 
@@ -270,7 +271,10 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
                 hop.alias, hop.user
             ),
         );
-        links.push(Link { handle, closed });
+        links.push(Link {
+            handle: Arc::new(handle),
+            closed,
+        });
     }
 
     let target = hops.last();
@@ -413,6 +417,23 @@ where
         .await
 }
 
+async fn open_terminal(
+    ctx: SessionCtx,
+    handle: Arc<client::Handle<ClientHandler>>,
+    size: crate::engine::PtySize,
+    reply: tokio::sync::oneshot::Sender<Result<crate::engine::TerminalHandle>>,
+) {
+    let opened = tokio::select! {
+        biased;
+        () = ctx.cancel.cancelled() => Err(Error::SessionEnded(ctx.id)),
+        opened = terminal::open(&ctx, &handle, size, TERMINAL_OPEN_TIMEOUT) => opened,
+    };
+    if let Err(e) = &opened {
+        ctx.log(LogLevel::Error, "pty", e.to_string());
+    }
+    let _ = reply.send(opened);
+}
+
 pub(crate) fn transport(hop: &Hop, e: &russh::Error) -> Error {
     Error::Transport {
         target: hop.alias.clone(),
@@ -453,21 +474,9 @@ impl Connection {
                 cmd = commands.recv() => match cmd {
                     Some(SessionCommand::Disconnect) | None => return CloseReason::UserRequested,
                     Some(SessionCommand::OpenTerminal { size, reply }) => {
-                        let opened = tokio::time::timeout(
-                            TERMINAL_OPEN_TIMEOUT,
-                            terminal::open(ctx, &target.handle, size),
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(Error::Timeout {
-                                phase: "opening a terminal on",
-                                target: ctx.engine.session_alias(ctx.id).unwrap_or_default(),
-                            })
-                        });
-                        if let Err(e) = &opened {
-                            ctx.log(LogLevel::Error, "pty", e.to_string());
-                        }
-                        let _ = reply.send(opened);
+                        // Off the supervisor loop: keepalive, Disconnect and
+                        // remote close stay responsive while a shell starts.
+                        tokio::spawn(open_terminal(ctx.clone(), Arc::clone(&target.handle), size, reply));
                     }
                 },
                 Some(rtt) = futures::future::OptionFuture::from(probe.as_mut()) => {

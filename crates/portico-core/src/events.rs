@@ -142,9 +142,10 @@ pub enum TerminalEvent {
     Opened,
     /// OSC title change requested by the remote program.
     Title(String),
-    /// Remote process exited.
+    /// Remote process exited with `status`, or was killed by `signal`.
     Exited {
         status: Option<u32>,
+        signal: Option<String>,
     },
     Closed,
 }

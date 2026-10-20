@@ -42,6 +42,8 @@ use crate::store::{Paths, load_toml};
 pub const DEFAULT_EVENT_CAPACITY: usize = 1024;
 /// Max in-flight PTY output chunks per terminal (data plane).
 pub const TERMINAL_OUTPUT_CAPACITY: usize = 256;
+/// Max queued keystroke / paste chunks per terminal.
+pub const TERMINAL_INPUT_CAPACITY: usize = 1024;
 
 /// Default `ConnectTimeout` (per hop: TCP connect and SSH negotiation).
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -121,20 +123,70 @@ impl ConnectRequest {
     }
 }
 
-/// Input sent to a terminal (data plane).
-#[derive(Debug)]
-pub enum TerminalInput {
-    Data(Bytes),
-    Resize(PtySize),
-    Close,
+/// Input side of a terminal (data plane). Cheap to clone.
+///
+/// Keystrokes and pastes go through a bounded queue drained by a dedicated
+/// writer task (never starved by output). Resizes use a `watch` (only the
+/// latest size matters, it can never be lost) and closing is a token (it can
+/// never be lost either, and it is also triggered when the output side is
+/// dropped).
+#[derive(Debug, Clone)]
+pub struct TerminalInputs {
+    data: mpsc::Sender<Bytes>,
+    size: tokio::sync::watch::Sender<PtySize>,
+    close: CancellationToken,
 }
 
-/// Data-plane endpoints of one PTY channel. Owned by exactly one UI view.
+/// Bytes the terminal could not queue (the remote side stopped reading).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("terminal input queue is full or closed")]
+pub struct InputRejected;
+
+impl TerminalInputs {
+    pub(crate) fn new(
+        data: mpsc::Sender<Bytes>,
+        size: tokio::sync::watch::Sender<PtySize>,
+        close: CancellationToken,
+    ) -> Self {
+        Self { data, size, close }
+    }
+
+    /// Queues keystrokes / pasted bytes / terminal replies without waiting.
+    pub fn try_send(&self, bytes: Bytes) -> std::result::Result<(), InputRejected> {
+        self.data.try_send(bytes).map_err(|_| InputRejected)
+    }
+
+    /// Queues bytes, waiting for room.
+    pub async fn send(&self, bytes: Bytes) -> std::result::Result<(), InputRejected> {
+        self.data.send(bytes).await.map_err(|_| InputRejected)
+    }
+
+    /// Announces a new size (`window-change`); the latest value always wins.
+    pub fn resize(&self, size: PtySize) {
+        self.size.send_if_modified(|current| {
+            let changed = *current != size;
+            *current = size;
+            changed
+        });
+    }
+
+    /// Closes the channel (EOF + CLOSE), idempotent.
+    pub fn close(&self) {
+        self.close.cancel();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.close.is_cancelled()
+    }
+}
+
+/// Data-plane endpoints of one PTY channel. Owned by exactly one UI view;
+/// dropping `output` closes the channel.
 #[derive(Debug)]
 pub struct TerminalHandle {
     pub id: TerminalId,
     pub session: SessionId,
-    pub input: mpsc::Sender<TerminalInput>,
+    pub input: TerminalInputs,
     pub output: mpsc::Receiver<Bytes>,
 }
 

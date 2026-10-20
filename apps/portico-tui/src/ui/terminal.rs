@@ -46,10 +46,13 @@ pub(crate) fn render(
         .right_aligned();
         frame.render_widget(Paragraph::new(badge), Rect { height: 1, ..area });
     }
-    if let Some(ended) = view.ended {
+    if let Some(ended) = &view.ended {
         let text = match ended {
             crate::terminal::Ended::Exited(code) => {
                 format!(" shell exited ({code}) · Ctrl-Space w to close ")
+            }
+            crate::terminal::Ended::Killed(sig) => {
+                format!(" shell killed by SIG{sig} · Ctrl-Space w to close ")
             }
             crate::terminal::Ended::Closed => {
                 " connection closed · Ctrl-Space w to close ".to_owned()

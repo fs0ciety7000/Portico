@@ -766,7 +766,7 @@ async fn next_output(handle: &mut portico_core::engine::TerminalHandle, needle: 
 
 #[tokio::test]
 async fn terminal_echo_resize_exit() {
-    use portico_core::engine::{PtySize, TerminalInput};
+    use portico_core::engine::PtySize;
     use portico_core::events::TerminalEvent;
 
     let key = new_key();
@@ -799,22 +799,19 @@ async fn terminal_echo_resize_exit() {
     next_output(&mut term, b"welcome").await;
 
     term.input
-        .send(TerminalInput::Data(bytes::Bytes::from_static(b"hello")))
+        .send(bytes::Bytes::from_static(b"hello"))
         .await
         .unwrap();
     next_output(&mut term, b"hello").await;
 
+    term.input.resize(PtySize {
+        cols: 120,
+        rows: 40,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
     term.input
-        .send(TerminalInput::Resize(PtySize {
-            cols: 120,
-            rows: 40,
-            pixel_width: 0,
-            pixel_height: 0,
-        }))
-        .await
-        .unwrap();
-    term.input
-        .send(TerminalInput::Data(bytes::Bytes::from_static(b"\rexit\r")))
+        .send(bytes::Bytes::from_static(b"\rexit\r"))
         .await
         .unwrap();
 
@@ -826,7 +823,7 @@ async fn terminal_echo_resize_exit() {
             .unwrap();
         match ev {
             EngineEvent::Terminal {
-                event: TerminalEvent::Exited { status },
+                event: TerminalEvent::Exited { status, .. },
                 ..
             } => exited = Some(status),
             EngineEvent::Terminal {
@@ -897,4 +894,174 @@ async fn terminal_on_a_server_refusing_shells_reports_it() {
         matches!(err.summary().code.as_str(), "ssh" | "terminal_refused"),
         "{err}"
     );
+}
+
+// ── phase 1b review regressions (protocol) ────────────────────────────────
+
+async fn pty_env(
+    behaviour: Behaviour,
+    key: &russh::keys::PrivateKey,
+) -> (TestServer, Env, portico_core::ids::SessionId) {
+    let server = TestServer::start(behaviour).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", key, None);
+    env.trust(&server);
+    let (id, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    (server, env, id)
+}
+
+fn size() -> portico_core::engine::PtySize {
+    portico_core::engine::PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+#[tokio::test]
+async fn ctrl_c_is_delivered_during_an_output_flood() {
+    let key = new_key();
+    let (server, env, id) = pty_env(
+        Behaviour {
+            pty_echo: true,
+            flood: true,
+            ..key_server(&key)
+        },
+        &key,
+    )
+    .await;
+    let mut term = env.engine.open_terminal(id, size()).await.unwrap();
+    // Slow UI: let the flood saturate every queue before typing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    term.input
+        .send(bytes::Bytes::from_static(b"\x03"))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !server.behaviour.received.lock().unwrap().contains(&0x03) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Ctrl-C starved by output"
+        );
+        // Keep draining a little, like a slow UI.
+        let _ = tokio::time::timeout(Duration::from_millis(20), term.output.recv()).await;
+    }
+}
+
+#[tokio::test]
+async fn pty_modes_are_sent() {
+    let key = new_key();
+    let (server, env, id) = pty_env(
+        Behaviour {
+            pty_echo: true,
+            ..key_server(&key)
+        },
+        &key,
+    )
+    .await;
+    let _term = env.engine.open_terminal(id, size()).await.unwrap();
+    let modes = server.behaviour.modes.lock().unwrap().clone();
+    for wanted in [
+        (russh::Pty::VERASE, 0x7f),
+        (russh::Pty::ICRNL, 1),
+        (russh::Pty::IUTF8, 1),
+    ] {
+        assert!(modes.contains(&wanted), "{wanted:?} missing from {modes:?}");
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_view_closes_the_channel() {
+    let key = new_key();
+    let (server, env, id) = pty_env(
+        Behaviour {
+            pty_echo: true,
+            ..key_server(&key)
+        },
+        &key,
+    )
+    .await;
+    let mut term = env.engine.open_terminal(id, size()).await.unwrap();
+    next_output(&mut term, b"welcome").await;
+    // A second terminal keeps the session alive: only the first must close.
+    let mut other = env.engine.open_terminal(id, size()).await.unwrap();
+    next_output(&mut other, b"welcome").await;
+    drop(term);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while server
+        .behaviour
+        .closed_channels
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == 0
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "channel never closed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The other terminal still works.
+    other
+        .input
+        .send(bytes::Bytes::from_static(b"ping"))
+        .await
+        .unwrap();
+    next_output(&mut other, b"ping").await;
+}
+
+#[tokio::test]
+async fn exit_signal_then_eof_without_close_is_handled() {
+    use portico_core::events::TerminalEvent;
+    let key = new_key();
+    let (server, mut env, id) = pty_env(
+        Behaviour {
+            pty_echo: true,
+            ..key_server(&key)
+        },
+        &key,
+    )
+    .await;
+    let term = env.engine.open_terminal(id, size()).await.unwrap();
+    term.input
+        .send(bytes::Bytes::from_static(b"kill\r"))
+        .await
+        .unwrap();
+    let mut signal = None;
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), env.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            EngineEvent::Terminal {
+                event: TerminalEvent::Exited { signal: s, .. },
+                ..
+            } => signal = s,
+            EngineEvent::Terminal {
+                event: TerminalEvent::Closed,
+                ..
+            } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(signal.as_deref(), Some("TERM"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while server
+        .behaviour
+        .closed_channels
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == 0
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "client never closed after EOF"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

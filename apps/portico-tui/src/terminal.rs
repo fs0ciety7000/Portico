@@ -16,7 +16,7 @@ use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use portico_core::engine::{PtySize, TerminalHandle, TerminalInput};
+use portico_core::engine::{PtySize, TerminalHandle, TerminalInputs};
 use portico_core::ids::{SessionId, TerminalId};
 use tokio::sync::mpsc;
 
@@ -58,7 +58,7 @@ impl Dimensions for GridSize {
 /// Receives terminal-side events (title changes, replies to queries).
 #[derive(Clone)]
 pub(crate) struct EventProxy {
-    input: mpsc::Sender<TerminalInput>,
+    input: TerminalInputs,
     title: Arc<Mutex<Option<String>>>,
 }
 
@@ -67,7 +67,8 @@ impl EventListener for EventProxy {
         match event {
             // Device status / attribute reports must reach the remote program.
             TermEvent::PtyWrite(text) => {
-                let _ = self.input.try_send(TerminalInput::Data(Bytes::from(text)));
+                // Non-blocking on purpose: this runs under the Term lock.
+                let _ = self.input.try_send(Bytes::from(text));
             }
             TermEvent::Title(title) => {
                 *self.title.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -85,11 +86,13 @@ impl EventListener for EventProxy {
 pub(crate) type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
 
 /// How a terminal's remote side ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ended {
     /// The shell exited with this status.
     Exited(u32),
-    /// Killed by a signal, or the channel / connection closed.
+    /// Killed by this signal (`TERM`, `KILL`…).
+    Killed(String),
+    /// The channel or the connection closed.
     Closed,
 }
 
@@ -100,7 +103,7 @@ pub(crate) struct TerminalView {
     pub(crate) alias: String,
     pub(crate) term: SharedTerm,
     title: Arc<Mutex<Option<String>>>,
-    input: mpsc::Sender<TerminalInput>,
+    input: TerminalInputs,
     pub(crate) size: GridSize,
     pub(crate) dirty: Arc<AtomicBool>,
     /// Why the remote shell ended, once it did.
@@ -198,7 +201,7 @@ impl TerminalView {
     pub(crate) fn send(&self, bytes: Vec<u8>) {
         // Back to the live view on input, like every terminal.
         self.scroll(Scroll::Bottom);
-        let _ = self.input.try_send(TerminalInput::Data(Bytes::from(bytes)));
+        let _ = self.input.try_send(Bytes::from(bytes));
     }
 
     pub(crate) fn scroll(&self, scroll: Scroll) {
@@ -217,7 +220,8 @@ impl TerminalView {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .resize(size);
-        let _ = self.input.try_send(TerminalInput::Resize(size.pty()));
+        // A `watch` under the hood: the latest size can never be lost.
+        self.input.resize(size.pty());
     }
 
     pub(crate) fn paste(&self, text: &str) {
@@ -226,8 +230,15 @@ impl TerminalView {
     }
 
     pub(crate) fn close(&mut self) {
-        let _ = self.input.try_send(TerminalInput::Close);
+        self.input.close();
         self.closed = true;
+    }
+}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        // A tab that disappears must never leave its shell running.
+        self.input.close();
     }
 }
 
@@ -265,7 +276,12 @@ pub(crate) fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 /// Encodes a key press the way xterm does. `None` for keys with no byte form.
-pub(crate) fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
+pub(crate) fn encode_key(
+    key: KeyEvent,
+    mode: alacritty_terminal::term::TermMode,
+) -> Option<Vec<u8>> {
+    use alacritty_terminal::term::TermMode;
+    let app_cursor = mode.contains(TermMode::APP_CURSOR);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -306,8 +322,11 @@ pub(crate) fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
             vec![b]
         }
         KeyCode::Char(c) => c.to_string().into_bytes(),
+        // LNM (new line mode): Enter sends CR LF.
+        KeyCode::Enter if mode.contains(TermMode::LINE_FEED_NEW_LINE) => b"\r\n".to_vec(),
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab if modifier > 2 => format!("\x1b[1;{modifier}Z").into_bytes(),
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Backspace => vec![if ctrl { 0x08 } else { 0x7f }],
         KeyCode::Esc => vec![0x1b],
@@ -339,7 +358,7 @@ pub(crate) fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     if alt
         && matches!(
             key.code,
-            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter | KeyCode::Tab | KeyCode::Esc
         )
     {
         bytes.insert(0, 0x1b);
@@ -351,8 +370,10 @@ pub(crate) fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    use alacritty_terminal::term::TermMode;
+
     fn k(code: KeyCode, m: KeyModifiers) -> Option<Vec<u8>> {
-        encode_key(KeyEvent::new(code, m), false)
+        encode_key(KeyEvent::new(code, m), TermMode::empty())
     }
 
     #[test]
@@ -393,8 +414,23 @@ mod tests {
     fn cursor_keys_follow_decckm_and_modifiers() {
         assert_eq!(k(KeyCode::Up, KeyModifiers::NONE), Some(b"\x1b[A".to_vec()));
         assert_eq!(
-            encode_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), true),
+            encode_key(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                TermMode::APP_CURSOR
+            ),
             Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            encode_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                TermMode::LINE_FEED_NEW_LINE
+            ),
+            Some(b"\r\n".to_vec())
+        );
+        assert_eq!(k(KeyCode::Tab, KeyModifiers::ALT), Some(b"\x1b\t".to_vec()));
+        assert_eq!(
+            k(KeyCode::Esc, KeyModifiers::ALT),
+            Some(b"\x1b\x1b".to_vec())
         );
         assert_eq!(
             k(KeyCode::Right, KeyModifiers::CONTROL),

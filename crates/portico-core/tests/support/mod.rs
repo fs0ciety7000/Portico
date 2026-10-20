@@ -46,6 +46,7 @@ pub fn user_cert(ca: &PrivateKey, key: &PrivateKey, principal: &str, ty: CertTyp
 
 /// What the test server accepts.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // independent test switches
 pub struct Behaviour {
     pub password: Option<(String, String)>,
     pub keys: Vec<PublicKey>,
@@ -67,6 +68,14 @@ pub struct Behaviour {
     pub last_resize: std::sync::Mutex<Option<(u32, u32)>>,
     /// `TERM` sent with the PTY request.
     pub term: std::sync::Mutex<Option<String>>,
+    /// Terminal modes sent with the PTY request.
+    pub modes: std::sync::Mutex<Vec<(russh::Pty, u32)>>,
+    /// After `shell`, send output forever (32 KiB chunks).
+    pub flood: bool,
+    /// Every byte received on PTY channels.
+    pub received: std::sync::Mutex<Vec<u8>>,
+    /// `CHANNEL_CLOSE` messages received from the client.
+    pub closed_channels: AtomicUsize,
 }
 
 pub struct TestServer {
@@ -248,10 +257,11 @@ impl russh::server::Handler for ServerHandler {
         _rows: u32,
         _pw: u32,
         _ph: u32,
-        _modes: &[(russh::Pty, u32)],
+        modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         *self.b.term.lock().unwrap() = Some(term.to_owned());
+        *self.b.modes.lock().unwrap() = modes.to_vec();
         session.channel_success(channel)
     }
 
@@ -261,6 +271,14 @@ impl russh::server::Handler for ServerHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
+        if self.b.flood {
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let chunk = bytes::Bytes::from(vec![b'x'; 32 * 1024]);
+                while handle.data(channel, chunk.clone()).await.is_ok() {}
+            });
+            return Ok(());
+        }
         session.data(channel, bytes::Bytes::from_static(b"welcome\r\n"))
     }
 
@@ -288,6 +306,10 @@ impl russh::server::Handler for ServerHandler {
         if !self.channels.iter().any(|c| c.id() == channel) {
             return Ok(());
         }
+        self.b.received.lock().unwrap().extend_from_slice(data);
+        if self.b.flood {
+            return Ok(());
+        }
         session.data(channel, bytes::Bytes::copy_from_slice(data))?;
         for &b in data {
             if b == b'\r' || b == b'\n' {
@@ -296,11 +318,31 @@ impl russh::server::Handler for ServerHandler {
                     session.eof(channel)?;
                     session.close(channel)?;
                 }
+                if self.line == b"kill" {
+                    // Like some non-OpenSSH servers: no CLOSE, the client must close.
+                    session.exit_signal_request(
+                        channel,
+                        russh::Sig::TERM,
+                        false,
+                        "terminated",
+                        "en",
+                    )?;
+                    session.eof(channel)?;
+                }
                 self.line.clear();
             } else {
                 self.line.push(b);
             }
         }
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _channel: russh::ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.b.closed_channels.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::term::TermMode;
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
@@ -427,8 +426,7 @@ impl App {
         if view.closed || view.ended.is_some() {
             return;
         }
-        let app_cursor = view.mode().contains(TermMode::APP_CURSOR);
-        if let Some(bytes) = encode_key(key, app_cursor) {
+        if let Some(bytes) = encode_key(key, view.mode()) {
             view.send(bytes);
         }
     }
@@ -520,8 +518,12 @@ impl App {
             EngineEvent::Terminal { id, event, .. } => {
                 if let Some(view) = self.terminals.iter_mut().find(|t| t.id == id) {
                     match event {
-                        TerminalEvent::Exited { status } => {
-                            view.ended = Some(status.map_or(Ended::Closed, Ended::Exited));
+                        TerminalEvent::Exited { status, signal } => {
+                            view.ended = Some(match (status, signal) {
+                                (Some(code), _) => Ended::Exited(code),
+                                (None, Some(sig)) => Ended::Killed(sig),
+                                (None, None) => Ended::Closed,
+                            });
                         }
                         TerminalEvent::Closed => {
                             view.closed = true;
