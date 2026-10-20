@@ -210,14 +210,14 @@ impl Error {
             },
             Self::AuthFailed { .. } => (
                 "auth_failed",
-                Some("Check User, IdentityFile and your agent; see the session log for details."),
+                Some("Check User, IdentityFile and your agent (ssh-add -l)."),
             ),
             Self::ProxyJumpCycle { .. } => (
                 "proxy_jump_cycle",
                 Some("Fix the ProxyJump chain in your ssh config."),
             ),
             Self::ProxyJumpTooDeep { .. } => ("proxy_jump_too_deep", None),
-            Self::Transport { .. } => ("ssh", Some("See the session log for protocol details.")),
+            Self::Transport { .. } => ("ssh", None),
             Self::Cancelled => ("cancelled", None),
             Self::SessionEnded(_) => ("session_ended", None),
             Self::TerminalRefused { .. } => (

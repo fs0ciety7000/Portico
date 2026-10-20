@@ -213,12 +213,17 @@ pub enum PromptKind {
         fingerprint: String,
         other_algorithms: Vec<String>,
     },
+    /// `attempt` starts at 1; above 1 the previous answer was wrong.
     Password {
         user: String,
         host: String,
+        attempt: u32,
+        attempts: u32,
     },
     KeyPassphrase {
         key_path: String,
+        attempt: u32,
+        attempts: u32,
     },
     KeyboardInteractive {
         name: String,

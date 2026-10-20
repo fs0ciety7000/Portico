@@ -156,6 +156,8 @@ impl<'a> FileSigner<'a> {
                 .ctx
                 .ask(PromptKind::KeyPassphrase {
                     key_path: self.path.display().to_string(),
+                    attempt,
+                    attempts: PASSPHRASE_ATTEMPTS,
                 })
                 .await;
             match answer {

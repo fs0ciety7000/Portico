@@ -616,10 +616,15 @@ impl Auth<'_> {
                 .ask(PromptKind::Password {
                     user: self.hop.user.clone(),
                     host: self.hop.alias.clone(),
+                    attempt,
+                    attempts: self.password_attempts,
                 })
                 .await?;
             let PromptResponse::Secret { value, remember } = answer else {
-                return Ok(false);
+                // Dismissing the last-resort prompt means "stop", not "failed".
+                self.ctx
+                    .log(LogLevel::Info, "auth", "password prompt dismissed");
+                return Err(Error::Cancelled);
             };
             self.ctx.phase(SessionPhase::Authenticating {
                 method: AuthMethod::Password,

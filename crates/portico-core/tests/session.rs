@@ -414,8 +414,40 @@ async fn all_methods_exhausted_reports_auth_failed() {
     let server = TestServer::start(Behaviour::default()).await;
     let mut env = Env::new(&target_config("t", server.port, ""));
     env.trust(&server);
-    let (_, out) = env.connect("t", |_| PromptResponse::Cancel).await;
+    let (_, out) = env.connect("t", wrong_password).await;
     assert_eq!(out.failure_code(), Some("auth_failed"), "{:?}", out.phases);
+}
+
+#[tokio::test]
+async fn dismissing_the_password_prompt_ends_without_failure() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+    let (_, out) = env.connect("t", |_| PromptResponse::Cancel).await;
+    assert!(
+        matches!(
+            out.last(),
+            SessionPhase::Closed {
+                reason: CloseReason::UserRequested
+            }
+        ),
+        "{:?}",
+        out.phases
+    );
+}
+
+fn wrong_password(kind: &PromptKind) -> PromptResponse {
+    match kind {
+        PromptKind::Password { .. } => PromptResponse::Secret {
+            value: secret("wrong"),
+            remember: false,
+        },
+        _ => PromptResponse::Cancel,
+    }
 }
 
 // ── routing, lifecycle, latency ────────────────────────────────────────────
@@ -602,7 +634,7 @@ async fn identities_only_hides_unrelated_agent_keys() {
     );
     env.write_key("id_other", &configured, None);
     env.trust(&server);
-    let (_, out) = env.connect("t", |_| PromptResponse::Cancel).await;
+    let (_, out) = env.connect("t", wrong_password).await;
     assert_eq!(out.failure_code(), Some("auth_failed"), "{:?}", out.phases);
     assert!(!out.phases.contains(&SessionPhase::Authenticating {
         method: AuthMethod::Agent
