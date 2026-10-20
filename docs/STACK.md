@@ -121,6 +121,12 @@ le volume est faible, et un format lisible et versionnable sert le principe « z
 | 2026-10-19 | Plan de contrôle `broadcast` / plan de données `mpsc` borné par terminal | Accepté |
 | 2026-10-20 | `known_hosts` implémenté dans Portico (hashed, `@cert-authority`, `@revoked`) au lieu de `russh::keys::known_hosts`, qui ne couvre pas ces cas | Accepté |
 | 2026-10-20 | Signer paresseux (`FuturePublicKey`) : passphrase demandée seulement après `PK_OK`, comme OpenSSH | Accepté |
-| 2026-10-20 | Clé ignorée après `PK_OK` (passphrase refusée) : envoi d'une signature vide pour resynchroniser le protocole (validé contre OpenSSH 9.6) | Accepté, à surveiller |
+| 2026-10-20 | Clé ignorée après `PK_OK` (passphrase refusée, refus de l'agent) : envoi d'une signature **bien formée mais invalide** pour resynchroniser le protocole (validé contre OpenSSH 9.6 ; Dropbear à valider en CI). Cible : PR upstream russh permettant à un `Signer` d'abandonner | Accepté, à surveiller |
+| 2026-10-20 | `ProxyCommand` refusé explicitement tant qu'il n'est pas implémenté (jamais de connexion directe à la place) | Accepté |
+| 2026-10-20 | SHA-1 `ssh-rsa` désactivé (clé hôte et auth), comme OpenSSH ≥ 8.8 ; opt-in par hôte post-MVP | Accepté |
+| 2026-10-20 | Mot de passe mémorisé lié à `user@nom_known_hosts:port#empreinte_clé_hôte` | Accepté |
+| 2026-10-20 | Certificat hôte d'une CA de confiance mais invalide : échec dur, sans repli sur la clé brute (plus strict qu'OpenSSH) | Accepté |
+| 2026-10-20 | russh 0.64 ne revérifie pas la clé hôte au re-key : limite connue, ticket upstream à ouvrir | Risque accepté |
+| 2026-10-20 | Copies résiduelles de mots de passe en mémoire (russh `String`, webview) : risque accepté pour le MVP ; désactivation des core dumps et du ptrace (`rustix`) en phase 4 | Risque accepté |
 | 2026-10-20 | `StrictHostKeyChecking no` traité comme `accept-new` : une clé modifiée est **toujours** refusée (écart volontaire avec OpenSSH) | Accepté |
 | 2026-10-20 | Latence = RTT de `keepalive@openssh.com` (`send_ping`), premier échantillon 500 ms après le login | Accepté |

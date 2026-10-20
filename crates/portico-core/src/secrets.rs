@@ -20,11 +20,15 @@ pub const SERVICE: &str = "dev.portico";
 /// What a secret unlocks. Rendered as the keyring account name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SecretKey {
-    /// Password for `user@host:port`.
+    /// Password for `user@host:port`, bound to the host key that was
+    /// verified for that connection (`host` is the `known_hosts` name, i.e.
+    /// `HostKeyAlias` or the lowercased `HostName`). A different server
+    /// identity never receives a remembered password.
     HostPassword {
         user: String,
         host: String,
         port: u16,
+        host_key: String,
     },
     /// Passphrase of a private key file.
     KeyPassphrase { fingerprint: String },
@@ -33,7 +37,12 @@ pub enum SecretKey {
 impl SecretKey {
     pub fn account(&self) -> String {
         match self {
-            Self::HostPassword { user, host, port } => format!("password:{user}@{host}:{port}"),
+            Self::HostPassword {
+                user,
+                host,
+                port,
+                host_key,
+            } => format!("password:{user}@{host}:{port}#{host_key}"),
             Self::KeyPassphrase { fingerprint } => format!("passphrase:{fingerprint}"),
         }
     }
@@ -135,8 +144,9 @@ mod tests {
             user: "root".into(),
             host: "db".into(),
             port: 22,
+            host_key: "SHA256:abc".into(),
         };
-        assert_eq!(k.account(), "password:root@db:22");
+        assert_eq!(k.account(), "password:root@db:22#SHA256:abc");
     }
 
     #[test]

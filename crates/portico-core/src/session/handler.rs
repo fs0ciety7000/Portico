@@ -24,6 +24,18 @@ pub(crate) struct Built {
     pub(crate) failure: Arc<Mutex<Option<HostKeyError>>>,
     /// Cancelled when the transport is closed by the peer or the network.
     pub(crate) closed: CancellationToken,
+    /// Identity of the server once its key was verified.
+    pub(crate) identity: Arc<Mutex<Option<HostIdentity>>>,
+}
+
+/// The verified server identity: what remembered passwords are bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostIdentity {
+    /// `known_hosts` name (`HostKeyAlias` or lowercased `HostName`).
+    pub(crate) name: String,
+    pub(crate) port: u16,
+    /// SHA256 fingerprint of the accepted host key (or certified key).
+    pub(crate) fingerprint: String,
 }
 
 /// Where and how to verify the server key.
@@ -35,6 +47,8 @@ struct HostCheck {
     known: KnownHosts,
     write_file: PathBuf,
     policy: StrictHostKeyChecking,
+    /// `HashKnownHosts yes`: record new keys with hashed names.
+    hash_names: bool,
 }
 
 pub(crate) struct ClientHandler {
@@ -42,13 +56,12 @@ pub(crate) struct ClientHandler {
     check: HostCheck,
     failure: Arc<Mutex<Option<HostKeyError>>>,
     closed: CancellationToken,
-    /// Key accepted during the first key exchange (re-keying presents it again).
-    accepted: Option<Vec<u8>>,
+    identity: Arc<Mutex<Option<HostIdentity>>>,
 }
 
 /// Loads `known_hosts` for `hop` and prepares the russh configuration.
-pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
-    let paths = ctx.engine.config().paths.clone();
+/// User files (first one receives new keys), then global files.
+fn known_hosts_files(paths: &crate::store::Paths, hop: &Hop) -> (Vec<PathBuf>, PathBuf) {
     let mut user_files = hop.resolved.user_known_hosts_files.clone();
     if user_files.is_empty() {
         user_files = vec![paths.known_hosts(), paths.ssh_dir.join("known_hosts2")];
@@ -60,7 +73,11 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
         .and_then(|v| v.first())
         .map_or_else(
             || paths.global_known_hosts.clone(),
-            |(args, _)| args.iter().map(PathBuf::from).collect(),
+            |(args, _)| {
+                args.iter()
+                    .map(|a| crate::ssh_config::expand_home(a, &paths.home))
+                    .collect()
+            },
         );
     let write_file = user_files
         .first()
@@ -68,7 +85,12 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
         .unwrap_or_else(|| paths.known_hosts());
     let mut files = user_files;
     files.extend(global_files);
+    (files, write_file)
+}
 
+pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
+    let paths = ctx.engine.config().paths.clone();
+    let (files, write_file) = known_hosts_files(&paths, hop);
     let known = tokio::task::spawn_blocking(move || KnownHosts::load(&files))
         .await
         .map_err(|_| Error::EngineClosed)??;
@@ -82,11 +104,30 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
         .get("hostkeyalias")
         .and_then(|v| v.first())
     {
-        Some((args, _)) if !args.is_empty() => (args.join(" "), 22),
-        _ => (hop.resolved.hostname.clone(), hop.resolved.port),
+        // OpenSSH takes a single alias and ignores the port for it.
+        Some((args, _)) if !args.is_empty() => (
+            args.first()
+                .map(|a| a.to_ascii_lowercase())
+                .unwrap_or_default(),
+            22,
+        ),
+        // known_hosts names are lowercase (OpenSSH lowercases before hashing).
+        _ => (
+            hop.resolved.hostname.to_ascii_lowercase(),
+            hop.resolved.port,
+        ),
     };
+    known_hosts::validate_host_name(&name)?;
 
     let mut preferred = russh::Preferred::default();
+    // Never negotiate SHA-1 `ssh-rsa` host keys (OpenSSH ≥ 8.8 default).
+    preferred.key = preferred
+        .key
+        .iter()
+        .filter(|a| !matches!(a, Algorithm::Rsa { hash: None }))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
     let known_algorithms = known.known_algorithms(&name, port);
     if !known_algorithms.is_empty() {
         // Prefer an algorithm we already have a key for (avoids spurious
@@ -111,6 +152,7 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
 
     let failure = Arc::new(Mutex::new(None));
     let closed = CancellationToken::new();
+    let identity = Arc::new(Mutex::new(None));
     Ok(Built {
         handler: ClientHandler {
             ctx: ctx.clone(),
@@ -120,14 +162,22 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
                 known,
                 write_file,
                 policy: hop.resolved.strict_host_key_checking,
+                hash_names: hop
+                    .resolved
+                    .options
+                    .get("hashknownhosts")
+                    .and_then(|v| v.first())
+                    .and_then(|(args, _)| args.first())
+                    .is_some_and(|v| v.eq_ignore_ascii_case("yes")),
             },
             failure: Arc::clone(&failure),
             closed: closed.clone(),
-            accepted: None,
+            identity: Arc::clone(&identity),
         },
         config,
         failure,
         closed,
+        identity,
     })
 }
 
@@ -236,6 +286,16 @@ impl ClientHandler {
             StrictHostKeyChecking::Yes => {
                 return Ok(self.fail(HostKeyError::UnknownStrict { host }));
             }
+            // A known host suddenly offering another key type is a classic
+            // downgrade/MITM pattern: never accept it silently.
+            StrictHostKeyChecking::AcceptNew | StrictHostKeyChecking::No
+                if !other_algorithms.is_empty() =>
+            {
+                return Ok(self.fail(HostKeyError::NewAlgorithm {
+                    host,
+                    known: other_algorithms.join(", "),
+                }));
+            }
             StrictHostKeyChecking::AcceptNew | StrictHostKeyChecking::No => {
                 self.ctx.log(
                     LogLevel::Warn,
@@ -273,14 +333,15 @@ impl ClientHandler {
     /// Appends the key to `known_hosts`. A write failure is logged, not fatal
     /// (OpenSSH behaves the same): the user already accepted the key.
     async fn remember(&self, key: &PublicKey) {
-        let (file, name, port, key) = (
+        let (file, name, port, key, hashed) = (
             self.check.write_file.clone(),
             self.check.name.clone(),
             self.check.port,
             key.clone(),
+            self.check.hash_names,
         );
         let written = tokio::task::spawn_blocking(move || {
-            known_hosts::append(&file, &name, port, &key).map(|()| file)
+            known_hosts::append(&file, &name, port, &key, hashed).map(|()| file)
         })
         .await;
         match written {
@@ -308,21 +369,27 @@ impl ClientHandler {
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
+    // russh 0.64 calls this for the initial key exchange only; re-keys are
+    // not re-verified (see docs/STACK.md decision log).
     async fn check_server_key(
         &mut self,
         presented: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let bytes = match presented {
-            PublicKeyOrCertificate::PublicKey { key, .. } => key.to_bytes().ok(),
-            PublicKeyOrCertificate::Certificate(cert) => cert.to_bytes().ok(),
-        };
-        if bytes.is_some() && bytes == self.accepted {
-            return Ok(true); // re-key: same key as accepted at connection time
-        }
         self.ctx.phase(SessionPhase::VerifyingHostKey);
         match self.verify(presented).await {
             Ok(true) => {
-                self.accepted = bytes;
+                let key = match presented {
+                    PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+                    PublicKeyOrCertificate::Certificate(cert) => {
+                        PublicKey::from(cert.public_key().clone())
+                    }
+                };
+                *self.identity.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(HostIdentity {
+                        name: self.check.name.clone(),
+                        port: self.check.port,
+                        fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+                    });
                 Ok(true)
             }
             Ok(false) => Ok(false),

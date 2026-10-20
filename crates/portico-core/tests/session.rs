@@ -146,6 +146,78 @@ async fn changed_host_key_always_fails_hard() {
 }
 
 #[tokio::test]
+async fn changed_key_detected_with_hashed_entry_and_mixed_case_alias() {
+    use base64::Engine as _;
+    use hmac::{KeyInit, Mac};
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  HostKeyAlias Prod-DB\n  StrictHostKeyChecking accept-new\n  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    // `HashKnownHosts yes` entry for the lowercase name, holding another key.
+    let salt = [9u8; 20];
+    let mut mac = <hmac::Hmac<sha1::Sha1> as KeyInit>::new_from_slice(&salt).unwrap();
+    mac.update(b"prod-db");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let impostor = new_key();
+    env.append_known_hosts(&format!(
+        "|1|{}|{} {}",
+        b64.encode(salt),
+        b64.encode(mac.finalize().into_bytes()),
+        impostor.public_key().to_openssh().unwrap()
+    ));
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(
+        out.failure_code(),
+        Some("host_key_changed"),
+        "{:?}",
+        out.phases
+    );
+    assert_eq!(
+        server
+            .behaviour
+            .logins
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn accept_new_refuses_new_algorithm_for_known_host() {
+    let server = TestServer::start(Behaviour::default()).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  StrictHostKeyChecking accept-new\n",
+    ));
+    let ecdsa = russh::keys::PrivateKey::random(
+        &mut russh::keys::key::safe_rng(),
+        russh::keys::Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let line = format!(
+        "[127.0.0.1]:{} {}",
+        server.port,
+        ecdsa.public_key().to_openssh().unwrap()
+    );
+    env.append_known_hosts(&line);
+    let before = env.known_hosts();
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(
+        out.failure_code(),
+        Some("host_key_new_algorithm"),
+        "{:?}",
+        out.phases
+    );
+    assert_eq!(env.known_hosts(), before);
+}
+
+#[tokio::test]
 async fn revoked_host_key_is_refused() {
     let server = TestServer::start(Behaviour::default()).await;
     let mut env = Env::new(&target_config("t", server.port, ""));
@@ -535,4 +607,145 @@ async fn identities_only_hides_unrelated_agent_keys() {
     assert!(!out.phases.contains(&SessionPhase::Authenticating {
         method: AuthMethod::Agent
     }));
+}
+
+// ── review regressions (protocol) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn proxy_command_never_connects_directly() {
+    let server = TestServer::start(Behaviour::default()).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  ProxyCommand nc %h %p\n",
+    ));
+    env.trust(&server);
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(out.failure_code(), Some("unsupported"));
+    assert_eq!(
+        server
+            .behaviour
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agent_refusal_moves_on_to_password() {
+    let key = new_key();
+    let server = TestServer::start(Behaviour {
+        keys: vec![key.public_key().clone()],
+        password: Some(("alice".into(), "pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket =
+        support::start_agent_with(agent_dir.path(), std::slice::from_ref(&key), true).await;
+    let mut env = Env::with_agent(&target_config("t", server.port, ""), socket);
+    env.trust(&server);
+    let (_, out) = env
+        .connect("t", |k| match k {
+            PromptKind::Password { .. } => PromptResponse::Secret {
+                value: secret("pw"),
+                remember: false,
+            },
+            other => panic!("{other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(out.phases.contains(&SessionPhase::Authenticating {
+        method: AuthMethod::Agent
+    }));
+    assert!(out.phases.contains(&SessionPhase::Authenticating {
+        method: AuthMethod::Password
+    }));
+}
+
+#[tokio::test]
+async fn dismissed_multi_step_keyboard_interactive_does_not_hang() {
+    let server = TestServer::start(Behaviour {
+        keyboard_interactive: Some(("alice".into(), "x".into())),
+        kbd_two_steps: true,
+        password: Some(("alice".into(), "pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+    let (_, out) = env
+        .connect("t", |k| match k {
+            PromptKind::KeyboardInteractive { .. } => PromptResponse::Cancel,
+            PromptKind::Password { .. } => PromptResponse::Secret {
+                value: secret("pw"),
+                remember: false,
+            },
+            other => panic!("{other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_key_only_identity_selects_the_agent_key() {
+    let (wanted, other) = (new_key(), new_key());
+    let server = TestServer::start(key_server(&wanted)).await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket = support::start_agent(agent_dir.path(), &[other, wanted.clone()]).await;
+    let mut env = Env::with_agent(
+        &target_config(
+            "t",
+            server.port,
+            "  IdentitiesOnly yes\n  IdentityFile ~/.ssh/k.pub\n",
+        ),
+        socket,
+    );
+    std::fs::write(env.ssh("k.pub"), wanted.public_key().to_openssh().unwrap()).unwrap();
+    env.trust(&server);
+    let (_, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    // Only the selected key was offered.
+    assert_eq!(
+        server
+            .behaviour
+            .pubkey_offers
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn preferred_authentications_password_skips_keys() {
+    let key = new_key();
+    let server = TestServer::start(Behaviour {
+        keys: vec![key.public_key().clone()],
+        password: Some(("alice".into(), "pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket = support::start_agent(agent_dir.path(), std::slice::from_ref(&key)).await;
+    let mut env = Env::with_agent(
+        &target_config("t", server.port, "  PreferredAuthentications password\n"),
+        socket,
+    );
+    env.trust(&server);
+    let (_, out) = env
+        .connect("t", |_| PromptResponse::Secret {
+            value: secret("pw"),
+            remember: false,
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(
+        server
+            .behaviour
+            .pubkey_offers
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }

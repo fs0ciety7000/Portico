@@ -15,7 +15,9 @@ mod auth;
 mod handler;
 mod route;
 mod signer;
+mod stream;
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -35,9 +37,14 @@ use crate::ssh_config::SshConfig;
 
 use handler::ClientHandler;
 use route::Hop;
+use stream::WatchedStream;
 
 /// Delay before the first latency probe after login.
 const FIRST_PROBE_DELAY: Duration = Duration::from_millis(500);
+/// Network time allowed for authentication (time spent in prompts excluded).
+const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `close` waits for each hop's DISCONNECT to go out.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 /// Commands accepted by a running session actor.
 #[derive(Debug)]
@@ -52,8 +59,13 @@ pub(crate) struct SessionCtx {
     pub(crate) id: SessionId,
     pub(crate) cancel: CancellationToken,
     logs: Arc<Mutex<LogRing>>,
-    /// Set while the user is answering a prompt (pauses handshake timeouts).
+    /// Set while the user is answering a prompt (pauses network timeouts).
     prompting: Arc<AtomicBool>,
+    /// When the last prompt was answered (grants a fresh timeout window).
+    last_prompt_end: Arc<Mutex<Option<tokio::time::Instant>>>,
+    /// Cancelled when the session ends: fails every transport stream so no
+    /// russh task or socket outlives the session.
+    abort: CancellationToken,
 }
 
 impl SessionCtx {
@@ -66,9 +78,11 @@ impl SessionCtx {
         Self {
             engine,
             id,
+            abort: cancel.child_token(),
             cancel,
             logs,
             prompting: Arc::new(AtomicBool::new(false)),
+            last_prompt_end: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -101,12 +115,43 @@ impl SessionCtx {
     pub(crate) async fn ask(&self, kind: PromptKind) -> Result<PromptResponse> {
         self.prompting.store(true, Ordering::SeqCst);
         let answer = self.engine.ask(self.id, kind, &self.cancel).await;
+        *self
+            .last_prompt_end
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(tokio::time::Instant::now());
         self.prompting.store(false, Ordering::SeqCst);
         answer
     }
 
-    fn is_prompting(&self) -> bool {
-        self.prompting.load(Ordering::SeqCst)
+    /// Runs `fut` with a network deadline that is suspended while the user
+    /// answers a prompt and restarts in full once they did.
+    async fn with_deadline<T>(
+        &self,
+        limit: Duration,
+        phase: &'static str,
+        target: &str,
+        fut: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::pin!(fut);
+        let mut deadline = tokio::time::Instant::now() + limit;
+        loop {
+            tokio::select! {
+                result = &mut fut => return result,
+                () = tokio::time::sleep_until(deadline) => {
+                    let now = tokio::time::Instant::now();
+                    if self.prompting.load(Ordering::SeqCst) {
+                        deadline = now + limit;
+                        continue;
+                    }
+                    let answered = *self.last_prompt_end.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(end) = answered.filter(|end| *end + limit > now) {
+                        deadline = end + limit;
+                        continue;
+                    }
+                    return Err(Error::Timeout { phase, target: target.to_owned() });
+                }
+            }
+        }
     }
 }
 
@@ -126,16 +171,18 @@ pub(crate) async fn run(
     };
     let conn = match established {
         Ok(conn) => conn,
-        Err(Error::Cancelled) => {
-            ctx.log(LogLevel::Info, "session", "connection aborted by the user");
-            ctx.phase(SessionPhase::Closed {
-                reason: CloseReason::UserRequested,
-            });
-            return;
-        }
         Err(e) => {
-            ctx.log(LogLevel::Error, "session", e.to_string());
-            ctx.phase(SessionPhase::Failed { error: e.summary() });
+            // Kill half-open transports (russh tasks, jump channels, sockets).
+            ctx.abort.cancel();
+            if matches!(e, Error::Cancelled) {
+                ctx.log(LogLevel::Info, "session", "connection aborted by the user");
+                ctx.phase(SessionPhase::Closed {
+                    reason: CloseReason::UserRequested,
+                });
+            } else {
+                ctx.log(LogLevel::Error, "session", e.to_string());
+                ctx.phase(SessionPhase::Failed { error: e.summary() });
+            }
             return;
         }
     };
@@ -144,16 +191,24 @@ pub(crate) async fn run(
     let reason = conn.supervise(&ctx, &mut commands).await;
     ctx.phase(SessionPhase::Disconnecting);
     conn.close().await;
+    ctx.abort.cancel();
     ctx.log(LogLevel::Info, "session", format!("closed ({reason:?})"));
     ctx.phase(SessionPhase::Closed { reason });
 }
 
+/// One authenticated transport and its "closed by peer" signal.
+struct Link {
+    handle: client::Handle<ClientHandler>,
+    closed: CancellationToken,
+}
+
 /// An authenticated chain of transports; the last one is the target.
 struct Connection {
-    hops: Vec<client::Handle<ClientHandler>>,
-    target_closed: CancellationToken,
+    links: Vec<Link>,
     keepalive: Duration,
     keepalive_max: u32,
+    /// `ServerAliveInterval 0`: probe for latency, never disconnect.
+    disconnect_on_silence: bool,
 }
 
 async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connection> {
@@ -172,8 +227,7 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
     ctx.log(LogLevel::Info, "route", route.join(" → "));
 
     let total = u8::try_from(hops.len()).unwrap_or(u8::MAX);
-    let mut handles: Vec<client::Handle<ClientHandler>> = Vec::with_capacity(hops.len());
-    let mut target_closed = CancellationToken::new();
+    let mut links: Vec<Link> = Vec::with_capacity(hops.len());
     for (index, hop) in hops.iter().enumerate() {
         ctx.phase(SessionPhase::Connecting {
             hop: u8::try_from(index + 1).unwrap_or(u8::MAX),
@@ -183,39 +237,24 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
         let limit = hop.connect_timeout(ctx.engine.config().connect_timeout);
         let built = handler::build(ctx, hop).await?;
         let closed = built.closed.clone();
-        let mut handle = match handles.last() {
-            None => {
-                let stream = tcp_connect(ctx, hop, limit).await?;
-                handshake(ctx, hop, built, stream, limit).await?
-            }
-            Some(previous) => {
-                ctx.log(
-                    LogLevel::Info,
-                    "jump",
-                    format!(
-                        "opening direct-tcpip to {}:{}",
-                        hop.resolved.hostname, hop.resolved.port
-                    ),
-                );
-                let channel = tokio::time::timeout(
-                    limit,
-                    previous.channel_open_direct_tcpip(
-                        hop.resolved.hostname.clone(),
-                        u32::from(hop.resolved.port),
-                        "127.0.0.1",
-                        0,
-                    ),
-                )
-                .await
-                .map_err(|_| Error::Timeout {
-                    phase: "opening a jump channel to",
-                    target: hop.alias.clone(),
-                })?
-                .map_err(|e| transport(hop, &e))?;
-                handshake(ctx, hop, built, channel.into_stream(), limit).await?
-            }
-        };
-        let method = auth::authenticate(ctx, &mut handle, hop).await?;
+        let identity_slot = Arc::clone(&built.identity);
+        let mut handle = open_transport(ctx, hop, built, links.last(), limit, &closed).await?;
+        let identity = identity_slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| Error::Transport {
+                target: hop.alias.clone(),
+                message: "server key was not verified".to_owned(),
+            })?;
+        let method = ctx
+            .with_deadline(
+                AUTH_TIMEOUT,
+                "authenticating to",
+                &hop.alias,
+                auth::authenticate(ctx, &mut handle, hop, &identity),
+            )
+            .await?;
         ctx.log(
             LogLevel::Info,
             "auth",
@@ -224,16 +263,14 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
                 hop.alias, hop.user
             ),
         );
-        target_closed = closed;
-        handles.push(handle);
+        links.push(Link { handle, closed });
     }
 
     let target = hops.last();
+    let interval = target.and_then(|h| h.option_u32("serveraliveinterval"));
     Ok(Connection {
-        hops: handles,
-        target_closed,
-        keepalive: target
-            .and_then(|h| h.resolved.server_alive_interval)
+        links,
+        keepalive: interval
             .filter(|s| *s > 0)
             .map_or(ctx.engine.config().keepalive, |s| {
                 Duration::from_secs(u64::from(s))
@@ -242,7 +279,50 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
             .and_then(|h| h.option_u32("serveralivecountmax"))
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_KEEPALIVE_MAX),
+        disconnect_on_silence: interval != Some(0),
     })
+}
+
+/// Opens the transport to `hop` (TCP, or a direct-tcpip channel through the
+/// previous hop) and runs the SSH handshake on it.
+async fn open_transport(
+    ctx: &SessionCtx,
+    hop: &Hop,
+    built: handler::Built,
+    previous: Option<&Link>,
+    limit: Duration,
+    closed: &CancellationToken,
+) -> Result<client::Handle<ClientHandler>> {
+    let Some(previous) = previous else {
+        let stream = tcp_connect(ctx, hop, limit).await?;
+        let stream = WatchedStream::new(stream, closed.clone(), ctx.abort.clone());
+        return handshake(ctx, hop, built, stream, limit).await;
+    };
+    ctx.log(
+        LogLevel::Info,
+        "jump",
+        format!(
+            "opening direct-tcpip to {}:{}",
+            hop.resolved.hostname, hop.resolved.port
+        ),
+    );
+    let open = async {
+        previous
+            .handle
+            .channel_open_direct_tcpip(
+                hop.resolved.hostname.clone(),
+                u32::from(hop.resolved.port),
+                "127.0.0.1",
+                0,
+            )
+            .await
+            .map_err(|e| transport(hop, &e))
+    };
+    let channel = ctx
+        .with_deadline(limit, "opening a jump channel to", &hop.alias, open)
+        .await?;
+    let stream = WatchedStream::new(channel.into_stream(), closed.clone(), ctx.abort.clone());
+    handshake(ctx, hop, built, stream, limit).await
 }
 
 async fn tcp_connect(ctx: &SessionCtx, hop: &Hop, limit: Duration) -> Result<TcpStream> {
@@ -293,8 +373,7 @@ async fn tcp_connect(ctx: &SessionCtx, hop: &Hop, limit: Duration) -> Result<Tcp
     })
 }
 
-/// Runs the SSH handshake. The timeout is paused while the user answers a
-/// host key prompt.
+/// Runs the SSH handshake (key exchange + host key verification).
 async fn handshake<S>(
     ctx: &SessionCtx,
     hop: &Hop,
@@ -312,26 +391,19 @@ where
         failure,
         ..
     } = built;
-    let fut = client::connect_stream(config, stream, handler);
-    tokio::pin!(fut);
-    let mut deadline = tokio::time::Instant::now() + limit;
-    loop {
-        tokio::select! {
-            result = &mut fut => {
-                return result.map_err(|e| {
-                    let recorded = failure.lock().unwrap_or_else(PoisonError::into_inner).take();
-                    recorded.map_or_else(|| transport(hop, &e), Error::HostKey)
-                });
-            }
-            () = tokio::time::sleep_until(deadline) => {
-                if ctx.is_prompting() {
-                    deadline = tokio::time::Instant::now() + limit;
-                    continue;
-                }
-                return Err(Error::Timeout { phase: "negotiating with", target: hop.alias.clone() });
-            }
-        }
-    }
+    let negotiate = async {
+        client::connect_stream(config, stream, handler)
+            .await
+            .map_err(|e| {
+                let recorded = failure
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                recorded.map_or_else(|| transport(hop, &e), Error::HostKey)
+            })
+    };
+    ctx.with_deadline(limit, "negotiating with", &hop.alias, negotiate)
+        .await
 }
 
 pub(crate) fn transport(hop: &Hop, e: &russh::Error) -> Error {
@@ -341,13 +413,15 @@ pub(crate) fn transport(hop: &Hop, e: &russh::Error) -> Error {
     }
 }
 
+type Probe<'a> = std::pin::Pin<Box<dyn Future<Output = Option<Duration>> + Send + 'a>>;
+
 impl Connection {
     async fn supervise(
         &self,
         ctx: &SessionCtx,
         commands: &mut mpsc::Receiver<SessionCommand>,
     ) -> CloseReason {
-        let Some(target) = self.hops.last() else {
+        let Some(target) = self.links.last() else {
             return CloseReason::RemoteClosed;
         };
         // First probe slightly after login: right after authentication the
@@ -358,46 +432,63 @@ impl Connection {
         );
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut missed = 0u32;
+        // The probe runs alongside the select so Disconnect / cancel / remote
+        // close are never delayed by a ping stuck on a dead network.
+        let mut probe: Option<Probe<'_>> = None;
         loop {
             tokio::select! {
                 biased;
                 () = ctx.cancel.cancelled() => return CloseReason::UserRequested,
-                () = self.target_closed.cancelled() => {
+                () = target.closed.cancelled() => {
                     ctx.log(LogLevel::Warn, "session", "connection closed by the remote host");
                     return CloseReason::RemoteClosed;
                 }
                 cmd = commands.recv() => match cmd {
                     Some(SessionCommand::Disconnect) | None => return CloseReason::UserRequested,
                 },
-                _ = ticker.tick() => {
-                    let started = Instant::now();
-                    let probe = tokio::time::timeout(self.keepalive, target.send_ping()).await;
-                    match probe {
-                        Ok(Ok(())) if !target.is_closed() => {
-                            missed = 0;
-                            ctx.event(SessionEvent::Latency { rtt: started.elapsed() });
+                Some(rtt) = futures::future::OptionFuture::from(probe.as_mut()) => {
+                    probe = None;
+                    if let Some(rtt) = rtt {
+                        missed = 0;
+                        ctx.event(SessionEvent::Latency { rtt });
+                    } else {
+                        missed += 1;
+                        ctx.log(
+                            LogLevel::Warn,
+                            "keepalive",
+                            format!("no keepalive reply ({missed}/{})", self.keepalive_max),
+                        );
+                        if target.handle.is_closed() {
+                            return CloseReason::RemoteClosed;
                         }
-                        _ => {
-                            missed += 1;
-                            ctx.log(LogLevel::Warn, "keepalive", format!("no keepalive reply ({missed}/{})", self.keepalive_max));
-                            if target.is_closed() {
-                                return CloseReason::RemoteClosed;
-                            }
-                            if missed >= self.keepalive_max {
-                                return CloseReason::Timeout;
-                            }
+                        if self.disconnect_on_silence && missed >= self.keepalive_max {
+                            return CloseReason::Timeout;
                         }
                     }
+                }
+                _ = ticker.tick(), if probe.is_none() => {
+                    let (handle, limit) = (&target.handle, self.keepalive);
+                    probe = Some(Box::pin(async move {
+                        let started = Instant::now();
+                        match tokio::time::timeout(limit, handle.send_ping()).await {
+                            Ok(Ok(())) if !handle.is_closed() => Some(started.elapsed()),
+                            _ => None,
+                        }
+                    }));
                 }
             }
         }
     }
 
+    /// Disconnects from the target back to the first hop, letting each
+    /// DISCONNECT travel through the still-open jump channels.
     async fn close(&self) {
-        for handle in self.hops.iter().rev() {
-            let _ = handle
+        for link in self.links.iter().rev() {
+            let _ = link
+                .handle
                 .disconnect(russh::Disconnect::ByApplication, "", "en")
                 .await;
+            let _ = tokio::time::timeout(CLOSE_GRACE, link.closed.cancelled()).await;
         }
     }
 }

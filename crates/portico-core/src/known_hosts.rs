@@ -141,7 +141,8 @@ impl KnownHosts {
         port: u16,
         marker: Marker,
     ) -> impl Iterator<Item = &'a Entry> + 'a {
-        let name = host_field(host, port);
+        // OpenSSH lowercases names before matching and hashing.
+        let name = host_field(&host.to_ascii_lowercase(), port);
         self.entries
             .iter()
             .filter(move |e| e.marker == marker && e.hosts.matches(&name))
@@ -320,7 +321,26 @@ fn parse_host_field(field: &str) -> std::result::Result<HostField, String> {
 /// Appends `host key` to `path`, creating `~/.ssh` (0700) and the file (0600)
 /// if needed. A single `write` of a complete line keeps concurrent appends
 /// from interleaving.
-pub fn append(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<()> {
+///
+/// With `hashed` (`HashKnownHosts yes`) the name is stored as
+/// `|1|salt|HMAC-SHA1(salt, name)` so the file does not reveal host names.
+pub fn append(path: &Path, host: &str, port: u16, key: &PublicKey, hashed: bool) -> Result<()> {
+    validate_host_name(host)?;
+    let name = host_field(&host.to_ascii_lowercase(), port);
+    let field = if hashed {
+        let mut salt = [0u8; 20];
+        russh::keys::ssh_key::rand_core::Rng::fill_bytes(
+            &mut russh::keys::key::safe_rng(),
+            &mut salt,
+        );
+        let hash = hashed_name(&salt, &name).ok_or_else(|| Error::Serde {
+            what: "known_hosts hash",
+            message: "invalid salt".to_owned(),
+        })?;
+        format!("|1|{}|{}", B64.encode(salt), B64.encode(hash))
+    } else {
+        name
+    };
     if let Some(dir) = path.parent().filter(|d| !d.exists()) {
         create_private_dir(dir)?;
     }
@@ -335,7 +355,7 @@ pub fn append(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<()>
     let line = format!(
         "{}{} {} {}\n",
         if needs_newline { "\n" } else { "" },
-        host_field(host, port),
+        field,
         key.algorithm().as_str(),
         B64.encode(blob)
     );
@@ -351,6 +371,24 @@ pub fn append(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<()>
     file.write_all(line.as_bytes())
         .map_err(|e| Error::io(path, e))?;
     file.sync_all().map_err(|e| Error::io(path, e))
+}
+
+/// Rejects names that would be read back as patterns or markers (`,`, `*`,
+/// `!`, `|1|`…) or break the line format. IPv6 literals stay valid: brackets
+/// are only added by [`host_field`].
+pub fn validate_host_name(host: &str) -> Result<()> {
+    let bad = host.is_empty()
+        || host.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, ',' | '*' | '?' | '!' | '#' | '|' | '[' | ']' | '@')
+        });
+    if bad {
+        return Err(Error::InvalidHostName {
+            host: host.escape_debug().to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn create_private_dir(dir: &Path) -> Result<()> {
@@ -454,6 +492,42 @@ mod tests {
     }
 
     #[test]
+    fn hashed_entries_ignore_host_case() {
+        let (a, b) = (key(), key());
+        let salt = [3u8; 20];
+        let hash = hashed_name(&salt, "db.example.com").unwrap();
+        let field = format!("|1|{}|{}", B64.encode(salt), B64.encode(hash));
+        let kh = kh(&line(&field, a.public_key()));
+        assert!(matches!(
+            kh.check_key("DB.Example.com", 22, a.public_key()),
+            HostKeyVerdict::Trusted { .. }
+        ));
+        assert!(matches!(
+            kh.check_key("DB.Example.com", 22, b.public_key()),
+            HostKeyVerdict::Changed { .. }
+        ));
+    }
+
+    #[test]
+    fn append_rejects_pattern_metacharacters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        for bad in ["a,b", "*", "a b", "a\nb", "#x", "|1|x|y", "!a", ""] {
+            assert!(
+                append(&path, bad, 22, key().public_key(), false).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(!path.exists());
+        append(&path, "::1", 2222, key().public_key(), false).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("[::1]:2222 ")
+        );
+    }
+
+    #[test]
     fn revoked_wins_over_trusted() {
         let a = key();
         let text = format!(
@@ -550,11 +624,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".ssh/known_hosts");
         let a = key();
-        append(&path, "example.com", 2222, a.public_key()).unwrap();
+        append(&path, "example.com", 2222, a.public_key(), false).unwrap();
         // A file without trailing newline must not get its last line merged.
         std::fs::write(&path, std::fs::read_to_string(&path).unwrap().trim_end()).unwrap();
-        append(&path, "other.com", 22, a.public_key()).unwrap();
+        append(&path, "other.com", 22, a.public_key(), true).unwrap();
 
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.lines().nth(1).unwrap().starts_with("|1|"),
+            "hashed entry"
+        );
+        assert!(!text.contains("other.com"));
         let kh = KnownHosts::load(&[path.clone(), dir.path().join("missing")]).unwrap();
         assert!(kh.warnings.is_empty());
         assert!(matches!(

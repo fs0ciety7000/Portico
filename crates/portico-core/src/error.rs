@@ -87,6 +87,12 @@ pub enum Error {
 
     #[error("operation cancelled")]
     Cancelled,
+
+    #[error("{host} closed the connection during authentication")]
+    AuthDisconnected { host: String },
+
+    #[error("invalid host name {host:?} for known_hosts")]
+    InvalidHostName { host: String },
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -105,6 +111,10 @@ pub enum HostKeyError {
         file: PathBuf,
         line: usize,
     },
+    #[error(
+        "{host} presented a new key type while known_hosts has {known}: refused under StrictHostKeyChecking accept-new/no"
+    )]
+    NewAlgorithm { host: String, known: String },
     #[error("host key for {host} was not trusted")]
     Rejected { host: String },
     #[error("host key for {host} is unknown and StrictHostKeyChecking is enabled")]
@@ -145,7 +155,10 @@ impl Error {
             Self::UnknownSession(_) => ("unknown_session", None),
             Self::UnknownPrompt(_) => ("unknown_prompt", None),
             Self::EngineClosed => ("engine_closed", None),
-            Self::Unsupported(_) => ("unsupported", None),
+            Self::Unsupported(_) => (
+                "unsupported",
+                Some("Portico refuses rather than connecting differently from ssh."),
+            ),
             Self::Resolve { .. } => ("dns", Some("Check the HostName and your network/DNS.")),
             Self::Connect { source, .. } => (
                 "connect",
@@ -165,6 +178,12 @@ impl Error {
                     "host_key_changed",
                     Some(
                         "Do not connect. Verify the new key with the server administrator; if legitimate, remove the old line from known_hosts.",
+                    ),
+                ),
+                HostKeyError::NewAlgorithm { .. } => (
+                    "host_key_new_algorithm",
+                    Some(
+                        "This host is known with another key type. Verify the new key with the administrator, then add it to known_hosts.",
                     ),
                 ),
                 HostKeyError::Rejected { .. } => ("host_key_rejected", None),
@@ -194,6 +213,16 @@ impl Error {
             Self::ProxyJumpTooDeep { .. } => ("proxy_jump_too_deep", None),
             Self::Transport { .. } => ("ssh", Some("See the session log for protocol details.")),
             Self::Cancelled => ("cancelled", None),
+            Self::AuthDisconnected { .. } => (
+                "auth_disconnected",
+                Some(
+                    "Too many keys offered? Set IdentitiesOnly yes with a specific IdentityFile, or PreferredAuthentications.",
+                ),
+            ),
+            Self::InvalidHostName { .. } => (
+                "invalid_host",
+                Some("HostName / HostKeyAlias must not contain spaces, commas or wildcards."),
+            ),
         };
         ErrorSummary {
             code: code.to_owned(),

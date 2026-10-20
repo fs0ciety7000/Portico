@@ -220,3 +220,34 @@ fn missing_config_is_empty() {
     let cfg = SshConfig::load(&dir.path().join("nope"), dir.path()).expect("load");
     assert!(cfg.host_aliases().is_empty());
 }
+
+#[test]
+fn proxy_command_and_proxy_jump_first_wins() {
+    let cfg = parse(
+        "Host a\n  ProxyCommand nc %h %p\n  ProxyJump bastion\nHost b\n  ProxyJump bastion\n  ProxyCommand nc %h %p\nHost c\n  ProxyCommand none\nHost *\n  ProxyJump j\n",
+    );
+    let a = cfg.resolve("a", &ctx());
+    assert_eq!(a.proxy_command.as_deref(), Some("nc a 22"));
+    assert!(a.proxy_jump.is_empty());
+    let b = cfg.resolve("b", &ctx());
+    assert!(b.proxy_command.is_none());
+    assert_eq!(b.proxy_jump.len(), 1);
+    // `ProxyCommand none` wins the slot and disables any later ProxyJump.
+    let c = cfg.resolve("c", &ctx());
+    assert!(c.proxy_command.is_none() && c.proxy_jump.is_empty());
+}
+
+#[test]
+fn identity_agent_expansion() {
+    let cfg =
+        parse("Host a\n  IdentityAgent ~/.1password/agent.sock\nHost b\n  IdentityAgent none\n");
+    assert_eq!(
+        cfg.resolve("a", &ctx()).identity_agent.as_deref(),
+        Some("/home/alice/.1password/agent.sock")
+    );
+    assert_eq!(
+        cfg.resolve("b", &ctx()).identity_agent.as_deref(),
+        Some("none")
+    );
+    assert_eq!(super::resolve::expand_env("${PORTICO_UNSET_VAR}/x"), "/x");
+}

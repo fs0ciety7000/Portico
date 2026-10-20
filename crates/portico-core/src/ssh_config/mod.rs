@@ -19,7 +19,7 @@ mod resolve;
 use std::path::{Path, PathBuf};
 
 pub use pattern::HostPattern;
-pub use resolve::{JumpHost, ResolveContext, ResolvedHost, StrictHostKeyChecking};
+pub use resolve::{JumpHost, ResolveContext, ResolvedHost, StrictHostKeyChecking, expand_home};
 
 use lexer::tokenize;
 use pattern::{has_wildcard, parse_comma_list, wildcard_match};

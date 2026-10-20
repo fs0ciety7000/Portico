@@ -19,7 +19,7 @@ use russh::keys::{Certificate, HashAlg, PublicKey};
 use russh::{MethodKind, MethodSet};
 use secrecy::{ExposeSecret, SecretString};
 
-use super::handler::ClientHandler;
+use super::handler::{ClientHandler, HostIdentity};
 use super::route::Hop;
 use super::signer::{Agent, FileSigner, KeySigner, Outcome, SignError};
 use super::{SessionCtx, transport};
@@ -34,13 +34,19 @@ const PASSWORD_ATTEMPTS: u32 = 3;
 /// Guard against servers looping keyboard-interactive info requests.
 const MAX_INFO_ROUNDS: u32 = 16;
 
-/// A private key file and what we know about it without decrypting it.
+/// A configured identity and what we know about it without decrypting it.
 #[derive(Debug)]
 struct FileIdentity {
     path: PathBuf,
     public: PublicKey,
     cert: Option<Certificate>,
+    /// `false` for public-key-only identities (`IdentityFile k.pub`): they
+    /// only select which agent key to use.
+    has_private: bool,
 }
+
+/// Methods Portico drives, in OpenSSH's default order.
+const DEFAULT_ORDER: [&str; 3] = ["publickey", "keyboard-interactive", "password"];
 
 #[derive(Debug)]
 enum Attempt<'a> {
@@ -51,6 +57,15 @@ enum Attempt<'a> {
 }
 
 impl Attempt<'_> {
+    fn is_rsa(&self) -> bool {
+        let alg = match self {
+            Self::AgentKey(k) => k.algorithm(),
+            Self::FileKey(f) => f.public.algorithm(),
+            Self::AgentCert(c) | Self::FileCert(_, c) => c.algorithm(),
+        };
+        matches!(alg, russh::keys::Algorithm::Rsa { .. })
+    }
+
     /// Phase method + log label (fingerprints and paths only, no secrets).
     fn describe(&self) -> (AuthMethod, String) {
         match self {
@@ -74,15 +89,18 @@ impl Attempt<'_> {
 struct Auth<'a> {
     ctx: &'a SessionCtx,
     hop: &'a Hop,
+    identity: &'a HostIdentity,
     handle: &'a mut Handle<ClientHandler>,
     methods: MethodSet,
     tried: Vec<&'static str>,
+    password_attempts: u32,
 }
 
 pub(crate) async fn authenticate(
     ctx: &SessionCtx,
     handle: &mut Handle<ClientHandler>,
     hop: &Hop,
+    identity: &HostIdentity,
 ) -> Result<AuthMethod> {
     let methods = match handle
         .authenticate_none(hop.user.clone())
@@ -107,21 +125,40 @@ pub(crate) async fn authenticate(
         ),
     );
 
+    if methods.is_empty() && handle.is_closed() {
+        return Err(Error::AuthDisconnected {
+            host: hop.alias.clone(),
+        });
+    }
+
     let mut auth = Auth {
         ctx,
         hop,
+        identity,
         handle,
         methods,
         tried: Vec::new(),
+        password_attempts: hop
+            .option_u32("numberofpasswordprompts")
+            .unwrap_or(PASSWORD_ATTEMPTS),
     };
-    if let Some(method) = auth.publickey().await? {
-        return Ok(method);
-    }
-    if auth.keyboard_interactive().await? {
-        return Ok(AuthMethod::KeyboardInteractive);
-    }
-    if auth.password().await? {
-        return Ok(AuthMethod::Password);
+    for method in method_order(hop) {
+        let done = match method {
+            "publickey" => auth.publickey().await?,
+            "keyboard-interactive" => auth
+                .keyboard_interactive()
+                .await?
+                .then_some(AuthMethod::KeyboardInteractive),
+            _ => auth.password().await?.then_some(AuthMethod::Password),
+        };
+        if let Some(m) = done {
+            return Ok(m);
+        }
+        if auth.handle.is_closed() {
+            return Err(Error::AuthDisconnected {
+                host: hop.alias.clone(),
+            });
+        }
     }
     Err(Error::AuthFailed {
         user: hop.user.clone(),
@@ -132,6 +169,39 @@ pub(crate) async fn authenticate(
             auth.tried.join(", ")
         },
     })
+}
+
+/// `PreferredAuthentications` order minus methods disabled by
+/// `PubkeyAuthentication` / `KbdInteractiveAuthentication` /
+/// `PasswordAuthentication no`.
+fn method_order(hop: &Hop) -> Vec<&'static str> {
+    let preferred: Vec<&'static str> = match hop.option_str("preferredauthentications") {
+        Some(list) => list
+            .split(',')
+            .filter_map(|m| {
+                DEFAULT_ORDER
+                    .iter()
+                    .copied()
+                    .find(|d| d.eq_ignore_ascii_case(m.trim()))
+            })
+            .collect(),
+        None => DEFAULT_ORDER.to_vec(),
+    };
+    let disabled = |key: &str| {
+        hop.option_str(key)
+            .is_some_and(|v| v.eq_ignore_ascii_case("no"))
+    };
+    preferred
+        .into_iter()
+        .filter(|m| match *m {
+            "publickey" => !disabled("pubkeyauthentication"),
+            "keyboard-interactive" => {
+                !disabled("kbdinteractiveauthentication")
+                    && !disabled("challengeresponseauthentication")
+            }
+            _ => !disabled("passwordauthentication"),
+        })
+        .collect()
 }
 
 impl Auth<'_> {
@@ -189,6 +259,8 @@ impl Auth<'_> {
                 .log(LogLevel::Info, "auth", "no public key identities available");
             return Ok(None);
         }
+        // `None`: the server did not advertise rsa-sha2-*; SHA-1 `ssh-rsa`
+        // stays disabled (OpenSSH ≥ 8.8 default), so RSA keys are skipped.
         let rsa_hash = self
             .handle
             .best_supported_rsa_hash()
@@ -202,6 +274,14 @@ impl Auth<'_> {
                 break;
             }
             let (method, label) = attempt.describe();
+            if attempt.is_rsa() && rsa_hash.is_none() {
+                self.ctx.log(
+                    LogLevel::Info,
+                    "auth",
+                    format!("{label}: skipped (server does not advertise rsa-sha2-*; ssh-rsa/SHA-1 disabled)"),
+                );
+                continue;
+            }
             self.ctx.phase(SessionPhase::Authenticating { method });
             self.ctx
                 .log(LogLevel::Info, "auth", format!("trying {label}"));
@@ -222,7 +302,7 @@ impl Auth<'_> {
                         .log(LogLevel::Debug, "auth", format!("{label}: rejected"));
                 }
                 Err(SignError::Cancelled) => return Err(Error::Cancelled),
-                Err(e) => {
+                Err(e @ (SignError::Send(_) | SignError::Key(_))) => {
                     // The transport may be out of sync after a signer failure.
                     return Err(Error::Transport {
                         target: self.hop.alias.clone(),
@@ -246,15 +326,23 @@ impl Auth<'_> {
         let result = match (attempt, agent) {
             (Attempt::AgentKey(key), Some(a)) => {
                 let hash = hash_for(&key, rsa_hash);
-                self.handle
-                    .authenticate_publickey_with(user, key, hash, &mut KeySigner::Agent(a))
-                    .await
+                let mut signer = KeySigner::agent(a, self.ctx);
+                let r = self
+                    .handle
+                    .authenticate_publickey_with(user, key, hash, &mut signer)
+                    .await;
+                self.note_outcome(&signer, label);
+                r
             }
             (Attempt::AgentCert(cert), Some(a)) => {
                 let hash = cert_hash(&cert, rsa_hash);
-                self.handle
-                    .authenticate_certificate_with(user, cert, hash, &mut KeySigner::Agent(a))
-                    .await
+                let mut signer = KeySigner::agent(a, self.ctx);
+                let r = self
+                    .handle
+                    .authenticate_certificate_with(user, cert, hash, &mut signer)
+                    .await;
+                self.note_outcome(&signer, label);
+                r
             }
             (Attempt::AgentKey(_) | Attempt::AgentCert(_), None) => return None,
             (Attempt::FileKey(identity), _) => {
@@ -282,27 +370,26 @@ impl Auth<'_> {
     }
 
     fn note_outcome(&self, signer: &KeySigner<'_>, label: &str) {
-        if let KeySigner::File(file) = signer {
-            match file.outcome {
-                Outcome::NotRequested => {
-                    self.ctx.log(
-                        LogLevel::Debug,
-                        "auth",
-                        format!("{label}: not accepted by the server"),
-                    );
-                }
-                Outcome::Skipped => {
-                    self.ctx
-                        .log(LogLevel::Info, "auth", format!("{label}: skipped (locked)"));
-                }
-                Outcome::Signed => {}
+        match signer.outcome() {
+            Outcome::NotRequested => {
+                self.ctx.log(
+                    LogLevel::Debug,
+                    "auth",
+                    format!("{label}: not accepted by the server"),
+                );
             }
+            Outcome::Skipped => {
+                self.ctx
+                    .log(LogLevel::Info, "auth", format!("{label}: skipped"));
+            }
+            Outcome::Signed => {}
         }
     }
 
     async fn connect_agent(&self) -> Option<Agent> {
         let socket = match self.hop.resolved.identity_agent.as_deref() {
             Some(v) if v.eq_ignore_ascii_case("none") => return None,
+            // Already `~`/`${VAR}`/token-expanded by the config resolver.
             Some(v) if v != "SSH_AUTH_SOCK" => Some(PathBuf::from(v)),
             _ => self.ctx.engine.config().agent_socket.clone(),
         }?;
@@ -351,7 +438,7 @@ impl Auth<'_> {
 
     async fn keyboard_interactive(&mut self) -> Result<bool> {
         let mut stored = self.stored_password().await;
-        for _ in 0..PASSWORD_ATTEMPTS {
+        for _ in 0..self.password_attempts {
             if !self.allows(MethodKind::KeyboardInteractive) {
                 return Ok(false);
             }
@@ -396,12 +483,7 @@ impl Auth<'_> {
                             .answer_info_request(name, instructions, &prompts, &mut stored)
                             .await?
                         else {
-                            // Keep the protocol in sync, then stop.
-                            let empty = vec![String::new(); prompts.len()];
-                            let _ = self
-                                .handle
-                                .authenticate_keyboard_interactive_respond(empty)
-                                .await;
+                            self.abandon_keyboard_interactive(prompts.len()).await?;
                             return Ok(false);
                         };
                         remember = keep;
@@ -415,6 +497,38 @@ impl Auth<'_> {
             }
         }
         Ok(false)
+    }
+
+    /// The user dismissed a prompt: answer this and any further info request
+    /// with empty strings until the server concludes, so russh stays in sync
+    /// (it would otherwise swallow the next auth request).
+    async fn abandon_keyboard_interactive(&mut self, first_prompts: usize) -> Result<()> {
+        let mut count = first_prompts;
+        for _ in 0..MAX_INFO_ROUNDS {
+            let response = self
+                .handle
+                .authenticate_keyboard_interactive_respond(vec![String::new(); count])
+                .await
+                .map_err(|e| transport(self.hop, &e))?;
+            match response {
+                KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                    count = prompts.len();
+                }
+                KeyboardInteractiveAuthResponse::Failure {
+                    remaining_methods, ..
+                } => {
+                    if !remaining_methods.is_empty() {
+                        self.methods = remaining_methods;
+                    }
+                    return Ok(());
+                }
+                KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            }
+        }
+        Err(Error::Transport {
+            target: self.hop.alias.clone(),
+            message: "keyboard-interactive did not conclude".to_owned(),
+        })
     }
 
     /// Answers one info request: from the secret store for a lone password
@@ -453,14 +567,15 @@ impl Auth<'_> {
                 .collect(),
         };
         Ok(match self.ctx.ask(kind).await? {
-            PromptResponse::Answers(values) => Some((
+            // sshd drops the connection when the answer count is wrong.
+            PromptResponse::Answers(values) if values.len() == prompts.len() => Some((
                 values
                     .iter()
                     .map(|v| v.expose_secret().to_owned())
                     .collect(),
                 None,
             )),
-            PromptResponse::Secret { value, remember } => {
+            PromptResponse::Secret { value, remember } if prompts.len() == 1 => {
                 let answer = vec![value.expose_secret().to_owned()];
                 Some((answer, remember.then_some(value)))
             }
@@ -492,7 +607,7 @@ impl Auth<'_> {
             self.ctx
                 .log(LogLevel::Warn, "auth", "remembered password was rejected");
         }
-        for attempt in 1..=PASSWORD_ATTEMPTS {
+        for attempt in 1..=self.password_attempts {
             if !self.allows(MethodKind::Password) {
                 return Ok(false);
             }
@@ -523,7 +638,7 @@ impl Auth<'_> {
             self.ctx.log(
                 LogLevel::Warn,
                 "auth",
-                format!("password rejected ({attempt}/{PASSWORD_ATTEMPTS})"),
+                format!("password rejected ({attempt}/{})", self.password_attempts),
             );
         }
         Ok(false)
@@ -532,8 +647,9 @@ impl Auth<'_> {
     fn password_key(&self) -> SecretKey {
         SecretKey::HostPassword {
             user: self.hop.user.clone(),
-            host: self.hop.resolved.hostname.clone(),
-            port: self.hop.resolved.port,
+            host: self.identity.name.clone(),
+            port: self.identity.port,
+            host_key: self.identity.fingerprint.clone(),
         }
     }
 
@@ -599,10 +715,25 @@ fn plan_attempts<'a>(
             AgentIdentity::Certificate { .. } => false,
         })
     };
+    // Certificate held by the agent for this key: signed there, no passphrase.
+    let agent_cert = |key: &PublicKey| {
+        agent.iter().find_map(|id| match id {
+            AgentIdentity::Certificate { certificate, .. }
+                if certificate.public_key() == key.key_data() =>
+            {
+                Some(certificate.clone())
+            }
+            _ => None,
+        })
+    };
+    let mut planned_certs: Vec<Certificate> = Vec::new();
     let mut attempts = Vec::new();
     // a. configured identities held by the agent
     for f in files.iter().filter(|f| agent_has(&f.public)) {
-        if let Some(cert) = &f.cert {
+        if let Some(cert) = agent_cert(&f.public) {
+            planned_certs.push(cert.clone());
+            attempts.push(Attempt::AgentCert(cert));
+        } else if let Some(cert) = f.cert.as_ref().filter(|_| f.has_private) {
             attempts.push(Attempt::FileCert(f, cert.clone()));
         }
         attempts.push(Attempt::AgentKey(f.public.clone()));
@@ -612,7 +743,9 @@ fn plan_attempts<'a>(
         for id in agent {
             match id {
                 AgentIdentity::Certificate { certificate, .. } => {
-                    attempts.push(Attempt::AgentCert(certificate.clone()));
+                    if !planned_certs.contains(certificate) {
+                        attempts.push(Attempt::AgentCert(certificate.clone()));
+                    }
                 }
                 AgentIdentity::PublicKey { key, .. } => {
                     if !files.iter().any(|f| f.public.key_data() == key.key_data()) {
@@ -622,8 +755,11 @@ fn plan_attempts<'a>(
             }
         }
     }
-    // c. configured identities not in the agent
-    for f in files.iter().filter(|f| !agent_has(&f.public)) {
+    // c. configured identities not in the agent (needs the private file)
+    for f in files
+        .iter()
+        .filter(|f| f.has_private && !agent_has(&f.public))
+    {
         if let Some(cert) = &f.cert {
             attempts.push(Attempt::FileCert(f, cert.clone()));
         }
@@ -633,6 +769,8 @@ fn plan_attempts<'a>(
 }
 
 /// Reads public halves (and certificates) without decrypting anything.
+/// Accepts `IdentityFile k`, `IdentityFile k.pub`, and a missing `k` whose
+/// `k.pub` exists (agent-only identity), like OpenSSH.
 /// Returns the usable identities and diagnostic notes for the session log.
 fn load_identities(
     paths: &[PathBuf],
@@ -646,38 +784,81 @@ fn load_identities(
         .collect();
     let mut identities = Vec::new();
     let mut notes = Vec::new();
-    for path in paths {
-        if !path.is_file() {
-            if explicit {
-                notes.push(format!("identity {} not found", path.display()));
+    for configured in paths {
+        let (private, public) = match locate(configured) {
+            Located::Private(p) => {
+                let Some(public) = public_half(&p) else {
+                    notes.push(format!(
+                        "cannot read the public key of {} (encrypted legacy key without .pub?)",
+                        p.display()
+                    ));
+                    continue;
+                };
+                (Some(p), public)
             }
-            continue;
-        }
-        let Some(public) = public_half(path) else {
-            notes.push(format!(
-                "cannot read the public key of {} (encrypted legacy key without .pub?)",
-                path.display()
-            ));
-            continue;
+            Located::PublicOnly(pub_path) => {
+                let Some(public) = read_public(&pub_path) else {
+                    notes.push(format!("invalid public key {}", pub_path.display()));
+                    continue;
+                };
+                let private = PathBuf::from(pub_path.to_string_lossy().trim_end_matches(".pub"));
+                (private.is_file().then_some(private), public)
+            }
+            Located::Missing => {
+                if explicit {
+                    notes.push(format!("identity {} not found", configured.display()));
+                }
+                continue;
+            }
         };
+        let base = private.clone().unwrap_or_else(|| configured.clone());
+        let base = PathBuf::from(base.to_string_lossy().trim_end_matches(".pub"));
         let cert = certs
             .iter()
             .find(|c| c.public_key() == public.key_data())
             .cloned()
             .or_else(|| {
-                let sidecar = PathBuf::from(format!("{}-cert.pub", path.display()));
+                let sidecar = PathBuf::from(format!("{}-cert.pub", base.display()));
                 std::fs::read_to_string(sidecar)
                     .ok()
                     .and_then(|t| Certificate::from_openssh(t.trim()).ok())
                     .filter(|c| c.public_key() == public.key_data())
             });
         identities.push(FileIdentity {
-            path: path.clone(),
+            has_private: private.is_some(),
+            path: private.unwrap_or(base),
             public,
             cert,
         });
     }
     (identities, notes)
+}
+
+enum Located {
+    Private(PathBuf),
+    PublicOnly(PathBuf),
+    Missing,
+}
+
+fn locate(path: &Path) -> Located {
+    let is_pub = path.extension().is_some_and(|e| e == "pub");
+    if is_pub && path.is_file() {
+        return Located::PublicOnly(path.to_path_buf());
+    }
+    if path.is_file() {
+        return Located::Private(path.to_path_buf());
+    }
+    let sidecar = PathBuf::from(format!("{}.pub", path.display()));
+    if sidecar.is_file() {
+        return Located::PublicOnly(sidecar);
+    }
+    Located::Missing
+}
+
+fn read_public(path: &Path) -> Option<PublicKey> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| PublicKey::from_openssh(t.trim()).ok())
 }
 
 fn public_half(path: &Path) -> Option<PublicKey> {

@@ -32,8 +32,6 @@ pub(crate) type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin + 'static
 pub(crate) enum SignError {
     #[error(transparent)]
     Send(#[from] russh::SendError),
-    #[error("ssh-agent refused to sign: {0}")]
-    Agent(String),
     #[error("{0}")]
     Key(String),
     #[error("cancelled")]
@@ -51,8 +49,29 @@ pub(crate) enum Outcome {
 }
 
 pub(crate) enum KeySigner<'a> {
-    Agent(&'a mut Agent),
+    Agent {
+        agent: &'a mut Agent,
+        ctx: &'a SessionCtx,
+        outcome: Outcome,
+    },
     File(FileSigner<'a>),
+}
+
+impl<'a> KeySigner<'a> {
+    pub(crate) fn agent(agent: &'a mut Agent, ctx: &'a SessionCtx) -> Self {
+        Self::Agent {
+            agent,
+            ctx,
+            outcome: Outcome::NotRequested,
+        }
+    }
+
+    pub(crate) fn outcome(&self) -> Outcome {
+        match self {
+            Self::Agent { outcome, .. } => *outcome,
+            Self::File(file) => file.outcome,
+        }
+    }
 }
 
 pub(crate) struct FileSigner<'a> {
@@ -74,12 +93,13 @@ impl<'a> FileSigner<'a> {
 
     async fn sign(
         &mut self,
+        identity: &AgentIdentity,
         hash_alg: Option<HashAlg>,
         to_sign: Vec<u8>,
     ) -> Result<Vec<u8>, SignError> {
         let Some(key) = self.unlock().await? else {
             self.outcome = Outcome::Skipped;
-            return Ok(invalid_signature(to_sign));
+            return refusal(identity, hash_alg, to_sign);
         };
         self.outcome = Outcome::Signed;
         append_signature(&key, hash_alg, to_sign)
@@ -237,11 +257,46 @@ fn append_signature(
     Ok(to_sign)
 }
 
-/// An empty signature: the server answers with a regular auth failure, which
-/// keeps the protocol in sync when a key is skipped after `PK_OK`.
-fn invalid_signature(mut to_sign: Vec<u8>) -> Vec<u8> {
-    to_sign.extend_from_slice(&[0, 0, 0, 0]);
-    to_sign
+/// Appends a *well-formed but invalid* signature (right algorithm name and
+/// size, all zeros). russh 0.64 cannot abandon a request after `PK_OK`, so
+/// this is how a key is skipped (passphrase dismissed, agent refusal): every
+/// server parses it and answers with a plain auth failure.
+fn refusal(
+    identity: &AgentIdentity,
+    hash_alg: Option<HashAlg>,
+    mut to_sign: Vec<u8>,
+) -> Result<Vec<u8>, SignError> {
+    use russh::keys::ssh_key::public::KeyData;
+
+    let key_data = match identity {
+        AgentIdentity::PublicKey { key, .. } => key.key_data().clone(),
+        AgentIdentity::Certificate { certificate, .. } => certificate.public_key().clone(),
+    };
+    let (name, data): (String, Vec<u8>) = match &key_data {
+        KeyData::Rsa(rsa) => (
+            russh::keys::Algorithm::Rsa { hash: hash_alg }
+                .as_str()
+                .to_owned(),
+            vec![0; rsa.n().as_positive_bytes().map_or(256, <[u8]>::len)],
+        ),
+        KeyData::Ecdsa(ecdsa) => (
+            russh::keys::Algorithm::Ecdsa {
+                curve: ecdsa.curve(),
+            }
+            .as_str()
+            .to_owned(),
+            // string(mpint 1) || string(mpint 1)
+            vec![0, 0, 0, 1, 1, 0, 0, 0, 1, 1],
+        ),
+        other => (other.algorithm().as_str().to_owned(), vec![0; 64]),
+    };
+    let mut blob = Vec::new();
+    name.as_bytes()
+        .encode(&mut blob)
+        .and_then(|()| data.as_slice().encode(&mut blob))
+        .and_then(|()| blob.as_slice().encode(&mut to_sign))
+        .map_err(|e| SignError::Key(e.to_string()))?;
+    Ok(to_sign)
 }
 
 impl russh::Signer for KeySigner<'_> {
@@ -254,11 +309,24 @@ impl russh::Signer for KeySigner<'_> {
         to_sign: Vec<u8>,
     ) -> Result<Vec<u8>, Self::Error> {
         match self {
-            Self::Agent(agent) => agent
-                .sign_request(key, hash_alg, to_sign)
-                .await
-                .map_err(|e| SignError::Agent(e.to_string())),
-            Self::File(file) => file.sign(hash_alg, to_sign).await,
+            Self::Agent {
+                agent,
+                ctx,
+                outcome,
+            } => match agent.sign_request(key, hash_alg, to_sign.clone()).await {
+                Ok(signed) => {
+                    *outcome = Outcome::Signed;
+                    Ok(signed)
+                }
+                Err(e) => {
+                    // Refused confirmation, cancelled Touch ID, FIDO timeout…:
+                    // move on to the next identity like `ssh` does.
+                    ctx.log(LogLevel::Warn, "agent", format!("agent did not sign: {e}"));
+                    *outcome = Outcome::Skipped;
+                    refusal(key, hash_alg, to_sign)
+                }
+            },
+            Self::File(file) => file.sign(key, hash_alg, to_sign).await,
         }
     }
 }

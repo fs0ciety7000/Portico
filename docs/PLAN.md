@@ -36,11 +36,12 @@
 - [x] Timeouts : TCP, négociation (suspendue pendant un prompt), canal de jump. Keepalive avec **mesure du RTT**
   (`keepalive@openssh.com`), `ServerAliveInterval` / `ServerAliveCountMax`, détection de fermeture distante
 - [x] Logs de session (`LogRing`) : route, adresses, vérification de clé, méthodes tentées (jamais de secret)
-- [x] Tests : 20 de bout en bout (serveur russh en process) et **interop OpenSSH 9.6 réel** (8 scénarios), 9 tests `known_hosts`, 3 tests de route
+- [x] Tests : 27 de bout en bout (serveur russh en process) et **interop OpenSSH 9.6 réel** (8 scénarios), 11 tests `known_hosts`, 4 tests de route
 - [x] TUI et GUI branchées : statut live (point coloré, phase, latence), toasts d'erreur avec hint, `d` pour déconnecter.
   Les prompts sont encore refusés proprement (les dialogues arrivent en 1b et 1c)
 
 ### 1b. PTY et terminal TUI *(Opus / Sonnet fort)*
+- Reporté de 1a : interop Dropbear en CI ; ticket upstream russh (abandon d'un `Signer`, vérification au re-key)
 - `Engine::open_terminal` : `request_pty` (TERM `xterm-256color`, modes), shell, resize, et `TerminalHandle` (plan de données borné)
 - TUI : widget `TerminalView` sur `alacritty_terminal` (palette ANSI du thème, curseur, scrollback, sélection),
   onglets, `Ctrl-Space` comme préfixe pour les commandes Portico (le reste passe au remote)
@@ -106,8 +107,42 @@
 | Phase | État | Tests | Revue sécu | Revue design |
 |---|---|---|---|---|
 | 0 Fondations | ✅ | 35 | couverte par la revue 1a | ✅ (captures TUI et GUI) |
-| 1a Transport et auth | ✅ | 68 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
+| 1a Transport et auth | ✅ | 82 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
 | 1b / 1c Terminal TUI / GUI | 🔜 | | | |
 | 2 SFTP / tunnels | ⏳ | | | |
 | 3 Clés / secrets / snippets | ⏳ | | | |
 | 4 Finition | ⏳ | | | |
+
+## Revues de la phase 1a (2026-10-20)
+
+### `agent-security` : 1 ÉLEVÉ, 2 MOYEN, 3 FAIBLE, tous traités
+| Gravité | Constat | Suite donnée |
+|---|---|---|
+| ÉLEVÉ | Nom d'hôte non mis en minuscules : une clé **changée** sur une entrée hachée passait pour inconnue, donc était acceptée en `accept-new` | Corrigé : nom normalisé (`HostKeyAlias` ou `HostName`), test hashed + casse mixte |
+| MOYEN | `accept-new`/`no` acceptait un nouvel algorithme pour un hôte déjà connu | Corrigé : refus `host_key_new_algorithm` + test |
+| MOYEN | Mot de passe mémorisé indexé sur `HostName:Port` (fuite possible entre deux `HostKeyAlias`) | Corrigé : lié à l'identité vérifiée (nom known_hosts + port + empreinte de la clé hôte) |
+| FAIBLE | Injection de motif dans known_hosts via `HostKeyAlias` | Corrigé : `validate_host_name` + test |
+| FAIBLE | Re-key non revérifié | Limite de russh 0.64 (handler appelé seulement au premier KEX) ; documenté, ticket upstream à ouvrir |
+| FAIBLE | Copies de mots de passe non effacées (russh, webview) | DTO Tauri désérialisé directement en `SecretString`. Désactivation des core dumps et du ptrace planifiée en phase 4 |
+| (hors sécu) | La GUI cessait de relayer les événements après un `Lagged` | Corrigé |
+
+### `agent-ssh-protocols` : 1 BLOQUANT, 9 IMPORTANT, 7 MINEUR
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : `ProxyCommand` ignoré, connexion directe au `HostName` | Corrigé : premier gagnant `ProxyCommand`/`ProxyJump` respecté, `ProxyCommand` refusé explicitement (`unsupported`) + 2 tests. Implémentation complète : post-MVP |
+| SHA-1 `ssh-rsa` utilisé par défaut | Corrigé : retiré des algos hôte, clés RSA sautées sans `rsa-sha2-*` |
+| Signature vide fragile (Dropbear), refus d'agent fatal | Corrigé : signature bien formée mais invalide, refus d'agent passant à l'identité suivante + test. Interop Dropbear en CI : à ajouter |
+| Keepalive bloquant Disconnect/annulation | Corrigé : sonde concurrente au `select!` |
+| keyboard-interactive désynchronisé après un prompt écarté | Corrigé : vidage jusqu'à la conclusion + contrôle du nombre de réponses + test |
+| Pas de timeout pendant l'auth | Corrigé : délai de 60 s suspendu pendant les prompts |
+| Certificat de l'agent signé par fichier | Corrigé : `AgentCert` prioritaire, dédupliqué |
+| `IdentityFile k.pub` ignoré | Corrigé : identités publiques seules (agent) + test |
+| `IdentityAgent ~/…` non expansé | Corrigé : `~`, `${VAR}`, tokens (et `GlobalKnownHostsFile`) |
+| `PreferredAuthentications`, `*Authentication no`, `NumberOfPasswordPrompts` | Corrigé + test |
+| RST non détecté, tâches russh orphelines | Corrigé : `WatchedStream` (EOF/erreur et abort) |
+| MINEUR : délai épuisé juste après un prompt | Corrigé (nouvelle fenêtre après chaque prompt) |
+| MINEUR : DISCONNECT de la cible coupé par celui du jump | Corrigé (fermeture hop par hop avec délai de grâce) |
+| MINEUR : « Too many authentication failures » trompeur | Corrigé : code `auth_disconnected` + hint |
+| MINEUR : `HashKnownHosts yes` et `ServerAliveInterval 0` ignorés | Corrigé |
+| MINEUR : certificat hôte invalide sans repli sur la clé brute | Conservé volontairement (plus strict qu'OpenSSH), consigné dans STACK |
+| MINEUR : re-key avec clé différente | Voir la ligne re-key de la revue sécurité (limite russh) |

@@ -76,6 +76,8 @@ et on signe avec `ssh_key::certificate::Builder`.
 ed25519, RSA (rsa-sha2), clé chiffrée, clé ignorée après PK_OK, certificat utilisateur, certificat d'hôte, ProxyJump, agent.
 Le test est `#[ignore]` par défaut. Pour le lancer : `cargo test -p portico-core --test openssh_interop -- --ignored` (job CI dédié).
 **Toute modification du transport ou de l'auth doit repasser ce test.**
+Le `TestServer` suit OpenSSH sur un point où russh diverge : un refus garde toutes les méthodes disponibles (`reject()`).
+Les agents de test sont `support::start_agent` (normal) et `start_agent_with(…, true)` (refuse de signer).
 
 ## Hygiène
 

@@ -22,6 +22,16 @@ pub(crate) struct Hop {
     pub(crate) resolved: ResolvedHost,
 }
 
+/// Refuses hops Portico cannot reach faithfully (never silently go direct).
+fn reachable(resolved: &ResolvedHost) -> Result<()> {
+    if resolved.proxy_command.is_some() {
+        return Err(Error::Unsupported(
+            "ProxyCommand (not supported yet; use ProxyJump for this host)",
+        ));
+    }
+    Ok(())
+}
+
 impl Hop {
     fn new(resolved: ResolvedHost, config: &EngineConfig) -> Self {
         Self {
@@ -48,6 +58,16 @@ impl Hop {
             .map_or(default, |s| Duration::from_secs(u64::from(s)))
     }
 
+    /// First value of a raw keyword.
+    pub(crate) fn option_str(&self, key: &str) -> Option<&str> {
+        self.resolved
+            .options
+            .get(key)
+            .and_then(|v| v.first())
+            .and_then(|(args, _)| args.first())
+            .map(String::as_str)
+    }
+
     /// First value of a raw keyword, parsed as `u32`.
     pub(crate) fn option_u32(&self, key: &str) -> Option<u32> {
         self.resolved
@@ -67,6 +87,7 @@ pub(crate) fn plan(
     user_override: Option<String>,
 ) -> Result<Vec<Hop>> {
     let target = ssh.resolve(alias, &config.resolve_context(user_override));
+    reachable(&target)?;
     let mut visiting = vec![alias.to_owned()];
     let mut hops = jump_chain(ssh, config, &target.proxy_jump, &mut visiting)?;
     hops.push(Hop::new(target, config));
@@ -98,6 +119,7 @@ fn jump_chain(
         if let Some(port) = jump.port {
             resolved.port = port;
         }
+        reachable(&resolved)?;
         if index == 0 {
             visiting.push(jump.host.clone());
             let inner = jump_chain(ssh, config, &resolved.proxy_jump, visiting)?;
@@ -160,6 +182,14 @@ Host target\n  HostName 10.0.0.9\n  ProxyJump inner,root@second:2200\n";
                 "alice@10.0.0.9:22"
             ]
         );
+    }
+
+    #[test]
+    fn proxy_command_is_refused_not_bypassed() {
+        let err = route("Host t\n  ProxyCommand nc %h %p\n", "t").unwrap_err();
+        assert!(matches!(err, Error::Unsupported(_)), "{err}");
+        let via = "Host j\n  ProxyCommand nc %h %p\nHost t\n  ProxyJump j\n";
+        assert!(matches!(route(via, "t"), Err(Error::Unsupported(_))));
     }
 
     #[test]

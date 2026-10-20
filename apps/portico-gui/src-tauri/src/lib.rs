@@ -29,9 +29,18 @@ pub fn run() {
             let mut events = engine.subscribe();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    if let Err(e) = handle.emit(ENGINE_EVENT, &event) {
-                        tracing::warn!(error = %e, "failed to forward engine event");
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            if let Err(e) = handle.emit(ENGINE_EVENT, &event) {
+                                tracing::warn!(error = %e, "failed to forward engine event");
+                            }
+                        }
+                        // A burst overflowed the channel: keep forwarding.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "engine events lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             });

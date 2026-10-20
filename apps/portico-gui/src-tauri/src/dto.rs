@@ -61,8 +61,9 @@ pub(crate) struct ThemeDto {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum PromptAnswerDto {
     AcceptHostKey,
-    Secret { value: String, remember: bool },
-    Answers { values: Vec<String> },
+    // Deserialized straight into `SecretString`: no intermediate `String`.
+    Secret { value: SecretString, remember: bool },
+    Answers { values: Vec<SecretString> },
     Cancel,
 }
 
@@ -85,14 +86,26 @@ impl From<PromptAnswerDto> for PromptResponse {
     fn from(dto: PromptAnswerDto) -> Self {
         match dto {
             PromptAnswerDto::AcceptHostKey => Self::AcceptHostKey,
-            PromptAnswerDto::Secret { value, remember } => Self::Secret {
-                value: SecretString::from(value),
-                remember,
-            },
-            PromptAnswerDto::Answers { values } => {
-                Self::Answers(values.into_iter().map(SecretString::from).collect())
-            }
+            PromptAnswerDto::Secret { value, remember } => Self::Secret { value, remember },
+            PromptAnswerDto::Answers { values } => Self::Answers(values),
             PromptAnswerDto::Cancel => Self::Cancel,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_answer_dto_debug_is_redacted() {
+        let dto: PromptAnswerDto =
+            serde_json::from_str(r#"{"kind":"secret","value":"hunter2","remember":true}"#).unwrap();
+        assert!(!format!("{dto:?}").contains("hunter2"));
+        let PromptResponse::Secret { value, remember } = dto.into() else {
+            panic!("expected a secret");
+        };
+        assert!(remember);
+        assert_eq!(secrecy::ExposeSecret::expose_secret(&value), "hunter2");
     }
 }

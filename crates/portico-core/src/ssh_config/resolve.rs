@@ -92,6 +92,8 @@ impl SshConfig {
     pub fn resolve(&self, alias: &str, ctx: &ResolveContext) -> ResolvedHost {
         let mut options: BTreeMap<String, Vec<(Vec<String>, Source)>> = BTreeMap::new();
         let mut warnings = Vec::new();
+        // ProxyCommand and ProxyJump share one slot: the first one wins.
+        let mut proxy_winner: Option<&'static str> = None;
 
         for block in &self.blocks {
             // Re-evaluated per block: `Match host` sees the HostName set so far.
@@ -120,6 +122,13 @@ impl SshConfig {
             }
 
             for d in block.directives.iter().filter(|d| !d.key.starts_with('#')) {
+                if proxy_winner.is_none() {
+                    proxy_winner = match d.key.as_str() {
+                        "proxycommand" => Some("proxycommand"),
+                        "proxyjump" => Some("proxyjump"),
+                        _ => None,
+                    };
+                }
                 let entry = options.entry(d.key.clone()).or_default();
                 if entry.is_empty() || MULTI_VALUED.contains(&d.key.as_str()) {
                     entry.push((d.args.clone(), d.source.clone()));
@@ -175,9 +184,18 @@ impl SshConfig {
             .unwrap_or_default();
         host.identities_only = host.first("identitiesonly").is_some_and(is_yes);
         host.forward_agent = host.first("forwardagent").is_some_and(is_yes);
-        host.identity_agent = host.first("identityagent").map(|s| tokens.expand(s));
+        host.identity_agent = host.first("identityagent").map(|s| {
+            if s.eq_ignore_ascii_case("none") || s == "SSH_AUTH_SOCK" {
+                s.to_owned()
+            } else {
+                expand_path(&expand_env(s), &tokens, ctx)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        });
         host.proxy_command = host
             .first("proxycommand")
+            .filter(|_| proxy_winner == Some("proxycommand"))
             .filter(|s| !s.eq_ignore_ascii_case("none"))
             .map(|_| {
                 // ProxyCommand is the whole rest of the line.
@@ -189,7 +207,10 @@ impl SshConfig {
                     .unwrap_or_default();
                 tokens.expand(&args)
             });
-        if let Some(raw) = host.first("proxyjump") {
+        if let Some(raw) = host
+            .first("proxyjump")
+            .filter(|_| proxy_winner == Some("proxyjump"))
+        {
             match parse_proxy_jump(raw) {
                 Ok(hops) => host.proxy_jump = hops,
                 Err(msg) => warnings.push(warn(&host, "proxyjump", msg)),
@@ -272,6 +293,31 @@ fn path_values(
 
 fn expand_path(raw: &str, tokens: &Tokens, ctx: &ResolveContext) -> PathBuf {
     expand_tilde(&tokens.expand(raw), Some(&ctx.home))
+}
+
+/// Expands `${NAME}` from the environment (OpenSSH does this for
+/// `IdentityAgent`, `IdentityFile`, …). Unknown variables expand to nothing.
+pub(crate) fn expand_env(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        out.push_str(rest.get(..start).unwrap_or_default());
+        let after = rest.get(start + 2..).unwrap_or_default();
+        let Some(end) = after.find('}') else {
+            out.push_str(rest.get(start..).unwrap_or_default());
+            return out;
+        };
+        let name = after.get(..end).unwrap_or_default();
+        out.push_str(&std::env::var(name).unwrap_or_default());
+        rest = after.get(end + 1..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `~` and `${VAR}` expansion for paths read from the config.
+pub fn expand_home(raw: &str, home: &Path) -> PathBuf {
+    expand_tilde(&expand_env(raw), Some(home))
 }
 
 /// Expands a leading `~` or `~/` with `home`. `~otheruser` is left untouched.

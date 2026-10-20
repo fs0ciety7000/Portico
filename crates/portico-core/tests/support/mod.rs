@@ -53,8 +53,14 @@ pub struct Behaviour {
     pub keyboard_interactive: Option<(String, String)>,
     pub allow_direct_tcpip: bool,
     pub banner: Option<String>,
+    /// keyboard-interactive asks a second question (PAM password + OTP).
+    pub kbd_two_steps: bool,
     /// Counts accepted logins (for assertions).
     pub logins: AtomicUsize,
+    /// Counts TCP connections accepted.
+    pub connections: AtomicUsize,
+    /// Counts publickey requests (probes included).
+    pub pubkey_offers: AtomicUsize,
 }
 
 pub struct TestServer {
@@ -86,7 +92,12 @@ impl TestServer {
         let b = Arc::clone(&behaviour);
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
-                let handler = ServerHandler { b: Arc::clone(&b) };
+                b.connections.fetch_add(1, Ordering::SeqCst);
+                let handler = ServerHandler {
+                    b: Arc::clone(&b),
+                    kbd_step: 0,
+                    kbd_first_ok: false,
+                };
                 let config = Arc::clone(&config);
                 tokio::spawn(async move {
                     if let Ok(running) = russh::server::run_stream(config, socket, handler).await {
@@ -113,6 +124,8 @@ impl TestServer {
 
 struct ServerHandler {
     b: Arc<Behaviour>,
+    kbd_step: u8,
+    kbd_first_ok: bool,
 }
 
 impl russh::server::Handler for ServerHandler {
@@ -130,6 +143,7 @@ impl russh::server::Handler for ServerHandler {
         _user: &str,
         key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
+        self.b.pubkey_offers.fetch_add(1, Ordering::SeqCst);
         // Certificate probes carry the certified key: let them through to
         // `auth_openssh_certificate`, which checks the CA.
         Ok(if self.knows(key) || self.b.user_ca.is_some() {
@@ -171,19 +185,31 @@ impl russh::server::Handler for ServerHandler {
         let Some((u, p)) = &self.b.keyboard_interactive else {
             return Ok(reject());
         };
+        let question = |q: &'static str| Auth::Partial {
+            name: "".into(),
+            instructions: "".into(),
+            prompts: vec![(q.into(), false)].into(),
+        };
         match response {
-            None => Ok(Auth::Partial {
-                name: "".into(),
-                instructions: "".into(),
-                prompts: vec![("Password: ".into(), false)].into(),
-            }),
+            None => {
+                self.kbd_step = 0;
+                Ok(question("Password: "))
+            }
             Some(mut r) => {
                 let answer = r.next().map(|b| String::from_utf8_lossy(&b).into_owned());
-                Ok(if user == u && answer.as_deref() == Some(p.as_str()) {
-                    self.accept()
+                let correct = user == u && answer.as_deref() == Some(p.as_str());
+                if self.b.kbd_two_steps && self.kbd_step == 0 {
+                    // PAM-like: keep asking even after a wrong first answer.
+                    self.kbd_step = 1;
+                    self.kbd_first_ok = correct;
+                    return Ok(question("Verification code: "));
+                }
+                let ok = if self.b.kbd_two_steps {
+                    self.kbd_first_ok
                 } else {
-                    reject()
-                })
+                    correct
+                };
+                Ok(if ok { self.accept() } else { reject() })
             }
         }
     }
@@ -438,13 +464,40 @@ pub fn target_config(alias: &str, port: u16, extra: &str) -> String {
 /// Starts an in-process ssh-agent holding `keys`; returns its socket path.
 #[cfg(unix)]
 pub async fn start_agent(dir: &std::path::Path, keys: &[PrivateKey]) -> PathBuf {
+    start_agent_with(dir, keys, false).await
+}
+
+/// An agent that lists its keys but refuses every signature (like a denied
+/// `ssh-add -c` confirmation or a cancelled Touch ID prompt).
+#[derive(Clone)]
+struct RefusingAgent;
+
+impl russh::keys::agent::server::Agent for RefusingAgent {
+    async fn confirm_request(&self, msg: russh::keys::agent::server::MessageType) -> bool {
+        !matches!(msg, russh::keys::agent::server::MessageType::Sign)
+    }
+}
+
+#[cfg(unix)]
+pub async fn start_agent_with(
+    dir: &std::path::Path,
+    keys: &[PrivateKey],
+    refuse_signing: bool,
+) -> PathBuf {
     let socket = dir.join("agent.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let incoming = futures::stream::unfold(listener, |l| async move {
         let next = l.accept().await.map(|(s, _)| s);
         Some((next, l))
     });
-    tokio::spawn(russh::keys::agent::server::serve(Box::pin(incoming), ()));
+    if refuse_signing {
+        tokio::spawn(russh::keys::agent::server::serve(
+            Box::pin(incoming),
+            RefusingAgent,
+        ));
+    } else {
+        tokio::spawn(russh::keys::agent::server::serve(Box::pin(incoming), ()));
+    }
     let mut client = russh::keys::agent::client::AgentClient::connect_uds(&socket)
         .await
         .unwrap();
