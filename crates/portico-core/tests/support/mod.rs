@@ -61,6 +61,12 @@ pub struct Behaviour {
     pub connections: AtomicUsize,
     /// Counts publickey requests (probes included).
     pub pubkey_offers: AtomicUsize,
+    /// Accept PTY shells that echo input; the line `exit` ends with status 3.
+    pub pty_echo: bool,
+    /// Last `window-change` received (cols, rows).
+    pub last_resize: std::sync::Mutex<Option<(u32, u32)>>,
+    /// `TERM` sent with the PTY request.
+    pub term: std::sync::Mutex<Option<String>>,
 }
 
 pub struct TestServer {
@@ -97,6 +103,8 @@ impl TestServer {
                     b: Arc::clone(&b),
                     kbd_step: 0,
                     kbd_first_ok: false,
+                    channels: Vec::new(),
+                    line: Vec::new(),
                 };
                 let config = Arc::clone(&config);
                 tokio::spawn(async move {
@@ -126,6 +134,10 @@ struct ServerHandler {
     b: Arc<Behaviour>,
     kbd_step: u8,
     kbd_first_ok: bool,
+    /// Keeps accepted session channels alive.
+    channels: Vec<Channel<Msg>>,
+    /// Bytes received since the last newline (for the `exit` command).
+    line: Vec<u8>,
 }
 
 impl russh::server::Handler for ServerHandler {
@@ -212,6 +224,84 @@ impl russh::server::Handler for ServerHandler {
                 Ok(if ok { self.accept() } else { reject() })
             }
         }
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if self.b.pty_echo {
+            reply.accept().await;
+            self.channels.push(channel);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)] // russh trait signature
+    async fn pty_request(
+        &mut self,
+        channel: russh::ChannelId,
+        term: &str,
+        _cols: u32,
+        _rows: u32,
+        _pw: u32,
+        _ph: u32,
+        _modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        *self.b.term.lock().unwrap() = Some(term.to_owned());
+        session.channel_success(channel)
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: russh::ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        session.data(channel, bytes::Bytes::from_static(b"welcome\r\n"))
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _channel: russh::ChannelId,
+        cols: u32,
+        rows: u32,
+        _pw: u32,
+        _ph: u32,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        *self.b.last_resize.lock().unwrap() = Some((cols, rows));
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Only PTY session channels echo; direct-tcpip channels carry other
+        // traffic (a jump's inner SSH stream) that must pass through untouched.
+        if !self.channels.iter().any(|c| c.id() == channel) {
+            return Ok(());
+        }
+        session.data(channel, bytes::Bytes::copy_from_slice(data))?;
+        for &b in data {
+            if b == b'\r' || b == b'\n' {
+                if self.line == b"exit" {
+                    session.exit_status_request(channel, 3)?;
+                    session.eof(channel)?;
+                    session.close(channel)?;
+                }
+                self.line.clear();
+            } else {
+                self.line.push(b);
+            }
+        }
+        Ok(())
     }
 
     async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {

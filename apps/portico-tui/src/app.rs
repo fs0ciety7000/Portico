@@ -1,13 +1,16 @@
 //! Application state, update loop and event multiplexing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::term::TermMode;
 use color_eyre::Result;
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
-use portico_core::engine::{ConnectRequest, HostInventory, PromptResponse};
-use portico_core::events::{SessionEvent, SessionPhase};
+use portico_core::engine::{ConnectRequest, HostInventory};
+use portico_core::events::{SessionEvent, SessionPhase, TerminalEvent};
 use portico_core::ids::SessionId;
 use portico_core::search::{Hit, HostSearch};
 use portico_core::{Engine, EngineEvent};
@@ -17,20 +20,31 @@ use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
 
 use crate::action::Action;
+use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
 use crate::keymap::map_key;
+use crate::terminal::{Ended, GridSize, TerminalView, encode_key};
 use crate::theme::Styles;
 use crate::ui;
 
-/// Which widget receives text input.
+/// Which widget receives keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
     Hosts,
     Search,
+    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Overlay {
     Help,
+}
+
+/// Transient notification shown bottom-right, fades after `ttl` ticks.
+#[derive(Debug, Clone)]
+pub(crate) struct Toast {
+    pub(crate) message: String,
+    pub(crate) is_error: bool,
+    pub(crate) ttl: u16,
 }
 
 /// Live state of one SSH session, derived from engine events.
@@ -48,14 +62,10 @@ impl SessionView {
             SessionPhase::Connected | SessionPhase::Failed { .. } | SessionPhase::Closed { .. }
         )
     }
-}
 
-/// Transient notification shown bottom-right, fades after `ttl` ticks.
-#[derive(Debug, Clone)]
-pub(crate) struct Toast {
-    pub(crate) message: String,
-    pub(crate) is_error: bool,
-    pub(crate) ttl: u16,
+    fn usable(&self) -> bool {
+        self.in_flight() || self.phase == SessionPhase::Connected
+    }
 }
 
 #[derive(Debug)]
@@ -73,8 +83,16 @@ pub(crate) struct App {
     pub(crate) toast: Option<Toast>,
     /// Latest session per host alias.
     pub(crate) sessions: HashMap<String, SessionView>,
-    /// Sessions whose prompt was declined (no dialog yet: phase 1b).
-    declined: HashSet<SessionId>,
+    /// Terminal tabs, in display order.
+    pub(crate) terminals: Vec<TerminalView>,
+    /// `None` = Home (host list), `Some(i)` = `terminals[i]`.
+    pub(crate) active: Option<usize>,
+    /// `Ctrl-Space` was pressed: the next key is a Portico command.
+    pub(crate) prefix: bool,
+    /// Pending dialogs; the front one is shown and receives keys.
+    pub(crate) dialogs: VecDeque<Dialog>,
+    /// Size of the terminal area, updated on every render.
+    pub(crate) term_size: GridSize,
     /// Monotonic frame counter for spinners.
     pub(crate) tick: u64,
     search: HostSearch,
@@ -84,10 +102,13 @@ pub(crate) struct App {
 
 /// Animation frame interval. Only drives spinners/toasts; idle UI does not redraw.
 const TICK: Duration = Duration::from_millis(80);
+/// Header + status bar.
+const CHROME_ROWS: u16 = 2;
 
 impl App {
     pub(crate) fn new(engine: Engine) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         Self {
             engine,
             running: true,
@@ -101,7 +122,14 @@ impl App {
             list: ListState::default(),
             toast: None,
             sessions: HashMap::new(),
-            declined: HashSet::new(),
+            terminals: Vec::new(),
+            active: None,
+            prefix: false,
+            dialogs: VecDeque::new(),
+            term_size: GridSize {
+                cols,
+                rows: rows.saturating_sub(CHROME_ROWS).max(1),
+            },
             tick: 0,
             search: HostSearch::default(),
             tx,
@@ -121,6 +149,10 @@ impl App {
         self.inventory.is_none() && self.load_error.is_none()
     }
 
+    pub(crate) fn active_terminal(&self) -> Option<&TerminalView> {
+        self.active.and_then(|i| self.terminals.get(i))
+    }
+
     /// Main loop: multiplexes terminal input, internal actions and ticks.
     pub(crate) async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         let mut input = EventStream::new();
@@ -131,28 +163,48 @@ impl App {
         terminal.draw(|f| ui::render(&mut self, f))?;
         while self.running {
             let action = tokio::select! {
-                Some(Ok(event)) = input.next() => match event {
-                    Event::Key(key) => map_key(key, self.focus, self.overlay.is_some()),
-                    Event::Resize(..) => Some(Action::Tick),
-                    _ => None,
-                },
+                Some(Ok(event)) = input.next() => self.map_event(event),
                 Some(action) = self.rx.recv() => Some(action),
                 event = engine_events.recv() => event.ok().map(Action::Engine),
                 _ = ticker.tick(), if self.needs_animation() => Some(Action::Tick),
             };
             if let Some(action) = action {
                 self.update(action);
+                // Drain what is already queued before drawing (one frame per burst).
+                while let Ok(action) = self.rx.try_recv() {
+                    self.update(action);
+                }
                 terminal.draw(|f| ui::render(&mut self, f))?;
+                self.sync_terminal_sizes();
             }
+        }
+        for view in &mut self.terminals {
+            view.close();
         }
         self.engine.shutdown();
         Ok(())
+    }
+
+    fn map_event(&self, event: Event) -> Option<Action> {
+        match event {
+            Event::Key(key) => map_key(
+                key,
+                self.focus,
+                self.overlay.is_some(),
+                !self.dialogs.is_empty(),
+                self.prefix,
+            ),
+            Event::Paste(text) => Some(Action::Paste(text)),
+            Event::Resize(..) => Some(Action::Tick),
+            _ => None,
+        }
     }
 
     fn needs_animation(&self) -> bool {
         self.is_loading()
             || self.toast.is_some()
             || self.sessions.values().any(SessionView::in_flight)
+            || (self.focus == Focus::Search)
     }
 
     fn spawn_load_hosts(&self) {
@@ -164,6 +216,7 @@ impl App {
         });
     }
 
+    #[allow(clippy::too_many_lines)] // flat dispatch table, one arm per action
     pub(crate) fn update(&mut self, action: Action) {
         match action {
             Action::Quit => self.running = false,
@@ -183,7 +236,10 @@ impl App {
                     .select(if self.hits.is_empty() { None } else { Some(0) });
             }
             Action::SelectLast => self.list.select(self.hits.len().checked_sub(1)),
-            Action::FocusSearch => self.focus = Focus::Search,
+            Action::FocusSearch => {
+                self.go_home();
+                self.focus = Focus::Search;
+            }
             Action::BlurSearch => self.focus = Focus::Hosts,
             Action::SearchInput(c) => {
                 self.query.push(c);
@@ -198,6 +254,7 @@ impl App {
                 self.refilter();
             }
             Action::ToggleHelp => {
+                self.prefix = false;
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     None => Some(Overlay::Help),
@@ -224,8 +281,58 @@ impl App {
             }
             Action::HostsLoaded(Err(e)) => self.load_error = Some(e),
             Action::Connect => self.connect_selected(),
-            Action::Disconnect => self.disconnect_selected(),
+            Action::Disconnect => self.disconnect_current(),
             Action::Engine(event) => self.on_engine_event(event),
+            Action::DialogKey(key) => self.dialog_key(key),
+            Action::Prefix => self.prefix = true,
+            Action::CancelPrefix => self.prefix = false,
+            Action::GoHome => {
+                self.prefix = false;
+                self.go_home();
+            }
+            Action::GoTab(index) => {
+                self.prefix = false;
+                self.activate(index);
+            }
+            Action::NextTab => self.cycle_tab(1),
+            Action::PrevTab => self.cycle_tab(-1),
+            Action::NewTab => {
+                self.prefix = false;
+                if let Some(view) = self.active_terminal() {
+                    let (alias, session) = (view.alias.clone(), view.session);
+                    self.open_terminal(alias, session);
+                }
+            }
+            Action::CloseTab => {
+                self.prefix = false;
+                self.close_active_tab();
+            }
+            Action::TerminalKey(key) => self.terminal_key(key),
+            Action::Paste(text) => match (self.focus, self.active_terminal()) {
+                (Focus::Terminal, Some(view)) => view.paste(&text),
+                (Focus::Search, _) => {
+                    self.query.push_str(text.lines().next().unwrap_or_default());
+                    self.refilter();
+                }
+                _ => {}
+            },
+            Action::ScrollUp => self.scroll(Scroll::PageUp),
+            Action::ScrollDown => self.scroll(Scroll::PageDown),
+            Action::TerminalDirty(id) => {
+                if let Some(view) = self.terminals.iter().find(|t| t.id == id) {
+                    view.dirty.store(false, Ordering::Release);
+                }
+            }
+            Action::TerminalOpened { alias, result } => match result {
+                Ok(handle) => {
+                    let view = TerminalView::spawn(*handle, alias, self.term_size, self.tx.clone());
+                    self.terminals.push(view);
+                    self.activate(self.terminals.len() - 1);
+                }
+                // The session's own failure is already reported.
+                Err(error) if error.code == "session_ended" => {}
+                Err(error) => self.notify(error.message, true),
+            },
         }
     }
 
@@ -238,38 +345,155 @@ impl App {
         self.sessions.get(alias)
     }
 
+    pub(crate) fn session_by_id(&self, id: SessionId) -> Option<&SessionView> {
+        self.sessions.values().find(|s| s.id == id)
+    }
+
+    // ── tabs ───────────────────────────────────────────────────────────────
+
+    fn go_home(&mut self) {
+        self.active = None;
+        if self.focus == Focus::Terminal {
+            self.focus = Focus::Hosts;
+        }
+    }
+
+    fn activate(&mut self, index: usize) {
+        if index < self.terminals.len() {
+            self.active = Some(index);
+            self.focus = Focus::Terminal;
+        }
+    }
+
+    fn cycle_tab(&mut self, delta: isize) {
+        self.prefix = false;
+        // Positions: 0 = Home, 1..=n = terminals.
+        let n = self.terminals.len() + 1;
+        let current = self.active.map_or(0, |i| i + 1);
+        let next = (current + n).saturating_add_signed(delta) % n;
+        if next == 0 {
+            self.go_home();
+        } else {
+            self.activate(next - 1);
+        }
+    }
+
+    fn close_active_tab(&mut self) {
+        let Some(index) = self.active else { return };
+        if index >= self.terminals.len() {
+            return;
+        }
+        let mut view = self.terminals.remove(index);
+        view.close();
+        // Closing the last tab of a session disconnects it.
+        if !self.terminals.iter().any(|t| t.session == view.session) {
+            let engine = self.engine.clone();
+            tokio::spawn(async move {
+                let _ = engine.disconnect(view.session).await;
+            });
+        }
+        if self.terminals.is_empty() {
+            self.go_home();
+        } else {
+            self.activate(index.min(self.terminals.len() - 1));
+        }
+    }
+
+    fn scroll(&mut self, scroll: Scroll) {
+        if let Some(view) = self.active_terminal() {
+            view.scroll(scroll);
+        }
+    }
+
+    fn terminal_key(&mut self, key: KeyEvent) {
+        self.prefix = false;
+        let Some(view) = self.active_terminal() else {
+            return;
+        };
+        if view.closed || view.ended.is_some() {
+            return;
+        }
+        let app_cursor = view.mode().contains(TermMode::APP_CURSOR);
+        if let Some(bytes) = encode_key(key, app_cursor) {
+            view.send(bytes);
+        }
+    }
+
+    /// Keeps PTY sizes in sync with the drawn terminal area.
+    fn sync_terminal_sizes(&mut self) {
+        let size = self.term_size;
+        for view in &mut self.terminals {
+            view.resize(size);
+        }
+    }
+
+    // ── sessions ───────────────────────────────────────────────────────────
+
     fn connect_selected(&mut self) {
         let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
             return;
         };
-        if self
-            .session_for(&alias)
-            .is_some_and(|s| s.in_flight() || s.phase == SessionPhase::Connected)
+        // Existing live tab for this host: just switch to it.
+        if let Some(index) = self
+            .terminals
+            .iter()
+            .position(|t| t.alias == alias && !t.closed && t.ended.is_none())
         {
+            self.activate(index);
             return;
         }
-        match self.engine.connect(ConnectRequest::new(alias.clone())) {
-            Ok(id) => {
-                self.sessions.insert(
-                    alias,
-                    SessionView {
-                        id,
-                        phase: SessionPhase::Resolving,
-                        latency: None,
-                    },
-                );
-            }
-            Err(e) => self.notify(e.summary().message, true),
-        }
+        let session = match self
+            .session_for(&alias)
+            .filter(|s| s.usable())
+            .map(|s| s.id)
+        {
+            Some(id) => id,
+            None => match self.engine.connect(ConnectRequest::new(alias.clone())) {
+                Ok(id) => {
+                    self.sessions.insert(
+                        alias.clone(),
+                        SessionView {
+                            id,
+                            phase: SessionPhase::Resolving,
+                            latency: None,
+                        },
+                    );
+                    id
+                }
+                Err(e) => {
+                    self.notify(e.summary().message, true);
+                    return;
+                }
+            },
+        };
+        self.open_terminal(alias, session);
     }
 
-    fn disconnect_selected(&mut self) {
-        let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
-            return;
+    /// Requests a shell; served once the session is connected.
+    fn open_terminal(&self, alias: String, session: SessionId) {
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        let size = self.term_size.pty();
+        tokio::spawn(async move {
+            let result = engine
+                .open_terminal(session, size)
+                .await
+                .map(Box::new)
+                .map_err(|e| e.summary());
+            let _ = tx.send(Action::TerminalOpened { alias, result });
+        });
+    }
+
+    fn disconnect_current(&mut self) {
+        self.prefix = false;
+        let id = match (self.focus, self.active_terminal()) {
+            (Focus::Terminal, Some(view)) => Some(view.session),
+            _ => self
+                .selected_host()
+                .and_then(|h| self.session_for(&h.alias))
+                .map(|s| s.id),
         };
-        let Some(id) = self.session_for(&alias).map(|s| s.id) else {
-            return;
-        };
+        let Some(id) = id else { return };
         let engine = self.engine.clone();
         tokio::spawn(async move {
             let _ = engine.disconnect(id).await;
@@ -278,47 +502,113 @@ impl App {
 
     fn on_engine_event(&mut self, event: EngineEvent) {
         match event {
-            EngineEvent::Session { id, event } => {
-                let Some((alias, view)) = self.sessions.iter_mut().find(|(_, v)| v.id == id) else {
-                    return;
-                };
-                let alias = alias.clone();
-                match event {
-                    SessionEvent::Phase(phase) => {
-                        view.phase = phase.clone();
-                        match phase {
-                            SessionPhase::Connected => {
-                                self.notify(format!("Connected to {alias}"), false);
-                            }
-                            SessionPhase::Failed { error } => {
-                                let msg = if self.declined.remove(&id) {
-                                    format!(
-                                        "{alias}: needs an answer (host key or password) — prompt dialogs arrive in the next phase"
-                                    )
-                                } else {
-                                    match error.hint {
-                                        Some(hint) => format!("{} — {hint}", error.message),
-                                        None => error.message,
-                                    }
-                                };
-                                self.notify(msg, true);
-                            }
-                            _ => {}
+            EngineEvent::Session { id, event } => self.on_session_event(id, event),
+            EngineEvent::Terminal { id, event, .. } => {
+                if let Some(view) = self.terminals.iter_mut().find(|t| t.id == id) {
+                    match event {
+                        TerminalEvent::Exited { status } => {
+                            view.ended = Some(status.map_or(Ended::Closed, Ended::Exited));
                         }
+                        TerminalEvent::Closed => {
+                            view.closed = true;
+                            view.ended.get_or_insert(Ended::Closed);
+                        }
+                        _ => {}
                     }
-                    SessionEvent::Latency { rtt } => view.latency = Some(rtt),
-                    _ => {}
                 }
             }
             EngineEvent::Prompt(prompt) => {
-                // Interactive prompt dialogs land in phase 1b; decline cleanly
-                // so the session reports a precise failure instead of hanging.
-                let _ = self.engine.respond(prompt.id, PromptResponse::Cancel);
-                if let Some(id) = prompt.session {
-                    self.declined.insert(id);
-                }
+                let alias = prompt
+                    .session
+                    .and_then(|id| self.sessions.iter().find(|(_, v)| v.id == id))
+                    .map(|(a, _)| a.clone());
+                self.dialogs
+                    .push_back(Dialog::Prompt(PromptDialog::new(prompt, alias)));
+            }
+            EngineEvent::PromptResolved { id } => {
+                self.dialogs
+                    .retain(|d| !matches!(d, Dialog::Prompt(p) if p.id == id));
             }
             _ => {}
+        }
+    }
+
+    fn on_session_event(&mut self, id: SessionId, event: SessionEvent) {
+        let Some(view) = self.sessions.values_mut().find(|v| v.id == id) else {
+            return;
+        };
+        match event {
+            SessionEvent::Phase(phase) => {
+                view.phase = phase.clone();
+                match phase {
+                    // The blocking alert already explains a changed key.
+                    SessionPhase::Failed { error } if error.code == "host_key_changed" => {
+                        self.end_terminals(id);
+                    }
+                    SessionPhase::Failed { error } => {
+                        let msg = match error.hint {
+                            Some(hint) => format!("{} — {hint}", error.message),
+                            None => error.message,
+                        };
+                        self.notify(msg, true);
+                        self.end_terminals(id);
+                    }
+                    SessionPhase::Closed { .. } => self.end_terminals(id),
+                    _ => {}
+                }
+            }
+            SessionEvent::Latency { rtt } => view.latency = Some(rtt),
+            SessionEvent::HostKeyChanged {
+                host,
+                port,
+                algorithm,
+                fingerprint,
+                expected_fingerprint,
+                known_hosts_file,
+                known_hosts_line,
+            } => {
+                self.dialogs.push_back(Dialog::ChangedKey(ChangedKeyAlert {
+                    host,
+                    port,
+                    algorithm,
+                    fingerprint,
+                    expected: expected_fingerprint,
+                    file: known_hosts_file,
+                    line: known_hosts_line,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    fn end_terminals(&mut self, session: SessionId) {
+        for view in self.terminals.iter_mut().filter(|t| t.session == session) {
+            view.closed = true;
+            view.ended.get_or_insert(Ended::Closed);
+        }
+    }
+
+    fn dialog_key(&mut self, key: KeyEvent) {
+        let Some(front) = self.dialogs.front_mut() else {
+            return;
+        };
+        match front {
+            Dialog::ChangedKey(_) => {
+                if matches!(
+                    key.code,
+                    crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Enter
+                ) {
+                    self.dialogs.pop_front();
+                }
+            }
+            Dialog::Prompt(prompt) => {
+                if let Outcome::Answer(response) = prompt.handle_key(key) {
+                    let id = prompt.id;
+                    self.dialogs.pop_front();
+                    // Already resolved elsewhere (cancelled session): nothing to do.
+                    let _ = self.engine.respond(id, response);
+                }
+            }
         }
     }
 

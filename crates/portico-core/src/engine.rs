@@ -271,6 +271,29 @@ impl Engine {
         Ok(())
     }
 
+    /// Opens an interactive shell in a PTY on `session`. If the session is
+    /// still connecting, the request is served as soon as it is connected;
+    /// it fails if the session fails or closes first.
+    pub async fn open_terminal(&self, session: SessionId, size: PtySize) -> Result<TerminalHandle> {
+        let tx = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            sessions
+                .get(&session)
+                .ok_or(Error::UnknownSession(session))?
+                .commands
+                .clone()
+        };
+        let (reply, answer) = oneshot::channel();
+        tx.send(SessionCommand::OpenTerminal { size, reply })
+            .await
+            .map_err(|_| Error::SessionEnded(session))?;
+        answer.await.map_err(|_| Error::SessionEnded(session))?
+    }
+
     /// Log lines recorded for a session (debug panel).
     pub fn session_logs(&self, id: SessionId) -> Result<Vec<LogRecord>> {
         let sessions = self

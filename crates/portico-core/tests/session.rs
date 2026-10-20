@@ -749,3 +749,152 @@ async fn preferred_authentications_password_skips_keys() {
         0
     );
 }
+
+// ── phase 1b: PTY ──────────────────────────────────────────────────────────
+
+async fn next_output(handle: &mut portico_core::engine::TerminalHandle, needle: &[u8]) -> Vec<u8> {
+    let mut seen = Vec::new();
+    while !seen.windows(needle.len()).any(|w| w == needle) {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), handle.output.recv())
+            .await
+            .expect("terminal output in time")
+            .expect("terminal still open");
+        seen.extend_from_slice(&chunk);
+    }
+    seen
+}
+
+#[tokio::test]
+async fn terminal_echo_resize_exit() {
+    use portico_core::engine::{PtySize, TerminalInput};
+    use portico_core::events::TerminalEvent;
+
+    let key = new_key();
+    let server = TestServer::start(Behaviour {
+        pty_echo: true,
+        ..key_server(&key)
+    })
+    .await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    env.trust(&server);
+    let (id, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+
+    let size = PtySize {
+        cols: 100,
+        rows: 30,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let mut term = env.engine.open_terminal(id, size).await.unwrap();
+    assert_eq!(
+        server.behaviour.term.lock().unwrap().as_deref(),
+        Some("xterm-256color")
+    );
+    next_output(&mut term, b"welcome").await;
+
+    term.input
+        .send(TerminalInput::Data(bytes::Bytes::from_static(b"hello")))
+        .await
+        .unwrap();
+    next_output(&mut term, b"hello").await;
+
+    term.input
+        .send(TerminalInput::Resize(PtySize {
+            cols: 120,
+            rows: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        }))
+        .await
+        .unwrap();
+    term.input
+        .send(TerminalInput::Data(bytes::Bytes::from_static(b"\rexit\r")))
+        .await
+        .unwrap();
+
+    let mut exited = None;
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), env.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            EngineEvent::Terminal {
+                event: TerminalEvent::Exited { status },
+                ..
+            } => exited = Some(status),
+            EngineEvent::Terminal {
+                event: TerminalEvent::Closed,
+                ..
+            } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(exited, Some(Some(3)));
+    assert_eq!(
+        *server.behaviour.last_resize.lock().unwrap(),
+        Some((120, 40))
+    );
+}
+
+#[tokio::test]
+async fn terminal_requested_while_connecting_is_served_once_connected() {
+    use portico_core::engine::PtySize;
+    let key = new_key();
+    let server = TestServer::start(Behaviour {
+        pty_echo: true,
+        ..key_server(&key)
+    })
+    .await;
+    let env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    env.trust(&server);
+    let id = env
+        .engine
+        .connect(portico_core::engine::ConnectRequest::new("t"))
+        .unwrap();
+    let size = PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let mut term = env.engine.open_terminal(id, size).await.unwrap();
+    next_output(&mut term, b"welcome").await;
+}
+
+#[tokio::test]
+async fn terminal_on_a_server_refusing_shells_reports_it() {
+    use portico_core::engine::PtySize;
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await; // no pty_echo: channel rejected
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    env.trust(&server);
+    let (id, _) = env.connect("t", never).await;
+    let size = PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let err = env.engine.open_terminal(id, size).await.unwrap_err();
+    assert!(
+        matches!(err.summary().code.as_str(), "ssh" | "terminal_refused"),
+        "{err}"
+    );
+}

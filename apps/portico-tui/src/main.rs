@@ -7,7 +7,9 @@
 
 mod action;
 mod app;
+mod dialog;
 mod keymap;
+mod terminal;
 mod theme;
 mod ui;
 
@@ -21,7 +23,10 @@ async fn main() -> Result<()> {
 
     let engine = Engine::new(EngineConfig::discover()?);
     let terminal = ratatui::init();
+    // Pastes arrive as one event (and can be bracketed for the remote shell).
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     let result = app::App::new(engine).run(terminal).await;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     result
 }

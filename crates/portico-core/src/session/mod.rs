@@ -16,6 +16,7 @@ mod handler;
 mod route;
 mod signer;
 mod stream;
+mod terminal;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +44,8 @@ use stream::WatchedStream;
 const FIRST_PROBE_DELAY: Duration = Duration::from_millis(500);
 /// Network time allowed for authentication (time spent in prompts excluded).
 const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Opening a PTY + shell (channel open, pty-req, shell).
+const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long `close` waits for each hop's DISCONNECT to go out.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
@@ -50,6 +53,10 @@ const CLOSE_GRACE: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub(crate) enum SessionCommand {
     Disconnect,
+    OpenTerminal {
+        size: crate::engine::PtySize,
+        reply: tokio::sync::oneshot::Sender<Result<crate::engine::TerminalHandle>>,
+    },
 }
 
 /// Everything a session task needs to report progress and ask questions.
@@ -445,6 +452,23 @@ impl Connection {
                 }
                 cmd = commands.recv() => match cmd {
                     Some(SessionCommand::Disconnect) | None => return CloseReason::UserRequested,
+                    Some(SessionCommand::OpenTerminal { size, reply }) => {
+                        let opened = tokio::time::timeout(
+                            TERMINAL_OPEN_TIMEOUT,
+                            terminal::open(ctx, &target.handle, size),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(Error::Timeout {
+                                phase: "opening a terminal on",
+                                target: ctx.engine.session_alias(ctx.id).unwrap_or_default(),
+                            })
+                        });
+                        if let Err(e) = &opened {
+                            ctx.log(LogLevel::Error, "pty", e.to_string());
+                        }
+                        let _ = reply.send(opened);
+                    }
                 },
                 Some(rtt) = futures::future::OptionFuture::from(probe.as_mut()) => {
                     probe = None;

@@ -88,6 +88,12 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
+    #[error("session {0} ended before the request could be served")]
+    SessionEnded(SessionId),
+
+    #[error("the server refused to open a {what}")]
+    TerminalRefused { what: &'static str },
+
     #[error("{host} closed the connection during authentication")]
     AuthDisconnected { host: String },
 
@@ -213,6 +219,11 @@ impl Error {
             Self::ProxyJumpTooDeep { .. } => ("proxy_jump_too_deep", None),
             Self::Transport { .. } => ("ssh", Some("See the session log for protocol details.")),
             Self::Cancelled => ("cancelled", None),
+            Self::SessionEnded(_) => ("session_ended", None),
+            Self::TerminalRefused { .. } => (
+                "terminal_refused",
+                Some("The account may have no shell, or the server forbids PTYs (PermitTTY no)."),
+            ),
             Self::AuthDisconnected { .. } => (
                 "auth_disconnected",
                 Some(

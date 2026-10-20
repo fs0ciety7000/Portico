@@ -23,6 +23,9 @@ alacritty_terminal.workspace = true
 color-eyre.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+bytes.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

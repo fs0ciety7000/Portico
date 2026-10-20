@@ -27,19 +27,24 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 fn render_help(app: &App, frame: &mut Frame<'_>) {
     let s = app.styles();
-    let height = u16::try_from(HELP.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(4);
-    let area = centered(frame.area(), 68, height);
-    let lines: Vec<Line<'_>> = HELP
-        .iter()
-        .map(|(k, d)| {
-            Line::from(vec![
-                Span::styled(format!("{k:<16}"), s.accent()),
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    for (i, (section, rows)) in HELP.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(*section, s.title())));
+        for (k, d) in *rows {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {k:<18}"), s.accent()),
                 Span::styled(*d, s.secondary()),
-            ])
-        })
-        .collect();
+            ]));
+        }
+    }
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4)
+        .min(frame.area().height);
+    let area = centered(frame.area(), 70, height);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(

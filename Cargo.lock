@@ -4193,15 +4193,18 @@ name = "portico-tui"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "bytes",
  "color-eyre",
  "crossterm",
  "futures",
  "portico-core",
  "portico-theme",
  "ratatui",
+ "secrecy",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

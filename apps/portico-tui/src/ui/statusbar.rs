@@ -13,6 +13,25 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
     let p = s.theme.palette;
     let (mode, hints): (&str, &[(&str, &str)]) = match app.focus {
+        _ if !app.dialogs.is_empty() => (" DIALOG ", &[("esc", "cancel / close")]),
+        Focus::Terminal if app.prefix => (
+            " PREFIX ",
+            &[
+                ("h", "hosts"),
+                ("1-9", "tab"),
+                ("n", "new"),
+                ("w", "close"),
+                ("d", "disconnect"),
+                ("?", "help"),
+            ],
+        ),
+        Focus::Terminal => (
+            " TERMINAL ",
+            &[
+                ("ctrl-space", "portico commands"),
+                ("shift-pgup", "scroll back"),
+            ],
+        ),
         Focus::Hosts => (
             " HOSTS ",
             &[

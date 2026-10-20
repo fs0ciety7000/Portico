@@ -168,9 +168,32 @@ async fn openssh_interop() {
     ));
     keygen(&env.ssh("id_ed25519"), "ed25519", "");
     sshd.authorize(&env.ssh("id_ed25519.pub"));
-    let (_, out) = env.connect("t", accept_host).await;
+    let (id, out) = env.connect("t", accept_host).await;
     assert_connected(&out, &sshd);
     assert_eq!(out.prompts.len(), 1);
+
+    // 1b. Real PTY + login shell: arithmetic proves a shell evaluated it.
+    let size = portico_core::engine::PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let mut term = env.engine.open_terminal(id, size).await.unwrap();
+    term.input
+        .send(portico_core::engine::TerminalInput::Data(
+            bytes::Bytes::from_static(b"echo portico-$((40+2))\r"),
+        ))
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    while !String::from_utf8_lossy(&seen).contains("portico-42") {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), term.output.recv())
+            .await
+            .expect("shell output in time")
+            .expect("terminal open");
+        seen.extend_from_slice(&chunk);
+    }
 
     // 2. RSA key: rsa-sha2-* negotiated through server-sig-algs.
     let mut env = Env::new(&host("t", port, &user, "  IdentityFile ~/.ssh/id_rsa\n"));
