@@ -30,11 +30,14 @@ use tokio_util::task::TaskTracker;
 
 use crate::error::{Error, Result};
 use crate::events::{EngineEvent, Prompt, PromptKind};
+use crate::forward::{ForwardSpec, TunnelInfo};
 use crate::hosts::{HostEntry, HostMetaFile, inventory};
-use crate::ids::{PromptId, SessionId, TerminalId};
+use crate::ids::{PromptId, SessionId, TerminalId, TransferId, TunnelId};
+use crate::logs::LogLevel;
 use crate::logs::{LogRecord, LogRing};
 use crate::secrets::{KeyringStore, SecretStore};
-use crate::session::{self, SessionCommand, SessionCtx};
+use crate::session::{self, Attached, SessionCommand, SessionCtx};
+use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
 use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
 use crate::store::{Paths, load_toml};
 
@@ -225,6 +228,12 @@ pub struct Engine {
 #[derive(Debug)]
 struct Inner {
     config: EngineConfig,
+    /// One SFTP client per session, opened on first use.
+    sftp: Mutex<HashMap<SessionId, Arc<tokio::sync::OnceCell<Arc<SftpClient>>>>>,
+    /// Running transfers (cancel tokens).
+    transfers: Mutex<HashMap<TransferId, CancellationToken>>,
+    /// Running tunnels.
+    tunnels: Mutex<HashMap<TunnelId, (TunnelInfo, CancellationToken)>>,
     events: broadcast::Sender<EngineEvent>,
     prompts: Mutex<HashMap<PromptId, oneshot::Sender<PromptResponse>>>,
     sessions: Mutex<HashMap<SessionId, SessionEntry>>,
@@ -249,6 +258,9 @@ impl Engine {
         Self {
             inner: Arc::new(Inner {
                 config,
+                sftp: Mutex::default(),
+                transfers: Mutex::default(),
+                tunnels: Mutex::default(),
                 events,
                 prompts: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
@@ -367,6 +379,222 @@ impl Engine {
             .await
             .map_err(|_| Error::SessionEnded(session))?;
         answer.await.map_err(|_| Error::SessionEnded(session))?
+    }
+
+    /// The connected transport of `session` (waits while it connects).
+    async fn attach(&self, session: SessionId) -> Result<Attached> {
+        let tx = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            sessions
+                .get(&session)
+                .ok_or(Error::UnknownSession(session))?
+                .commands
+                .clone()
+        };
+        let (reply, answer) = oneshot::channel();
+        tx.send(SessionCommand::Attach { reply })
+            .await
+            .map_err(|_| Error::SessionEnded(session))?;
+        answer.await.map_err(|_| Error::SessionEnded(session))
+    }
+
+    // ── SFTP ────────────────────────────────────────────────────────────
+
+    /// The session's SFTP client, opened on first use and reopened if the
+    /// previous one died.
+    async fn sftp(&self, session: SessionId) -> Result<(Arc<SftpClient>, Attached)> {
+        let attached = self.attach(session).await?;
+        loop {
+            let cell = Arc::clone(
+                self.inner
+                    .sftp
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .entry(session)
+                    .or_default(),
+            );
+            let client = cell
+                .get_or_try_init(|| async { crate::sftp::open(&attached).await.map(Arc::new) })
+                .await?;
+            if !client.cancel.is_cancelled() {
+                return Ok((Arc::clone(client), attached));
+            }
+            // Dead client: forget it and open a new one.
+            let mut map = self
+                .inner
+                .sftp
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if map.get(&session).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                map.remove(&session);
+            }
+        }
+    }
+
+    /// Runs an SFTP operation; a protocol-level failure retires the client.
+    async fn with_sftp<T, F, Fut>(&self, session: SessionId, op: F) -> Result<T>
+    where
+        F: FnOnce(Arc<SftpClient>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let (client, _) = self.sftp(session).await?;
+        let result = op(Arc::clone(&client)).await;
+        if let Err(Error::Sftp(crate::sftp::SftpError::Remote {
+            failure: crate::sftp::RemoteFailure::Other,
+            ..
+        })) = &result
+        {
+            // Could be a dead channel: reopen on next use (cheap).
+            client.cancel.cancel();
+        }
+        result
+    }
+
+    /// The remote home directory (where browsing starts).
+    pub async fn sftp_home(&self, session: SessionId) -> Result<String> {
+        self.with_sftp(session, |c| async move { c.home().await })
+            .await
+    }
+
+    /// Lists a remote directory: directories first, then by name.
+    pub async fn sftp_list(&self, session: SessionId, path: &str) -> Result<Vec<RemoteEntry>> {
+        let path = path.to_owned();
+        self.with_sftp(session, |c| async move { c.list(&path).await })
+            .await
+    }
+
+    pub async fn sftp_stat(&self, session: SessionId, path: &str) -> Result<RemoteEntry> {
+        let path = path.to_owned();
+        self.with_sftp(session, |c| async move { c.stat(&path).await })
+            .await
+    }
+
+    pub async fn sftp_mkdir(&self, session: SessionId, path: &str) -> Result<()> {
+        let path = path.to_owned();
+        self.with_sftp(session, |c| async move { c.mkdir(&path).await })
+            .await
+    }
+
+    /// Renames or moves; refuses to replace an existing destination.
+    pub async fn sftp_rename(&self, session: SessionId, from: &str, to: &str) -> Result<()> {
+        let (from, to) = (from.to_owned(), to.to_owned());
+        self.with_sftp(session, |c| async move { c.rename(&from, &to).await })
+            .await
+    }
+
+    /// Removes a file, a symlink or an empty directory.
+    pub async fn sftp_remove(&self, session: SessionId, path: &str) -> Result<()> {
+        let path = path.to_owned();
+        self.with_sftp(session, |c| async move { c.remove(&path).await })
+            .await
+    }
+
+    /// Starts a transfer; progress and outcome arrive as
+    /// [`EngineEvent::Sftp`] events carrying the returned id.
+    pub async fn transfer(
+        &self,
+        session: SessionId,
+        request: TransferRequest,
+    ) -> Result<TransferId> {
+        let (client, attached) = self.sftp(session).await?;
+        let id = TransferId::next();
+        let cancel = client.cancel.child_token();
+        self.inner
+            .transfers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, cancel.clone());
+        let engine = self.clone();
+        tokio::spawn(async move {
+            client.transfer(attached, id, request, cancel).await;
+            engine
+                .inner
+                .transfers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+        });
+        Ok(id)
+    }
+
+    /// Cancels a transfer; its partial file is removed.
+    pub fn cancel_transfer(&self, id: TransferId) -> Result<()> {
+        self.inner
+            .transfers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .ok_or(crate::sftp::SftpError::UnknownTransfer(id))?
+            .cancel();
+        Ok(())
+    }
+
+    // ── Tunnels ─────────────────────────────────────────────────────────
+
+    /// Starts a `-L` / `-R` tunnel on `session` (waits while it connects).
+    /// `Listening` or `Failed` follows on the event bus.
+    pub async fn start_tunnel(&self, session: SessionId, spec: ForwardSpec) -> Result<TunnelId> {
+        let attached = self.attach(session).await?;
+        let id = TunnelId::next();
+        let cancel = attached.ctx.cancel.child_token();
+        self.inner
+            .tunnels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id,
+                (
+                    TunnelInfo {
+                        id,
+                        session,
+                        spec: spec.clone(),
+                    },
+                    cancel.clone(),
+                ),
+            );
+        attached
+            .ctx
+            .log(LogLevel::Info, "tunnel", format!("starting {spec}"));
+        tokio::spawn(crate::forward::run(attached, id, spec, cancel));
+        Ok(id)
+    }
+
+    pub fn stop_tunnel(&self, id: TunnelId) -> Result<()> {
+        self.inner
+            .tunnels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .ok_or(crate::forward::TunnelError::UnknownTunnel(id))?
+            .1
+            .cancel();
+        Ok(())
+    }
+
+    /// Running tunnels (all sessions).
+    pub fn tunnels(&self) -> Vec<TunnelInfo> {
+        let mut list: Vec<TunnelInfo> = self
+            .inner
+            .tunnels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|(info, _)| info.clone())
+            .collect();
+        list.sort_by_key(|t| t.id);
+        list
+    }
+
+    pub(crate) fn forget_tunnel(&self, id: TunnelId) {
+        self.inner
+            .tunnels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
     }
 
     /// Log lines recorded for a session (debug panel).

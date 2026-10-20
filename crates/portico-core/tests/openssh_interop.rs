@@ -13,9 +13,14 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use portico_core::engine::PromptResponse;
-use portico_core::events::{AuthMethod, PromptKind, SessionPhase};
+use portico_core::events::{
+    AuthMethod, EngineEvent, PromptKind, SessionPhase, SftpEvent, TunnelEvent,
+};
+use portico_core::forward::{Endpoint, ForwardSpec};
+use portico_core::sftp::{Direction, OnConflict, TransferRequest};
 use secrecy::SecretString;
 use support::{Env, accept_host, never};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn run(cmd: &mut Command) {
     let out = cmd.output().unwrap();
@@ -99,7 +104,7 @@ impl Sshd {
              HostCertificate {d}/host_ed25519-cert.pub\nPidFile {d}/sshd.pid\n\
              AuthorizedKeysFile {d}/authorized_keys\nTrustedUserCAKeys {d}/user_ca.pub\n\
              StrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
-             PermitRootLogin yes\nAllowTcpForwarding yes\nLogLevel DEBUG\n",
+             PermitRootLogin yes\nAllowTcpForwarding yes\nSubsystem sftp internal-sftp\nLogLevel DEBUG\n",
             d = d.display()
         );
         std::fs::write(d.join("sshd_config"), config).unwrap();
@@ -315,4 +320,134 @@ async fn openssh_interop() {
     assert!(out.phases.contains(&SessionPhase::Authenticating {
         method: AuthMethod::Agent
     }));
+
+    // 9. SFTP (internal-sftp): list, upload, download, rename, remove.
+    let mut env = Env::new(&host(
+        "t",
+        port,
+        &user,
+        "  IdentityFile ~/.ssh/id_ed25519\n",
+    ));
+    keygen(&env.ssh("id_ed25519"), "ed25519", "");
+    sshd.authorize(&env.ssh("id_ed25519.pub"));
+    let (id, out) = env.connect("t", accept_host).await;
+    assert_connected(&out, &sshd);
+    let remote_dir = tempfile::tempdir().unwrap();
+    let remote_dir_s = remote_dir.path().display().to_string();
+    std::fs::write(remote_dir.path().join("hello.txt"), b"hello").unwrap();
+    let list = env.engine.sftp_list(id, &remote_dir_s).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(!env.engine.sftp_home(id).await.unwrap().is_empty());
+    let local = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(local.path().join("up.bin"), &data).unwrap();
+    for request in [
+        TransferRequest {
+            direction: Direction::Upload,
+            local: local.path().join("up.bin"),
+            remote: format!("{remote_dir_s}/up.bin"),
+            on_conflict: OnConflict::Ask,
+        },
+        TransferRequest {
+            direction: Direction::Download,
+            local: local.path().join("down.bin"),
+            remote: format!("{remote_dir_s}/up.bin"),
+            on_conflict: OnConflict::Ask,
+        },
+    ] {
+        let t = env.engine.transfer(id, request).await.unwrap();
+        loop {
+            match env.events.recv().await.unwrap() {
+                EngineEvent::Sftp {
+                    event: SftpEvent::TransferFinished { transfer, .. },
+                    ..
+                } if transfer == t => break,
+                EngineEvent::Sftp {
+                    event: SftpEvent::TransferFailed { transfer, error },
+                    ..
+                } if transfer == t => {
+                    panic!("{error:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(std::fs::read(local.path().join("down.bin")).unwrap(), data);
+    env.engine
+        .sftp_rename(
+            id,
+            &format!("{remote_dir_s}/up.bin"),
+            &format!("{remote_dir_s}/moved.bin"),
+        )
+        .await
+        .unwrap();
+    env.engine
+        .sftp_remove(id, &format!("{remote_dir_s}/moved.bin"))
+        .await
+        .unwrap();
+
+    // 10. -L and -R through OpenSSH to a local echo service.
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = echo.accept().await {
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    let ep = |h: &str, p: u16| Endpoint {
+        host: h.into(),
+        port: p,
+    };
+    for spec in [
+        ForwardSpec::Local {
+            bind: ep("127.0.0.1", 0),
+            target: ep("127.0.0.1", echo_port),
+        },
+        ForwardSpec::Remote {
+            bind: ep("127.0.0.1", 0),
+            target: ep("127.0.0.1", echo_port),
+        },
+    ] {
+        let tunnel = env.engine.start_tunnel(id, spec.clone()).await.unwrap();
+        let bind = loop {
+            match env.events.recv().await.unwrap() {
+                EngineEvent::Tunnel {
+                    id: t,
+                    event: TunnelEvent::Listening { bind },
+                    ..
+                } if t == tunnel => break bind,
+                EngineEvent::Tunnel {
+                    id: t,
+                    event: TunnelEvent::Failed { error },
+                    ..
+                } if t == tunnel => {
+                    panic!("{spec}: {error:?}\n{}", sshd.log())
+                }
+                _ => {}
+            }
+        };
+        let p: u16 = bind
+            .split(", ")
+            .next()
+            .unwrap()
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", p))
+            .await
+            .unwrap();
+        s.write_all(b"via openssh").await.unwrap();
+        let mut buf = [0_u8; 11];
+        tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf))
+            .await
+            .expect("echo through the tunnel")
+            .unwrap();
+        assert_eq!(&buf, b"via openssh", "{spec}");
+        env.engine.stop_tunnel(tunnel).unwrap();
+    }
 }

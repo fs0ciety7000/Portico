@@ -99,6 +99,12 @@ pub enum Error {
 
     #[error("invalid host name {host:?} for known_hosts")]
     InvalidHostName { host: String },
+
+    #[error(transparent)]
+    Sftp(#[from] crate::sftp::SftpError),
+
+    #[error(transparent)]
+    Tunnel(#[from] crate::forward::TunnelError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -234,6 +240,8 @@ impl Error {
                 "invalid_host",
                 Some("HostName / HostKeyAlias must not contain spaces, commas or wildcards."),
             ),
+            Self::Sftp(e) => e.code_and_hint(),
+            Self::Tunnel(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),

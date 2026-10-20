@@ -170,15 +170,26 @@ pub enum SftpEvent {
     },
     TransferStarted {
         transfer: TransferId,
+        direction: crate::sftp::Direction,
         name: String,
         total: Option<u64>,
     },
+    /// Throttled (at most every `sftp::PROGRESS_EVERY`), plus a final one.
     TransferProgress {
         transfer: TransferId,
         done: u64,
         total: Option<u64>,
     },
     TransferFinished {
+        transfer: TransferId,
+        /// Final path (may differ from the request with `OnConflict::Rename`).
+        destination: String,
+    },
+    /// The destination existed and the policy was `Skip`.
+    TransferSkipped {
+        transfer: TransferId,
+    },
+    TransferCancelled {
         transfer: TransferId,
     },
     TransferFailed {

@@ -57,6 +57,9 @@ pub(crate) struct ClientHandler {
     failure: Arc<Mutex<Option<HostKeyError>>>,
     closed: CancellationToken,
     identity: Arc<Mutex<Option<HostIdentity>>>,
+    /// Only the final hop may deliver `-R` connections (a jump host never
+    /// received a `tcpip-forward` request from us).
+    is_target: bool,
 }
 
 /// Loads `known_hosts` for `hop` and prepares the russh configuration.
@@ -88,7 +91,7 @@ fn known_hosts_files(paths: &crate::store::Paths, hop: &Hop) -> (Vec<PathBuf>, P
     (files, write_file)
 }
 
-pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
+pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop, is_target: bool) -> Result<Built> {
     let paths = ctx.engine.config().paths.clone();
     let (files, write_file) = known_hosts_files(&paths, hop);
     let known = tokio::task::spawn_blocking(move || KnownHosts::load(&files))
@@ -173,6 +176,7 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop) -> Result<Built> {
             failure: Arc::clone(&failure),
             closed: closed.clone(),
             identity: Arc::clone(&identity),
+            is_target,
         },
         config,
         failure,
@@ -401,6 +405,111 @@ impl client::Handler for ClientHandler {
         }
     }
 
+    // ── Channels opened by the server ────────────────────────────────────
+    // russh accepts them all by default. Portico refuses everything except
+    // the `-R` connections it asked for: no agent or X11 forwarding, no
+    // server-initiated sessions or direct-tcpip.
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if !self.is_target {
+            self.ctx.log(
+                LogLevel::Warn,
+                "tunnel",
+                "a jump host tried to open a forwarded connection: refused",
+            );
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
+        crate::forward::serve_forwarded(
+            &self.ctx,
+            &self.ctx.routes,
+            channel,
+            reply,
+            (connected_address, connected_port),
+            (originator_address, originator_port),
+        );
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        refuse(&self.ctx, "forwarded-streamlocal", reply).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        refuse(&self.ctx, "agent forwarding", reply).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_session(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        refuse(&self.ctx, "session", reply).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_tcpip(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        refuse(&self.ctx, "direct-tcpip", reply).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_streamlocal(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        refuse(&self.ctx, "direct-streamlocal", reply).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        refuse(&self.ctx, "X11", reply).await;
+        Ok(())
+    }
+
     async fn auth_banner(
         &mut self,
         banner: &str,
@@ -433,4 +542,15 @@ impl client::Handler for ClientHandler {
             DisconnectReason::Error(e) => Err(e),
         }
     }
+}
+
+async fn refuse(ctx: &SessionCtx, what: &str, reply: client::ChannelOpenHandle) {
+    ctx.log(
+        LogLevel::Warn,
+        "session",
+        format!("the server tried to open a {what} channel: refused"),
+    );
+    reply
+        .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+        .await;
 }

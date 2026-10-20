@@ -7,6 +7,8 @@
     unreachable_pub
 )]
 
+pub mod sftp_server;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,6 +78,17 @@ pub struct Behaviour {
     pub received: std::sync::Mutex<Vec<u8>>,
     /// `CHANNEL_CLOSE` messages received from the client.
     pub closed_channels: AtomicUsize,
+    /// Serve the `sftp` subsystem over this directory.
+    pub sftp_root: Option<std::path::PathBuf>,
+    /// Accept `tcpip-forward` (listens on 127.0.0.1).
+    pub allow_tcpip_forward: bool,
+    /// On `tcpip-forward`, also try channels the client never asked for
+    /// (a forwarded port it did not request, agent, X11).
+    pub rogue_channels: bool,
+    /// How many rogue channel opens the client refused.
+    pub rogue_refused: AtomicUsize,
+    /// How many rogue channel opens the client accepted.
+    pub rogue_accepted: AtomicUsize,
 }
 
 pub struct TestServer {
@@ -241,7 +254,7 @@ impl russh::server::Handler for ServerHandler {
         reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.b.pty_echo {
+        if self.b.pty_echo || self.b.sftp_root.is_some() {
             reply.accept().await;
             self.channels.push(channel);
         }
@@ -348,6 +361,87 @@ impl russh::server::Handler for ServerHandler {
 
     async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(self.b.banner.clone())
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: russh::ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let index = self.channels.iter().position(|c| c.id() == channel);
+        match (&self.b.sftp_root, index) {
+            (Some(root), Some(i)) if name == "sftp" => {
+                let ch = self.channels.remove(i);
+                session.channel_success(channel)?;
+                let server = sftp_server::SftpServer::new(root.clone());
+                tokio::spawn(russh_sftp::server::run(ch.into_stream(), server));
+            }
+            _ => session.channel_failure(channel)?,
+        }
+        Ok(())
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        if !self.b.allow_tcpip_forward {
+            return Ok(false);
+        }
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", u16::try_from(*port).unwrap())).await
+        else {
+            return Ok(false);
+        };
+        let bound = u32::from(listener.local_addr().unwrap().port());
+        *port = bound;
+        let handle = session.handle();
+        let address = address.to_owned();
+        if self.b.rogue_channels {
+            let b = Arc::clone(&self.b);
+            let h = handle.clone();
+            tokio::spawn(async move {
+                let tries = [
+                    h.channel_open_forwarded_tcpip("127.0.0.1", bound + 1, "10.6.6.6", 666)
+                        .await
+                        .is_ok(),
+                    h.channel_open_agent().await.is_ok(),
+                    h.channel_open_x11("10.6.6.6", 6000).await.is_ok(),
+                ];
+                for accepted in tries {
+                    let counter = if accepted {
+                        &b.rogue_accepted
+                    } else {
+                        &b.rogue_refused
+                    };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+        tokio::spawn(async move {
+            while let Ok((mut tcp, peer)) = listener.accept().await {
+                let h = handle.clone();
+                let address = address.clone();
+                tokio::spawn(async move {
+                    let Ok(ch) = h
+                        .channel_open_forwarded_tcpip(
+                            address,
+                            bound,
+                            peer.ip().to_string(),
+                            u32::from(peer.port()),
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    let mut stream = ch.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+                });
+            }
+        });
+        Ok(true)
     }
 
     async fn channel_open_direct_tcpip(

@@ -54,10 +54,31 @@ const CLOSE_GRACE: Duration = Duration::from_secs(2);
 /// while the actor is still connecting.
 #[derive(Debug)]
 pub(crate) enum SessionCommand {
+    /// Hands out the connected transport (SFTP, tunnels).
+    Attach {
+        reply: tokio::sync::oneshot::Sender<Attached>,
+    },
     OpenTerminal {
         size: crate::engine::PtySize,
         reply: tokio::sync::oneshot::Sender<Result<crate::engine::TerminalHandle>>,
     },
+}
+
+/// A connected session, lent to SFTP and tunnel tasks. They must stop when
+/// `ctx.cancel` fires.
+#[derive(Clone)]
+pub(crate) struct Attached {
+    pub(crate) ctx: SessionCtx,
+    pub(crate) handle: Arc<client::Handle<ClientHandler>>,
+    pub(crate) routes: crate::forward::RemoteRoutes,
+}
+
+impl std::fmt::Debug for Attached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attached")
+            .field("session", &self.ctx.id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Everything a session task needs to report progress and ask questions.
@@ -74,6 +95,8 @@ pub(crate) struct SessionCtx {
     /// Cancelled when the session ends: fails every transport stream so no
     /// russh task or socket outlives the session.
     abort: CancellationToken,
+    /// `-R` routes this session asked the server for.
+    pub(crate) routes: crate::forward::RemoteRoutes,
 }
 
 impl SessionCtx {
@@ -91,6 +114,7 @@ impl SessionCtx {
             logs,
             prompting: Arc::new(AtomicBool::new(false)),
             last_prompt_end: Arc::new(Mutex::new(None)),
+            routes: Arc::default(),
         }
     }
 
@@ -244,7 +268,7 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
             target: hop.alias.clone(),
         });
         let limit = hop.connect_timeout(ctx.engine.config().connect_timeout);
-        let built = handler::build(ctx, hop).await?;
+        let built = handler::build(ctx, hop, index + 1 == hops.len()).await?;
         let closed = built.closed.clone();
         let identity_slot = Arc::clone(&built.identity);
         let mut handle = open_transport(ctx, hop, built, links.last(), limit, &closed).await?;
@@ -474,6 +498,13 @@ impl Connection {
                 }
                 cmd = commands.recv() => match cmd {
                     None => return CloseReason::UserRequested,
+                    Some(SessionCommand::Attach { reply }) => {
+                        let _ = reply.send(Attached {
+                            ctx: ctx.clone(),
+                            handle: Arc::clone(&target.handle),
+                            routes: Arc::clone(&ctx.routes),
+                        });
+                    }
                     Some(SessionCommand::OpenTerminal { size, reply }) => {
                         // Off the supervisor loop: keepalive, cancellation and
                         // remote close stay responsive while a shell starts.
