@@ -40,14 +40,20 @@
 - [x] TUI et GUI branchées : statut live (point coloré, phase, latence), toasts d'erreur avec hint, `d` pour déconnecter.
   Les prompts sont encore refusés proprement (les dialogues arrivent en 1b et 1c)
 
-### 1b. PTY et terminal TUI *(Opus / Sonnet fort)*
-- Reporté de 1a : interop Dropbear en CI ; ticket upstream russh (abandon d'un `Signer`, vérification au re-key)
-- `Engine::open_terminal` : `request_pty` (TERM `xterm-256color`, modes), shell, resize, et `TerminalHandle` (plan de données borné)
-- TUI : widget `TerminalView` sur `alacritty_terminal` (palette ANSI du thème, curseur, scrollback, sélection),
-  onglets, `Ctrl-Space` comme préfixe pour les commandes Portico (le reste passe au remote)
-- Prompts TUI : modales pour clé hôte (TOFU), clé modifiée (`HostKeyChanged`, bloquante), mot de passe, passphrase et keyboard-interactive
-  (champ masqué, case « mémoriser »). Elles remplacent le refus automatique actuel
-- Barre de statut : badge de phase animé et latence
+### 1b. PTY et terminal TUI ✅ *(Opus)*
+- [x] `Engine::open_terminal` : canal session, `pty-req` (`xterm-256color`, `VERASE`, `IUTF8`), shell, `window-change`,
+  exit-status/signal, fermeture ; plan de données borné avec backpressure bout en bout. Une demande faite pendant la connexion
+  est servie dès que la session est établie
+- [x] TUI : émulateur `alacritty_terminal` par onglet (10 000 lignes d'historique, OSC 52 désactivé, réponses DA/DSR
+  renvoyées, titre OSC dans l'onglet), rendu ANSI 16 couleurs du thème / 256 couleurs / truecolor, curseur couleur accent
+- [x] Onglets (Hosts + terminaux) avec préfixe `Ctrl-Space`, encodage des touches xterm, bracketed paste,
+  historique `Shift-PgUp`, redimensionnement du PTY en direct
+- [x] Dialogues : TOFU (`yes` tapé quand la clé est inhabituelle), mot de passe et passphrase (masque fixe, case « mémoriser »),
+  keyboard-interactive, alerte bloquante « clé changée »
+- [x] Vérifié en réel contre OpenSSH : vim (écran alternatif), couleurs, `Ctrl-C`, historique, ProxyJump, resize, passphrase, alerte.
+  500 000 lignes affichées en environ 0,5 s ; mémoire 7 Mo au repos, 39 Mo avec un historique plein
+- Reporté : interop Dropbear en CI ; ticket upstream russh (abandon d'un `Signer`, vérification au re-key) ;
+  sélection et copie à la souris (le terminal hôte reste utilisable avec `Shift`)
 
 ### 1c. PTY et terminal GUI *(Opus pour le composant Terminal, puis Sonnet)*
 - `xterm.js` + addon WebGL (repli DOM) + `fit`, octets via `tauri::ipc::Channel<Vec<u8>>`
@@ -108,7 +114,8 @@
 |---|---|---|---|---|
 | 0 Fondations | ✅ | 35 | couverte par la revue 1a | ✅ (captures TUI et GUI) |
 | 1a Transport et auth | ✅ | 82 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
-| 1b / 1c Terminal TUI / GUI | 🔜 | | | |
+| 1b Terminal TUI | ✅ | 91 + interop (shell réel) | en cours | en cours |
+| 1c Terminal GUI | 🔜 | | | |
 | 2 SFTP / tunnels | ⏳ | | | |
 | 3 Clés / secrets / snippets | ⏳ | | | |
 | 4 Finition | ⏳ | | | |
