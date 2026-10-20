@@ -26,6 +26,7 @@ use bytes::Bytes;
 use secrecy::SecretString;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::error::{Error, Result};
 use crate::events::{EngineEvent, Prompt, PromptKind};
@@ -228,6 +229,8 @@ struct Inner {
     prompts: Mutex<HashMap<PromptId, oneshot::Sender<PromptResponse>>>,
     sessions: Mutex<HashMap<SessionId, SessionEntry>>,
     shutdown: CancellationToken,
+    /// Session actors, so a shutdown can wait for clean closes.
+    tasks: TaskTracker,
 }
 
 #[derive(Debug)]
@@ -250,6 +253,7 @@ impl Engine {
                 prompts: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 shutdown: CancellationToken::new(),
+                tasks: TaskTracker::new(),
             }),
         }
     }
@@ -306,26 +310,40 @@ impl Engine {
                 },
             );
         let ctx = SessionCtx::new(self.clone(), id, cancel, logs);
-        tokio::spawn(session::run(ctx, request, rx));
+        self.inner.tasks.spawn(session::run(ctx, request, rx));
         Ok(id)
     }
 
-    /// Closes a session (or aborts it while connecting).
+    /// Closes a session, or aborts it while connecting (pending prompts are
+    /// withdrawn). Cancelling the session token is enough: the actor maps it
+    /// to `Closed { UserRequested }` and closes channels and transport.
+    // Kept `async` for API stability (callers already await it).
+    #[allow(clippy::unused_async)]
     pub async fn disconnect(&self, id: SessionId) -> Result<()> {
-        let (tx, cancel) = {
-            let sessions = self
-                .inner
-                .sessions
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let entry = sessions.get(&id).ok_or(Error::UnknownSession(id))?;
-            (entry.commands.clone(), entry.cancel.clone())
-        };
-        if tx.send(SessionCommand::Disconnect).await.is_err() {
-            // The actor is still connecting or already gone: cancel it.
-            cancel.cancel();
-        }
+        let sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        sessions
+            .get(&id)
+            .ok_or(Error::UnknownSession(id))?
+            .cancel
+            .cancel();
         Ok(())
+    }
+
+    /// Closes every session but keeps the engine usable (a UI that reloads
+    /// and lost track of them), unlike [`Engine::shutdown`].
+    pub fn disconnect_all(&self) {
+        let sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for entry in sessions.values() {
+            entry.cancel.cancel();
+        }
     }
 
     /// Opens an interactive shell in a PTY on `session`. If the session is
@@ -382,6 +400,9 @@ impl Engine {
     ) -> Result<PromptResponse> {
         let id = PromptId::next();
         let rx = self.register_prompt(id);
+        // Withdraws the prompt however this future ends (cancelled, or
+        // dropped because the whole connection attempt was aborted).
+        let _withdraw = WithdrawPrompt { engine: self, id };
         self.emit(EngineEvent::Prompt(Prompt {
             id,
             session: Some(session),
@@ -389,15 +410,7 @@ impl Engine {
         }));
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                self.inner
-                    .prompts
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&id);
-                self.emit(EngineEvent::PromptResolved { id });
-                Err(Error::Cancelled)
-            }
+            () = cancel.cancelled() => Err(Error::Cancelled),
             answer = rx => answer.map_err(|_| Error::EngineClosed),
         }
     }
@@ -436,6 +449,42 @@ impl Engine {
     /// Cancels every session and background task.
     pub fn shutdown(&self) {
         self.inner.shutdown.cancel();
+    }
+
+    /// [`Engine::shutdown`], then waits up to `limit` for the sessions to
+    /// close cleanly (channel EOF/CLOSE, SSH DISCONNECT). Returns whether
+    /// they all did. For app exit.
+    pub async fn shutdown_and_wait(&self, limit: std::time::Duration) -> bool {
+        self.shutdown();
+        self.inner.tasks.close();
+        tokio::time::timeout(limit, self.inner.tasks.wait())
+            .await
+            .is_ok()
+    }
+}
+
+/// Removes a pending prompt and tells the UIs, when the asking side stops
+/// waiting for any reason.
+struct WithdrawPrompt<'a> {
+    engine: &'a Engine,
+    id: PromptId,
+}
+
+impl Drop for WithdrawPrompt<'_> {
+    fn drop(&mut self) {
+        let pending = self
+            .engine
+            .inner
+            .prompts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id)
+            .is_some();
+        // Answered prompts were already resolved by `respond`.
+        if pending {
+            self.engine
+                .emit(EngineEvent::PromptResolved { id: self.id });
+        }
     }
 }
 

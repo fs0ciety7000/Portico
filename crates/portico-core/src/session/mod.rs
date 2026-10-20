@@ -49,10 +49,11 @@ const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long `close` waits for each hop's DISCONNECT to go out.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
-/// Commands accepted by a running session actor.
+/// Commands accepted by a running session actor. Closing is not a command:
+/// [`crate::Engine::disconnect`] cancels the session token, which also works
+/// while the actor is still connecting.
 #[derive(Debug)]
 pub(crate) enum SessionCommand {
-    Disconnect,
     OpenTerminal {
         size: crate::engine::PtySize,
         reply: tokio::sync::oneshot::Sender<Result<crate::engine::TerminalHandle>>,
@@ -472,9 +473,9 @@ impl Connection {
                     return CloseReason::RemoteClosed;
                 }
                 cmd = commands.recv() => match cmd {
-                    Some(SessionCommand::Disconnect) | None => return CloseReason::UserRequested,
+                    None => return CloseReason::UserRequested,
                     Some(SessionCommand::OpenTerminal { size, reply }) => {
-                        // Off the supervisor loop: keepalive, Disconnect and
+                        // Off the supervisor loop: keepalive, cancellation and
                         // remote close stay responsive while a shell starts.
                         tokio::spawn(open_terminal(ctx.clone(), Arc::clone(&target.handle), size, reply));
                     }

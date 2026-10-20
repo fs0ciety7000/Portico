@@ -440,6 +440,90 @@ async fn dismissing_the_password_prompt_ends_without_failure() {
     );
 }
 
+/// Closing a tab while its host asks for a password must abort the
+/// connection at once and withdraw the dialog (no orphan prompt that could
+/// still be answered).
+#[tokio::test]
+async fn disconnect_while_prompting_aborts_and_withdraws_the_prompt() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+    let id = env
+        .engine
+        .connect(portico_core::engine::ConnectRequest::new("t"))
+        .unwrap();
+    let prompt = loop {
+        match tokio::time::timeout(Duration::from_secs(10), env.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            EngineEvent::Prompt(p) if p.session == Some(id) => break p.id,
+            _ => {}
+        }
+    };
+    env.engine.disconnect(id).await.unwrap();
+    let (mut withdrawn, mut closed) = (false, false);
+    while !(withdrawn && closed) {
+        match tokio::time::timeout(Duration::from_secs(1), env.events.recv())
+            .await
+            .expect("disconnect must take effect within a second")
+            .unwrap()
+        {
+            EngineEvent::PromptResolved { id: p } if p == prompt => withdrawn = true,
+            EngineEvent::Session {
+                id: sid,
+                event: SessionEvent::Phase(phase),
+            } if sid == id => {
+                assert!(
+                    matches!(
+                        phase,
+                        SessionPhase::Closed {
+                            reason: CloseReason::UserRequested
+                        }
+                    ),
+                    "{phase:?}"
+                );
+                closed = true;
+            }
+            _ => {}
+        }
+    }
+    // The withdrawn prompt can no longer be answered.
+    assert!(env.engine.respond(prompt, PromptResponse::Cancel).is_err());
+}
+
+#[tokio::test]
+async fn shutdown_and_wait_closes_sessions_cleanly() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_ed25519\n",
+    ));
+    env.write_key("id_ed25519", &key, None);
+    env.trust(&server);
+    let (id, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(env.engine.shutdown_and_wait(Duration::from_secs(2)).await);
+    let closed = env
+        .wait_for(id, |e| {
+            matches!(e, SessionEvent::Phase(SessionPhase::Closed { .. }))
+        })
+        .await;
+    assert!(matches!(
+        closed,
+        SessionEvent::Phase(SessionPhase::Closed {
+            reason: CloseReason::UserRequested
+        })
+    ));
+}
+
 fn wrong_password(kind: &PromptKind) -> PromptResponse {
     match kind {
         PromptKind::Password { .. } => PromptResponse::Secret {
