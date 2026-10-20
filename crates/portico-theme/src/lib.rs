@@ -100,6 +100,16 @@ pub const RADII: [(&str, u16); 4] = [("sm", 4), ("md", 8), ("lg", 12), ("pill", 
 /// Motion durations in ms. Nothing in Portico animates longer than `slow`.
 pub const MOTION: [(&str, u16); 4] = [("instant", 0), ("fast", 120), ("base", 180), ("slow", 260)];
 
+/// Period of looping "in flight" indicators (status pulse, skeletons): the
+/// only animations allowed to exceed `slow`.
+pub const MOTION_LOOP_MS: u16 = 1200;
+
+/// Elevation shadows (GUI), identical in every dark theme.
+pub const SHADOWS: [(&str, &str); 2] = [
+    ("raised", "0 12px 32px rgb(0 0 0 / 0.4)"),
+    ("overlay", "0 24px 64px rgb(0 0 0 / 0.5)"),
+];
+
 /// Standard easing (decelerate) and emphasized easing (spring-like overshoot-free).
 pub const EASING_STANDARD: &str = "cubic-bezier(0.2, 0, 0, 1)";
 pub const EASING_EMPHASIZED: &str = "cubic-bezier(0.3, 0, 0, 1.0)";
@@ -111,14 +121,16 @@ pub const FONT_MONO: &str =
 /// Display face for the wordmark and large titles only.
 pub const FONT_DISPLAY: &str = "\"Cormorant Garamond\", \"Iowan Old Style\", Georgia, serif";
 
-/// Type scale (GUI px).
-pub const TYPE_SCALE: [(&str, u16); 6] = [
+/// Type scale (GUI px). `display*` are for host titles in the display face.
+pub const TYPE_SCALE: [(&str, u16); 8] = [
     ("xs", 11),
     ("sm", 12),
     ("base", 13),
     ("md", 14),
     ("lg", 16),
     ("xl", 20),
+    ("display-sm", 30),
+    ("display", 34),
 ];
 
 /// **Obsidian**: the default. Near-black mineral, marble text, brass accent.
@@ -146,7 +158,7 @@ pub const OBSIDIAN: Theme = Theme {
         connecting: Rgb::hex(0x8a_aa_d6),
         authenticating: Rgb::hex(0xb3_9d_e0),
         connected: Rgb::hex(0x7f_c8_a0),
-        warning: Rgb::hex(0xe0_b4_6a),
+        warning: Rgb::hex(0xf2_c1_4e),
         error: Rgb::hex(0xe5_7c_70),
     },
     ansi: AnsiPalette([
@@ -185,13 +197,13 @@ pub const BASALT: Theme = Theme {
         text_primary: Rgb::hex(0xe4_e8_ee),
         text_secondary: Rgb::hex(0x9b_a4_b0),
         text_muted: Rgb::hex(0x63_6c_78),
-        accent: Rgb::hex(0x8f_b3_d9),
-        accent_strong: Rgb::hex(0xae_ca_e8),
+        accent: Rgb::hex(0xb4_bc_c6),
+        accent_strong: Rgb::hex(0xcc_d3_db),
         text_on_accent: Rgb::hex(0x0b_12_1a),
     },
     status: StatusPalette {
         idle: Rgb::hex(0x63_6c_78),
-        connecting: Rgb::hex(0x8f_b3_d9),
+        connecting: Rgb::hex(0x6f_c3_d3),
         authenticating: Rgb::hex(0xb4_a2_e6),
         connected: Rgb::hex(0x82_cf_a8),
         warning: Rgb::hex(0xe6_bb_6e),
@@ -233,8 +245,8 @@ pub const TRAVERTINE: Theme = Theme {
         text_primary: Rgb::hex(0xef_e6_da),
         text_secondary: Rgb::hex(0xb0_a4_95),
         text_muted: Rgb::hex(0x75_6b_60),
-        accent: Rgb::hex(0xd4_8f_6a),
-        accent_strong: Rgb::hex(0xe6_a8_84),
+        accent: Rgb::hex(0xc9_9a_74),
+        accent_strong: Rgb::hex(0xdc_b0_8e),
         text_on_accent: Rgb::hex(0x1a_0f_09),
     },
     status: StatusPalette {
@@ -293,8 +305,12 @@ pub fn export_css() -> String {
     for (k, v) in MOTION {
         let _ = writeln!(css, "  --motion-{k}: {v}ms;");
     }
+    let _ = writeln!(css, "  --motion-loop: {MOTION_LOOP_MS}ms;");
     for (k, v) in TYPE_SCALE {
         let _ = writeln!(css, "  --text-{k}: {v}px;");
+    }
+    for (k, v) in SHADOWS {
+        let _ = writeln!(css, "  --shadow-{k}: {v};");
     }
     let _ = writeln!(css, "  --ease-standard: {EASING_STANDARD};");
     let _ = writeln!(css, "  --ease-emphasized: {EASING_EMPHASIZED};");
@@ -416,6 +432,61 @@ mod tests {
                 s.error,
             ] {
                 assert!(contrast(c, p.bg_surface) >= 4.5, "{} status colour", t.id);
+            }
+        }
+    }
+
+    /// CIE L*a*b* from sRGB (D65).
+    // Standard colour-science notation (x, y, z, r, g, b…) reads best here.
+    #[allow(clippy::many_single_char_names)]
+    fn lab(c: Rgb) -> (f64, f64, f64) {
+        let lin = |v: u8| {
+            let s = f64::from(v) / 255.0;
+            if s <= 0.040_45 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (r, g, b) = (lin(c.0), lin(c.1), lin(c.2));
+        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.950_47;
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.088_83;
+        let f = |t: f64| {
+            if t > 0.008_856 {
+                t.cbrt()
+            } else {
+                7.787 * t + 16.0 / 116.0
+            }
+        };
+        let (fx, fy, fz) = (f(x), f(y), f(z));
+        (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+    }
+
+    fn delta_e(a: Rgb, b: Rgb) -> f64 {
+        let (l1, a1, b1) = lab(a);
+        let (l2, a2, b2) = lab(b);
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    }
+
+    /// Colour = meaning: the accent must never be mistaken for a status.
+    #[test]
+    fn accent_is_distinct_from_statuses() {
+        for t in THEMES {
+            let s = t.status;
+            for (name, c) in [
+                ("connecting", s.connecting),
+                ("authenticating", s.authenticating),
+                ("connected", s.connected),
+                ("warning", s.warning),
+                ("error", s.error),
+            ] {
+                let d = delta_e(t.palette.accent, c);
+                assert!(
+                    d >= 20.0,
+                    "{}: accent too close to {name} (ΔE {d:.1})",
+                    t.id
+                );
             }
         }
     }
