@@ -333,40 +333,55 @@ async fn run_local(
             );
             continue;
         };
-        let handle = Arc::clone(&attached.handle);
-        let ctx = ctx.clone();
-        let target = target.clone();
-        let cancel = cancel.child_token();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let opened = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                handle.channel_open_direct_tcpip(
-                    target.host.clone(),
-                    u32::from(target.port),
-                    peer.ip().to_string(),
-                    u32::from(peer.port()),
-                ),
-            )
-            .await;
-            let channel = match opened {
-                Ok(Ok(channel)) => channel,
-                Ok(Err(e)) => {
-                    ctx.log(LogLevel::Warn, "tunnel", format!("{peer} → {target}: {e}"));
-                    return;
-                }
-                Err(_) => {
-                    ctx.log(
-                        LogLevel::Warn,
-                        "tunnel",
-                        format!("{peer} → {target}: timed out"),
-                    );
-                    return;
-                }
-            };
-            pipe(&ctx, id, peer.to_string(), channel, socket, &cancel).await;
-        });
+        tokio::spawn(serve_local(
+            attached.clone(),
+            id,
+            target.clone(),
+            peer,
+            socket,
+            permit,
+            cancel.child_token(),
+        ));
     }
+}
+
+/// One `-L` connection: opens `direct-tcpip` to the target, then pipes.
+async fn serve_local(
+    attached: Attached,
+    id: TunnelId,
+    target: Endpoint,
+    peer: SocketAddr,
+    socket: TcpStream,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    cancel: CancellationToken,
+) {
+    let ctx = &attached.ctx;
+    let opened = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        attached.handle.channel_open_direct_tcpip(
+            target.host.clone(),
+            u32::from(target.port),
+            peer.ip().to_string(),
+            u32::from(peer.port()),
+        ),
+    )
+    .await;
+    let channel = match opened {
+        Ok(Ok(channel)) => channel,
+        Ok(Err(e)) => {
+            ctx.log(LogLevel::Warn, "tunnel", format!("{peer} → {target}: {e}"));
+            return;
+        }
+        Err(_) => {
+            ctx.log(
+                LogLevel::Warn,
+                "tunnel",
+                format!("{peer} → {target}: timed out"),
+            );
+            return;
+        }
+    };
+    pipe(ctx, id, peer.to_string(), channel, socket, &cancel).await;
 }
 
 async fn run_remote(
