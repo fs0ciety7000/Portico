@@ -5,8 +5,12 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 
+use portico_core::events::SessionPhase;
+use portico_core::hosts::HostEntry;
+
 use crate::app::App;
 use crate::theme::Styles;
+use crate::ui::fmt::display_path;
 
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
@@ -38,9 +42,9 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             Span::styled(format!(":{}", r.port), s.muted()),
         ]),
         Line::from(""),
-        status_line(app, &host.alias, s),
-        Line::from(""),
     ];
+    lines.extend(status_lines(app, host, s));
+    lines.push(Line::from(""));
 
     let mut row = |label: &str, value: String| {
         lines.push(Line::from(vec![
@@ -56,10 +60,10 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         row("ProxyCommand", cmd.clone());
     }
     for f in &r.identity_files {
-        row("Identity", f.display().to_string());
+        row("Identity", display_path(&f.to_string_lossy()));
     }
     for f in &r.certificate_files {
-        row("Certificate", f.display().to_string());
+        row("Certificate", display_path(&f.to_string_lossy()));
     }
     for f in &r.local_forwards {
         row("Forward -L", f.clone());
@@ -80,7 +84,11 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     }
     row(
         "Defined in",
-        format!("{}:{}", host.source.file.display(), host.source.line),
+        format!(
+            "{}:{}",
+            display_path(&host.source.file.to_string_lossy()),
+            host.source.line
+        ),
     );
     for w in &r.warnings {
         lines.push(Line::from(Span::styled(
@@ -97,8 +105,10 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn status_line(app: &App, alias: &str, s: Styles) -> Line<'static> {
-    let view = app.session_for(alias);
+/// Status, latency and what can be done next; a failure gets its message,
+/// hint and remedy on their own lines.
+fn status_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
+    let view = app.session_for(&host.alias);
     let st = super::status::status(view, s);
     let dot = if st.busy {
         super::spinner(app.tick)
@@ -110,15 +120,63 @@ fn status_line(app: &App, alias: &str, s: Styles) -> Line<'static> {
         Span::styled(st.label, s.secondary()),
     ];
     if let Some(rtt) = st.latency {
-        spans.push(Span::styled(format!("  {rtt}"), s.status(st.color)));
+        let style = if st.slow {
+            s.status(s.theme.status.warning)
+        } else {
+            s.muted()
+        };
+        spans.push(Span::styled(" · ", s.muted()));
+        spans.push(Span::styled(rtt, style));
     }
-    let hint = match view.map(|v| &v.phase) {
-        Some(portico_core::events::SessionPhase::Connected) => {
-            "   d to disconnect · terminal arrives next"
-        }
-        Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => "",
-        _ => "   Enter to connect",
+    let phase = view.map(|v| &v.phase);
+    let hint: &[(&str, &str)] = match phase {
+        Some(SessionPhase::Connected) => &[("↵", "open terminal"), ("d", "disconnect")],
+        Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => &[("d", "cancel")],
+        Some(SessionPhase::Failed { .. }) => &[("↵", "retry")],
+        _ => &[("↵", "connect")],
     };
-    spans.push(Span::styled(hint, s.muted()));
-    Line::from(spans)
+    let mut lines = vec![Line::from(spans)];
+
+    if let Some(SessionPhase::Failed { error }) = phase {
+        lines.push(Line::from(""));
+        let error_style = s.status(s.theme.status.error);
+        match error.code.as_str() {
+            // The blocking alert already showed the details: keep it short.
+            "host_key_changed" => lines.push(Line::from(Span::styled(
+                "Host key changed: possible man-in-the-middle.",
+                error_style,
+            ))),
+            // A refusal the user chose is not shown as an error.
+            "host_key_rejected" => lines.push(Line::from(Span::styled(
+                error.message.clone(),
+                s.secondary(),
+            ))),
+            _ => {
+                lines.push(Line::from(Span::styled(error.message.clone(), error_style)));
+                if let Some(hint) = &error.hint {
+                    lines.push(Line::from(Span::styled(hint.clone(), s.secondary())));
+                }
+            }
+        }
+        if error.code == "host_key_changed" {
+            let r = &host.resolved;
+            let target = if r.port == 22 {
+                r.hostname.clone()
+            } else {
+                format!("[{}]:{}", r.hostname, r.port)
+            };
+            lines.push(Line::from(vec![
+                Span::styled("Fix  ", s.muted()),
+                Span::styled(format!("ssh-keygen -R '{target}'"), s.title()),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    let mut keys = Vec::new();
+    for (key, label) in hint {
+        keys.push(Span::styled(format!(" {key} "), s.key_hint()));
+        keys.push(Span::styled(format!(" {label}   "), s.muted()));
+    }
+    lines.push(Line::from(keys));
+    lines
 }

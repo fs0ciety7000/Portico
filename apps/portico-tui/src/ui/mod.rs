@@ -2,6 +2,7 @@
 
 mod details;
 mod dialog;
+pub(crate) mod fmt;
 mod hosts;
 mod overlays;
 mod status;
@@ -60,26 +61,27 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     }
 }
 
-/// Brand, then tabs: `Hosts │ 1 web-01 ● │ 2 db ●`, theme on the right.
+/// Brand, then tabs `Hosts │ 1 web-01 ● │ 2 db ●`, theme on the right when
+/// it fits. Tabs are windowed around the active one so it is always visible.
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
-    let mut spans = vec![
+    let width = usize::from(area.width);
+    let brand = vec![
         Span::styled(" ╭┴┴╮ ", s.accent()),
         Span::styled("PORTICO", s.title()),
-        Span::styled("  ", s.base()),
+        Span::raw("  "),
     ];
-    let tab = |label: String, active: bool| {
-        if active {
-            Span::styled(
-                format!(" {label} "),
-                s.selected().add_modifier(ratatui::style::Modifier::BOLD),
-            )
-        } else {
-            Span::styled(format!(" {label} "), s.muted())
-        }
-    };
+    let brand_width = 15;
+
     let count = app.inventory.as_ref().map_or(0, |i| i.hosts.len());
-    spans.push(tab(format!("Hosts {count}"), app.active.is_none()));
+    // Each tab: (spans, width).
+    let mut tabs: Vec<(Vec<Span<'static>>, usize)> = Vec::new();
+    tabs.push(tab_spans(
+        s,
+        &format!("Hosts {count}"),
+        None,
+        app.active.is_none(),
+    ));
     for (i, view) in app.terminals.iter().enumerate() {
         let st = status::status(app.session_by_id(view.session), s);
         let dead = view.closed || view.ended.is_some();
@@ -90,28 +92,99 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         } else {
             "●"
         };
-        spans.push(Span::styled("│", s.border()));
-        spans.push(tab(
-            format!("{} {}", i + 1, truncate(&view.label(), 18)),
+        let color = if dead { s.theme.status.idle } else { st.color };
+        let label = format!("{} {}", i + 1, fmt::truncate(&view.alias, 16));
+        tabs.push(tab_spans(
+            s,
+            &label,
+            Some((dot, color)),
             app.active == Some(i),
         ));
+    }
+
+    // Window [first, last] around the active tab within the budget.
+    let theme = s.theme.name;
+    let active = app.active.map_or(0, |i| i + 1);
+    let budget_with_theme = width.saturating_sub(brand_width + theme.chars().count() + 3);
+    let budget = width.saturating_sub(brand_width + 1);
+    let total: usize = tabs.iter().map(|(_, w)| w).sum();
+    let show_theme = total <= budget_with_theme;
+    let budget = if show_theme {
+        budget_with_theme
+    } else {
+        budget
+    };
+    let (mut first, mut last) = (active, active);
+    let mut used = tabs.get(active).map_or(0, |(_, w)| *w);
+    let width_of = |i: usize| tabs.get(i).map(|(_, w)| *w);
+    loop {
+        let mut grew = false;
+        // Reserve room for the ‹+n / +n› markers.
+        if let Some(w) = width_of(last + 1).filter(|w| used + w + 8 <= budget) {
+            last += 1;
+            used += w;
+            grew = true;
+        }
+        if let Some(w) = first
+            .checked_sub(1)
+            .and_then(width_of)
+            .filter(|w| used + w + 8 <= budget)
+        {
+            first -= 1;
+            used += w;
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    let mut spans = brand;
+    if first > 0 {
+        spans.push(Span::styled(format!("‹+{first} "), s.muted()));
+    }
+    for (tab, _) in tabs.iter().take(last + 1).skip(first) {
+        spans.extend(tab.iter().cloned());
+    }
+    if last + 1 < tabs.len() {
         spans.push(Span::styled(
-            format!("{dot} "),
-            s.status(if dead { s.theme.status.idle } else { st.color }),
+            format!(" +{}›", tabs.len() - last - 1),
+            s.muted(),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
-    let right =
-        Line::from(vec![Span::styled(s.theme.name, s.muted()), Span::raw("  ")]).right_aligned();
-    frame.render_widget(Paragraph::new(right), area);
+    if show_theme {
+        let used: usize = spans.iter().map(Span::width).sum();
+        let pad = width.saturating_sub(used + theme.chars().count() + 2);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(theme, s.muted()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(s.chrome()), area);
 }
 
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_owned()
+fn tab_spans(
+    s: crate::theme::Styles,
+    label: &str,
+    dot: Option<(&'static str, portico_theme::Rgb)>,
+    active: bool,
+) -> (Vec<Span<'static>>, usize) {
+    let mut spans = vec![Span::styled("│", s.border())];
+    if active {
+        spans.push(Span::styled("▍", s.accent().patch(s.selected())));
+        spans.push(Span::styled(
+            format!("{label} "),
+            s.title().patch(s.selected()),
+        ));
     } else {
-        let mut t: String = text.chars().take(max.saturating_sub(1)).collect();
-        t.push('…');
-        t
+        spans.push(Span::styled(format!(" {label} "), s.muted()));
     }
+    if let Some((dot, color)) = dot {
+        let style = if active {
+            s.status(color).patch(s.selected())
+        } else {
+            s.status(color)
+        };
+        spans.push(Span::styled(format!("{dot} "), style));
+    }
+    let width = spans.iter().map(Span::width).sum();
+    (spans, width)
 }

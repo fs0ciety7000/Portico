@@ -16,6 +16,7 @@
 | Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `↵`, double-clic |
 | Se déconnecter (hôte sélectionné) | `d` | `d` |
 | Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | — *(1c)* |
+| Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | — |
 | Palette de commandes | — | `⌘K` |
 | Recharger `~/.ssh/config` | `r` | `⌘R` |
 | Changer de thème | `t` | `t` |
@@ -25,7 +26,9 @@
 ## Terminal (TUI)
 
 Toutes les touches partent vers l'hôte distant, y compris `Ctrl-C`. Les commandes Portico passent par le
-préfixe **`Ctrl-Space`** (la barre de statut affiche `PREFIX`).
+préfixe **`Ctrl-Space`** (la barre de statut affiche `PREFIX`). Le préfixe fonctionne aussi depuis la liste
+des hôtes, avec la même table : une seule grammaire à retenir. Il s'applique à une seule touche, et `Esc`
+l'annule.
 
 | Action | Touches |
 |---|---|

@@ -179,15 +179,15 @@ impl TerminalView {
         }
     }
 
-    /// Tab label: OSC title if the remote set one, else the host alias.
-    /// Tab label: always the alias (a remote title must not impersonate
-    /// another host), followed by the remote title if any.
-    pub(crate) fn label(&self) -> String {
+    /// Title set by the remote (OSC 0/2), if any. Shown next to the alias,
+    /// never instead of it: a remote title must not impersonate another host.
+    pub(crate) fn remote_title(&self) -> Option<String> {
         let title = self.title.lock().unwrap_or_else(PoisonError::into_inner);
-        match title.as_deref().filter(|t| !t.trim().is_empty()) {
-            Some(t) => format!("{} · {t}", self.alias),
-            None => self.alias.clone(),
-        }
+        title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
     }
 
     pub(crate) fn mode(&self) -> TermMode {

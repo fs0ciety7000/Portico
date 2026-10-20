@@ -281,6 +281,8 @@ mod tests {
         let mut d = dialog(PromptKind::Password {
             user: "u".into(),
             host: "h".into(),
+            attempt: 1,
+            attempts: 3,
         });
         d.paste("hunter2\nsecond line");
         let Outcome::Answer(PromptResponse::Secret { value, .. }) =
@@ -306,6 +308,8 @@ mod tests {
         let mut d = dialog(PromptKind::Password {
             user: "u".into(),
             host: "h".into(),
+            attempt: 1,
+            attempts: 3,
         });
         for c in "s3cr3t".chars() {
             d.handle_key(key(KeyCode::Char(c)));

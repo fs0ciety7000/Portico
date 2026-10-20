@@ -1,4 +1,7 @@
 //! Modal rendering for prompts and the changed-key alert.
+//!
+//! Contract (ui-design-premium): title says what and where, body explains,
+//! actions sit bottom-right with the primary one last and highlighted.
 
 use portico_core::events::PromptKind;
 use ratatui::Frame;
@@ -9,24 +12,20 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
 use crate::dialog::{ChangedKeyAlert, Dialog, PromptDialog};
 use crate::theme::Styles;
+use crate::ui::fmt::display_path;
 
 /// Fixed mask: shows that something was typed, never how much.
 const MASK: &str = "••••••••";
+/// Width of an input field's surface.
+const FIELD_WIDTH: usize = 34;
+/// Modal widths.
+const PROMPT_WIDTH: u16 = 74;
+const ALERT_WIDTH: u16 = 80;
 
 pub(crate) fn render(dialog: &Dialog, s: Styles, frame: &mut Frame<'_>) {
     match dialog {
         Dialog::Prompt(p) => render_prompt(p, s, frame),
         Dialog::ChangedKey(a) => render_changed(a, s, frame),
-    }
-}
-
-/// `/home/me/.ssh/x` → `~/.ssh/x` (display only).
-fn display_path(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", path.get(home.len()..).unwrap_or_default())
-        }
-        _ => path.to_owned(),
     }
 }
 
@@ -50,117 +49,124 @@ fn modal(frame: &mut Frame<'_>, width: u16, height: u16) -> Rect {
     h
 }
 
-fn kv(s: Styles, k: &str, v: String) -> Line<'static> {
+fn kv(s: Styles, width: usize, k: &str, v: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{k:<13}"), s.muted()),
+        Span::styled(format!("{k:<width$}"), s.muted()),
         Span::styled(v, s.title()),
     ])
 }
 
-fn footer(s: Styles, hints: &[(&str, &str)]) -> Line<'static> {
+/// Actions, right-aligned; the last one is the primary action.
+fn footer(s: Styles, actions: &[(&str, &str)]) -> Line<'static> {
     let mut spans = Vec::new();
-    for (k, label) in hints {
-        spans.push(Span::styled(format!(" {k} "), s.key_hint()));
-        spans.push(Span::styled(format!(" {label}   "), s.muted()));
+    let last = actions.len().saturating_sub(1);
+    for (i, (k, label)) in actions.iter().enumerate() {
+        if i == last {
+            spans.push(Span::styled(format!(" {k} "), s.key_primary()));
+            spans.push(Span::styled(format!(" {label}"), s.accent()));
+        } else {
+            spans.push(Span::styled(format!(" {k} "), s.key_hint()));
+            spans.push(Span::styled(format!(" {label}   "), s.muted()));
+        }
     }
-    Line::from(spans)
+    Line::from(spans).right_aligned()
 }
 
-#[allow(clippy::too_many_lines)] // one layout per prompt kind; mostly formatting
+// One arm per prompt kind; splitting it would scatter the layout.
+#[allow(clippy::too_many_lines)]
 fn render_prompt(p: &PromptDialog, s: Styles, frame: &mut Frame<'_>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let (title, hints): (String, Vec<(&str, &str)>) = match &p.kind {
+    let alias = p.alias.clone();
+    let on = |what: &str| match &alias {
+        Some(a) => format!(" {what} · {a} "),
+        None => format!(" {what} "),
+    };
+    let (title, actions): (String, Vec<(&str, &str)>) = match &p.kind {
         PromptKind::UnknownHostKey {
             host,
             port,
             algorithm,
             fingerprint,
             other_algorithms,
-        } => host_key_lines(
-            p,
-            s,
-            &mut lines,
-            host,
-            *port,
-            algorithm,
-            fingerprint,
-            other_algorithms,
-        ),
-        kind => {
-            let title = match kind {
-                PromptKind::Password { user, host } => format!(" Password · {user}@{host} "),
-                PromptKind::KeyPassphrase { key_path } => {
-                    lines.push(Line::from(Span::styled(
-                        format!("Unlock {}", display_path(key_path)),
-                        s.secondary(),
-                    )));
-                    lines.push(Line::from(""));
-                    " Key passphrase ".to_owned()
-                }
-                PromptKind::KeyboardInteractive {
-                    name, instructions, ..
-                } => {
-                    for text in [name, instructions]
-                        .into_iter()
-                        .filter(|t| !t.trim().is_empty())
-                    {
-                        lines.push(Line::from(Span::styled(
-                            text.trim().to_owned(),
-                            s.secondary(),
-                        )));
-                    }
-                    if !lines.is_empty() {
-                        lines.push(Line::from(""));
-                    }
-                    format!(
-                        " {} ",
-                        p.alias
-                            .clone()
-                            .unwrap_or_else(|| "Authentication".to_owned())
-                    )
-                }
-                _ => " Question ".to_owned(),
-            };
-            for (i, field) in p.fields.iter().enumerate() {
-                let focused = p.focus == i;
-                let shown = if field.masked {
-                    if field.value.is_empty() {
-                        String::new()
-                    } else {
-                        MASK.to_owned()
-                    }
-                } else {
-                    field.value.to_string()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:<13}", field.label), s.muted()),
-                    Span::styled(shown, s.title()),
-                    Span::styled(if focused { "▏" } else { "" }, s.accent()),
-                ]));
+        } => {
+            host_key_lines(
+                p,
+                s,
+                &mut lines,
+                host,
+                *port,
+                algorithm,
+                fingerprint,
+                other_algorithms,
+            );
+            if other_algorithms.is_empty() {
+                (
+                    on("New host key"),
+                    vec![("n / Esc", "refuse"), ("y", "trust & remember")],
+                )
+            } else {
+                (
+                    on("Unusual host key"),
+                    vec![("Esc", "refuse"), ("yes ↵", "trust")],
+                )
             }
-            if p.can_remember() {
-                lines.push(Line::from(""));
-                let mark = if p.remember { "■" } else { "□" };
-                let style = if p.focus == p.fields.len() {
-                    s.accent()
-                } else {
-                    s.secondary()
-                };
+        }
+        PromptKind::Password {
+            user,
+            host,
+            attempt,
+            attempts,
+        } => {
+            lines.push(Line::from(Span::styled(
+                format!("Sign in as {user} on {host}."),
+                s.secondary(),
+            )));
+            retry_line(s, &mut lines, "password", *attempt, *attempts);
+            lines.push(Line::from(""));
+            field_lines(p, s, &mut lines);
+            (on("Password"), secret_actions(p))
+        }
+        PromptKind::KeyPassphrase {
+            key_path,
+            attempt,
+            attempts,
+        } => {
+            lines.push(Line::from(Span::styled(
+                format!("Unlock {}", display_path(key_path)),
+                s.secondary(),
+            )));
+            retry_line(s, &mut lines, "passphrase", *attempt, *attempts);
+            lines.push(Line::from(""));
+            field_lines(p, s, &mut lines);
+            (on("Key passphrase"), secret_actions(p))
+        }
+        PromptKind::KeyboardInteractive {
+            name, instructions, ..
+        } => {
+            for text in [name, instructions]
+                .into_iter()
+                .filter(|t| !t.trim().is_empty())
+            {
                 lines.push(Line::from(Span::styled(
-                    format!("{mark} Remember in the system keyring"),
-                    style,
+                    text.trim().to_owned(),
+                    s.secondary(),
                 )));
             }
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            field_lines(p, s, &mut lines);
             (
-                title,
-                vec![("↵", "submit"), ("Tab", "next"), ("Esc", "cancel")],
+                on("Authentication"),
+                vec![("Tab", "next"), ("Esc", "cancel"), ("↵", "submit")],
             )
         }
+        _ => (" Question ".to_owned(), vec![("Esc", "cancel")]),
     };
     lines.push(Line::from(""));
-    lines.push(footer(s, &hints));
+    lines.push(footer(s, &actions));
 
-    let area = modal(frame, 74, wrapped_height(&lines, 74));
+    let area = modal(frame, PROMPT_WIDTH, wrapped_height(&lines, PROMPT_WIDTH));
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
@@ -174,6 +180,69 @@ fn render_prompt(p: &PromptDialog, s: Styles, frame: &mut Frame<'_>) {
     );
 }
 
+fn secret_actions(p: &PromptDialog) -> Vec<(&'static str, &'static str)> {
+    if p.can_remember() && p.focus == p.fields.len() {
+        vec![("Space", "toggle"), ("Esc", "cancel"), ("↵", "submit")]
+    } else {
+        vec![("Tab", "next"), ("Esc", "cancel"), ("↵", "submit")]
+    }
+}
+
+fn retry_line(s: Styles, lines: &mut Vec<Line<'static>>, what: &str, attempt: u32, attempts: u32) {
+    if attempt > 1 {
+        lines.push(Line::from(Span::styled(
+            format!("Incorrect {what}, try again ({attempt}/{attempts})."),
+            s.status(s.theme.status.error),
+        )));
+    }
+}
+
+/// Input fields on a raised surface (masked when secret), then the
+/// "remember" toggle.
+fn field_lines(p: &PromptDialog, s: Styles, lines: &mut Vec<Line<'static>>) {
+    let label_width = p
+        .fields
+        .iter()
+        .map(|f| f.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let surface = s.key_hint();
+    for (i, field) in p.fields.iter().enumerate() {
+        let focused = p.focus == i;
+        let shown = if field.masked {
+            if field.value.is_empty() {
+                String::new()
+            } else {
+                MASK.to_owned()
+            }
+        } else {
+            crate::ui::fmt::truncate(&field.value, FIELD_WIDTH - 2)
+        };
+        let cursor = if focused { "▏" } else { " " };
+        let pad = FIELD_WIDTH.saturating_sub(shown.chars().count() + 2);
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<label_width$}", field.label), s.muted()),
+            Span::styled(format!(" {shown}"), surface),
+            Span::styled(cursor, s.accent().patch(surface)),
+            Span::styled(" ".repeat(pad), surface),
+        ]));
+    }
+    if p.can_remember() {
+        lines.push(Line::from(""));
+        let mark = if p.remember { "■" } else { "□" };
+        let style = if p.focus == p.fields.len() {
+            s.accent()
+        } else {
+            s.secondary()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{mark} Remember in the system keyring"),
+            style,
+        )));
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // the prompt's fields, destructured
 fn host_key_lines(
     p: &PromptDialog,
@@ -184,8 +253,7 @@ fn host_key_lines(
     algorithm: &str,
     fingerprint: &str,
     other_algorithms: &[String],
-) -> (String, Vec<(&'static str, &'static str)>) {
-    let status = s.theme.status;
+) {
     let target = if port == 22 {
         host.to_owned()
     } else {
@@ -196,23 +264,14 @@ fn host_key_lines(
         s.title(),
     )));
     lines.push(Line::from(Span::styled(
-        "Check the fingerprint with the server administrator before trusting it.",
+        "Verify this fingerprint with the server's administrator.",
         s.secondary(),
     )));
     lines.push(Line::from(""));
-    lines.push(kv(s, "Key type", algorithm.to_owned()));
-    lines.push(Line::from(vec![
-        Span::styled(format!("{:<13}", "Fingerprint"), s.muted()),
-        Span::styled(
-            fingerprint.to_owned(),
-            s.accent().add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    lines.push(kv(s, 13, "Key type", algorithm.to_owned()));
+    lines.push(kv(s, 13, "Fingerprint", fingerprint.to_owned()));
     if other_algorithms.is_empty() {
-        return (
-            " New host key ".to_owned(),
-            vec![("y", "trust & remember"), ("n", "refuse")],
-        );
+        return;
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -220,17 +279,13 @@ fn host_key_lines(
             "⚠ This host is already known with another key type ({}). This is unusual.",
             other_algorithms.join(", ")
         ),
-        s.status(status.warning),
+        s.status(s.theme.status.warning),
     )));
     lines.push(Line::from(vec![
-        Span::styled("Type yes to trust it: ", s.secondary()),
-        Span::styled(p.confirm.clone(), s.title()),
+        Span::styled("Type yes to trust it  ", s.secondary()),
+        Span::styled(format!(" {:<4}", p.confirm), s.key_hint()),
         Span::styled("▏", s.accent()),
     ]));
-    (
-        " Unusual host key ".to_owned(),
-        vec![("yes ↵", "trust"), ("Esc", "refuse")],
-    )
 }
 
 fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
@@ -238,7 +293,7 @@ fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
     let target = if a.port == 22 {
         a.host.clone()
     } else {
-        format!("{}:{}", a.host, a.port)
+        format!("[{}]:{}", a.host, a.port)
     };
     let lines = vec![
         Line::from(Span::styled(
@@ -250,8 +305,8 @@ fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
             s.status(error),
         )),
         Line::from(""),
-        kv(s, "Key type", a.algorithm.clone()),
-        kv(s, "Expected", a.expected.clone()),
+        kv(s, 13, "Key type", a.algorithm.clone()),
+        kv(s, 13, "Expected", a.expected.clone()),
         Line::from(vec![
             Span::styled(format!("{:<13}", "Received"), s.muted()),
             Span::styled(
@@ -261,27 +316,33 @@ fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
         ]),
         kv(
             s,
+            13,
             "Recorded in",
             format!("{}:{}", display_path(&a.file), a.line),
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "Portico refused to connect. If the change is legitimate, confirm the new key with the administrator, then remove the old line from known_hosts.",
+            "Portico refused to connect. If the administrator confirms the new key:",
             s.secondary(),
         )),
+        Line::from(vec![
+            Span::styled(format!("{:<13}", "Fix"), s.muted()),
+            Span::styled(format!("ssh-keygen -R '{target}'"), s.title()),
+        ]),
         Line::from(""),
-        footer(s, &[("Esc", "close")]),
+        footer(s, &[("↵ / Esc", "close")]),
     ];
-    let area = modal(frame, 80, wrapped_height(&lines, 80));
+    let area = modal(frame, ALERT_WIDTH, wrapped_height(&lines, ALERT_WIDTH));
+    let banner = ratatui::style::Style::new()
+        .bg(crate::theme::c(error))
+        .fg(crate::theme::c(s.theme.palette.bg_base))
+        .add_modifier(Modifier::BOLD);
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
-                .border_type(BorderType::Thick)
+                .border_type(BorderType::Rounded)
                 .border_style(s.status(error))
-                .title(Line::from(Span::styled(
-                    " ⚠ HOST KEY CHANGED ",
-                    s.status(error).add_modifier(Modifier::BOLD),
-                )))
+                .title(Line::from(Span::styled(" ⚠ HOST KEY CHANGED ", banner)))
                 .padding(Padding::new(2, 2, 1, 0))
                 .style(s.overlay()),
         ),

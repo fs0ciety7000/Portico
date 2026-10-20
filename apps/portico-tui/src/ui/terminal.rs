@@ -40,8 +40,8 @@ pub(crate) fn render(
 
     if offset > 0 {
         let badge = Line::from(vec![
-            Span::styled(format!(" ↑ {offset} lines "), s.key_hint()),
-            Span::styled(" Shift-PgDn ", s.muted()),
+            Span::styled(format!(" ↑ {offset} lines  "), s.muted().patch(s.chrome())),
+            Span::styled(" Shift-PgDn ", s.key_hint()),
         ])
         .right_aligned();
         frame.render_widget(Paragraph::new(badge), Rect { height: 1, ..area });
@@ -58,7 +58,12 @@ pub(crate) fn render(
                 " connection closed · Ctrl-Space w to close ".to_owned()
             }
         };
-        let line = Line::from(Span::styled(text, s.key_hint())).centered();
+        // A failing exit status is worth noticing; a clean one is not.
+        let style = match ended {
+            crate::terminal::Ended::Exited(0) | crate::terminal::Ended::Closed => s.key_hint(),
+            _ => s.key_hint().patch(s.status(s.theme.status.warning)),
+        };
+        let line = Line::from(Span::styled(text, style)).centered();
         let y = area.bottom().saturating_sub(1);
         frame.render_widget(
             Paragraph::new(line),
@@ -177,6 +182,9 @@ struct Palette<'a> {
 }
 
 impl Palette<'_> {
+    /// Colours here are chosen by the remote program (SGR), not by Portico:
+    /// they bypass the design tokens on purpose, except the 16 named colours
+    /// and the default fg/bg, which map to the theme.
     fn resolve(&self, color: TermColor, foreground: bool) -> Color {
         let p = &self.theme.palette;
         match color {

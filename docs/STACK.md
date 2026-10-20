@@ -130,3 +130,7 @@ le volume est faible, et un format lisible et versionnable sert le principe « z
 | 2026-10-20 | Copies résiduelles de mots de passe en mémoire (russh `String`, webview) : risque accepté pour le MVP ; désactivation des core dumps et du ptrace (`rustix`) en phase 4 | Risque accepté |
 | 2026-10-20 | `StrictHostKeyChecking no` traité comme `accept-new` : une clé modifiée est **toujours** refusée (écart volontaire avec OpenSSH) | Accepté |
 | 2026-10-20 | Latence = RTT de `keepalive@openssh.com` (`send_ping`), premier échantillon 500 ms après le login | Accepté |
+| 2026-10-20 | Terminal : tâches lecteur et écrivain séparées par canal ; russh 0.64 rouvre la fenêtre SSH dès réception, donc la backpressure est TCP et par connexion (pas par canal). Cible : PR upstream pour piloter l'ajustement de fenêtre | Limite upstream acceptée |
+| 2026-10-20 | `vte` / `alacritty_terminal` ne bornent pas les séquences OSC ni les caractères combinants : titres assainis et combinants plafonnés côté Portico ; à suivre upstream | Risque surveillé |
+| 2026-10-20 | Refus de `pty-req` : échec du terminal (`terminal_refused`), là où `ssh -t` continue sans PTY ; un shell sans PTY est inutilisable dans un onglet | Accepté |
+| 2026-10-20 | Écarter le prompt de mot de passe termine la session (`Closed { UserRequested }`) au lieu d'essayer la méthode suivante, comme `Ctrl-C` dans `ssh` | Accepté |

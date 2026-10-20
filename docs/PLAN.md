@@ -114,11 +114,46 @@
 |---|---|---|---|---|
 | 0 Fondations | ✅ | 35 | couverte par la revue 1a | ✅ (captures TUI et GUI) |
 | 1a Transport et auth | ✅ | 82 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
-| 1b Terminal TUI | ✅ | 91 + interop (shell réel) | en cours | en cours |
+| 1b Terminal TUI | ✅ | 103 + interop (shell réel) | ✅ (voir ci-dessous) | ✅ (tmux 80×24 et 110×28) |
 | 1c Terminal GUI | 🔜 | | | |
 | 2 SFTP / tunnels | ⏳ | | | |
 | 3 Clés / secrets / snippets | ⏳ | | | |
 | 4 Finition | ⏳ | | | |
+
+## Revues de la phase 1b (2026-10-20)
+
+### `agent-security` : 1 ÉLEVÉ, 2 MOYEN, 2 FAIBLE, tous traités
+| Gravité | Constat | Suite donnée |
+|---|---|---|
+| ÉLEVÉ | Un collage pendant un dialogue partait vers le shell ou la recherche | Corrigé : le collage va au dialogue ouvert, jamais à une réponse de clé hôte |
+| MOYEN | Une frappe en vol (`y`, texte du shell) pouvait répondre à un dialogue qui venait de s'ouvrir | Corrigé : les dialogues ignorent les touches pendant 400 ms |
+| MOYEN | Le bracketed paste pouvait être contourné en coupant le marqueur de fin | Corrigé : tous les ESC/C1 sont retirés du collage |
+| FAIBLE | Titre distant (OSC) capable d'usurper un autre hôte (bidi, longueur) | Corrigé : titre assaini, tronqué, toujours affiché après l'alias |
+| FAIBLE | Champs secrets réalloués sans effacement | Corrigé : pré-dimensionnés, plafonnés, effacés après transmission |
+
+### `agent-ssh-protocols` : 2 BLOQUANT, tous traités
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : `Ctrl-C` bloqué derrière un flot de sortie | Corrigé : tâches lecteur et écrivain séparées + test (flot + `Ctrl-C`) |
+| **BLOQUANT** : un écrivain en attente de fenêtre gelait la boucle russh (toute la connexion) | Corrigé par la même séparation ; resize via `watch`, fermeture via jeton |
+| Canal laissé à moitié ouvert après un échec d'ouverture | Corrigé : EOF + CLOSE sur tous les chemins, ouverture hors de la boucle de supervision |
+| Modes PTY incomplets, `exit-signal` ignoré, EOF sans CLOSE | Corrigé (`ICRNL`, vitesses, `Exited { signal }`) + tests |
+| Backpressure par canal impossible (russh ajuste la fenêtre à la réception) | Limite upstream consignée dans STACK ; mémoire bornée, débit régulé au niveau TCP |
+
+### `agent-design-review` : 2 BLOQUANT, 9 IMPORTANT, tous traités
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : en-tête d'onglets qui déborde à 80 colonnes et masque l'onglet actif | Corrigé : fenêtre glissante autour de l'onglet actif (`‹+n` / `+n›`), alias tronqués, thème affiché seulement s'il tient |
+| **BLOQUANT** : la pastille de statut perdait sa couleur sur la ligne sélectionnée | Corrigé : la sélection ne change plus que le fond |
+| Dialogues : titre sans contexte, actions non hiérarchisées | Corrigé : « quoi · hôte », actions à droite, action principale en dernier et accentuée |
+| Mot de passe faux redemandé sans explication | Corrigé : `attempt` / `attempts` dans les prompts, « Incorrect …, try again (2/3) » |
+| Annuler le mot de passe affichait une erreur | Corrigé : fin de session `Closed { UserRequested }`, sans toast |
+| Alerte de clé modifiée peu lisible | Corrigé : bandeau d'erreur, empreinte reçue en gras, commande `ssh-keygen -R` exacte |
+| Échec : message et hint mélangés | Corrigé : message, hint et remède sur des lignes distinctes (détails et toast) |
+| Barre de statut : libellés de touches incohérents, PREFIX peu visible | Corrigé : libellés uniformes, pastille PREFIX inversée, `● alias · latence · titre` à droite |
+| Préfixe absent de la liste des hôtes, alias de touches redondants | Corrigé : `Ctrl-Space` partout, alias `l p c x k` retirés |
+| Refus volontaire d'une clé affiché comme une erreur | Corrigé : statut neutre « Refused » |
+| Bannière de fin de shell : code ≠ 0 non signalé | Corrigé : couleur d'avertissement |
 
 ## Revues de la phase 1a (2026-10-20)
 

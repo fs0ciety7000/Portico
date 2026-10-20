@@ -12,7 +12,7 @@ use portico_core::engine::{ConnectRequest, HostInventory};
 use portico_core::events::{SessionEvent, SessionPhase, TerminalEvent};
 use portico_core::ids::SessionId;
 use portico_core::search::{Hit, HostSearch};
-use portico_core::{Engine, EngineEvent};
+use portico_core::{Engine, EngineEvent, ErrorSummary};
 use portico_theme::{THEMES, Theme};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
@@ -42,6 +42,8 @@ pub(crate) enum Overlay {
 #[derive(Debug, Clone)]
 pub(crate) struct Toast {
     pub(crate) message: String,
+    /// Actionable advice, on its own line under the message.
+    pub(crate) hint: Option<String>,
     pub(crate) is_error: bool,
     pub(crate) ttl: u16,
 }
@@ -184,15 +186,22 @@ impl App {
         Ok(())
     }
 
-    fn map_event(&self, event: Event) -> Option<Action> {
+    fn map_event(&mut self, event: Event) -> Option<Action> {
         match event {
-            Event::Key(key) => map_key(
-                key,
-                self.focus,
-                self.overlay.is_some(),
-                !self.dialogs.is_empty(),
-                self.prefix,
-            ),
+            Event::Key(key) => {
+                let action = map_key(
+                    key,
+                    self.focus,
+                    self.overlay.is_some(),
+                    !self.dialogs.is_empty(),
+                    self.prefix,
+                );
+                // The prefix applies to exactly one key.
+                if action.is_some() && !matches!(action, Some(Action::Prefix)) {
+                    self.prefix = false;
+                }
+                action
+            }
             Event::Paste(text) => Some(Action::Paste(text)),
             Event::Resize(..) => Some(Action::Tick),
             _ => None,
@@ -263,7 +272,7 @@ impl App {
             Action::CycleTheme => {
                 self.theme_index = (self.theme_index + 1) % THEMES.len();
                 let name = self.styles().theme.name;
-                self.notify(format!("Theme · {name}"), false);
+                self.notify(format!("Theme · {name}"));
             }
             Action::Reload => {
                 self.inventory = None;
@@ -275,7 +284,7 @@ impl App {
                 self.inventory = Some(inv);
                 self.refilter();
                 if warnings > 0 {
-                    self.notify(format!("{warnings} ssh_config warning(s)"), false);
+                    self.notify(format!("{warnings} ssh_config warning(s)"));
                 }
             }
             Action::HostsLoaded(Err(e)) => self.load_error = Some(e),
@@ -327,7 +336,7 @@ impl App {
                 }
                 // The session's own failure is already reported.
                 Err(error) if error.code == "session_ended" => {}
-                Err(error) => self.notify(error.message, true),
+                Err(error) => self.notify_error(error),
             },
         }
     }
@@ -473,7 +482,7 @@ impl App {
                     id
                 }
                 Err(e) => {
-                    self.notify(e.summary().message, true);
+                    self.notify_error(e.summary());
                     return;
                 }
             },
@@ -561,12 +570,12 @@ impl App {
                     SessionPhase::Failed { error } if error.code == "host_key_changed" => {
                         self.end_terminals(id);
                     }
+                    // The user refused the key: the host list says so, quietly.
+                    SessionPhase::Failed { error } if error.code == "host_key_rejected" => {
+                        self.end_terminals(id);
+                    }
                     SessionPhase::Failed { error } => {
-                        let msg = match error.hint {
-                            Some(hint) => format!("{} — {hint}", error.message),
-                            None => error.message,
-                        };
-                        self.notify(msg, true);
+                        self.notify_error(error);
                         self.end_terminals(id);
                     }
                     SessionPhase::Closed { .. } => self.end_terminals(id),
@@ -628,11 +637,21 @@ impl App {
         }
     }
 
-    fn notify(&mut self, message: String, is_error: bool) {
+    fn notify_error(&mut self, error: ErrorSummary) {
+        self.toast = Some(Toast {
+            message: error.message,
+            hint: error.hint,
+            is_error: true,
+            ttl: 80,
+        });
+    }
+
+    fn notify(&mut self, message: String) {
         self.toast = Some(Toast {
             message,
-            is_error,
-            ttl: if is_error { 80 } else { 40 },
+            hint: None,
+            is_error: false,
+            ttl: 40,
         });
     }
 
@@ -690,6 +709,8 @@ mod tests {
                 kind: PromptKind::Password {
                     user: "u".into(),
                     host: "h".into(),
+                    attempt: 1,
+                    attempts: 3,
                 },
             },
             None,

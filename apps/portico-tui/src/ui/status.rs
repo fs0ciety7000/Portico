@@ -16,6 +16,8 @@ pub(crate) struct Status {
     pub(crate) label: String,
     pub(crate) busy: bool,
     pub(crate) latency: Option<String>,
+    /// Latency above the warning threshold.
+    pub(crate) slow: bool,
 }
 
 pub(crate) fn status(view: Option<&SessionView>, s: Styles) -> Status {
@@ -25,6 +27,7 @@ pub(crate) fn status(view: Option<&SessionView>, s: Styles) -> Status {
         label: label.to_owned(),
         busy,
         latency: None,
+        slow: false,
     };
     let Some(view) = view else {
         return mk(st.idle, "Disconnected", false);
@@ -46,6 +49,7 @@ pub(crate) fn status(view: Option<&SessionView>, s: Styles) -> Status {
             let slow = view.latency.is_some_and(|d| d > SLOW_RTT);
             Status {
                 latency: view.latency.map(format_rtt),
+                slow,
                 ..mk(
                     if slow { st.warning } else { st.connected },
                     "Connected",
@@ -54,10 +58,11 @@ pub(crate) fn status(view: Option<&SessionView>, s: Styles) -> Status {
             }
         }
         SessionPhase::Disconnecting => mk(st.idle, "Disconnecting", true),
-        SessionPhase::Failed { error } => Status {
-            label: format!("Failed · {}", error.code.replace('_', " ")),
-            ..mk(st.error, "", false)
-        },
+        // A refusal the user chose is not an error.
+        SessionPhase::Failed { error } if error.code == "host_key_rejected" => {
+            mk(st.idle, "Refused", false)
+        }
+        SessionPhase::Failed { .. } => mk(st.error, "Failed", false),
         _ => mk(st.idle, "Disconnected", false),
     }
 }

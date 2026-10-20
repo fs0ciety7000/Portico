@@ -20,8 +20,9 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r · t · q", "Reload config · theme · quit"),
         ],
     ),
+    ("Terminal", &[("Shift-PgUp / PgDn", "Scroll back")]),
     (
-        "Terminal  (Ctrl-Space, then…)",
+        "Anywhere  (Ctrl-Space, then…)",
         &[
             ("h  or  0", "Back to hosts"),
             ("1-9  ] [", "Go to tab / next / previous"),
@@ -29,7 +30,6 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("w", "Close tab (last tab disconnects)"),
             ("d", "Disconnect this host"),
             ("Ctrl-Space", "Send Ctrl-Space to the remote"),
-            ("Shift-PgUp/PgDn", "Scroll back (no prefix)"),
         ],
     ),
 ];
@@ -61,10 +61,11 @@ pub(crate) fn map_key(
         return None;
     }
     let is_prefix_key = ctrl && matches!(key.code, KeyCode::Char(' ' | '@'));
+    // The prefix works from every view, so tab commands are the same everywhere.
+    if prefix {
+        return Some(prefix_command(key, is_prefix_key, focus));
+    }
     if focus == Focus::Terminal {
-        if prefix {
-            return Some(prefix_command(key, is_prefix_key));
-        }
         if overlay_open {
             return Some(Action::CloseOverlay);
         }
@@ -115,27 +116,31 @@ pub(crate) fn map_key(
             KeyCode::Char(c @ '1'..='9') => Some(Action::GoTab(usize::from(c as u8 - b'1'))),
             KeyCode::Enter => Some(Action::Connect),
             KeyCode::Esc => Some(Action::SearchClear),
-            _ if is_prefix_key => Some(Action::NextTab),
+            _ if is_prefix_key => Some(Action::Prefix),
             _ => None,
         },
     }
 }
 
-fn prefix_command(key: KeyEvent, is_prefix_key: bool) -> Action {
+fn prefix_command(key: KeyEvent, is_prefix_key: bool, focus: Focus) -> Action {
     if is_prefix_key {
-        // Ctrl-Space twice: deliver it to the remote program.
-        return Action::TerminalKey(key);
+        // Ctrl-Space twice: deliver it to the remote program, if any.
+        return if focus == Focus::Terminal {
+            Action::TerminalKey(key)
+        } else {
+            Action::CancelPrefix
+        };
     }
     match key.code {
         KeyCode::Char('h' | '0') => Action::GoHome,
         KeyCode::Char(c @ '1'..='9') => Action::GoTab(usize::from(c as u8 - b'1')),
-        KeyCode::Char(']' | 'l') | KeyCode::Tab => Action::NextTab,
-        KeyCode::Char('[' | 'p') | KeyCode::BackTab => Action::PrevTab,
-        KeyCode::Char('n' | 'c') => Action::NewTab,
-        KeyCode::Char('w' | 'x') => Action::CloseTab,
+        KeyCode::Char(']') | KeyCode::Tab => Action::NextTab,
+        KeyCode::Char('[') | KeyCode::BackTab => Action::PrevTab,
+        KeyCode::Char('n') => Action::NewTab,
+        KeyCode::Char('w') => Action::CloseTab,
         KeyCode::Char('d') => Action::Disconnect,
         KeyCode::Char('?') => Action::ToggleHelp,
-        KeyCode::Char('/' | 'k') => Action::FocusSearch,
+        KeyCode::Char('/') => Action::FocusSearch,
         _ => Action::CancelPrefix,
     }
 }
@@ -173,6 +178,30 @@ mod tests {
         assert!(matches!(
             map_key(prefix, Focus::Terminal, false, false, true),
             Some(Action::TerminalKey(_))
+        ));
+    }
+
+    #[test]
+    fn prefix_works_from_the_host_list() {
+        let prefix = key(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert!(matches!(
+            map_key(prefix, Focus::Hosts, false, false, false),
+            Some(Action::Prefix)
+        ));
+        assert!(matches!(
+            map_key(
+                key(KeyCode::Char('2'), KeyModifiers::NONE),
+                Focus::Hosts,
+                false,
+                false,
+                true
+            ),
+            Some(Action::GoTab(1))
+        ));
+        // Twice from the host list: nothing to forward it to.
+        assert!(matches!(
+            map_key(prefix, Focus::Hosts, false, false, true),
+            Some(Action::CancelPrefix)
         ));
     }
 

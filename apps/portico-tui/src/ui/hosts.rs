@@ -93,6 +93,8 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     }
 
     let Some(inv) = &app.inventory else { return };
+    // Leave room for the dot, a favourite star and some of the target.
+    let alias_max = usize::from(area.width).saturating_sub(10).max(8);
     let items: Vec<ListItem<'_>> = app
         .hits
         .iter()
@@ -106,7 +108,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
             };
             let mut spans = vec![
                 Span::styled(format!("{dot} "), s.status(st.color)),
-                Span::styled(h.alias.clone(), s.title()),
+                Span::styled(super::fmt::truncate(&h.alias, alias_max), s.title()),
             ];
             if h.meta.favorite {
                 spans.push(Span::styled(" ★", s.accent()));

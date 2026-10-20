@@ -50,10 +50,39 @@ impl Styles {
             .fg(c(self.theme.palette.text_primary))
             .add_modifier(Modifier::BOLD)
     }
+    /// Background only: spans keep their meaning colours (status dot,
+    /// favourite star, muted metadata) on the selected row.
     pub(crate) fn selected(self) -> Style {
+        Style::new().bg(c(self.theme.palette.bg_selected))
+    }
+    /// Header / chrome surface.
+    pub(crate) fn chrome(self) -> Style {
         Style::new()
-            .bg(c(self.theme.palette.bg_selected))
+            .bg(c(self.theme.palette.bg_surface))
             .fg(c(self.theme.palette.text_primary))
+    }
+    /// Status-bar mode pill (HOSTS, TERMINAL…).
+    pub(crate) fn mode_pill(self) -> Style {
+        Style::new()
+            .bg(c(self.theme.palette.accent))
+            .fg(c(self.theme.palette.text_on_accent))
+            .add_modifier(Modifier::BOLD)
+    }
+    /// Transient PREFIX mode: inverted so it never looks like TERMINAL.
+    pub(crate) fn prefix_pill(self) -> Style {
+        Style::new()
+            .bg(c(self.theme.palette.bg_elevated))
+            .fg(c(self.theme.palette.accent_strong))
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    }
+    /// Key cap of the primary action in a footer.
+    pub(crate) fn key_primary(self) -> Style {
+        Style::new()
+            .bg(c(self.theme.palette.accent))
+            .fg(c(self.theme.palette.text_on_accent))
+    }
+    pub(crate) fn border_strong(self) -> Style {
+        Style::new().fg(c(self.theme.palette.border_strong))
     }
     pub(crate) fn key_hint(self) -> Style {
         Style::new()
