@@ -43,6 +43,8 @@ pub fn run() {
             commands::search_hosts,
             commands::list_themes,
             commands::connect,
+            commands::disconnect,
+            commands::respond_prompt,
         ])
         .run(tauri::generate_context!());
 

@@ -1,12 +1,16 @@
 //! IPC commands. Errors cross the boundary as `ErrorSummary` (code, message,
 //! hint) so the UI can render them without string matching.
 
+// Tauri injects `State` (and deserialized arguments) by value.
+#![allow(clippy::needless_pass_by_value)]
+
 use portico_core::engine::ConnectRequest;
+use portico_core::ids::{PromptId, SessionId};
 use portico_core::search::HostSearch;
 use portico_core::{Engine, ErrorSummary};
 use tauri::State;
 
-use crate::dto::{HostDto, ThemeDto};
+use crate::dto::{HostDto, PromptAnswerDto, ThemeDto};
 
 #[tauri::command]
 pub(crate) async fn list_hosts(engine: State<'_, Engine>) -> Result<Vec<HostDto>, ErrorSummary> {
@@ -41,13 +45,32 @@ pub(crate) fn list_themes() -> Vec<ThemeDto> {
         .collect()
 }
 
+/// Starts a session; progress arrives on `engine://event`.
 #[tauri::command]
-pub(crate) async fn connect(engine: State<'_, Engine>, alias: String) -> Result<u64, ErrorSummary> {
-    let request = ConnectRequest {
-        alias,
-        user_override: None,
-        pty: None,
-    };
-    let (session, _terminal) = engine.connect(request).await.map_err(|e| e.summary())?;
-    Ok(session.get())
+pub(crate) fn connect(engine: State<'_, Engine>, alias: String) -> Result<u64, ErrorSummary> {
+    let id = engine
+        .connect(ConnectRequest::new(alias))
+        .map_err(|e| e.summary())?;
+    Ok(id.get())
+}
+
+#[tauri::command]
+pub(crate) async fn disconnect(
+    engine: State<'_, Engine>,
+    session: u64,
+) -> Result<(), ErrorSummary> {
+    let id = SessionId::from_raw(session);
+    engine.disconnect(id).await.map_err(|e| e.summary())
+}
+
+/// Answers an engine prompt. Secrets are wrapped immediately and never logged.
+#[tauri::command]
+pub(crate) fn respond_prompt(
+    engine: State<'_, Engine>,
+    prompt: u64,
+    answer: PromptAnswerDto,
+) -> Result<(), ErrorSummary> {
+    engine
+        .respond(PromptId::from_raw(prompt), answer.into())
+        .map_err(|e| e.summary())
 }

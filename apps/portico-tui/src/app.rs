@@ -1,13 +1,16 @@
 //! Application state, update loop and event multiplexing.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream};
 use futures::StreamExt;
-use portico_core::Engine;
-use portico_core::engine::{ConnectRequest, HostInventory};
+use portico_core::engine::{ConnectRequest, HostInventory, PromptResponse};
+use portico_core::events::{SessionEvent, SessionPhase};
+use portico_core::ids::SessionId;
 use portico_core::search::{Hit, HostSearch};
+use portico_core::{Engine, EngineEvent};
 use portico_theme::{THEMES, Theme};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
@@ -28,6 +31,23 @@ pub(crate) enum Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Overlay {
     Help,
+}
+
+/// Live state of one SSH session, derived from engine events.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionView {
+    pub(crate) id: SessionId,
+    pub(crate) phase: SessionPhase,
+    pub(crate) latency: Option<Duration>,
+}
+
+impl SessionView {
+    pub(crate) fn in_flight(&self) -> bool {
+        !matches!(
+            self.phase,
+            SessionPhase::Connected | SessionPhase::Failed { .. } | SessionPhase::Closed { .. }
+        )
+    }
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -51,6 +71,10 @@ pub(crate) struct App {
     pub(crate) hits: Vec<Hit>,
     pub(crate) list: ListState,
     pub(crate) toast: Option<Toast>,
+    /// Latest session per host alias.
+    pub(crate) sessions: HashMap<String, SessionView>,
+    /// Sessions whose prompt was declined (no dialog yet: phase 1b).
+    declined: HashSet<SessionId>,
     /// Monotonic frame counter for spinners.
     pub(crate) tick: u64,
     search: HostSearch,
@@ -76,6 +100,8 @@ impl App {
             hits: Vec::new(),
             list: ListState::default(),
             toast: None,
+            sessions: HashMap::new(),
+            declined: HashSet::new(),
             tick: 0,
             search: HostSearch::default(),
             tx,
@@ -99,6 +125,7 @@ impl App {
     pub(crate) async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         let mut input = EventStream::new();
         let mut ticker = tokio::time::interval(TICK);
+        let mut engine_events = self.engine.subscribe();
         self.spawn_load_hosts();
 
         terminal.draw(|f| ui::render(&mut self, f))?;
@@ -110,6 +137,7 @@ impl App {
                     _ => None,
                 },
                 Some(action) = self.rx.recv() => Some(action),
+                event = engine_events.recv() => event.ok().map(Action::Engine),
                 _ = ticker.tick(), if self.needs_animation() => Some(Action::Tick),
             };
             if let Some(action) = action {
@@ -122,7 +150,9 @@ impl App {
     }
 
     fn needs_animation(&self) -> bool {
-        self.is_loading() || self.toast.is_some()
+        self.is_loading()
+            || self.toast.is_some()
+            || self.sessions.values().any(SessionView::in_flight)
     }
 
     fn spawn_load_hosts(&self) {
@@ -194,7 +224,8 @@ impl App {
             }
             Action::HostsLoaded(Err(e)) => self.load_error = Some(e),
             Action::Connect => self.connect_selected(),
-            Action::ConnectFailed(msg) => self.notify(msg, true),
+            Action::Disconnect => self.disconnect_selected(),
+            Action::Engine(event) => self.on_engine_event(event),
         }
     }
 
@@ -203,29 +234,99 @@ impl App {
         self.inventory.as_ref()?.hosts.get(hit.index)
     }
 
+    pub(crate) fn session_for(&self, alias: &str) -> Option<&SessionView> {
+        self.sessions.get(alias)
+    }
+
     fn connect_selected(&mut self) {
-        let Some(host) = self.selected_host() else {
+        let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
             return;
         };
-        let request = ConnectRequest {
-            alias: host.alias.clone(),
-            user_override: None,
-            pty: None,
+        if self
+            .session_for(&alias)
+            .is_some_and(|s| s.in_flight() || s.phase == SessionPhase::Connected)
+        {
+            return;
+        }
+        match self.engine.connect(ConnectRequest::new(alias.clone())) {
+            Ok(id) => {
+                self.sessions.insert(
+                    alias,
+                    SessionView {
+                        id,
+                        phase: SessionPhase::Resolving,
+                        latency: None,
+                    },
+                );
+            }
+            Err(e) => self.notify(e.summary().message, true),
+        }
+    }
+
+    fn disconnect_selected(&mut self) {
+        let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
+            return;
+        };
+        let Some(id) = self.session_for(&alias).map(|s| s.id) else {
+            return;
         };
         let engine = self.engine.clone();
-        let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = engine.connect(request).await {
-                let _ = tx.send(Action::ConnectFailed(e.summary().message));
-            }
+            let _ = engine.disconnect(id).await;
         });
+    }
+
+    fn on_engine_event(&mut self, event: EngineEvent) {
+        match event {
+            EngineEvent::Session { id, event } => {
+                let Some((alias, view)) = self.sessions.iter_mut().find(|(_, v)| v.id == id) else {
+                    return;
+                };
+                let alias = alias.clone();
+                match event {
+                    SessionEvent::Phase(phase) => {
+                        view.phase = phase.clone();
+                        match phase {
+                            SessionPhase::Connected => {
+                                self.notify(format!("Connected to {alias}"), false);
+                            }
+                            SessionPhase::Failed { error } => {
+                                let msg = if self.declined.remove(&id) {
+                                    format!(
+                                        "{alias}: needs an answer (host key or password) — prompt dialogs arrive in the next phase"
+                                    )
+                                } else {
+                                    match error.hint {
+                                        Some(hint) => format!("{} — {hint}", error.message),
+                                        None => error.message,
+                                    }
+                                };
+                                self.notify(msg, true);
+                            }
+                            _ => {}
+                        }
+                    }
+                    SessionEvent::Latency { rtt } => view.latency = Some(rtt),
+                    _ => {}
+                }
+            }
+            EngineEvent::Prompt(prompt) => {
+                // Interactive prompt dialogs land in phase 1b; decline cleanly
+                // so the session reports a precise failure instead of hanging.
+                let _ = self.engine.respond(prompt.id, PromptResponse::Cancel);
+                if let Some(id) = prompt.session {
+                    self.declined.insert(id);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn notify(&mut self, message: String, is_error: bool) {
         self.toast = Some(Toast {
             message,
             is_error,
-            ttl: 40,
+            ttl: if is_error { 80 } else { 40 },
         });
     }
 

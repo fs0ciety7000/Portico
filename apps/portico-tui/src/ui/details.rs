@@ -38,7 +38,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             Span::styled(format!(":{}", r.port), s.muted()),
         ]),
         Line::from(""),
-        status_line(s),
+        status_line(app, &host.alias, s),
         Line::from(""),
     ];
 
@@ -97,11 +97,28 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn status_line(s: Styles) -> Line<'static> {
-    let idle = s.theme.status.idle;
-    Line::from(vec![
-        Span::styled("● ", s.status(idle)),
-        Span::styled("Disconnected", s.secondary()),
-        Span::styled("   Enter to connect", s.muted()),
-    ])
+fn status_line(app: &App, alias: &str, s: Styles) -> Line<'static> {
+    let view = app.session_for(alias);
+    let st = super::status::status(view, s);
+    let dot = if st.busy {
+        super::spinner(app.tick)
+    } else {
+        "●"
+    };
+    let mut spans = vec![
+        Span::styled(format!("{dot} "), s.status(st.color)),
+        Span::styled(st.label, s.secondary()),
+    ];
+    if let Some(rtt) = st.latency {
+        spans.push(Span::styled(format!("  {rtt}"), s.status(st.color)));
+    }
+    let hint = match view.map(|v| &v.phase) {
+        Some(portico_core::events::SessionPhase::Connected) => {
+            "   d to disconnect · terminal arrives next"
+        }
+        Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => "",
+        _ => "   Enter to connect",
+    };
+    spans.push(Span::styled(hint, s.muted()));
+    Line::from(spans)
 }

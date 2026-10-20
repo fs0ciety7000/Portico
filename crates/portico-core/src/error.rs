@@ -48,6 +48,75 @@ pub enum Error {
 
     #[error("not supported yet: {0}")]
     Unsupported(&'static str),
+
+    #[error("cannot resolve {host}: {source}")]
+    Resolve {
+        host: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("cannot connect to {target}: {source}")]
+    Connect {
+        target: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("timed out while {phase} {target}")]
+    Timeout { phase: &'static str, target: String },
+
+    #[error(transparent)]
+    HostKey(#[from] HostKeyError),
+
+    #[error("authentication failed for {user}@{host} (tried: {tried})")]
+    AuthFailed {
+        user: String,
+        host: String,
+        tried: String,
+    },
+
+    #[error("ProxyJump loop detected: {chain}")]
+    ProxyJumpCycle { chain: String },
+
+    #[error("ProxyJump chain is longer than {max} hops")]
+    ProxyJumpTooDeep { max: usize },
+
+    #[error("ssh error with {target}: {message}")]
+    Transport { target: String, message: String },
+
+    #[error("operation cancelled")]
+    Cancelled,
+}
+
+/// Host key verification failures. Never recoverable by a click: see
+/// `CLAUDE.md` §11.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum HostKeyError {
+    #[error(
+        "host key for {host} has CHANGED (now {actual}, expected {expected} per {}:{line}): possible man-in-the-middle attack",
+        file.display()
+    )]
+    Changed {
+        host: String,
+        actual: String,
+        expected: String,
+        file: PathBuf,
+        line: usize,
+    },
+    #[error("host key for {host} was not trusted")]
+    Rejected { host: String },
+    #[error("host key for {host} is unknown and StrictHostKeyChecking is enabled")]
+    UnknownStrict { host: String },
+    #[error("host key for {host} is revoked ({}:{line})", file.display())]
+    Revoked {
+        host: String,
+        file: PathBuf,
+        line: usize,
+    },
+    #[error("invalid host certificate for {host}: {reason}")]
+    InvalidCertificate { host: String, reason: String },
 }
 
 impl Error {
@@ -77,6 +146,54 @@ impl Error {
             Self::UnknownPrompt(_) => ("unknown_prompt", None),
             Self::EngineClosed => ("engine_closed", None),
             Self::Unsupported(_) => ("unsupported", None),
+            Self::Resolve { .. } => ("dns", Some("Check the HostName and your network/DNS.")),
+            Self::Connect { source, .. } => (
+                "connect",
+                Some(match source.kind() {
+                    std::io::ErrorKind::ConnectionRefused => {
+                        "Nothing listens on that port: is sshd running, is the Port right?"
+                    }
+                    _ => "Check that the host is reachable (VPN, firewall, ProxyJump).",
+                }),
+            ),
+            Self::Timeout { .. } => (
+                "timeout",
+                Some("The host did not answer in time; check ConnectTimeout and the network."),
+            ),
+            Self::HostKey(e) => match e {
+                HostKeyError::Changed { .. } => (
+                    "host_key_changed",
+                    Some(
+                        "Do not connect. Verify the new key with the server administrator; if legitimate, remove the old line from known_hosts.",
+                    ),
+                ),
+                HostKeyError::Rejected { .. } => ("host_key_rejected", None),
+                HostKeyError::UnknownStrict { .. } => (
+                    "host_key_unknown",
+                    Some(
+                        "Add the host key to known_hosts or relax StrictHostKeyChecking for this host.",
+                    ),
+                ),
+                HostKeyError::Revoked { .. } => (
+                    "host_key_revoked",
+                    Some("This key was explicitly revoked: contact the server administrator."),
+                ),
+                HostKeyError::InvalidCertificate { .. } => (
+                    "host_cert_invalid",
+                    Some("The host certificate is expired or not issued for this name."),
+                ),
+            },
+            Self::AuthFailed { .. } => (
+                "auth_failed",
+                Some("Check User, IdentityFile and your agent; see the session log for details."),
+            ),
+            Self::ProxyJumpCycle { .. } => (
+                "proxy_jump_cycle",
+                Some("Fix the ProxyJump chain in your ssh config."),
+            ),
+            Self::ProxyJumpTooDeep { .. } => ("proxy_jump_too_deep", None),
+            Self::Transport { .. } => ("ssh", Some("See the session log for protocol details.")),
+            Self::Cancelled => ("cancelled", None),
         };
         ErrorSummary {
             code: code.to_owned(),

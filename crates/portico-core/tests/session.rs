@@ -1,0 +1,538 @@
+//! End-to-end session tests against an in-process russh server (phase 1a).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+
+use std::time::Duration;
+
+use portico_core::engine::PromptResponse;
+use portico_core::events::{
+    AuthMethod, CloseReason, EngineEvent, PromptKind, SessionEvent, SessionPhase,
+};
+use russh::keys::ssh_key::certificate::CertType;
+use secrecy::SecretString;
+use support::{Behaviour, Env, TestServer, accept_host, never, new_key, target_config, user_cert};
+
+fn secret(s: &str) -> SecretString {
+    SecretString::from(s.to_owned())
+}
+
+fn key_server(key: &russh::keys::PrivateKey) -> Behaviour {
+    Behaviour {
+        keys: vec![key.public_key().clone()],
+        ..Behaviour::default()
+    }
+}
+
+// ── host key verification ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn unknown_host_accepted_is_recorded_and_trusted_next_time() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+
+    let (_, first) = env.connect("t", accept_host).await;
+    assert!(first.connected(), "{:?}", first.phases);
+    assert!(matches!(
+        first.prompts.as_slice(),
+        [PromptKind::UnknownHostKey { port, fingerprint, .. }]
+            if *port == server.port && fingerprint.starts_with("SHA256:")
+    ));
+    assert!(
+        env.known_hosts()
+            .contains(&format!("[127.0.0.1]:{}", server.port))
+    );
+
+    let (_, second) = env.connect("t", never).await;
+    assert!(second.connected(), "{:?}", second.phases);
+}
+
+#[tokio::test]
+async fn unknown_host_rejected_fails_and_records_nothing() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+
+    let (_, out) = env.connect("t", |_| PromptResponse::Cancel).await;
+    assert_eq!(
+        out.failure_code(),
+        Some("host_key_rejected"),
+        "{:?}",
+        out.phases
+    );
+    assert!(env.known_hosts().is_empty());
+}
+
+#[tokio::test]
+async fn strict_host_key_checking_refuses_unknown_without_prompt() {
+    let server = TestServer::start(Behaviour::default()).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  StrictHostKeyChecking yes\n",
+    ));
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(out.failure_code(), Some("host_key_unknown"));
+}
+
+#[tokio::test]
+async fn accept_new_records_without_prompt() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  StrictHostKeyChecking accept-new\n  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    let (_, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(!env.known_hosts().is_empty());
+}
+
+#[tokio::test]
+async fn changed_host_key_always_fails_hard() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    // Even `StrictHostKeyChecking no` must not let a changed key through.
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    let impostor = new_key();
+    env.append_known_hosts(&format!(
+        "[127.0.0.1]:{} {}",
+        server.port,
+        impostor.public_key().to_openssh().unwrap()
+    ));
+
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(out.failure_code(), Some("host_key_changed"));
+    assert!(
+        !out.phases
+            .iter()
+            .any(|p| matches!(p, SessionPhase::Connected))
+    );
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        EngineEvent::Session {
+            event: SessionEvent::HostKeyChanged {
+                known_hosts_line: 1,
+                ..
+            },
+            ..
+        }
+    )));
+    assert_eq!(
+        server
+            .behaviour
+            .logins
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn revoked_host_key_is_refused() {
+    let server = TestServer::start(Behaviour::default()).await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+    env.append_known_hosts(&format!(
+        "@revoked * {}",
+        server.host_key.public_key().to_openssh().unwrap()
+    ));
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(out.failure_code(), Some("host_key_revoked"));
+}
+
+#[tokio::test]
+async fn host_certificate_from_trusted_ca_needs_no_prompt() {
+    let key = new_key();
+    let (host_ca, host_key) = (new_key(), new_key());
+    let cert = user_cert(&host_ca, &host_key, "127.0.0.1", CertType::Host);
+    let server = TestServer::start_with(key_server(&key), host_key, vec![cert]).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    env.append_known_hosts(&format!(
+        "@cert-authority [127.0.0.1]:{} {}",
+        server.port,
+        host_ca.public_key().to_openssh().unwrap()
+    ));
+    let (id, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    let logs = env.engine.session_logs(id).unwrap();
+    assert!(
+        logs.iter().any(|l| l.message.contains("trusted CA")),
+        "{logs:#?}"
+    );
+}
+
+// ── authentication ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn encrypted_key_asks_passphrase_retries_and_remembers() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, Some("correct horse"));
+    env.trust(&server);
+
+    let mut answers = vec![
+        PromptResponse::Secret {
+            value: secret("wrong"),
+            remember: false,
+        },
+        PromptResponse::Secret {
+            value: secret("correct horse"),
+            remember: true,
+        },
+    ]
+    .into_iter();
+    let (_, out) = env
+        .connect("t", |kind| {
+            assert!(matches!(kind, PromptKind::KeyPassphrase { .. }), "{kind:?}");
+            answers.next().unwrap()
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(out.prompts.len(), 2);
+    assert!(out.phases.contains(&SessionPhase::Authenticating {
+        method: AuthMethod::PublicKey
+    }));
+    assert!(!out.transcript().contains("correct horse"));
+
+    // Remembered: no prompt the second time.
+    let (_, again) = env.connect("t", never).await;
+    assert!(again.connected());
+}
+
+#[tokio::test]
+async fn passphrase_is_not_asked_for_a_key_the_server_refuses() {
+    let key = new_key();
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "s3cret".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, Some("unused"));
+    env.trust(&server);
+
+    let (_, out) = env
+        .connect("t", |kind| match kind {
+            PromptKind::Password { user, .. } if user == "alice" => PromptResponse::Secret {
+                value: secret("s3cret"),
+                remember: false,
+            },
+            other => panic!("unexpected prompt {other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(out.prompts.len(), 1);
+}
+
+#[tokio::test]
+async fn user_certificate_is_tried_first() {
+    let (ca, key) = (new_key(), new_key());
+    let server = TestServer::start(Behaviour {
+        user_ca: Some(ca.public_key().clone()),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    let cert = user_cert(&ca, &key, "alice", CertType::User);
+    std::fs::write(env.ssh("id_test-cert.pub"), cert.to_openssh().unwrap()).unwrap();
+    env.trust(&server);
+
+    let (_, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(out.phases.contains(&SessionPhase::Authenticating {
+        method: AuthMethod::Certificate
+    }));
+}
+
+#[tokio::test]
+async fn password_retry_remember_and_no_leak() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "hunter22".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+
+    let mut answers = vec![
+        PromptResponse::Secret {
+            value: secret("nope"),
+            remember: false,
+        },
+        PromptResponse::Secret {
+            value: secret("hunter22"),
+            remember: true,
+        },
+    ]
+    .into_iter();
+    let (id, out) = env.connect("t", |_| answers.next().unwrap()).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(out.prompts.len(), 2);
+
+    let logs = serde_json::to_string(&env.engine.session_logs(id).unwrap()).unwrap();
+    for haystack in [out.transcript(), logs] {
+        assert!(!haystack.contains("hunter22"));
+        assert!(!haystack.contains("nope"));
+    }
+    let (_, again) = env.connect("t", never).await;
+    assert!(again.connected(), "remembered password must be used");
+}
+
+#[tokio::test]
+async fn keyboard_interactive() {
+    let server = TestServer::start(Behaviour {
+        keyboard_interactive: Some(("alice".into(), "otp-123".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+    let (_, out) = env
+        .connect("t", |kind| match kind {
+            PromptKind::KeyboardInteractive { prompts, .. } => {
+                assert_eq!(prompts.len(), 1);
+                assert!(!prompts[0].echo);
+                PromptResponse::Answers(vec![secret("otp-123")])
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+}
+
+#[tokio::test]
+async fn all_methods_exhausted_reports_auth_failed() {
+    let server = TestServer::start(Behaviour::default()).await;
+    let mut env = Env::new(&target_config("t", server.port, ""));
+    env.trust(&server);
+    let (_, out) = env.connect("t", |_| PromptResponse::Cancel).await;
+    assert_eq!(out.failure_code(), Some("auth_failed"), "{:?}", out.phases);
+}
+
+// ── routing, lifecycle, latency ────────────────────────────────────────────
+
+#[tokio::test]
+async fn proxy_jump_two_hops() {
+    let key = new_key();
+    let bastion = TestServer::start(Behaviour {
+        keys: vec![key.public_key().clone()],
+        allow_direct_tcpip: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let target = TestServer::start(key_server(&key)).await;
+    let config = format!(
+        "{}{}",
+        target_config("bastion", bastion.port, ""),
+        target_config("target", target.port, "  ProxyJump bastion\n"),
+    );
+    let mut env = Env::new(&format!("IdentityFile ~/.ssh/id_test\n{config}"));
+    env.write_key("id_test", &key, None);
+    env.trust(&bastion);
+    env.trust(&target);
+
+    let (_, out) = env.connect("target", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    let hops: Vec<(u8, u8)> = out
+        .phases
+        .iter()
+        .filter_map(|p| match p {
+            SessionPhase::Connecting { hop, hops, .. } => Some((*hop, *hops)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hops, [(1, 2), (2, 2)]);
+    assert_eq!(
+        target
+            .behaviour
+            .logins
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn proxy_jump_cycle_fails_fast() {
+    let mut env = Env::new("Host a\n  ProxyJump b\nHost b\n  ProxyJump a\n");
+    let (_, out) = env.connect("a", never).await;
+    assert_eq!(out.failure_code(), Some("proxy_jump_cycle"));
+}
+
+#[tokio::test]
+async fn connection_refused_has_actionable_hint() {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut env = Env::new(&target_config("t", port, ""));
+    let (_, out) = env.connect("t", never).await;
+    let SessionPhase::Failed { error } = out.last() else {
+        panic!("{:?}", out.phases)
+    };
+    assert_eq!(error.code, "connect");
+    assert!(error.hint.as_deref().unwrap_or_default().contains("sshd"));
+}
+
+#[tokio::test]
+async fn silent_server_times_out() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = listener.accept().await {
+            held.push(s); // accept, never speak SSH
+        }
+    });
+    let mut env = Env::with_timeout(&target_config("t", port, ""), Duration::from_millis(300));
+    let (_, out) = env.connect("t", never).await;
+    assert_eq!(out.failure_code(), Some("timeout"));
+}
+
+#[tokio::test]
+async fn phases_latency_banner_and_disconnect() {
+    let key = new_key();
+    let server = TestServer::start(Behaviour {
+        keys: vec![key.public_key().clone()],
+        banner: Some("Authorized use only".into()),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new(&target_config(
+        "t",
+        server.port,
+        "  IdentityFile ~/.ssh/id_test\n",
+    ));
+    env.write_key("id_test", &key, None);
+    env.trust(&server);
+
+    let (id, out) = env.connect("t", never).await;
+    let kinds: Vec<&str> = out
+        .phases
+        .iter()
+        .map(|p| match p {
+            SessionPhase::Resolving => "resolving",
+            SessionPhase::Connecting { .. } => "connecting",
+            SessionPhase::Handshake => "handshake",
+            SessionPhase::VerifyingHostKey => "verifying",
+            SessionPhase::Authenticating { .. } => "authenticating",
+            SessionPhase::Connected => "connected",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "resolving",
+            "connecting",
+            "handshake",
+            "verifying",
+            "authenticating",
+            "connected"
+        ]
+    );
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        EngineEvent::Session { event: SessionEvent::Banner { text }, .. } if text == "Authorized use only"
+    )));
+
+    let latency = env
+        .wait_for(id, |e| matches!(e, SessionEvent::Latency { .. }))
+        .await;
+    let SessionEvent::Latency { rtt } = latency else {
+        unreachable!()
+    };
+    assert!(rtt < Duration::from_secs(2));
+
+    env.engine.disconnect(id).await.unwrap();
+    let closed = env
+        .wait_for(id, |e| {
+            matches!(e, SessionEvent::Phase(SessionPhase::Closed { .. }))
+        })
+        .await;
+    assert!(matches!(
+        closed,
+        SessionEvent::Phase(SessionPhase::Closed {
+            reason: CloseReason::UserRequested
+        })
+    ));
+    assert!(!env.engine.session_logs(id).unwrap().is_empty());
+}
+
+// ── ssh-agent ──────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agent_identity_signs() {
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket = support::start_agent(agent_dir.path(), std::slice::from_ref(&key)).await;
+    let mut env = Env::with_agent(&target_config("t", server.port, ""), socket);
+    env.trust(&server);
+    let (_, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(out.phases.contains(&SessionPhase::Authenticating {
+        method: AuthMethod::Agent
+    }));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn identities_only_hides_unrelated_agent_keys() {
+    let (agent_key, configured) = (new_key(), new_key());
+    let server = TestServer::start(key_server(&agent_key)).await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket = support::start_agent(agent_dir.path(), std::slice::from_ref(&agent_key)).await;
+    let mut env = Env::with_agent(
+        &target_config(
+            "t",
+            server.port,
+            "  IdentitiesOnly yes\n  IdentityFile ~/.ssh/id_other\n",
+        ),
+        socket,
+    );
+    env.write_key("id_other", &configured, None);
+    env.trust(&server);
+    let (_, out) = env.connect("t", |_| PromptResponse::Cancel).await;
+    assert_eq!(out.failure_code(), Some("auth_failed"), "{:?}", out.phases);
+    assert!(!out.phases.contains(&SessionPhase::Authenticating {
+        method: AuthMethod::Agent
+    }));
+}

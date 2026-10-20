@@ -13,6 +13,7 @@
 | Naviguer pendant la recherche | `↑` `↓`, `Ctrl-N` / `Ctrl-P` | `↑` `↓`, `Ctrl-N` / `Ctrl-P` |
 | Vider la recherche | `Ctrl-U` (ou `Esc` hors recherche) | `Esc` |
 | Se connecter | `↵` | `↵`, double-clic |
+| Se déconnecter (hôte sélectionné) | `d` | `d` |
 | Palette de commandes | — *(phase 1b)* | `⌘K` |
 | Recharger `~/.ssh/config` | `r` | `⌘R` |
 | Changer de thème | `t` | `t` |

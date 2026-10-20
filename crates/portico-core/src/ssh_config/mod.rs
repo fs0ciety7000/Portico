@@ -13,7 +13,7 @@
 //! `Match exec`, `canonical`, `final`, `tagged`, `localnetwork`.
 
 mod lexer;
-mod pattern;
+pub(crate) mod pattern;
 mod resolve;
 
 use std::path::{Path, PathBuf};

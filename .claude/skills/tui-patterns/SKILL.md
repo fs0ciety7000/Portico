@@ -78,7 +78,7 @@ Composant `Form` réutilisable : une liste de `Field` (`Text`, `Secret`, `Select
 - Validation en ligne : message sous le champ en `status-error`, et bouton primaire désactivé tant que le formulaire est invalide.
 - **Prompts du moteur** (`EngineEvent::Prompt`) : modale prioritaire, quel que soit le focus.
   - `UnknownHostKey` : empreinte en mono, `y` accepter et enregistrer, `n` refuser.
-  - `ChangedHostKey` : bloc rouge, **aucune** option d'acceptation, seulement `Esc`.
+  - `SessionEvent::HostKeyChanged` (événement, pas un prompt) : bloc rouge avec les deux empreintes et la ligne de `known_hosts`, **aucune** option d'acceptation, seulement `Esc`.
   - `Password` / `KeyPassphrase` : champ `Secret` et case « mémoriser dans le trousseau ».
   - En réponse, on appelle `engine.respond(id, …)` ; à la réception de `PromptResolved`, on ferme la modale (même si c'est une autre UI qui a répondu).
 

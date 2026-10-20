@@ -119,3 +119,8 @@ le volume est faible, et un format lisible et versionnable sert le principe « z
 | 2026-10-19 | Tokens de design en Rust, CSS généré et vérifié par test | Accepté |
 | 2026-10-19 | `portico-gui` hors `default-members` (dépend de webkit2gtk sur Linux) | Accepté |
 | 2026-10-19 | Plan de contrôle `broadcast` / plan de données `mpsc` borné par terminal | Accepté |
+| 2026-10-20 | `known_hosts` implémenté dans Portico (hashed, `@cert-authority`, `@revoked`) au lieu de `russh::keys::known_hosts`, qui ne couvre pas ces cas | Accepté |
+| 2026-10-20 | Signer paresseux (`FuturePublicKey`) : passphrase demandée seulement après `PK_OK`, comme OpenSSH | Accepté |
+| 2026-10-20 | Clé ignorée après `PK_OK` (passphrase refusée) : envoi d'une signature vide pour resynchroniser le protocole (validé contre OpenSSH 9.6) | Accepté, à surveiller |
+| 2026-10-20 | `StrictHostKeyChecking no` traité comme `accept-new` : une clé modifiée est **toujours** refusée (écart volontaire avec OpenSSH) | Accepté |
+| 2026-10-20 | Latence = RTT de `keepalive@openssh.com` (`send_ping`), premier échantillon 500 ms après le login | Accepté |

@@ -27,7 +27,8 @@ pub enum StrictHostKeyChecking {
     Yes,
     /// Accept and record unknown keys; changed keys still fail.
     AcceptNew,
-    /// Accept unknown keys without recording. Portico still refuses changed keys.
+    /// Treated like `AcceptNew` (unknown keys are accepted and recorded).
+    /// Unlike OpenSSH, Portico still refuses changed keys.
     No,
 }
 

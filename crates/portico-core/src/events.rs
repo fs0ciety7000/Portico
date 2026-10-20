@@ -108,7 +108,27 @@ pub enum CloseReason {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SessionEvent {
+    /// A session was created for `alias` (first event of every session).
+    Started {
+        alias: String,
+    },
     Phase(SessionPhase),
+    /// Pre-authentication banner sent by the server.
+    Banner {
+        text: String,
+    },
+    /// The server presented a key that differs from `known_hosts`. Emitted
+    /// right before `Phase(Failed)`; UIs show a blocking red warning with
+    /// **no** option to accept.
+    HostKeyChanged {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint: String,
+        expected_fingerprint: String,
+        known_hosts_file: String,
+        known_hosts_line: usize,
+    },
     /// Round-trip time of an SSH keepalive (`keepalive@openssh.com`).
     Latency {
         rtt: Duration,
@@ -183,21 +203,14 @@ pub struct Prompt {
 #[non_exhaustive]
 pub enum PromptKind {
     /// First connection to this host: Trust-On-First-Use decision.
+    /// `other_algorithms` lists key types already known for this host (the UI
+    /// warns: this is unusual).
     UnknownHostKey {
         host: String,
         port: u16,
         algorithm: String,
         fingerprint: String,
-    },
-    /// The key differs from `known_hosts`. **Never** offers a one-click accept:
-    /// UIs show a red, blocking warning; replacing the key is a separate,
-    /// deliberate action.
-    ChangedHostKey {
-        host: String,
-        port: u16,
-        algorithm: String,
-        fingerprint: String,
-        known_hosts_line: usize,
+        other_algorithms: Vec<String>,
     },
     Password {
         user: String,

@@ -1,7 +1,9 @@
 //! Serializable views sent to the webview (camelCase for TypeScript).
 
+use portico_core::engine::PromptResponse;
 use portico_core::hosts::HostEntry;
-use serde::Serialize;
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,4 +54,45 @@ pub(crate) struct ThemeDto {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
+}
+
+/// Answer to a prompt, as sent by the webview.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PromptAnswerDto {
+    AcceptHostKey,
+    Secret { value: String, remember: bool },
+    Answers { values: Vec<String> },
+    Cancel,
+}
+
+// Manual impl: the derived one would print secrets.
+impl std::fmt::Debug for PromptAnswerDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::AcceptHostKey => "accept_host_key",
+            Self::Secret { .. } => "secret",
+            Self::Answers { .. } => "answers",
+            Self::Cancel => "cancel",
+        };
+        f.debug_struct("PromptAnswerDto")
+            .field("kind", &kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<PromptAnswerDto> for PromptResponse {
+    fn from(dto: PromptAnswerDto) -> Self {
+        match dto {
+            PromptAnswerDto::AcceptHostKey => Self::AcceptHostKey,
+            PromptAnswerDto::Secret { value, remember } => Self::Secret {
+                value: SecretString::from(value),
+                remember,
+            },
+            PromptAnswerDto::Answers { values } => {
+                Self::Answers(values.into_iter().map(SecretString::from).collect())
+            }
+            PromptAnswerDto::Cancel => Self::Cancel,
+        }
+    }
 }

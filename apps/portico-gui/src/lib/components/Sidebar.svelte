@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { Host } from "../api";
+  import { describe, type Host, type SessionView } from "../api";
 
   let {
     hosts,
+    sessions = {},
     query = $bindable(""),
     selected = $bindable(0),
     loading = false,
@@ -10,6 +11,7 @@
     onconnect,
   }: {
     hosts: Host[];
+    sessions?: Record<string, SessionView>;
     query?: string;
     selected?: number;
     loading?: boolean;
@@ -70,6 +72,7 @@
   {:else}
     <ul class="list" role="listbox" aria-label="Hosts" bind:this={listEl}>
       {#each hosts as host, i (host.alias)}
+        {@const st = describe(sessions[host.alias])}
         <li
           role="option"
           aria-selected={i === selected}
@@ -78,7 +81,7 @@
           ondblclick={() => onconnect(host)}
           onkeydown={() => {}}
         >
-          <span class="dot"></span>
+          <span class="dot" data-status={st.status} class:busy={st.busy}></span>
           <span class="alias">{host.alias}{#if host.favorite}<span class="star" aria-label="favorite"> ★</span>{/if}</span>
           <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
         </li>
@@ -174,11 +177,19 @@
     background: var(--accent);
   }
   .dot {
+    --c: var(--status-idle);
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--status-idle);
+    background: var(--c);
   }
+  .dot[data-status="connecting"] { --c: var(--status-connecting); }
+  .dot[data-status="authenticating"] { --c: var(--status-authenticating); }
+  .dot[data-status="connected"] { --c: var(--status-connected); }
+  .dot[data-status="warning"] { --c: var(--status-warning); }
+  .dot[data-status="error"] { --c: var(--status-error); }
+  .dot.busy { animation: blink 1s var(--ease-standard) infinite alternate; }
+  @keyframes blink { to { opacity: 0.35; } }
   .alias { font-weight: 550; }
   .star { color: var(--accent); font-size: var(--text-xs); }
   .target {

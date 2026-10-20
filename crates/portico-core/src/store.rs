@@ -29,6 +29,8 @@ pub struct Paths {
     pub config_dir: PathBuf,
     /// Recent sessions, logs, vault.
     pub data_dir: PathBuf,
+    /// System-wide `known_hosts` files (read-only).
+    pub global_known_hosts: Vec<PathBuf>,
 }
 
 impl Paths {
@@ -42,6 +44,10 @@ impl Paths {
             home: base.home_dir().to_path_buf(),
             config_dir: project.config_dir().to_path_buf(),
             data_dir: project.data_dir().to_path_buf(),
+            global_known_hosts: vec![
+                PathBuf::from("/etc/ssh/ssh_known_hosts"),
+                PathBuf::from("/etc/ssh/ssh_known_hosts2"),
+            ],
         })
     }
 
@@ -52,6 +58,7 @@ impl Paths {
             home: root.to_path_buf(),
             config_dir: root.join("config"),
             data_dir: root.join("data"),
+            global_known_hosts: vec![root.join("etc/ssh/ssh_known_hosts")],
         }
     }
 
@@ -61,6 +68,14 @@ impl Paths {
 
     pub fn known_hosts(&self) -> PathBuf {
         self.ssh_dir.join("known_hosts")
+    }
+
+    /// OpenSSH default identities, in OpenSSH's order.
+    pub fn default_identities(&self) -> Vec<PathBuf> {
+        ["id_rsa", "id_ecdsa", "id_ed25519"]
+            .iter()
+            .map(|n| self.ssh_dir.join(n))
+            .collect()
     }
 }
 

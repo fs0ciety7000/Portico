@@ -24,6 +24,12 @@ macro_rules! define_id {
             pub fn get(self) -> u64 {
                 self.0
             }
+
+            /// Rebuilds an id received over IPC. Unknown ids are rejected by
+            /// the engine calls that take them.
+            pub fn from_raw(raw: u64) -> Self {
+                Self(raw)
+            }
         }
 
         impl fmt::Display for $name {

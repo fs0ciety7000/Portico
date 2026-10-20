@@ -1,9 +1,22 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
-  import type { Host } from "../api";
+  import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
 
-  let { host, onconnect }: { host: Host | undefined; onconnect: (host: Host) => void } = $props();
+  let {
+    host,
+    session,
+    onconnect,
+    ondisconnect,
+  }: {
+    host: Host | undefined;
+    session: SessionView | undefined;
+    onconnect: (host: Host) => void;
+    ondisconnect: (host: Host) => void;
+  } = $props();
+
+  const status = $derived(describe(session));
+  const live = $derived(status.busy || session?.phase.phase === "connected");
 </script>
 
 <section class="details">
@@ -18,10 +31,16 @@
             </p>
           </div>
           <div class="actions">
-            <StatusBadge status="idle" />
-            <button class="primary" onclick={() => onconnect(host)}>
-              Connect <kbd>↵</kbd>
-            </button>
+            <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
+            {#if live}
+              <button class="secondary" onclick={() => ondisconnect(host)}>
+                Disconnect <kbd>D</kbd>
+              </button>
+            {:else}
+              <button class="primary" onclick={() => onconnect(host)}>
+                Connect <kbd>↵</kbd>
+              </button>
+            {/if}
           </div>
         </header>
 
@@ -51,6 +70,10 @@
           {/each}
           <dt>Defined in</dt><dd class="mono muted">{host.source}</dd>
         </dl>
+
+        {#if session?.phase.phase === "failed" && session.phase.error.hint}
+          <p class="hint">{session.phase.error.hint}</p>
+        {/if}
 
         {#each host.warnings as w (w)}
           <p class="warning">⚠ {w}</p>
@@ -106,6 +129,28 @@
   }
   button.primary:hover { background: var(--accent-strong); }
   button.primary:active { transform: scale(0.97); }
+  button.secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 32px;
+    padding: 0 var(--space-4);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  button.secondary:hover { background: var(--bg-elevated); }
+  .hint {
+    margin-top: var(--space-5);
+    padding: var(--space-3) var(--space-4);
+    border-left: 2px solid var(--status-error);
+    background: color-mix(in srgb, var(--status-error) 8%, transparent);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+  }
   button.primary kbd {
     background: color-mix(in srgb, var(--text-on-accent) 12%, transparent);
     border-color: transparent;

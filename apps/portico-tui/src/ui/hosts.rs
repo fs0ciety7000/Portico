@@ -93,14 +93,19 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     }
 
     let Some(inv) = &app.inventory else { return };
-    let idle = s.theme.status.idle;
     let items: Vec<ListItem<'_>> = app
         .hits
         .iter()
         .filter_map(|hit| inv.hosts.get(hit.index))
         .map(|h| {
+            let st = super::status::status(app.session_for(&h.alias), s);
+            let dot = if st.busy {
+                super::spinner(app.tick)
+            } else {
+                "●"
+            };
             let mut spans = vec![
-                Span::styled("● ", s.status(idle)),
+                Span::styled(format!("{dot} "), s.status(st.color)),
                 Span::styled(h.alias.clone(), s.title()),
             ];
             if h.meta.favorite {

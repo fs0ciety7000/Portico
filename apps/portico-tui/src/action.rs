@@ -1,5 +1,6 @@
 //! Everything that can change [`crate::app::App`] state.
 
+use portico_core::EngineEvent;
 use portico_core::engine::HostInventory;
 
 #[derive(Debug)]
@@ -25,5 +26,6 @@ pub(crate) enum Action {
     Reload,
     HostsLoaded(Result<HostInventory, String>),
     Connect,
-    ConnectFailed(String),
+    Disconnect,
+    Engine(EngineEvent),
 }

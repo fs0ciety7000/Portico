@@ -1,7 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
-  import { api, asError, isTauri, type Host, type ThemeInfo, type ErrorSummary } from "./lib/api";
+  import {
+    api,
+    asError,
+    isTauri,
+    type EngineEvent,
+    type Host,
+    type SessionView,
+    type ThemeInfo,
+    type ErrorSummary,
+  } from "./lib/api";
   import { demoHosts, demoThemes } from "./lib/demo";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -17,6 +26,10 @@
   let paletteOpen = $state(false);
   let searchEl: HTMLInputElement | undefined = $state();
   let toast: ErrorSummary | null = $state(null);
+  /** Latest session per host alias. */
+  let sessions: Record<string, SessionView> = $state({});
+  /** Sessions whose prompt was declined (dialogs arrive in phase 1c). */
+  const declined = new Set<number>();
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
   const theme = $derived(themes[themeIndex]);
@@ -64,10 +77,49 @@
   }
 
   async function connect(host: Host) {
+    const current = sessions[host.alias];
+    if (current && current.phase.phase !== "failed" && current.phase.phase !== "closed") return;
     try {
-      await api.connect(host.alias);
+      const id = await api.connect(host.alias);
+      sessions[host.alias] = { id, phase: { phase: "resolving" }, latencyMs: null };
     } catch (e) {
       showError(e);
+    }
+  }
+
+  async function disconnect(host: Host) {
+    const s = sessions[host.alias];
+    if (s) await api.disconnect(s.id).catch(showError);
+  }
+
+  function aliasOf(id: number): string | undefined {
+    return Object.keys(sessions).find((a) => sessions[a]?.id === id);
+  }
+
+  function onEngineEvent(ev: EngineEvent) {
+    if (ev.type === "prompt" && "id" in ev && "session" in ev) {
+      // Prompt dialogs land in phase 1c: decline so the session fails precisely.
+      if (ev.session !== null) declined.add(ev.session);
+      api.respondPrompt(ev.id, { kind: "cancel" }).catch(() => {});
+      return;
+    }
+    if (ev.type !== "session" || !("event" in ev)) return;
+    const alias = aliasOf(ev.id);
+    const view = alias ? sessions[alias] : undefined;
+    if (!view) return;
+    const e = ev.event;
+    if (e.kind === "phase") {
+      const { kind: _kind, ...phase } = e;
+      view.phase = phase;
+      if (phase.phase === "failed") {
+        toast = declined.delete(ev.id)
+          ? { code: "prompt", message: `${alias} needs an answer (host key or password)`, hint: "Prompt dialogs arrive in the next phase." }
+          : phase.error;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => (toast = null), 5000);
+      }
+    } else if (e.kind === "latency") {
+      view.latencyMs = e.rtt.secs * 1000 + e.rtt.nanos / 1e6;
     }
   }
 
@@ -96,10 +148,21 @@
       else if (e.key === "k" || e.key === "ArrowUp") selected = Math.max(selected - 1, 0);
       else if (e.key === "Enter") connectSelected();
       else if (e.key === "t") cycleTheme();
+      else if (e.key === "d") {
+        const host = hosts[selected];
+        if (host) disconnect(host);
+      }
     }
   }
 
-  onMount(load);
+  onMount(() => {
+    load();
+    if (!isTauri()) return;
+    const unlisten = api.onEngineEvent(onEngineEvent);
+    return () => {
+      unlisten.then((f) => f());
+    };
+  });
 </script>
 
 <svelte:window {onkeydown} />
@@ -117,8 +180,13 @@
   </header>
 
   <main>
-    <Sidebar {hosts} {loading} bind:query bind:selected bind:searchEl onconnect={connect} />
-    <HostDetails host={hosts[selected]} onconnect={connect} />
+    <Sidebar {hosts} {sessions} {loading} bind:query bind:selected bind:searchEl onconnect={connect} />
+    <HostDetails
+      host={hosts[selected]}
+      session={sessions[hosts[selected]?.alias ?? ""]}
+      onconnect={connect}
+      ondisconnect={disconnect}
+    />
   </main>
 
   <footer class="statusbar">
@@ -126,6 +194,7 @@
     <span class="spacer"></span>
     <span><kbd>/</kbd> search</span>
     <span><kbd>↵</kbd> connect</span>
+    <span><kbd>d</kbd> disconnect</span>
     <span><kbd>t</kbd> theme</span>
     <span><kbd>⌘K</kbd> commands</span>
   </footer>

@@ -64,16 +64,19 @@ fn render_toast(app: &App, frame: &mut Frame<'_>) {
     } else {
         ("✓", status.connected)
     };
-    let width = u16::try_from(toast.message.chars().count())
-        .unwrap_or(60)
-        .saturating_add(8)
-        .min(frame.area().width.saturating_sub(2));
     let area = frame.area();
+    // Wrap long messages instead of truncating them.
+    let max_width = area.width.saturating_sub(4).clamp(20, 72);
+    let text_len = u16::try_from(toast.message.chars().count()).unwrap_or(u16::MAX);
+    let width = text_len.saturating_add(9).min(max_width);
+    let inner = width.saturating_sub(7).max(1);
+    let lines = text_len.div_ceil(inner).clamp(1, 4);
+    let height = lines + 2;
     let rect = Rect {
         x: area.right().saturating_sub(width + 2),
-        y: area.bottom().saturating_sub(5),
+        y: area.bottom().saturating_sub(height + 2),
         width,
-        height: 3,
+        height,
     };
     frame.render_widget(Clear, rect);
     frame.render_widget(
@@ -81,6 +84,7 @@ fn render_toast(app: &App, frame: &mut Frame<'_>) {
             Span::styled(format!("{icon}  "), s.status(color)),
             Span::raw(toast.message.clone()),
         ]))
+        .wrap(ratatui::widgets::Wrap { trim: true })
         .block(
             Block::bordered()
                 .border_type(BorderType::Rounded)

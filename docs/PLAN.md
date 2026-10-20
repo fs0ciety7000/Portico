@@ -22,31 +22,36 @@
 
 ## Phase 1 : connexion interactive (cœur du produit) 🔜
 
-### 1a. Transport et authentification *(Opus, puis revue `agent-ssh-protocols` et `agent-security`)*
-- `session/` : un acteur par session et la machine d'états `SessionPhase` émise à chaque transition
-- `transport.rs` : `russh::client` avec un `Handler` qui vérifie les clés via `known_hosts`
-  (`UserKnownHostsFile` + `GlobalKnownHostsFile`, entrées hachées, `@cert-authority`, `@revoked`).
-  Une clé inconnue déclenche `Prompt::UnknownHostKey` (TOFU) ; une clé modifiée provoque un **échec dur** avec `Prompt::ChangedHostKey`, en information seulement.
-- Ordre d'authentification façon OpenSSH : **certificat** (`CertificateFile` ou `*-cert.pub`), puis **agent** (`SSH_AUTH_SOCK` / `IdentityAgent`),
-  puis clés `IdentityFile` (passphrase via prompt, puis keyring), puis keyboard-interactive, puis mot de passe.
-  `IdentitiesOnly` est respecté.
-- **ProxyJump** : chaînage via `channel_open_direct_tcpip` sur le hop précédent, puis le transport suivant sur ce stream,
-  avec la phase `Connecting { hop, hops }`. Les alias de jump sont résolus récursivement, avec détection de cycle.
-- `ConnectTimeout`, keepalive (`ServerAliveInterval`, 15 s par défaut) avec **mesure de RTT** et `SessionEvent::Latency`
-- Logs de session (`LogRing`) : kex négocié, algorithmes, méthodes d'auth tentées, hops
-- **Tests** : serveur `russh` en process (skill `ssh-testing`) couvrant TOFU, clé changée, auth clé, auth cert, auth mot de passe, jump à 2 hops, timeout
+### 1a. Transport et authentification ✅ *(Opus ; revues `agent-ssh-protocols` et `agent-security`)*
+- [x] `session/` : un acteur par session, machine d'états `SessionPhase` émise à chaque transition, registre de sessions dans l'`Engine`
+  (`connect` non bloquant, `disconnect`, `session_logs`)
+- [x] `known_hosts` maison : hashed `|1|`, `[host]:port`, wildcards/négation, `@cert-authority` (validité, type, principals), `@revoked`,
+  ajout atomique en `0600`, `HostKeyAlias`, préférence des algorithmes déjà connus
+- [x] Clé inconnue : `Prompt::UnknownHostKey` (TOFU, avec avertissement s'il existe d'autres types de clé connus).
+  Clé modifiée : `SessionEvent::HostKeyChanged` puis **échec dur**, même avec `StrictHostKeyChecking no`
+- [x] Auth dans l'ordre d'OpenSSH : `none`, puis certificats, agent (`IdentityAgent`, `IdentitiesOnly`), clés `IdentityFile`
+  (**passphrase demandée seulement si le serveur accepte la clé**, via un signer paresseux), keyboard-interactive, mot de passe.
+  Les secrets peuvent être mémorisés via `SecretStore`
+- [x] ProxyJump récursif (sémantique `ssh -J`), détection de cycles, au plus 8 hops, phases `Connecting { hop, hops }`
+- [x] Timeouts : TCP, négociation (suspendue pendant un prompt), canal de jump. Keepalive avec **mesure du RTT**
+  (`keepalive@openssh.com`), `ServerAliveInterval` / `ServerAliveCountMax`, détection de fermeture distante
+- [x] Logs de session (`LogRing`) : route, adresses, vérification de clé, méthodes tentées (jamais de secret)
+- [x] Tests : 20 de bout en bout (serveur russh en process) et **interop OpenSSH 9.6 réel** (8 scénarios), 9 tests `known_hosts`, 3 tests de route
+- [x] TUI et GUI branchées : statut live (point coloré, phase, latence), toasts d'erreur avec hint, `d` pour déconnecter.
+  Les prompts sont encore refusés proprement (les dialogues arrivent en 1b et 1c)
 
 ### 1b. PTY et terminal TUI *(Opus / Sonnet fort)*
 - `Engine::open_terminal` : `request_pty` (TERM `xterm-256color`, modes), shell, resize, et `TerminalHandle` (plan de données borné)
 - TUI : widget `TerminalView` sur `alacritty_terminal` (palette ANSI du thème, curseur, scrollback, sélection),
   onglets, `Ctrl-Space` comme préfixe pour les commandes Portico (le reste passe au remote)
-- Prompts TUI : modales pour clé hôte, mot de passe et passphrase (champ masqué, case « mémoriser »)
+- Prompts TUI : modales pour clé hôte (TOFU), clé modifiée (`HostKeyChanged`, bloquante), mot de passe, passphrase et keyboard-interactive
+  (champ masqué, case « mémoriser »). Elles remplacent le refus automatique actuel
 - Barre de statut : badge de phase animé et latence
 
 ### 1c. PTY et terminal GUI *(Opus pour le composant Terminal, puis Sonnet)*
 - `xterm.js` + addon WebGL (repli DOM) + `fit`, octets via `tauri::ipc::Channel<Vec<u8>>`
 - **Spike perf** WebKitGTK et WKWebView (débit et latence) : décision sur le renderer
-- Onglets, modales de prompt, badge de statut avec latence, reconnexion
+- Onglets, modales de prompt (la commande `respond_prompt` existe déjà), reconnexion
 
 **Sortie** : connexion réelle à `localhost` et via un bastion, depuis les deux UIs. `vim` et `htop` sont utilisables. Statut et latence sont visibles.
 
@@ -100,8 +105,9 @@
 
 | Phase | État | Tests | Revue sécu | Revue design |
 |---|---|---|---|---|
-| 0 Fondations | ✅ | 35 | à planifier en ouverture de 1a | ✅ (captures TUI et GUI) |
-| 1 Connexion | 🔜 | | | |
+| 0 Fondations | ✅ | 35 | couverte par la revue 1a | ✅ (captures TUI et GUI) |
+| 1a Transport et auth | ✅ | 68 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
+| 1b / 1c Terminal TUI / GUI | 🔜 | | | |
 | 2 SFTP / tunnels | ⏳ | | | |
 | 3 Clés / secrets / snippets | ⏳ | | | |
 | 4 Finition | ⏳ | | | |

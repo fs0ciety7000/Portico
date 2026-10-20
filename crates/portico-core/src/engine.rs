@@ -18,7 +18,9 @@
 //!   `CancellationToken`, so closing a session tears everything down.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use bytes::Bytes;
 use secrecy::SecretString;
@@ -26,9 +28,12 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{Error, Result};
-use crate::events::EngineEvent;
+use crate::events::{EngineEvent, Prompt, PromptKind};
 use crate::hosts::{HostEntry, HostMetaFile, inventory};
 use crate::ids::{PromptId, SessionId, TerminalId};
+use crate::logs::{LogRecord, LogRing};
+use crate::secrets::{KeyringStore, SecretStore};
+use crate::session::{self, SessionCommand, SessionCtx};
 use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
 use crate::store::{Paths, load_toml};
 
@@ -38,12 +43,27 @@ pub const DEFAULT_EVENT_CAPACITY: usize = 1024;
 /// Max in-flight PTY output chunks per terminal (data plane).
 pub const TERMINAL_OUTPUT_CAPACITY: usize = 256;
 
+/// Default `ConnectTimeout` (per hop: TCP connect and SSH negotiation).
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Default keepalive / latency probe interval (`ServerAliveInterval`).
+pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(15);
+/// Default `ServerAliveCountMax`.
+pub const DEFAULT_KEEPALIVE_MAX: u32 = 3;
+/// Log lines kept per session for the debug panel.
+pub const SESSION_LOG_CAPACITY: usize = 500;
+
 /// Engine construction parameters.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub paths: Paths,
     pub local_user: String,
     pub event_capacity: usize,
+    /// Where passwords and passphrases are remembered.
+    pub secrets: Arc<dyn SecretStore>,
+    /// `SSH_AUTH_SOCK` captured at startup (`IdentityAgent` may override it).
+    pub agent_socket: Option<PathBuf>,
+    pub connect_timeout: Duration,
+    pub keepalive: Duration,
 }
 
 impl EngineConfig {
@@ -53,6 +73,10 @@ impl EngineConfig {
             paths: Paths::discover()?,
             local_user: local_user(),
             event_capacity: DEFAULT_EVENT_CAPACITY,
+            secrets: Arc::new(KeyringStore),
+            agent_socket: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            keepalive: DEFAULT_KEEPALIVE,
         })
     }
 
@@ -86,8 +110,15 @@ pub struct ConnectRequest {
     /// Host alias (resolved through `ssh_config`) or raw host name.
     pub alias: String,
     pub user_override: Option<String>,
-    /// Open an interactive shell right away with this size.
-    pub pty: Option<PtySize>,
+}
+
+impl ConnectRequest {
+    pub fn new(alias: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            user_override: None,
+        }
+    }
 }
 
 /// Input sent to a terminal (data plane).
@@ -138,7 +169,16 @@ struct Inner {
     config: EngineConfig,
     events: broadcast::Sender<EngineEvent>,
     prompts: Mutex<HashMap<PromptId, oneshot::Sender<PromptResponse>>>,
+    sessions: Mutex<HashMap<SessionId, SessionEntry>>,
     shutdown: CancellationToken,
+}
+
+#[derive(Debug)]
+struct SessionEntry {
+    alias: String,
+    commands: mpsc::Sender<SessionCommand>,
+    cancel: CancellationToken,
+    logs: Arc<Mutex<LogRing>>,
 }
 
 impl Engine {
@@ -151,6 +191,7 @@ impl Engine {
                 config,
                 events,
                 prompts: Mutex::new(HashMap::new()),
+                sessions: Mutex::new(HashMap::new()),
                 shutdown: CancellationToken::new(),
             }),
         }
@@ -184,18 +225,101 @@ impl Engine {
         .map_err(|_| Error::EngineClosed)?
     }
 
-    /// Opens an SSH session (Phase 1b: russh transport, `ProxyJump` chain,
-    /// `known_hosts`, agent/cert/key/password auth, keepalive latency).
-    #[allow(clippy::unused_async)] // async contract; the body lands in Phase 1b
-    pub async fn connect(
-        &self,
-        request: ConnectRequest,
-    ) -> Result<(SessionId, Option<TerminalHandle>)> {
+    /// Starts an SSH session and returns immediately. Progress, prompts and
+    /// the outcome are reported as [`EngineEvent`]s for the returned id.
+    pub fn connect(&self, request: ConnectRequest) -> Result<SessionId> {
         if self.inner.shutdown.is_cancelled() {
             return Err(Error::EngineClosed);
         }
-        tracing::debug!(alias = %request.alias, "connect requested");
-        Err(Error::Unsupported("SSH sessions (Phase 1b)"))
+        let id = SessionId::next();
+        let cancel = self.inner.shutdown.child_token();
+        let logs = Arc::new(Mutex::new(LogRing::new(SESSION_LOG_CAPACITY)));
+        let (tx, rx) = mpsc::channel(8);
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id,
+                SessionEntry {
+                    alias: request.alias.clone(),
+                    commands: tx,
+                    cancel: cancel.clone(),
+                    logs: Arc::clone(&logs),
+                },
+            );
+        let ctx = SessionCtx::new(self.clone(), id, cancel, logs);
+        tokio::spawn(session::run(ctx, request, rx));
+        Ok(id)
+    }
+
+    /// Closes a session (or aborts it while connecting).
+    pub async fn disconnect(&self, id: SessionId) -> Result<()> {
+        let (tx, cancel) = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let entry = sessions.get(&id).ok_or(Error::UnknownSession(id))?;
+            (entry.commands.clone(), entry.cancel.clone())
+        };
+        if tx.send(SessionCommand::Disconnect).await.is_err() {
+            // The actor is still connecting or already gone: cancel it.
+            cancel.cancel();
+        }
+        Ok(())
+    }
+
+    /// Log lines recorded for a session (debug panel).
+    pub fn session_logs(&self, id: SessionId) -> Result<Vec<LogRecord>> {
+        let sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let entry = sessions.get(&id).ok_or(Error::UnknownSession(id))?;
+        let ring = entry.logs.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(ring.iter().cloned().collect())
+    }
+
+    /// Alias a session was opened for.
+    pub fn session_alias(&self, id: SessionId) -> Option<String> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|e| e.alias.clone())
+    }
+
+    /// Asks the user a question and waits for the answer, or for `cancel`.
+    pub(crate) async fn ask(
+        &self,
+        session: SessionId,
+        kind: PromptKind,
+        cancel: &CancellationToken,
+    ) -> Result<PromptResponse> {
+        let id = PromptId::next();
+        let rx = self.register_prompt(id);
+        self.emit(EngineEvent::Prompt(Prompt {
+            id,
+            session: Some(session),
+            kind,
+        }));
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                self.inner
+                    .prompts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
+                self.emit(EngineEvent::PromptResolved { id });
+                Err(Error::Cancelled)
+            }
+            answer = rx => answer.map_err(|_| Error::EngineClosed),
+        }
     }
 
     /// Answers a pending prompt. Errors if it was already answered/cancelled.
@@ -214,7 +338,6 @@ impl Engine {
     }
 
     /// Registers a prompt and returns the receiver the asking task awaits.
-    #[allow(dead_code)] // used by the session layer (Phase 1b)
     pub(crate) fn register_prompt(&self, id: PromptId) -> oneshot::Receiver<PromptResponse> {
         let (tx, rx) = oneshot::channel();
         self.inner
@@ -245,6 +368,10 @@ mod tests {
             paths: Paths::rooted(root),
             local_user: "alice".into(),
             event_capacity: 16,
+            secrets: Arc::new(crate::secrets::MemoryStore::default()),
+            agent_socket: None,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            keepalive: DEFAULT_KEEPALIVE,
         })
     }
 

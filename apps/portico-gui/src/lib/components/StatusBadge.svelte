@@ -1,6 +1,6 @@
 <script lang="ts">
   // Connection status pill. Colour = meaning; animation only while in flight.
-  type Status = "idle" | "connecting" | "authenticating" | "connected" | "warning" | "error";
+  import { formatRtt, type Status } from "../api";
 
   let { status = "idle", label, latencyMs = null }: {
     status?: Status;
@@ -22,8 +22,8 @@
 <span class="badge" data-status={status} role="status" aria-live="polite">
   <span class="dot" class:busy></span>
   <span>{label ?? labels[status]}</span>
-  {#if status === "connected" && latencyMs !== null}
-    <span class="latency mono">{latencyMs} ms</span>
+  {#if (status === "connected" || status === "warning") && latencyMs !== null}
+    <span class="latency mono">{formatRtt(latencyMs)}</span>
   {/if}
 </span>
 

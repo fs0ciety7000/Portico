@@ -3,6 +3,7 @@
 mod details;
 mod hosts;
 mod overlays;
+mod status;
 mod statusbar;
 
 use ratatui::Frame;

@@ -85,6 +85,40 @@ impl SecretStore for KeyringStore {
     }
 }
 
+/// In-memory store: tests, and sessions where no keyring is available
+/// (secrets then live only for the process lifetime).
+#[derive(Debug, Default)]
+pub struct MemoryStore {
+    entries: std::sync::Mutex<std::collections::HashMap<String, SecretString>>,
+}
+
+impl SecretStore for MemoryStore {
+    fn get(&self, key: &SecretKey) -> Result<Option<SecretString>> {
+        Ok(self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key.account())
+            .cloned())
+    }
+
+    fn set(&self, key: &SecretKey, secret: &SecretString) -> Result<()> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.account(), secret.clone());
+        Ok(())
+    }
+
+    fn delete(&self, key: &SecretKey) -> Result<()> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key.account());
+        Ok(())
+    }
+}
+
 // keyring errors never contain the secret itself, only platform diagnostics.
 #[allow(clippy::needless_pass_by_value)]
 fn keyring_err(e: keyring::Error) -> Error {

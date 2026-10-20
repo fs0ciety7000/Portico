@@ -11,7 +11,7 @@ Aucun test ne dépend d'un `sshd` système ni d'Internet. On démarre un **serve
 sur `127.0.0.1:0` (port éphémère) avec un `Handler` configurable, puis on pointe un `Paths::rooted(tempdir)`
 contenant un `~/.ssh/config`, un `known_hosts` et des clés générés pour le test.
 
-## Fixture (à créer dans `crates/portico-core/tests/support/mod.rs`)
+## Fixture (`crates/portico-core/tests/support/mod.rs`, en place)
 
 ```rust
 pub struct TestServer {
@@ -51,7 +51,7 @@ et on signe avec `ssh_key::certificate::Builder`.
 | Hôte inconnu, réponse `AcceptHostKey` | `Prompt::UnknownHostKey`, puis `Connected`, et la ligne est ajoutée à `known_hosts` |
 | Hôte inconnu, réponse `Cancel` | `Failed{code:"host_key_rejected"}`, `known_hosts` inchangé |
 | `StrictHostKeyChecking yes` avec hôte inconnu | échec sans prompt |
-| **Clé hôte modifiée** | `Prompt::ChangedHostKey` (information), puis `Failed`, **jamais** `Connected` |
+| **Clé hôte modifiée** | `SessionEvent::HostKeyChanged`, puis `Failed{code:"host_key_changed"}`, **jamais** `Connected` |
 | Auth par clé (sans passphrase, puis avec) | `Authenticating{PublicKey}`, puis prompt de passphrase, puis `Connected` |
 | Auth par certificat signé par une CA de confiance | `Authenticating{Certificate}`, puis `Connected` |
 | Certificat expiré | la méthode suivante est tentée, avec une ligne explicite dans le log |
@@ -69,6 +69,13 @@ et on signe avec `ssh_key::certificate::Builder`.
 - **-R** : le serveur ouvre `forwarded-tcpip`, et la connexion locale doit aboutir.
 - **SFTP** : `russh-sftp` côté serveur sur `sftp_root`. On teste list, upload et download 10 Mo (checksum), l'annulation (pas de fichier partiel final), `.part` puis `rename`.
 - **Copy-id** : un serveur avec exec simulé sur un `authorized_keys` temporaire. Deux appels ne doivent produire **qu'une seule** ligne, et les permissions doivent être vérifiées.
+
+## Interop OpenSSH réel
+
+`crates/portico-core/tests/openssh_interop.rs` lance un vrai `sshd` (non-root possible) avec `ssh-keygen` et `ssh-agent` :
+ed25519, RSA (rsa-sha2), clé chiffrée, clé ignorée après PK_OK, certificat utilisateur, certificat d'hôte, ProxyJump, agent.
+Le test est `#[ignore]` par défaut. Pour le lancer : `cargo test -p portico-core --test openssh_interop -- --ignored` (job CI dédié).
+**Toute modification du transport ou de l'auth doit repasser ce test.**
 
 ## Hygiène
 
