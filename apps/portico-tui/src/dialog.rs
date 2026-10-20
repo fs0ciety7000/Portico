@@ -4,12 +4,21 @@
 //! Secrets are typed into `Zeroizing` buffers, never displayed (not even
 //! their length) and handed to the engine as `SecretString`.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portico_core::engine::PromptResponse;
 use portico_core::events::{Prompt, PromptKind};
 use portico_core::ids::PromptId;
 use secrecy::SecretString;
 use zeroize::Zeroizing;
+
+/// Keys arriving this soon after a dialog opens were typed for something
+/// else (the shell in the active tab): they are ignored, so a stray `y`
+/// never trusts a host key and stray keystrokes never become a password.
+const ARM_DELAY: Duration = Duration::from_millis(400);
+/// Maximum length of a typed or pasted answer.
+const MAX_INPUT: usize = 256;
 
 /// One input line in a dialog.
 #[derive(Debug)]
@@ -24,7 +33,8 @@ impl Field {
         Self {
             label: label.into(),
             masked,
-            value: Zeroizing::new(String::new()),
+            // Pre-sized so typing never reallocates (no stray secret copies).
+            value: Zeroizing::new(String::with_capacity(MAX_INPUT * 4)),
         }
     }
 }
@@ -42,6 +52,7 @@ pub(crate) struct PromptDialog {
     pub(crate) remember: bool,
     /// Typed confirmation for risky host keys (`yes`).
     pub(crate) confirm: String,
+    pub(crate) opened_at: Instant,
 }
 
 /// What a key press did to a dialog.
@@ -70,6 +81,7 @@ impl PromptDialog {
             focus: 0,
             remember: false,
             confirm: String::new(),
+            opened_at: Instant::now(),
         }
     }
 
@@ -88,6 +100,9 @@ impl PromptDialog {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        if self.opened_at.elapsed() < ARM_DELAY {
+            return Outcome::Pending;
+        }
         if let PromptKind::UnknownHostKey { .. } = self.kind {
             return self.host_key_key(key);
         }
@@ -106,7 +121,9 @@ impl PromptDialog {
                 }
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(f) = self.fields.get_mut(self.focus) {
+                if let Some(f) = self.fields.get_mut(self.focus)
+                    && f.value.chars().count() < MAX_INPUT
+                {
                     f.value.push(c);
                 }
             }
@@ -118,6 +135,24 @@ impl PromptDialog {
             _ => {}
         }
         Outcome::Pending
+    }
+
+    /// Pasted text goes to the focused field (first line, no control
+    /// characters). Never answers a host key question.
+    pub(crate) fn paste(&mut self, text: &str) {
+        if self.opened_at.elapsed() < ARM_DELAY {
+            return;
+        }
+        let Some(field) = self.fields.get_mut(self.focus) else {
+            return;
+        };
+        let line = text.lines().next().unwrap_or_default();
+        for c in line.chars().filter(|c| !c.is_control()) {
+            if field.value.chars().count() >= MAX_INPUT {
+                break;
+            }
+            field.value.push(c);
+        }
     }
 
     fn host_key_key(&mut self, key: KeyEvent) -> Outcome {
@@ -146,7 +181,12 @@ impl PromptDialog {
     }
 
     fn submit(&mut self) -> PromptResponse {
-        let take = |f: &mut Field| SecretString::from(std::mem::take(&mut *f.value));
+        let take = |f: &mut Field| {
+            // Copy into an exact-size secret, then wipe the input buffer.
+            let secret = SecretString::from(f.value.as_str());
+            zeroize::Zeroize::zeroize(&mut *f.value);
+            secret
+        };
         match self.kind {
             PromptKind::KeyboardInteractive { .. } => {
                 PromptResponse::Answers(self.fields.iter_mut().map(take).collect())
@@ -191,15 +231,74 @@ mod tests {
         KeyEvent::new(c, KeyModifiers::NONE)
     }
 
+    /// A dialog that has been open long enough to accept keys.
     fn dialog(kind: PromptKind) -> PromptDialog {
-        PromptDialog::new(
+        let mut d = PromptDialog::new(
             Prompt {
                 id: PromptId::next(),
                 session: None,
                 kind,
             },
             None,
-        )
+        );
+        d.opened_at = Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .unwrap_or_else(Instant::now);
+        d
+    }
+
+    #[test]
+    fn keys_right_after_opening_are_ignored() {
+        let mut d = PromptDialog::new(
+            Prompt {
+                id: PromptId::next(),
+                session: None,
+                kind: PromptKind::UnknownHostKey {
+                    host: "h".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: "SHA256:x".into(),
+                    other_algorithms: vec![],
+                },
+            },
+            None,
+        );
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Char('y'))),
+            Outcome::Pending
+        ));
+        d.opened_at = Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .unwrap_or_else(Instant::now);
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Char('y'))),
+            Outcome::Answer(PromptResponse::AcceptHostKey)
+        ));
+    }
+
+    #[test]
+    fn paste_fills_the_field_but_never_answers_a_host_key() {
+        let mut d = dialog(PromptKind::Password {
+            user: "u".into(),
+            host: "h".into(),
+        });
+        d.paste("hunter2\nsecond line");
+        let Outcome::Answer(PromptResponse::Secret { value, .. }) =
+            d.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("expected a secret");
+        };
+        assert_eq!(value.expose_secret(), "hunter2");
+
+        let mut hk = dialog(PromptKind::UnknownHostKey {
+            host: "h".into(),
+            port: 22,
+            algorithm: "a".into(),
+            fingerprint: "f".into(),
+            other_algorithms: vec!["b".into()],
+        });
+        hk.paste("yes");
+        assert!(hk.confirm.is_empty());
     }
 
     #[test]

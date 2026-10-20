@@ -129,7 +129,8 @@ impl Widget for TermWidget<'_> {
             let mut symbol = String::new();
             symbol.push(if cell.c == '\0' { ' ' } else { cell.c });
             if let Some(extra) = cell.zerowidth() {
-                symbol.extend(extra);
+                // A hostile stream can stack unbounded combining marks.
+                symbol.extend(extra.iter().take(4));
             }
             target.set_symbol(&symbol);
             target.set_style(Style::new().fg(fg).bg(bg).add_modifier(modifier));
