@@ -2,7 +2,9 @@
 
 > Source de vérité : `apps/portico-tui/src/keymap.rs` (TUI, aide `?` générée depuis `HELP`) et la palette
 > de `apps/portico-gui/src/App.svelte` (GUI). Toute modification de raccourci met à jour ce fichier.
-> `⌘` désigne `Cmd` sur macOS et `Ctrl` sur Linux.
+> `⌘` désigne `Cmd` sur macOS. Sur Linux, le modificateur de l'app est `Ctrl` dans la liste des hôtes et
+> **`Ctrl-Shift`** dès qu'un terminal a le focus (`Ctrl-T`, `Ctrl-W`, `Ctrl-K`… appartiennent au shell, à vim, à tmux),
+> comme GNOME Terminal. `Ctrl-Shift` fonctionne partout, c'est ce que l'UI affiche.
 
 ## Liste des hôtes
 
@@ -15,10 +17,10 @@
 | Vider la recherche | `Ctrl-U` (ou `Esc` hors recherche) | `Esc` |
 | Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `↵`, double-clic |
 | Se déconnecter (hôte sélectionné) | `d` | `d` |
-| Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | — *(1c)* |
+| Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | `⌘1`…`⌘9`, `Ctrl-Tab` / `Ctrl-Shift-Tab` |
 | Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | — |
 | Palette de commandes | — | `⌘K` |
-| Recharger `~/.ssh/config` | `r` | `⌘R` |
+| Recharger `~/.ssh/config` | `r` | `⌘R` (Linux : `Ctrl-R`) |
 | Changer de thème | `t` | `t` |
 | Aide | `?` | (palette) |
 | Quitter | `q`, `Ctrl-C` | `⌘Q` (système) |
@@ -53,11 +55,28 @@ l'annule.
 | Keyboard-interactive | `Tab` entre les champs · `↵` valider · `Esc` annuler |
 | Clé d'hôte modifiée (alerte) | `Esc` / `↵` fermer (aucune acceptation possible) |
 
+## Terminal (GUI)
+
+Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app ci-dessous.
+
+| Action | macOS | Linux |
+|---|---|---|
+| Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `⌘T` | `Ctrl-Shift-T` |
+| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `⌘W` | `Ctrl-Shift-W` |
+| Onglet n / liste des hôtes | `⌘1`…`⌘9` / `⌘0` | `Ctrl-Shift-1`…`9` / `Ctrl-Shift-0` |
+| Onglet suivant / précédent | `Ctrl-Tab` / `Ctrl-Shift-Tab`, `⌘]` / `⌘[` | `Ctrl-Tab` / `Ctrl-Shift-Tab` |
+| Palette de commandes | `⌘K` | `Ctrl-Shift-K` |
+| Copier la sélection / coller | `⌘C` / `⌘V` | `Ctrl-Shift-C` / `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
+| Reconnecter un onglet terminé ou en échec | `↵` | `↵` |
+| Annuler une connexion en cours | `Esc` | `Esc` |
+| Fermer un onglet (souris) | clic milieu sur l'onglet | clic milieu sur l'onglet |
+
+Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
+
 ## Prévus
 
 | Action | TUI | GUI | Phase |
 |---|---|---|---|
-| Onglets, terminal, dialogues | ✅ | `⌘T` / `⌘W` / `⌘1..9` | 1c |
 | Snippets | `Ctrl-Space s` | `⌘K` puis « Snippet » | 3 |
 | Explorateur SFTP | `Ctrl-Space f` | `⌘⇧F` | 2 |
 | Tunnels | `Ctrl-Space p` | `⌘⇧P` | 2 |

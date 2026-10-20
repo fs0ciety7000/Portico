@@ -134,3 +134,8 @@ le volume est faible, et un format lisible et versionnable sert le principe « z
 | 2026-10-20 | `vte` / `alacritty_terminal` ne bornent pas les séquences OSC ni les caractères combinants : titres assainis et combinants plafonnés côté Portico ; à suivre upstream | Risque surveillé |
 | 2026-10-20 | Refus de `pty-req` : échec du terminal (`terminal_refused`), là où `ssh -t` continue sans PTY ; un shell sans PTY est inutilisable dans un onglet | Accepté |
 | 2026-10-20 | Écarter le prompt de mot de passe termine la session (`Closed { UserRequested }`) au lieu d'essayer la méthode suivante, comme `Ctrl-C` dans `ssh` | Accepté |
+| 2026-10-20 | GUI : octets PTY en brut sur un `ipc::Channel` par terminal, rafales regroupées (64 Kio) et **contrôle de flux par acquittements** (xterm.js acquitte ce qu'il a parsé, 512 Kio max en vol), car `Channel::send` ne bloque jamais | Accepté |
+| 2026-10-20 | GUI Linux : modificateur `Ctrl-Shift` dans un terminal (`Ctrl-T/W/K` appartiennent au shell), `⌘` sur macOS | Accepté |
+| 2026-10-20 | Commandes Tauri qui appellent le moteur en `async` (une commande sync s'exécute sur le thread principal, hors runtime Tokio : `connect` paniquait) | Accepté |
+| 2026-10-20 | Rendu xterm.js : WebGL avec repli DOM sur perte de contexte. Spike WebKitGTK (Xvfb, GL logiciel, build debug) : 1 M lignes (6,9 Mo) en 1,9 s de bout en bout, mémoire stable sous flot continu, `Ctrl-C` immédiat. WKWebView (macOS) à mesurer sur matériel réel | Accepté, à mesurer sur macOS |
+| 2026-10-20 | Polices non embarquées (repli système si JetBrains Mono / Inter absents) ; embarquement prévu au packaging (phase 4) | Reporté |
