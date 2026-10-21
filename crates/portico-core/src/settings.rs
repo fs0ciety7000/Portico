@@ -125,6 +125,18 @@ pub(crate) fn load(path: &Path) -> Result<Settings> {
     Ok(settings)
 }
 
+/// Sets `key` to a string, keeping the decoration (comments above it, inline
+/// comment) of an existing entry: `insert` would replace the whole entry.
+fn set_string(table: &mut toml_edit::Table, key: &str, text: &str) {
+    if let Some(value) = table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(text);
+        *value.decor_mut() = decor;
+        return;
+    }
+    table.insert(key, toml_edit::value(text));
+}
+
 /// Validates and writes `settings` (see the module doc); returns them as
 /// the next [`load`] will read them. Blocking.
 pub(crate) fn save(path: &Path, settings: &Settings) -> Result<Settings> {
@@ -134,9 +146,7 @@ pub(crate) fn save(path: &Path, settings: &Settings) -> Result<Settings> {
     let mut doc = store::parse_document(path, &text)?;
     let root = doc.as_table_mut();
     match &settings.theme {
-        Some(theme) => {
-            root.insert("theme", toml_edit::value(theme.as_str()));
-        }
+        Some(theme) => set_string(root, "theme", theme),
         None => {
             root.remove("theme");
         }
@@ -147,11 +157,16 @@ pub(crate) fn save(path: &Path, settings: &Settings) -> Result<Settings> {
             keymap.remove(name);
             continue;
         }
-        let mut table = toml_edit::Table::new();
-        for (action, binding) in map {
-            table.insert(action, toml_edit::value(binding.as_str()));
+        // Edited in place: comments and order of the kept entries survive.
+        if !keymap.get(name).is_some_and(toml_edit::Item::is_table) {
+            keymap.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
         }
-        keymap.insert(name, toml_edit::Item::Table(table));
+        if let Some(table) = keymap.get_mut(name).and_then(toml_edit::Item::as_table_mut) {
+            table.retain(|action, _| map.contains_key(action));
+            for (action, binding) in map {
+                set_string(table, action, binding);
+            }
+        }
     }
     if keymap.is_empty() {
         root.remove("keymap");
@@ -168,6 +183,32 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn comments_next_to_saved_keys_survive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            "# hand comment\ntheme = \"obsidian\" # inline\n\n[keymap.tui]\n# files on F\n\"hosts.files\" = \"F\"\n\"hosts.debug\" = \"L\"\n",
+        )
+        .expect("write");
+        let mut settings = load(&path).expect("load");
+        settings.theme = Some("basalt".into());
+        settings.keymap.tui.insert("hosts.files".into(), "G".into());
+        settings.keymap.tui.remove("hosts.debug");
+        save(&path, &settings).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("# hand comment\ntheme = \"basalt\" # inline"),
+            "{text}"
+        );
+        assert!(
+            text.contains("# files on F\n\"hosts.files\" = \"G\""),
+            "{text}"
+        );
+        assert!(!text.contains("hosts.debug"), "{text}");
+    }
 
     fn sample() -> Settings {
         let mut settings = Settings {
