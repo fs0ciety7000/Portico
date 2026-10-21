@@ -32,7 +32,7 @@ export const GUI_FIXED: DocTable[] = [
       "Les titres de section sont des lignes : on s'y déplace comme sur un hôte.",
     rows: [
       ["Plier / déplier la section (sur son titre)", "`↵`, clic"],
-      ["Retirer de « Recent » (souris)", "`×` au survol de la ligne"],
+      ["Retirer de « Recent » (souris)", "`×` au survol ou sur la ligne sélectionnée"],
       ["Naviguer pendant la recherche", "`↑` `↓`, `Ctrl-N` / `Ctrl-P`"],
       ["Vider la recherche", "`Esc`"],
       ["Favori (souris)", "étoile à côté du nom, dans les détails"],
@@ -46,6 +46,8 @@ export const GUI_FIXED: DocTable[] = [
     rows: [
       ["Ajouter un tag (`#` facultatif)", "`Espace`, `,` ou `↵` dans le champ Tags"],
       ["Retirer le dernier tag", "`Backspace` dans le champ vide"],
+      ["Sélectionner un tag (anneau d'accent ; le tag refusé par le moteur est marqué dès sa création)", "`←` / `→` depuis le champ vide, puis `←` `→`, `Home` / `End`"],
+      ["Retirer le tag sélectionné", "`Backspace` ou `Suppr`"],
       ["Groupe : choisir une suggestion (groupes existants)", "`↓` / `↑`, puis `↵`"],
       ["Champ suivant", "`Tab`"],
       ["Enregistrer", "`Ctrl-S` (macOS : `⌘S`), `Ctrl-↵`, ou `↵` dans un champ d'une ligne"],
@@ -58,15 +60,19 @@ export const GUI_FIXED: DocTable[] = [
       "Panneau debug : sessions à gauche (vivantes et 20 dernières terminées, sondes « probe » de copy-id comprises), à droite " +
       "les journaux ou la config effective (`ssh -G`). Ouvert depuis un onglet, il présélectionne sa session. Les textes sont " +
       "affichés échappés (contrôles, bidi), comme dans « Copy all ». Les mots-clés qui exécutent des commandes (`ProxyCommand`, " +
-      "`LocalCommand`, `RemoteCommand`, `KnownHostsCommand`) sont masqués et jamais copiés.",
+      "`LocalCommand`, `RemoteCommand`, `KnownHostsCommand`) sont masqués (« Hidden: may contain a secret · never copied ») : leur valeur " +
+      "n'est jamais envoyée à la webview. Une option fixée par Portico à la connexion a l'origine « at connect ». Dans la liste des " +
+      "sessions, l'issue est un libellé court (« Failed · host key changed », code en infobulle) ; « Refused » (clé hôte refusée " +
+      "volontairement) est neutre.",
     rows: [
       ["Session précédente / suivante", "`k` / `j`, `↑` / `↓`"],
-      ["Onglet Logs / Effective config", "`1` / `2`"],
+      ["Onglet Logs / Effective config", "`Tab` (aussi `1` / `2`)"],
       ["Filtrer (texte ; `Esc` vide le filtre)", "`/`"],
-      ["Niveau minimal", "boutons Debug, Info, Warn, Error"],
+      ["Niveau minimal suivant (Debug → Info → Warn → Error)", "`v`, ou les boutons"],
+      ["Défiler les records (une page, début, fin ; la fin relance le suivi)", "`PgUp` / `PgDn`, `Home` / `g`, `End` / `G`"],
       ["Suivre en direct on/off (défiler vers le haut l'arrête)", "`f`"],
-      ["Copier tout le journal (texte `to_line` ; sans presse-papiers, le texte s'affiche sélectionné)", "`c`"],
-      ["Rafraîchir (et recalculer la config effective)", "`r`"],
+      ["Copier tous les records (texte `to_line` ; sans presse-papiers, le texte s'affiche sélectionné)", "`y` (aussi `c`)"],
+      ["Rafraîchir (et recalculer la config effective)", "`Ctrl-R` (aussi `r`)"],
       ["Fermer", "`Esc`"],
     ],
   },

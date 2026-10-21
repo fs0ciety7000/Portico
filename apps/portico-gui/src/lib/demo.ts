@@ -36,6 +36,10 @@ export const demoHosts: Host[] = [
   { ...base, alias: "grafana", hostname: "grafana.internal", user: "ops", port: 22, proxyJump: ["bastion"], tags: ["monitoring"], favorite: true, group: group("Infrastructure"), source: "~/.ssh/config:20" },
   { ...base, alias: "staging", hostname: "staging.example.com", user: "deploy", port: 22, proxyJump: [], tags: ["staging"], favorite: false, source: "~/.ssh/conf.d/staging:1" },
   { ...base, alias: "lab-pi", hostname: "192.168.1.40", user: "pi", port: 22, proxyJump: [], tags: ["home"], favorite: false, source: "~/.ssh/config:30" },
+  // `?long=1`: a host with a long alias (ellipsis in the list, wrapped title).
+  ...(new URLSearchParams(location.search).get("long") === "1"
+    ? [{ ...base, alias: "analytics-warehouse-replica-eu-west-3-standby", hostname: "10.0.7.31", user: "analyst", port: 22, proxyJump: ["bastion"], tags: ["analytics"], favorite: true, group: group("Production"), source: "~/.ssh/config:44" }]
+    : []),
 ];
 
 export const demoThemes: ThemeInfo[] = [

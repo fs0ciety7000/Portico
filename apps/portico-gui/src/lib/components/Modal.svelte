@@ -164,6 +164,8 @@
     display: grid;
     place-items: center;
     padding: var(--space-6);
+    /* Room for a notice raised while the dialog is open (App.svelte). */
+    padding-top: calc(var(--space-6) + var(--toast-room, 0px));
     z-index: 21;
   }
   .modal {
@@ -178,11 +180,11 @@
     width: min(760px, 100%);
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
-    max-height: min(720px, calc(100vh - 2 * var(--space-6)));
+    max-height: min(720px, calc(100vh - 2 * var(--space-6) - var(--toast-room, 0px)));
   }
   .modal.full {
     width: min(1180px, 100%);
-    height: min(780px, calc(100vh - 2 * var(--space-6)));
+    height: min(780px, calc(100vh - 2 * var(--space-6) - var(--toast-room, 0px)));
     max-height: none;
   }
   .modal.wide .body { overflow-y: auto; }

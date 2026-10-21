@@ -75,8 +75,8 @@ class SettingsState {
       const shown = problems.slice(0, LISTED).join("\n");
       const more = problems.length > LISTED ? `\nand ${problems.length - LISTED} more` : "";
       workspace.notify(
-        { code: "settings_ignored", message: `settings.toml: ${problems.length === 1 ? "one entry" : `${problems.length} entries`} ignored`, hint: shown + more },
-        "info",
+        { code: "settings_ignored", message: `settings.toml: ${problems.length} ${problems.length === 1 ? "entry" : "entries"} ignored`, hint: shown + more },
+        "warning",
         LIST_TOAST_MS,
       );
     }

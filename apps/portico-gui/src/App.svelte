@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { fly } from "svelte/transition";
   import { describe, formatRtt, isTauri, sentence, setHome, type Host } from "./lib/api";
   import { backend } from "./lib/backend";
@@ -305,7 +305,7 @@
         ]
       : []),
     ...(hosts.recent.length
-      ? [{ id: "hosts.clear-recent", title: "Clear recent", shortcut: k("hosts.clear-recent"), run: () => (hosts.confirmClear = true) }]
+      ? [{ id: "hosts.clear-recent", title: "Clear recent", shortcut: tab ? undefined : k("hosts.clear-recent"), run: () => (hosts.confirmClear = true) }]
       : []),
     {
       id: "app.files",
@@ -411,6 +411,7 @@
       case "app.theme":
         return settings.cycle();
       case "app.favorite":
+      case "hosts.favorite":
         if (targetAlias) void hosts.toggleFavorite(targetAlias);
         return;
       case "hosts.edit":
@@ -475,6 +476,21 @@
     }
   });
 
+  // A notice never covers a dialog: the one showing when a dialog opens is
+  // dismissed; one raised while a dialog is open shows above it, and the
+  // dialog moves down by the notice's height (`--toast-room`, Modal.svelte).
+  let hadModal = false;
+  $effect(() => {
+    const open = modalOpen;
+    if (open && !hadModal) untrack(() => workspace.dismissToast());
+    hadModal = open;
+  });
+  let toastHeight = $state(0);
+  $effect(() => {
+    const room = modalOpen && workspace.toast && toastHeight ? `calc(${toastHeight}px + var(--space-4))` : "0px";
+    document.documentElement.style.setProperty("--toast-room", room);
+  });
+
   function closeFiles() {
     filesOpen = false;
   }
@@ -502,23 +518,25 @@
     };
   });
 
+  // Status-bar hints, most useful first: when the bar runs out of room
+  // they give way from the end of each list (the palette hint stays last).
   const tabHints = [
+    ["tab.hosts", "hosts"],
     ["tab.new", "new tab"],
     ["tab.close", "close"],
     ["app.files", "files"],
-    ["app.snippets", "snippets"],
     ["app.logs", "logs"],
-    ["tab.hosts", "hosts"],
+    ["app.snippets", "snippets"],
   ] as const;
   const hostHints = [
-    ["hosts.search", "search", false],
-    ["hosts.connect", "connect", false],
-    ["hosts.edit", "edit", true],
-    ["app.favorite", "favorite", true],
-    ["hosts.files", "files", true],
-    ["hosts.snippets", "snippets", true],
-    ["app.logs", "logs", true],
-    ["app.theme", "theme", true],
+    ["hosts.connect", "connect"],
+    ["hosts.search", "search"],
+    ["hosts.edit", "edit"],
+    ["app.favorite", "favorite"],
+    ["hosts.files", "files"],
+    ["app.logs", "logs"],
+    ["hosts.snippets", "snippets"],
+    ["app.theme", "theme"],
   ] as const;
 </script>
 
@@ -576,31 +594,31 @@
 
   <footer class="statusbar">
     {#if tab}
+      <!-- The status (dot, alias, phase, latency) never shrinks; only the
+           terminal title does, then the hints give way (see .hints). -->
       <span class="session" data-status={tabStatus.status}>
         <span class="dot" class:busy={tabStatus.busy} class:hollow={!!tab.end}></span>
         <span class="alias">{tab.alias}</span>
         {#if tab.end}<span class="ended">{tab.end.kind === "closed" ? "Shell closed" : "Shell exited"}</span>{/if}
-        <span>{tab.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
+        <span class="phase">{tab.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
         {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected"}
           <span class="rtt mono" class:slow={tabStatus.status === "warning"}>{formatRtt(tabSession.latencyMs)}</span>
         {/if}
-        {#if tab.title}<span class="title">{tab.title}</span>{/if}
+        {#if tab.title}<span class="title" title={tab.title}>{tab.title}</span>{/if}
       </span>
-      <span class="spacer"></span>
       <span class="hints">
-        {#each tabHints as [id, label] (id)}
-          {#if k(id)}<span class="optional"><kbd>{k(id)}</kbd> {label}</span>{/if}
-        {/each}
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
+        {#each tabHints as [id, label] (id)}
+          {#if k(id)}<span><kbd>{k(id)}</kbd> {label}</span>{/if}
+        {/each}
       </span>
     {:else}
-      <span>{hosts.all.length} hosts · {workspace.tabs.length} open</span>
-      <span class="spacer"></span>
+      <span class="counts">{hosts.all.length} hosts · {workspace.tabs.length} open</span>
       <span class="hints">
-        {#each hostHints as [id, label, optional] (id)}
-          {#if k(id)}<span class:optional><kbd>{k(id)}</kbd> {label}</span>{/if}
-        {/each}
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
+        {#each hostHints as [id, label] (id)}
+          {#if k(id)}<span><kbd>{k(id)}</kbd> {label}</span>{/if}
+        {/each}
       </span>
     {/if}
     <span class="theme-name">
@@ -708,16 +726,18 @@
 
 {#if workspace.toast}
   {@const toast = workspace.toast}
-  <!-- Above an open dialog, the notice goes to the top right, clear of its buttons. -->
+  <!-- Above an open dialog, the notice goes to the top, in the room the dialog leaves it. -->
   <div
     class="toast"
     class:top={modalOpen}
     data-tone={toast.tone}
     role={toast.tone === "error" ? "alert" : "status"}
+    bind:offsetHeight={toastHeight}
     transition:fly={{ y: modalOpen ? -12 : 12, duration: dur("base") }}
   >
     <svg viewBox="0 0 16 16" aria-hidden="true">
       {#if toast.tone === "error"}<circle cx="8" cy="8" r="6.25" /><path d="M8 4.75v3.75M8 11.1v.1" />
+      {:else if toast.tone === "warning"}<path d="M8 2.25 14.25 13.25H1.75Z" /><path d="M8 6.5v3M8 11.1v.1" />
       {:else}<circle cx="8" cy="8" r="6.25" /><path d="M8 7.25v4M8 4.9v.1" />{/if}
     </svg>
     <div class="toast-text">
@@ -773,7 +793,9 @@
     min-height: 0;
   }
   main.with-files { grid-template-columns: minmax(0, 1fr) min(420px, 42%); }
-  main > .hosts { position: absolute; inset: 0; }
+  /* Above the (empty, transparent) terminal stage: it must not take the
+     host list's clicks. Hidden while a tab is active. */
+  main > .hosts { position: absolute; inset: 0; z-index: 1; }
   .stage { position: relative; min-width: 0; min-height: 0; }
   .stage > :global(*) { position: absolute; inset: 0; }
   .hosts {
@@ -794,23 +816,38 @@
     font-size: var(--text-xs);
     white-space: nowrap;
   }
-  .spacer { flex: 1; }
-  .hints { display: flex; gap: var(--space-4); flex-shrink: 0; }
-  /* Narrow windows keep the session info and the palette hint. */
-  @media (max-width: 1100px) {
-    .hints .optional { display: none; }
+  /*
+   * Room is shared by priority, from the space actually left (no viewport
+   * breakpoint): the session status keeps its full width, the terminal
+   * title shrinks to an ellipsis, and the hints take what remains. They
+   * lay out right to left (DOM order = priority) and wrap; a wrapped hint
+   * falls on a second line that the bar clips, so whole hints disappear,
+   * least useful first, never a half-cut one.
+   */
+  .hints {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: row-reverse;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    align-self: stretch;
+    column-gap: var(--space-4);
+    min-width: 0;
+    overflow: hidden;
   }
-  .theme-name { padding-left: var(--space-3); border-left: 1px solid var(--border-subtle); }
+  .hints > span { display: flex; align-items: center; gap: var(--space-1); height: 100%; }
+  .counts { flex: 0 0 auto; }
+  .theme-name { flex: 0 0 auto; padding-left: var(--space-3); border-left: 1px solid var(--border-subtle); }
   .session {
     --c: var(--status-idle);
     display: flex;
     flex: 0 1 auto;
-    overflow: hidden;
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
     color: var(--text-secondary);
   }
+  .session > * { flex: 0 0 auto; }
   .session[data-status="connecting"] { --c: var(--status-connecting); }
   .session[data-status="authenticating"] { --c: var(--status-authenticating); }
   .session[data-status="connected"] { --c: var(--status-connected); }
@@ -823,7 +860,7 @@
   .session .alias { color: var(--text-primary); font-weight: 550; }
   .rtt { color: var(--text-muted); }
   .rtt.slow { color: var(--status-warning); }
-  .session .title { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+  .session > .title { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; }
   .session > * + *:not(.alias)::before { content: "·"; margin-right: var(--space-2); color: var(--text-muted); }
   @keyframes pulse {
     0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent); }
@@ -846,7 +883,15 @@
     box-shadow: var(--shadow-raised);
     z-index: 30;
   }
-  .toast.top { top: calc(44px + var(--space-4)); bottom: auto; }
+  .toast.top {
+    top: var(--space-4);
+    right: 0;
+    bottom: auto;
+    left: 0;
+    width: fit-content;
+    margin-inline: auto;
+  }
+  .toast[data-tone="warning"] { --c: var(--status-warning); }
   .toast[data-tone="info"] { --c: var(--border-strong); }
   .toast svg {
     flex: 0 0 auto;
@@ -857,6 +902,7 @@
     stroke: var(--c);
     stroke-width: 1.5;
     stroke-linecap: round;
+    stroke-linejoin: round;
   }
   .toast[data-tone="info"] svg { stroke: var(--text-secondary); }
   .toast-text { display: grid; gap: var(--space-1); }
