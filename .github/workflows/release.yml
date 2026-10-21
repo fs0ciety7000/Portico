@@ -1,0 +1,286 @@
+name: Release
+
+# Builds every distributable and publishes them in a *draft* GitHub Release.
+# - push of a tag `v<version>` (must match the workspace version): build + draft release
+# - workflow_dispatch: build only (dry run), artifacts attached to the run
+# Procedure, secrets and verification: docs/RELEASE.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    name: version check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Workspace, GUI and tag versions agree
+        run: |
+          set -eu
+          cargo_v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          tauri_v=$(jq -r .version apps/portico-gui/src-tauri/tauri.conf.json)
+          npm_v=$(jq -r .version apps/portico-gui/package.json)
+          echo "Cargo.toml=$cargo_v tauri.conf.json=$tauri_v package.json=$npm_v"
+          test -n "$cargo_v"
+          test "$cargo_v" = "$tauri_v"
+          test "$cargo_v" = "$npm_v"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "$GITHUB_REF_NAME" = "v$cargo_v" || {
+              echo "::error::tag $GITHUB_REF_NAME does not match workspace version $cargo_v"; exit 1; }
+          fi
+          echo "version=$cargo_v" >> "$GITHUB_OUTPUT"
+
+  tui:
+    name: tui (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc builds: oldest supported Ubuntu runner sets the glibc floor (2.35).
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          # Fully static builds (no NSS: see docs/RELEASE.md, "Limites").
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, musl: true }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: musl toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked -p portico-tui --target ${{ matrix.target }}
+      - name: Smoke test (renders under a pty, quits on q)
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/release/portico"
+          file "$bin"
+          mkdir -p "$RUNNER_TEMP/home"
+          (sleep 2; printf q) | HOME="$RUNNER_TEMP/home" TERM=xterm-256color \
+            timeout 20 script -qfec "stty cols 120 rows 36; $bin" /dev/null > "$RUNNER_TEMP/tui.out"
+          grep -q PORTICO "$RUNNER_TEMP/tui.out"
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="portico-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/portico" "dist/$name/"
+          cp README.md "dist/$name/"
+          for f in LICENSE LICENSE-MIT LICENSE-APACHE; do
+            if [ -f "$f" ]; then cp "$f" "dist/$name/"; fi
+          done
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ls -l "dist/$name/portico" "dist/$name.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tui-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  gui-linux:
+    name: gui linux (${{ matrix.arch }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-22.04 }
+          - { arch: aarch64, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    env:
+      # linuxdeploy is itself an AppImage: run it without FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev file
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-gui-${{ matrix.arch }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/portico-gui/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: apps/portico-gui
+        run: pnpm install --frozen-lockfile
+      - name: Bundle (deb + AppImage)
+        working-directory: apps/portico-gui
+        run: pnpm tauri build --ci --bundles deb,appimage -- --locked
+      - name: Inspect
+        run: |
+          set -eu
+          b=target/release/bundle
+          dpkg-deb -I "$b"/deb/*.deb
+          dpkg-deb -c "$b"/deb/*.deb
+          ls -l "$b"/deb/*.deb "$b"/appimage/*.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-${{ matrix.arch }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  gui-macos:
+    name: gui macos (universal)
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-gui-macos
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/portico-gui/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: apps/portico-gui
+        run: pnpm install --frozen-lockfile
+      - id: signing
+        name: Signing mode
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              echo "notarized=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "notarized=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID missing: the app is signed but NOT notarized"
+            fi
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "notarized=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Apple signing secrets missing: building an UNSIGNED (ad-hoc) dmg"
+          fi
+      - name: Bundle (signed with Developer ID, notarized when credentials exist)
+        if: steps.signing.outputs.signed == 'true'
+        working-directory: apps/portico-gui
+        env:
+          # Read by the Tauri bundler: imports the .p12 into a temporary keychain,
+          # signs with the hardened runtime, notarizes and staples the .app.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg -- --locked
+      - name: Bundle (unsigned, ad-hoc signature)
+        if: steps.signing.outputs.signed != 'true'
+        working-directory: apps/portico-gui
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg -- --locked
+      - name: Verify signature and name the dmg
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          NOTARIZED: ${{ steps.signing.outputs.notarized }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          b=target/universal-apple-darwin/release/bundle
+          app="$b/macos/Portico.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --entitlements - --xml "$app"
+          lipo -archs "$app/Contents/MacOS/"*
+          mkdir -p dist
+          if [ "$NOTARIZED" = "true" ]; then
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+            out="Portico_${VERSION}_universal.dmg"
+          elif [ "$SIGNED" = "true" ]; then
+            out="Portico_${VERSION}_universal-not-notarized.dmg"
+          else
+            out="Portico_${VERSION}_universal-unsigned.dmg"
+          fi
+          cp "$b"/dmg/*.dmg "dist/$out"
+          ls -l "dist/$out"
+          echo "macOS: signed=$SIGNED notarized=$NOTARIZED -> $out" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos-universal
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: draft release
+    needs: [version, tui, gui-linux, gui-macos]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -eu
+          for f in *; do sha256sum "$f" > "$f.sha256"; done
+          sha256sum $(ls | grep -v '\.sha256$') > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --verify-tag \
+            --title "Portico $VERSION" \
+            --notes "Draft built by the Release workflow from $GITHUB_SHA. Verify downloads with SHA256SUMS (see docs/RELEASE.md)."
