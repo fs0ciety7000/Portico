@@ -5,7 +5,7 @@
 
 use portico_core::ErrorSummary;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Flex, Layout};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph};
 
@@ -19,6 +19,7 @@ pub(crate) fn render(
     s: Styles,
     tick: u64,
     frame: &mut Frame<'_>,
+    band: u16,
 ) {
     let screen = frame.area();
     let width = screen.width.saturating_sub(4).min(84);
@@ -34,12 +35,7 @@ pub(crate) fn render(
         .saturating_add(form_height)
         .saturating_add(4)
         .min(screen.height.saturating_sub(2));
-    let [v] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(screen);
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(v);
+    let area = crate::ui::panel_rect(screen, width, height, band);
 
     let title = match &panel.session {
         Some((_, alias)) => Line::from(vec![

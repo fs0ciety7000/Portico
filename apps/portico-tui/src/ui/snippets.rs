@@ -3,7 +3,7 @@
 //! form or the editor in place of the list.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph};
 
@@ -18,40 +18,45 @@ use crate::ui::{fmt, form, spinner};
 /// Rows of the command box in the editor.
 const COMMAND_ROWS: usize = 4;
 
-pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
+pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     let s = app.styles();
     let tick = app.tick;
+    // Behind a dialog, the panel's keys do not work: no hints.
+    let dialog_open = !app.dialogs.is_empty();
     let Some(panel) = &mut app.snippets_panel else {
         return;
     };
     let screen = frame.area();
     let width = screen.width.saturating_sub(2).min(100);
     let height = screen.height.saturating_sub(2).min(32);
-    let [v] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(screen);
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(v);
+    let area = crate::ui::panel_rect(screen, width, height, band);
     let target = match &panel.alias {
         Some(alias) => format!("· {} ", fmt::truncate(alias, 40)),
         None => "· all hosts ".to_owned(),
     };
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(s.border_focus())
         .title(Line::from(vec![
             Span::styled(" Snippets ", s.title()),
             Span::styled(target, s.muted()),
         ]))
-        .title_bottom(Line::from(Span::styled(" Esc close ", s.muted())).right_aligned())
         .padding(Padding::new(2, 2, 1, 0))
         .style(s.overlay());
+    // `Esc close` only where Esc closes (elsewhere it goes back).
+    if matches!(panel.mode, SnipMode::Browse) && !dialog_open {
+        block =
+            block.title_bottom(Line::from(Span::styled(" Esc close ", s.muted())).right_aligned());
+    }
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let w = usize::from(inner.width);
-    let hints = panel.hints();
+    let hints = if dialog_open {
+        Vec::new()
+    } else {
+        panel.hints()
+    };
 
     match &panel.mode {
         SnipMode::Fill(f) => {
@@ -124,13 +129,13 @@ fn browse(
         }
         line
     }];
+    // Not a fault, a state: neutral text, then what to do about it.
     if let Some(why) = &panel.cannot_run {
-        for (i, l) in fmt::wrap(why, w.saturating_sub(2)).into_iter().enumerate() {
-            let lead = if i == 0 { "▲ " } else { "  " };
-            head.push(Line::from(vec![
-                Span::styled(lead, s.status(s.theme.status.warning)),
-                Span::styled(l, s.secondary()),
-            ]));
+        for l in fmt::wrap(why, w) {
+            head.push(Line::from(Span::styled(l, s.secondary())));
+        }
+        for l in fmt::wrap(&panel.next_action(), w) {
+            head.push(Line::from(Span::styled(l, s.muted())));
         }
     }
     head.push(Line::from(""));
@@ -415,9 +420,9 @@ fn edit_lines(f: &EditForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static>
         lw,
         f.run,
         if f.run {
-            "press Enter after typing it"
+            "yes — Enter is sent"
         } else {
-            "only type it (you press Enter)"
+            "no — typed only, you press Enter"
         },
         f.focus == EditField::Run,
     ));

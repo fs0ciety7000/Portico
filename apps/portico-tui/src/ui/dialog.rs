@@ -4,6 +4,7 @@
 //! actions sit bottom-right with the primary one last and highlighted.
 
 use portico_core::events::PromptKind;
+use portico_core::vault::MIN_PASSPHRASE_CHARS;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Modifier;
@@ -247,6 +248,22 @@ fn input_lines(fields: &[Field], focus: usize, s: Styles, lines: &mut Vec<Line<'
     }
 }
 
+/// `At least 8 characters   5 / 8 min` under a new passphrase, from the
+/// start. `typed` is already capped at the minimum (the length of a
+/// secret is never shown beyond that).
+pub(crate) fn passphrase_rule(s: Styles, typed: usize) -> Line<'static> {
+    let min = MIN_PASSPHRASE_CHARS;
+    let mut spans = vec![Span::styled(
+        format!("At least {min} characters"),
+        s.secondary(),
+    )];
+    spans.push(Span::styled(format!("   {typed} / {min} min"), s.muted()));
+    if typed >= min {
+        spans.push(Span::styled(" ✓", s.muted()));
+    }
+    Line::from(spans)
+}
+
 /// Vault unlock / create / change, and a key passphrase for the agent.
 /// Explanation lines, then (title, primary action, cancel action).
 fn secret_intro(
@@ -350,7 +367,22 @@ fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) 
         lines.push(Line::from(Span::styled(t.to_owned(), style)));
     };
     lines.push(Line::from(""));
+    let first_field = lines.len();
     input_lines(&d.fields, d.focus, s, &mut lines);
+    // The rule sits right under the new passphrase, aligned with it.
+    if let Some((index, typed)) = d.new_passphrase_progress() {
+        let label_width = d
+            .fields
+            .iter()
+            .map(|f| f.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            + 3;
+        let mut rule = passphrase_rule(s, typed);
+        rule.spans.insert(0, Span::raw(" ".repeat(label_width)));
+        let at = (first_field + index + 1).min(lines.len());
+        lines.insert(at, rule);
+    }
     if d.busy {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![

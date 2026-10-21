@@ -98,18 +98,26 @@ n'est pas disponible). Seules les touches utilisables sur la sélection sont pro
 |---|---|
 | Se déplacer / changer de section | `j` / `k`, `↓` / `↑`, `g` / `G` · `Tab` |
 | Nouvelle clé (formulaire) | `n` |
-| Ajouter à l'agent (durée : aucune / 1 h / 8 h, passphrase si besoin) | `a`, `←` `→`, `↵` |
+| Ajouter à l'agent (durée : « Until removed » / 1 h / 8 h, passphrase si besoin) | `a`, `←` `→`, `↵` |
 | Retirer de l'agent (confirmation) | `x` (ou `Suppr`), puis `y` |
-| Copier la clé sur un hôte (sélecteur flou, puis Connecting · Installing · Verifying) | `c`, saisie, `↵` |
-| Réessayer une copie en échec / quitter la vue (la copie continue) | `r` / `Esc` |
+| Copier la clé sur un hôte (sélecteur flou, puis Connecting · Installing · Verifying ; sans clé privée, `.pub` seul, l'étape Verifying est sautée et le résultat le dit) | `c`, saisie, `↵` |
+| Réessayer une copie en échec / quitter la vue (la copie continue) | `↵` ou `r` / `Esc` |
 | Copier la clé publique (OSC 52, et la ligne s'affiche) | `y` (`Esc` masque la ligne) |
 | Vault : déverrouiller ou verrouiller | `v` |
 | Vault : créer, ou changer la passphrase | `V` |
 | Rafraîchir | `Ctrl-R` |
 | Fermer | `Esc`, `q`, `Ctrl-C` |
 
+Quand la liste dépasse la hauteur, elle défile avec la sélection (l'en-tête de section reste visible
+sur sa première ligne) et « ↑ n more / ↓ n more » compte les clés masquées. Pendant une question en
+ligne (durée, retrait), la ligne sélectionnée garde son fond. Une notice qui ne tient pas sous la liste
+s'affiche en toast sous le panneau.
+
 Formulaire de génération : `Tab` / `Shift-Tab` (ou `↓` / `↑`) entre les champs, `←` `→` ou `Espace`
 sur le type, `Ctrl-U` vide le champ, `↵` génère (les erreurs s'affichent sous le champ), `Esc` annule.
+La passphrase fait au moins 8 caractères, ou est vide (compteur « n / 8 min »). Si le moteur refuse la
+génération alors qu'une passphrase avait été envoyée, les champs sont effacés : `↵` reste bloqué tant
+qu'elle n'est pas ressaisie, ou que `Ctrl-N` ne confirme « sans passphrase ».
 
 ## Snippets (TUI)
 
@@ -122,17 +130,22 @@ panneau l'explique) ; la gestion reste possible.
 |---|---|
 | Filtrer / vider le filtre | saisie / `Ctrl-U` (ou `Esc` si le filtre n'est pas vide) |
 | Se déplacer | `↓` / `↑`, `PgUp` / `PgDn` |
-| Exécuter dans l'onglet (formulaire si `{{placeholders}}`) | `↵` |
+| Exécuter (« run » : tapé puis Entrée) ou coller (« paste » : tapé seulement) dans l'onglet ; formulaire si `{{placeholders}}` | `↵` |
 | Nouveau / éditer | `Ctrl-N` / `Ctrl-E` |
 | Supprimer (confirmation) | `Ctrl-D` (ou `Suppr`), puis `y` |
 | Recharger | `Ctrl-R` |
 | Fermer | `Esc`, `Ctrl-C` |
 
+Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante :
+`Esc`, puis `↵` pour se connecter.
+
 Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera
-tapé, `↵` envoie (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la
-commande insère une ligne, `←` `→` change la portée, `Espace` coche « Run », `Ctrl-S` (ou `↵` hors
-commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant
-n'accepte pas le collage groupé) propose `r` pour l'exécuter quand même, ou `Esc`.
+tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵`
+dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is
+sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet
+multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande
+confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien),
+`Esc` annule.
 
 ## Dialogues
 
@@ -143,8 +156,8 @@ n'accepte pas le collage groupé) propose `r` pour l'exécuter quand même, ou `
 | Mot de passe / passphrase | saisie masquée · `Tab` champ suivant / case « mémoriser » · `Espace` cocher · `↵` valider · `Esc` / `Ctrl-C` annuler |
 | Keyboard-interactive | `Tab` entre les champs · `↵` valider · `Esc` annuler |
 | Clé d'hôte modifiée (alerte) | `Esc` / `↵` fermer (aucune acceptation possible) |
-| Vault verrouillé au démarrage (TUI) | saisie masquée · `↵` déverrouiller · `Esc` continuer sans (secrets non mémorisés) |
-| Créer le vault / changer sa passphrase (TUI) | `Tab` champ suivant · `↵` valider · `Esc` annuler (« not now » quand il est proposé après « mémoriser ») |
+| Vault verrouillé au démarrage (TUI) | saisie masquée · `↵` déverrouiller · `Esc` continuer sans (secrets non mémorisés ; la barre de statut affiche « Esc continue without ») |
+| Créer le vault / changer sa passphrase (TUI) | `Tab` champ suivant · `↵` valider · `Esc` annuler (« not now » quand il est proposé après « mémoriser ») ; au moins 8 caractères, compteur « n / 8 min » dès l'ouverture |
 | Passphrase d'une clé pour l'agent (TUI) | saisie masquée · `↵` ajouter · `Esc` annuler |
 
 ## Terminal (GUI)

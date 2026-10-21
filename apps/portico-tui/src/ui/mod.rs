@@ -19,7 +19,30 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::app::App;
+use crate::app::{App, Overlay};
+
+/// An overlay panel of at most `width` × `height`: centred between the
+/// header and the status bar, its bottom clear of the toast `band` (the
+/// rows just above the status bar). Only the bottom moves when the band
+/// appears, so the content does not jump.
+pub(crate) fn panel_rect(screen: Rect, width: u16, height: u16, band: u16) -> Rect {
+    let region = Rect {
+        y: screen.y.saturating_add(1),
+        height: screen.height.saturating_sub(2),
+        ..screen
+    };
+    let [v] = Layout::vertical([Constraint::Length(height.min(region.height))])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(region);
+    let [mut area] = Layout::horizontal([Constraint::Length(width.min(region.width))])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(v);
+    let limit = region.bottom().saturating_sub(band);
+    if area.bottom() > limit {
+        area.height = limit.saturating_sub(area.y);
+    }
+    area
+}
 
 /// Braille spinner, advanced by `App::tick`.
 pub(crate) const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -81,14 +104,36 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
     }
     statusbar::render(app, frame, status);
-    if app.overlay == Some(crate::app::Overlay::Tunnels)
+    // Over a panel, the toast sits between the panel and the status bar,
+    // never on the panel's frame or hints: the panel gives way if needed.
+    let panel_open = matches!(
+        app.overlay,
+        Some(Overlay::Keys | Overlay::Snippets | Overlay::Tunnels)
+    );
+    let band = match &app.toast {
+        Some(t) if panel_open => {
+            overlays::ToastBox::new(s, t.is_error, &t.message, t.hint.as_deref(), status.width)
+                .height
+        }
+        _ => 0,
+    };
+    let toast_zone = if band > 0 {
+        Rect {
+            y: status.y.saturating_sub(band),
+            height: band,
+            ..status
+        }
+    } else {
+        toast_zone
+    };
+    if app.overlay == Some(Overlay::Tunnels)
         && let Some(panel) = &mut app.tunnels_panel
     {
-        tunnels::render(panel, &app.tunnels, s, tick, frame);
+        tunnels::render(panel, &app.tunnels, s, tick, frame, band);
     }
     match app.overlay {
-        Some(crate::app::Overlay::Keys) => keys::render(app, frame),
-        Some(crate::app::Overlay::Snippets) => snippets::render(app, frame),
+        Some(Overlay::Keys) => keys::render(app, frame, band),
+        Some(Overlay::Snippets) => snippets::render(app, frame, band),
         _ => {}
     }
     // Help, then toasts: above the panels, so a result is never hidden.

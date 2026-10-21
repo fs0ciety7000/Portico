@@ -8,12 +8,14 @@
 //! `portico_core::snippets::snippet_input`), never run locally.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portico_core::ErrorSummary;
 use portico_core::snippets::{MAX_COMMAND_BYTES, Snippet, SnippetScope};
 use ratatui::widgets::ListState;
 
+use crate::dialog::ARM_DELAY;
 use crate::form::{MAX_LINE, paste_line, push_char};
 use crate::keys::{Load, Notice};
 
@@ -375,9 +377,13 @@ pub(crate) enum SnipMode {
         name: String,
     },
     /// A multi-line paste-only snippet cannot be pasted here: run it?
+    /// Only `r` runs it, and only once armed (`ARM_DELAY` after
+    /// `opened_at`): the `↵` that sent the snippet, held or repeated,
+    /// must never execute it.
     NeedsRun {
         rendered: String,
         error: ErrorSummary,
+        opened_at: Instant,
     },
 }
 
@@ -510,7 +516,7 @@ impl SnippetsPanel {
             self.notice = Some(Notice {
                 ok: false,
                 message: why.clone(),
-                hint: Some("Open a terminal tab on a host, then Ctrl-Space s.".into()),
+                hint: Some(self.next_action()),
             });
             return SnipOutcome::None;
         }
@@ -531,10 +537,24 @@ impl SnippetsPanel {
         SnipOutcome::None
     }
 
-    /// Keys that do something right now.
+    /// Without a terminal: what to do to get one.
+    pub(crate) fn next_action(&self) -> String {
+        match &self.alias {
+            Some(alias) => format!("Esc, then ↵ to connect {alias}."),
+            None => "Esc, then choose a host and ↵ to connect.".to_owned(),
+        }
+    }
+
+    /// Keys that do something right now. The primary action says what
+    /// `↵` does to the snippet: `run` (typed, then Enter) or `paste`.
     pub(crate) fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        let verb = |run: bool| if run { "run" } else { "paste" };
         match &self.mode {
-            SnipMode::Fill(_) => vec![("↵", "send"), ("Tab", "next"), ("Esc", "back")],
+            SnipMode::Fill(form) => vec![
+                ("↵", verb(form.snippet.run)),
+                ("Tab", "next"),
+                ("Esc", "back"),
+            ],
             SnipMode::Edit(form) => {
                 if form.busy {
                     return Vec::new();
@@ -554,9 +574,10 @@ impl SnippetsPanel {
             SnipMode::NeedsRun { .. } => vec![("r", "run it"), ("Esc", "cancel")],
             SnipMode::Browse => {
                 let mut hints = Vec::new();
-                let any = self.selected().is_some();
-                if any && self.cannot_run.is_none() {
-                    hints.push(("↵", "run"));
+                let selected = self.selected();
+                let any = selected.is_some();
+                if let Some(snippet) = selected.filter(|_| self.cannot_run.is_none()) {
+                    hints.push(("↵", verb(snippet.run)));
                 }
                 hints.push(("Ctrl-N", "new"));
                 if any {
@@ -645,17 +666,31 @@ impl SnippetsPanel {
                 self.mode = SnipMode::Browse;
                 return outcome;
             }
-            SnipMode::NeedsRun { rendered, .. } => {
-                let outcome = match key.code {
-                    KeyCode::Char('r' | 'R') | KeyCode::Enter => SnipOutcome::Send {
-                        rendered: std::mem::take(rendered),
-                        run: true,
-                        values: Vec::new(),
-                    },
+            SnipMode::NeedsRun {
+                rendered,
+                opened_at,
+                ..
+            } => {
+                if opened_at.elapsed() < ARM_DELAY {
+                    return SnipOutcome::None;
+                }
+                return match key.code {
+                    KeyCode::Char('r' | 'R') => {
+                        let rendered = std::mem::take(rendered);
+                        self.mode = SnipMode::Browse;
+                        SnipOutcome::Send {
+                            rendered,
+                            run: true,
+                            values: Vec::new(),
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.mode = SnipMode::Browse;
+                        SnipOutcome::None
+                    }
+                    // Anything else (Enter included) does nothing.
                     _ => SnipOutcome::None,
                 };
-                self.mode = SnipMode::Browse;
-                return outcome;
             }
             SnipMode::Browse => {}
         }
@@ -926,6 +961,57 @@ mod tests {
         );
         assert!(snippet_bytes("a\nb", false, true).is_ok());
         assert_eq!(snippet_bytes("ls", false, false).ok(), Some(b"ls".to_vec()));
+    }
+
+    #[test]
+    fn needs_run_ignores_an_immediate_enter() {
+        let mut panel = panel();
+        let needs_run = |opened_at| SnipMode::NeedsRun {
+            rendered: "a\nb".into(),
+            error: ErrorSummary {
+                code: "snippet_needs_paste_mode".into(),
+                message: "cannot paste".into(),
+                hint: None,
+            },
+            opened_at,
+        };
+        // Just opened: every key is ignored, `r` included.
+        panel.mode = needs_run(Instant::now());
+        for code in [KeyCode::Enter, KeyCode::Char('r'), KeyCode::Esc] {
+            assert!(matches!(
+                panel.handle_key(k(code), &HashMap::new()),
+                SnipOutcome::None
+            ));
+            assert!(matches!(panel.mode, SnipMode::NeedsRun { .. }));
+        }
+        // Armed: Enter and other keys still do nothing.
+        let armed = Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .unwrap_or_else(Instant::now);
+        panel.mode = needs_run(armed);
+        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char(' ')] {
+            assert!(matches!(
+                panel.handle_key(k(code), &HashMap::new()),
+                SnipOutcome::None
+            ));
+            assert!(matches!(panel.mode, SnipMode::NeedsRun { .. }));
+        }
+        // Only `r` runs it.
+        let SnipOutcome::Send { rendered, run, .. } =
+            panel.handle_key(k(KeyCode::Char('r')), &HashMap::new())
+        else {
+            panic!("r runs it");
+        };
+        assert_eq!(rendered, "a\nb");
+        assert!(run);
+        assert!(matches!(panel.mode, SnipMode::Browse));
+        // Esc cancels.
+        panel.mode = needs_run(armed);
+        assert!(matches!(
+            panel.handle_key(k(KeyCode::Esc), &HashMap::new()),
+            SnipOutcome::None
+        ));
+        assert!(matches!(panel.mode, SnipMode::Browse));
     }
 
     #[test]

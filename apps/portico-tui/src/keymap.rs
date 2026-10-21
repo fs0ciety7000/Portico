@@ -70,7 +70,7 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Snippets (type to filter)",
         &[
-            ("↵ · Ctrl-N", "Run · new"),
+            ("↵ · Ctrl-N", "Run/paste · new"),
             ("Ctrl-E", "Edit"),
             ("Ctrl-D", "Delete (asks)"),
         ],
