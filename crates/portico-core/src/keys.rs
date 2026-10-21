@@ -348,7 +348,12 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 fn current_uid() -> Result<u32> {
     use std::os::unix::fs::MetadataExt;
     let dir = std::env::temp_dir();
-    let probe = dir.join(format!(".portico-uid-{}", std::process::id()));
+    // Random name: concurrent generations (threads, processes) never meet.
+    let probe = dir.join(format!(
+        ".portico-uid-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     let created = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
