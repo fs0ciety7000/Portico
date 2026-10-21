@@ -10,15 +10,28 @@
 //! reaches the terminal is exactly what the user saw:
 //!
 //! - the command may span lines (`\n`, `\t` allowed) but never contains ESC,
-//!   other C0 controls, DEL, C1 controls or bidi overrides: an ESC could end
-//!   a bracketed paste early (`ESC[201~`) and turn the rest into keystrokes,
-//!   a C1 `CSI` (U+009B) is an ESC in disguise, and bidi overrides make the
-//!   displayed command differ from the typed one. Checked on save **and** on
-//!   render (the file can be edited by hand);
+//!   other C0 controls, DEL, C1 controls, Unicode line/paragraph separators
+//!   (U+2028/U+2029), bidi overrides or invisible format characters
+//!   (zero-width space and non-joiner, word joiner and invisible operators,
+//!   BOM, soft hyphen, tag characters; the zero-width joiner of emoji
+//!   sequences stays allowed): an ESC could end a bracketed paste early
+//!   (`ESC[201~`) and turn the rest into keystrokes, a C1 `CSI` (U+009B) is
+//!   an ESC in disguise, and the others make the displayed command differ
+//!   from the typed one. Checked on save, on load **and** on render (the
+//!   file can be edited by hand);
 //! - placeholder values are single-line: no line break (a newline in a
-//!   value would execute a half-built command) and no control character;
+//!   value would execute a half-built command) and no control or invisible
+//!   character;
 //! - substitution is a single pass, so a value that looks like
-//!   `{{other}}` is inserted literally, never expanded.
+//!   `{{other}}` is inserted literally, never expanded;
+//! - a multi-line body is only pasted (`run = false`) inside a bracketed
+//!   paste: without it, each line break would run a line
+//!   ([`snippet_input`] refuses with `snippet_needs_paste_mode`).
+//!
+//! `snippets.toml` is read with a size cap; entries that fail validation
+//! are hidden from [`SnippetStore::list`] (kept in the file, a warning is
+//! logged without their content) and duplicate or malformed ids are
+//! re-derived from the name.
 //!
 //! [`Snippet::render_checked`] enforces this; [`snippet_input`] turns the
 //! result into the bytes the UI writes on its `TerminalHandle`.
@@ -30,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::hosts::HostEntry;
-use crate::store::{load_toml, save_toml};
+use crate::store::save_toml;
 
 /// Longest snippet name, in characters.
 pub const MAX_NAME_CHARS: usize = 80;
@@ -48,6 +61,8 @@ pub const MAX_VALUE_BYTES: usize = 4 * 1024;
 pub const MAX_SCOPE_ENTRIES: usize = 256;
 /// Longest host alias or tag in a scope, in bytes.
 const MAX_SCOPE_ENTRY_LEN: usize = 255;
+/// Largest `snippets.toml` read, in bytes.
+pub const MAX_SNIPPETS_FILE_BYTES: u64 = 1024 * 1024;
 /// Generated ids keep at most this much of the name (room for `-NNN`).
 const MAX_SLUG_BASE: usize = 48;
 
@@ -109,6 +124,10 @@ pub enum SnippetError {
     },
     #[error("unknown snippet {id}")]
     NotFound { id: String },
+    #[error("a multi-line snippet cannot be pasted without bracketed paste")]
+    NeedsPasteMode,
+    #[error("{} is larger than {max} bytes", path.display())]
+    FileTooLarge { path: PathBuf, max: u64 },
 }
 
 impl SnippetError {
@@ -142,6 +161,16 @@ impl SnippetError {
             Self::NotFound { .. } => (
                 "snippet_not_found",
                 Some("It may have been deleted from another window: reload the snippets."),
+            ),
+            Self::NeedsPasteMode => (
+                "snippet_needs_paste_mode",
+                Some(
+                    "The remote shell does not accept multi-line pastes: run the snippet, or paste it from a shell with bracketed paste.",
+                ),
+            ),
+            Self::FileTooLarge { .. } => (
+                "snippet_file_too_large",
+                Some("snippets.toml is unusually large: trim it by hand or move it away."),
             ),
         }
     }
@@ -215,7 +244,7 @@ impl Snippet {
         if name.chars().count() > MAX_NAME_CHARS {
             return Err(invalid("name", "is too long"));
         }
-        if name.chars().any(|c| c.is_control() || is_bidi_control(c)) {
+        if name.chars().any(|c| c.is_control() || is_hidden_format(c)) {
             return Err(invalid("name", "contains control characters"));
         }
         if self.command.trim().is_empty() {
@@ -238,7 +267,7 @@ impl Snippet {
             }
             if description
                 .chars()
-                .any(|c| (c.is_control() && c != '\n') || is_bidi_control(c))
+                .any(|c| (c.is_control() && c != '\n') || is_hidden_format(c))
             {
                 return Err(invalid("description", "contains control characters"));
             }
@@ -277,12 +306,20 @@ impl Snippet {
 /// wrapped in paste markers, so a multi-line snippet is inserted as a whole
 /// instead of running line by line. `run` appends a final `\r`.
 ///
+/// A multi-line body that is only to be pasted (`!run`) needs bracketed
+/// paste: otherwise every line but the last would run, which is not what
+/// "paste" promises. That case is refused with
+/// [`SnippetError::NeedsPasteMode`] (`snippet_needs_paste_mode`).
+///
 /// Defensive: whatever the input, ESC and other control characters (except
 /// tab and line breaks) are dropped, so the paste can never be closed early.
-pub fn snippet_input(rendered: &str, run: bool, bracketed_paste: bool) -> Vec<u8> {
+pub fn snippet_input(rendered: &str, run: bool, bracketed_paste: bool) -> Result<Vec<u8>> {
     let body = rendered
         .trim_end_matches(['\n', '\r'])
         .replace("\r\n", "\n");
+    if !run && !bracketed_paste && body.contains(['\n', '\r']) {
+        return Err(SnippetError::NeedsPasteMode.into());
+    }
     let text: String = body
         .chars()
         .filter_map(|c| match c {
@@ -306,7 +343,7 @@ pub fn snippet_input(rendered: &str, run: bool, bracketed_paste: bool) -> Vec<u8
     if run {
         out.push(b'\r');
     }
-    out
+    Ok(out)
 }
 
 /// `snippets.toml` with serialized read-modify-write. Blocking: async
@@ -330,23 +367,52 @@ impl SnippetStore {
         &self.path
     }
 
-    /// Every snippet, in file order (a missing file is an empty list).
+    /// Every valid snippet, in file order (a missing file is an empty
+    /// list). Entries that fail [`Snippet::validate`] (hand-edited file) are
+    /// left out with a warning naming only their position and the failing
+    /// field; they stay in the file.
     pub fn list(&self) -> Result<Vec<Snippet>> {
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok(self.load()?.snippets)
+        let file = self.load()?;
+        let mut valid = Vec::with_capacity(file.snippets.len());
+        for (index, snippet) in file.snippets.into_iter().enumerate() {
+            match snippet.validate() {
+                Ok(()) => valid.push(snippet),
+                Err(e) => {
+                    let (field, reason) = match &e {
+                        SnippetError::Invalid { field, reason } => (*field, *reason),
+                        _ => ("snippet", "is invalid"),
+                    };
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        index,
+                        field,
+                        reason,
+                        "ignoring an invalid snippet"
+                    );
+                }
+            }
+        }
+        Ok(valid)
     }
 
-    /// Loads the file; hand-written entries without an id get one derived
-    /// from their name (deterministic, persisted by the next write).
+    /// Loads the file (at most [`MAX_SNIPPETS_FILE_BYTES`]). Entries with a
+    /// missing, malformed or duplicate id get one derived from their name
+    /// (deterministic, persisted by the next write). Validation is left to
+    /// the callers: invalid entries are kept so that a write never loses
+    /// what the user typed by hand.
     fn load(&self) -> Result<SnippetFile> {
-        let mut file: SnippetFile = load_toml(&self.path)?;
+        let mut file: SnippetFile = load_toml_capped(&self.path)?;
         for index in 0..file.snippets.len() {
-            let missing = file
-                .snippets
-                .get(index)
-                .filter(|s| s.id.trim().is_empty())
-                .map(|s| s.name.clone());
-            if let Some(name) = missing {
+            let earlier = file.snippets.get(..index).unwrap_or_default();
+            let needs_id = file.snippets.get(index).and_then(|s| {
+                let id = s.id.trim();
+                let bad = id.is_empty()
+                    || validate_id(id).is_err()
+                    || earlier.iter().any(|other| other.id == id);
+                bad.then(|| s.name.clone())
+            });
+            if let Some(name) = needs_id {
                 let id = unique_id(&name, &file.snippets);
                 if let Some(snippet) = file.snippets.get_mut(index) {
                     snippet.id = id;
@@ -385,6 +451,48 @@ impl SnippetStore {
         file.snippets.remove(index);
         save_toml(&self.path, &file)
     }
+}
+
+/// [`load_toml`] with a size cap checked before parsing.
+fn load_toml_capped(path: &Path) -> Result<SnippetFile> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_SNIPPETS_FILE_BYTES => {
+            return Err(SnippetError::FileTooLarge {
+                path: path.to_path_buf(),
+                max: MAX_SNIPPETS_FILE_BYTES,
+            }
+            .into());
+        }
+        _ => {}
+    }
+    // The file may grow between the check and the read: read at most one
+    // byte more than the cap and check again.
+    let text = {
+        use std::io::Read;
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SnippetFile::default());
+            }
+            Err(e) => return Err(crate::Error::io(path, e)),
+        };
+        let mut text = String::new();
+        file.take(MAX_SNIPPETS_FILE_BYTES.saturating_add(1))
+            .read_to_string(&mut text)
+            .map_err(|e| crate::Error::io(path, e))?;
+        text
+    };
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_SNIPPETS_FILE_BYTES {
+        return Err(SnippetError::FileTooLarge {
+            path: path.to_path_buf(),
+            max: MAX_SNIPPETS_FILE_BYTES,
+        }
+        .into());
+    }
+    toml::from_str(&text).map_err(|e| crate::Error::Serde {
+        what: "toml",
+        message: format!("{}: {e}", path.display()),
+    })
 }
 
 // ── Parsing and checks ──────────────────────────────────────────────────
@@ -435,6 +543,29 @@ fn is_bidi_control(c: char) -> bool {
     )
 }
 
+/// Invisible format characters that make the displayed text differ from
+/// the typed one: zero-width space and non-joiner, word joiner and
+/// invisible operators, BOM / zero-width no-break space, soft hyphen and
+/// tag characters. U+200D (zero-width joiner) is allowed: emoji sequences
+/// use it.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{200b}'
+            | '\u{200c}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{feff}'
+            | '\u{e0000}'..='\u{e007f}'
+    )
+}
+
+/// Bidi controls, invisible format characters and line/paragraph
+/// separators: never allowed in single-line fields.
+fn is_hidden_format(c: char) -> bool {
+    is_bidi_control(c) || is_invisible_format(c) || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
 fn check_command(command: &str) -> Result<(), SnippetError> {
     if command.len() > MAX_COMMAND_BYTES {
         return Err(invalid("command", "is too long"));
@@ -444,8 +575,10 @@ fn check_command(command: &str) -> Result<(), SnippetError> {
             '\n' | '\t' => continue,
             '\u{1b}' => "contains an escape character (ESC)",
             '\u{80}'..='\u{9f}' => "contains a C1 control character",
+            '\u{2028}' | '\u{2029}' => "contains a Unicode line or paragraph separator",
             c if c.is_control() => "contains a control character",
             c if is_bidi_control(c) => "contains a bidirectional text override",
+            c if is_invisible_format(c) => "contains an invisible format character",
             _ => continue,
         };
         return Err(invalid("command", reason));
@@ -470,6 +603,7 @@ fn check_value(placeholder: &str, value: &str) -> Result<(), SnippetError> {
             '\u{80}'..='\u{9f}' => "contains a C1 control character",
             c if c.is_control() => "contains a control character",
             c if is_bidi_control(c) => "contains a bidirectional text override",
+            c if is_invisible_format(c) => "contains an invisible format character",
             _ => continue,
         };
         return Err(fail(reason));
@@ -490,7 +624,7 @@ fn check_scope(field: &'static str, entries: &[String]) -> Result<(), SnippetErr
         }
         if entry
             .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || is_bidi_control(c))
+            .any(|c| c.is_whitespace() || c.is_control() || is_hidden_format(c))
         {
             return Err(invalid(
                 field,
@@ -777,22 +911,122 @@ mod tests {
         .expect("valid");
     }
 
+    fn input(rendered: &str, run: bool, bracketed_paste: bool) -> Vec<u8> {
+        snippet_input(rendered, run, bracketed_paste).expect("input")
+    }
+
     #[test]
     fn input_bytes() {
-        assert_eq!(snippet_input("df -h", true, false), b"df -h\r");
-        assert_eq!(snippet_input("df -h", false, false), b"df -h");
+        assert_eq!(input("df -h", true, false), b"df -h\r");
+        assert_eq!(input("df -h", false, false), b"df -h");
+        // Trailing line breaks do not make a body multi-line.
+        assert_eq!(input("df -h\n\r\n", false, false), b"df -h");
         assert_eq!(
-            snippet_input("a\nb\r\nc\n\n", true, true),
+            input("a\nb\r\nc\n\n", true, true),
             b"\x1b[200~a\rb\rc\x1b[201~\r"
         );
-        assert_eq!(snippet_input("a\nb", false, false), b"a\rb");
-        assert_eq!(snippet_input("", true, true), b"\r");
+        // Running a multi-line body line by line is what `run` asks for.
+        assert_eq!(input("a\nb", true, false), b"a\rb\r");
+        assert_eq!(input("a\nb", false, true), b"\x1b[200~a\rb\x1b[201~");
+        assert_eq!(input("", true, true), b"\r");
         // Defensive: control characters never get through, even unchecked.
         assert_eq!(
-            snippet_input("x\u{1b}[201~y\u{9b}z\t", false, true),
+            input("x\u{1b}[201~y\u{9b}z\t", false, true),
             "\x1b[200~x[201~yz\t\x1b[201~".as_bytes()
         );
-        assert_eq!(snippet_input("é", false, false), "é".as_bytes());
+        assert_eq!(input("é", false, false), "é".as_bytes());
+    }
+
+    #[test]
+    fn paste_only_multiline_without_bracketed_paste_is_refused() {
+        for body in ["a\nb", "a\r\nb", "a\rb", "a\n\nb\n"] {
+            let e = snippet_input(body, false, false).expect_err(body);
+            assert_eq!(code(&e), "snippet_needs_paste_mode", "{body:?}");
+            let hint = e.summary().hint.expect("hint");
+            assert!(hint.contains("bracketed paste"), "{hint}");
+            assert!(!e.to_string().contains(body), "{e}");
+        }
+    }
+
+    #[test]
+    fn command_with_line_separator_or_zero_width_is_refused() {
+        for bad in [
+            "ls\u{2028}rm -rf ~",
+            "ls\u{2029}x",
+            "rm\u{200b} -rf",
+            "a\u{200c}b",
+            "a\u{2060}b",
+            "a\u{2063}b",
+            "\u{feff}ls",
+            "r\u{ad}m",
+            "ls \u{e0041}\u{e007f}",
+        ] {
+            let e = snippet(bad).render_checked(&[]).expect_err(bad);
+            assert_eq!(code(&e), "snippet_invalid", "{bad:?}");
+            assert!(snippet(bad).validate().is_err(), "{bad:?}");
+            let e = snippet("echo {{v}}")
+                .render_checked(&[("v", bad)])
+                .expect_err(bad);
+            assert_eq!(code(&e), "snippet_value", "{bad:?}");
+            let named = Snippet {
+                name: format!("n{bad}"),
+                ..snippet("df")
+            };
+            assert!(named.validate().is_err(), "{bad:?}");
+        }
+        // The zero-width joiner of emoji sequences stays allowed.
+        let family = "echo \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        snippet(family).validate().expect("zwj");
+        assert_eq!(snippet(family).render_checked(&[]).expect("render"), family);
+        snippet("echo {{v}}")
+            .render_checked(&[("v", "\u{1f469}\u{200d}\u{1f4bb}")])
+            .expect("zwj value");
+    }
+
+    #[test]
+    fn hand_edited_file_with_duplicate_ids_and_bidi_name_is_sanitized() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("snippets.toml");
+        std::fs::write(
+            &path,
+            "[[snippet]]\nid = \"df\"\nname = \"Disk\"\ncommand = \"df -h\"\nscope = { kind = \"global\" }\n\n\
+             [[snippet]]\nid = \"df\"\nname = \"Disk inodes\"\ncommand = \"df -i\"\nscope = { kind = \"global\" }\n\n\
+             [[snippet]]\nid = \"Bad_Id\"\nname = \"Up\"\ncommand = \"uptime\"\nscope = { kind = \"global\" }\n\n\
+             [[snippet]]\nid = \"evil\"\nname = \"safe\u{202e}txt.sh\"\ncommand = \"ls\"\nscope = { kind = \"global\" }\n\n\
+             [[snippet]]\nid = \"esc\"\nname = \"Esc\"\ncommand = \"echo \\u001b[201~\"\nscope = { kind = \"global\" }\n",
+        )
+        .expect("write");
+        let store = SnippetStore::new(&path);
+        let list = store.list().expect("list");
+        let ids: Vec<&str> = list.iter().map(|s| s.id.as_str()).collect();
+        // Duplicate id re-derived, malformed id re-derived, invalid entries
+        // (bidi name, ESC in the command) hidden.
+        assert_eq!(ids, ["df", "disk-inodes", "up"]);
+        assert!(list.iter().all(|s| s.validate().is_ok()));
+        // Ids are unique, so each one addresses exactly one snippet.
+        store.delete("disk-inodes").expect("delete");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("df -h") && !text.contains("df -i"), "{text}");
+        // The hidden entries are kept in the file, never shown.
+        assert!(text.contains("id = \"evil\""), "{text}");
+        let ids: Vec<String> = store
+            .list()
+            .expect("list")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["df", "up"]);
+    }
+
+    #[test]
+    fn oversized_file_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("snippets.toml");
+        let size = usize::try_from(MAX_SNIPPETS_FILE_BYTES).expect("size") + 1;
+        std::fs::write(&path, "#".repeat(size)).expect("write");
+        let e = SnippetStore::new(&path).list().expect_err("too large");
+        assert_eq!(code(&e), "snippet_file_too_large");
+        assert!(e.summary().hint.is_some());
     }
 
     #[test]

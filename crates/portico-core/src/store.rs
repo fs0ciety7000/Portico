@@ -143,26 +143,87 @@ pub(crate) enum WriteNewError {
     Other(Error),
 }
 
-/// Writes `bytes` to a `0600` temp file next to `path`, synced to disk.
-fn write_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
-    use std::io::Write;
+/// Attempts at finding a free temp file name before giving up.
+const TEMP_NAME_ATTEMPTS: u32 = 8;
 
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
+/// Creates `dir` and its missing parents, private (`0700` on Unix: only
+/// directories created here get that mode, existing ones are left alone).
+pub(crate) fn create_private_dir_all(dir: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir).map_err(|e| Error::io(dir, e))
+}
 
+/// Opens (creating it `0600` if needed) the lock file `path` and takes an
+/// exclusive advisory lock on it (`flock`), blocking until it is free. The
+/// lock is released when the returned file is dropped. Each open is its
+/// own lock holder, so two handles in one process exclude each other too.
+pub(crate) fn lock_exclusive(path: &Path) -> Result<std::fs::File> {
+    if let Some(dir) = path.parent() {
+        create_private_dir_all(dir)?;
+    }
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut file = opts.open(&tmp).map_err(|e| Error::io(&tmp, e))?;
+    let file = opts.open(path).map_err(|e| Error::io(path, e))?;
+    file.lock().map_err(|e| Error::io(path, e))?;
+    Ok(file)
+}
+
+/// Random suffix of temp file names (unpredictable: no pre-planted name).
+fn random_suffix() -> std::io::Result<u64> {
+    use rand::TryRng;
+    rand::rngs::SysRng
+        .try_next_u64()
+        .map_err(|e| std::io::Error::other(format!("no system randomness: {e}")))
+}
+
+/// Writes `bytes` to a new `0600` temp file next to `path`, synced to disk.
+///
+/// The name is random and the file is created with `create_new` (`O_EXCL`):
+/// a symlink or file planted under that name is never followed nor reused.
+/// Missing parent directories are created `0700`.
+fn write_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    use std::io::Write;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    create_private_dir_all(dir)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut attempt = 0u32;
+    let (tmp, mut file) = loop {
+        let suffix = random_suffix().map_err(|e| Error::io(dir, e))?;
+        let tmp = dir.join(format!(".{file_name}.tmp-{suffix:016x}"));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    && attempt.saturating_add(1) < TEMP_NAME_ATTEMPTS =>
+            {
+                attempt = attempt.saturating_add(1);
+            }
+            Err(e) => return Err(Error::io(&tmp, e)),
+        }
+    };
     let written = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
@@ -213,5 +274,66 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("read"), b"first");
         // No temp file left behind.
         assert_eq!(std::fs::read_dir(dir.path()).expect("ls").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_temp_does_not_follow_a_planted_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mode = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+
+        // A symlink planted at the final name is replaced, its target kept.
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"original").expect("write");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let path = dir.path().join("doc.toml");
+        std::os::unix::fs::symlink(&victim, &path).expect("symlink");
+        write_atomic(&path, b"new").expect("write");
+        assert_eq!(std::fs::read(&victim).expect("read"), b"original");
+        assert_eq!(mode(&victim), 0o644);
+        let meta = std::fs::symlink_metadata(&path).expect("meta");
+        assert!(meta.file_type().is_file(), "{meta:?}");
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
+        assert_eq!(mode(&path), 0o600);
+        // No temp file left behind.
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("ls")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+
+        // Missing parents are created private.
+        let nested = dir.path().join("a/b/doc.toml");
+        write_atomic(&nested, b"x").expect("write");
+        assert_eq!(mode(&dir.path().join("a")), 0o700);
+        assert_eq!(mode(&dir.path().join("a/b")), 0o700);
+        assert_eq!(mode(&nested), 0o600);
+    }
+
+    #[test]
+    fn exclusive_lock_is_released_on_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sub/x.lock");
+        let first = lock_exclusive(&path).expect("lock");
+        let probe = std::fs::File::open(&path).expect("open");
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(first);
+        probe.try_lock().expect("free after drop");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

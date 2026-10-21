@@ -21,7 +21,7 @@ use crate::engine::PromptResponse;
 use crate::error::Error;
 use crate::events::PromptKind;
 use crate::logs::LogLevel;
-use crate::secrets::SecretKey;
+use crate::secrets::{SecretKey, SecretStore};
 
 /// Passphrase attempts before giving up on a key (OpenSSH: 3).
 const PASSPHRASE_ATTEMPTS: u32 = 3;
@@ -105,6 +105,31 @@ impl<'a> FileSigner<'a> {
         append_signature(&key, hash_alg, to_sign)
     }
 
+    /// Stores a passphrase that just decrypted the key. A failure is only
+    /// logged, with the error code and never the secret.
+    async fn remember(
+        &self,
+        store: &std::sync::Arc<dyn SecretStore>,
+        secret_key: &SecretKey,
+        secret: SecretString,
+    ) {
+        let (store, secret_key) = (std::sync::Arc::clone(store), secret_key.clone());
+        let saved = tokio::task::spawn_blocking(move || store.set(&secret_key, &secret)).await;
+        match saved {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => self.ctx.log(
+                LogLevel::Warn,
+                "secrets",
+                format!("could not remember the passphrase ({})", e.summary().code),
+            ),
+            Err(_) => self.ctx.log(
+                LogLevel::Warn,
+                "secrets",
+                "could not remember the passphrase",
+            ),
+        }
+    }
+
     /// Loads the private key, asking for a passphrase if it is encrypted.
     /// `Ok(None)` means "skip this key".
     async fn unlock(&self) -> Result<Option<PrivateKey>, SignError> {
@@ -165,19 +190,7 @@ impl<'a> FileSigner<'a> {
                     let to_store = remember.then(|| value.clone());
                     if let Some(key) = encrypted.decrypt(value).await {
                         if let Some(secret) = to_store {
-                            let (store, secret_key) =
-                                (std::sync::Arc::clone(&store), secret_key.clone());
-                            let saved = tokio::task::spawn_blocking(move || {
-                                store.set(&secret_key, &secret)
-                            })
-                            .await;
-                            if !matches!(saved, Ok(Ok(()))) {
-                                self.ctx.log(
-                                    LogLevel::Warn,
-                                    "secrets",
-                                    "could not remember the passphrase",
-                                );
-                            }
+                            self.remember(&store, &secret_key, secret).await;
                         }
                         return Ok(Some(key));
                     }

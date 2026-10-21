@@ -4,13 +4,13 @@
 //! remembered passwords and key passphrases live in `vault.toml` (data dir),
 //! encrypted under a key derived from a master passphrase.
 //!
-//! ## Format (version 1)
+//! ## Format (version 2)
 //!
 //! A readable, versioned TOML file whose binary fields are standard base64:
 //!
 //! ```toml
 //! format = "portico-vault"
-//! version = 1
+//! version = 2
 //! [kdf]            # Argon2id v0x13: memory_kib, iterations, parallelism, salt
 //! [cipher]         # xchacha20poly1305: check_nonce, check, nonce, ciphertext
 //! ```
@@ -19,11 +19,14 @@
 //!   16-byte salt: an encryption key and an independent *check* key. The
 //!   parameters are stored in the file and must lie inside [`KdfBounds`]
 //!   **before** any derivation runs: a hostile file can neither weaken the
-//!   KDF (floor) nor freeze the machine (ceiling).
-//! - **Encryption**: the whole `account → secret` map is one JSON object,
-//!   padded with spaces to a multiple of 256 bytes (the size leaks only a
-//!   coarse bucket), encrypted with XChaCha20-Poly1305 under a fresh random
-//!   24-byte nonce at every write.
+//!   KDF below the defaults (floor) nor freeze the machine (ceiling).
+//! - **Content**: one JSON object
+//!   `{"generation": n, "entries": {account: base64(secret)}}`. Secrets are
+//!   base64-encoded so that the JSON never needs escaping: neither encoding
+//!   nor decoding goes through an intermediate (non-zeroized) copy. The
+//!   object is padded with spaces to a multiple of 256 bytes (the size leaks
+//!   only a coarse bucket) and encrypted with XChaCha20-Poly1305 under a
+//!   fresh random 24-byte nonce at every write.
 //! - **Authenticated header**: the AAD is a canonical rendering of the format,
 //!   version, KDF parameters, salt, cipher and check nonce. Changing any of
 //!   them invalidates both tags.
@@ -31,6 +34,8 @@
 //!   (AAD = header). It tells a wrong passphrase ([`VaultError::WrongPassphrase`])
 //!   apart from a damaged ciphertext ([`VaultError::Corrupt`]); it gives an
 //!   offline attacker nothing the ciphertext did not already give.
+//! - Version 1 (development builds only, never released) is refused with
+//!   [`VaultError::UnsupportedVersion`]: the vault has to be recreated.
 //!
 //! ## Invariants
 //!
@@ -38,13 +43,28 @@
 //!   [`SecretString`]s; nothing secret reaches `Debug`, logs or errors.
 //! - Every write is atomic (`store::write_atomic`, `0600`); creation never
 //!   replaces an existing file (`store::write_new`).
-//! - Writes re-read the file and refuse to clobber a vault re-keyed by another
-//!   process ([`VaultError::ChangedOnDisk`]); there is no cross-process lock,
-//!   concurrent writers of *entries* are merged last-writer-wins per write.
+//! - **Cross-process lock**: every read-modify-write (create, write of an
+//!   entry, change of passphrase) holds an exclusive advisory lock on
+//!   `vault.toml.lock` (`0600`, next to the vault, left in place) from the
+//!   read to the rename. Writers in other processes (or other handles) are
+//!   serialized: a re-key can never be reverted by a writer that read the
+//!   file before it. Unlocking only reads one atomically renamed file and
+//!   takes no lock. Lock order: in-memory state, then the file lock.
+//! - Writes re-read the file under the lock: entries written by another
+//!   process are kept, and a vault re-keyed by another process locks this
+//!   handle ([`VaultError::ChangedOnDisk`]).
+//! - **Rollback**: the content carries a `generation` counter incremented at
+//!   every write and kept in memory while unlocked. A write that reads an
+//!   older generation (an older copy of the file put back, by a restore or an
+//!   attacker) is refused and locks the vault ([`VaultError::Rollback`]).
+//!   The protection lasts for the lifetime of the unlocked handle only: an
+//!   older file put back while Portico is not running unlocks normally.
 //! - All operations are **blocking** (Argon2 takes ~0.5 s by design, plus file
-//!   I/O): async callers go through `tokio::task::spawn_blocking`, as the
-//!   [`crate::Engine`] `vault_*` methods do.
+//!   I/O and the lock): async callers go through
+//!   `tokio::task::spawn_blocking`, as the [`crate::Engine`] `vault_*`
+//!   methods do.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -64,8 +84,8 @@ use crate::store::{self, WriteNewError};
 
 /// Value of the `format` field.
 pub const VAULT_FORMAT: &str = "portico-vault";
-/// Current (and only) format version.
-pub const VAULT_VERSION: u32 = 1;
+/// Current (and only readable) format version.
+pub const VAULT_VERSION: u32 = 2;
 /// Minimum length of a new master passphrase, in characters.
 pub const MIN_PASSPHRASE_CHARS: usize = 8;
 
@@ -118,18 +138,15 @@ pub struct KdfBounds {
 }
 
 impl KdfBounds {
-    /// Floor: OWASP's Argon2id minimum (19 MiB, 2 passes). Ceiling: 1 GiB,
-    /// 10 passes, 8 lanes (a few seconds at most, no swap storm).
+    /// Floor: the defaults (64 MiB, 3 passes): a file cannot ask for a
+    /// weaker derivation than the one Portico writes. Ceiling: 256 MiB,
+    /// 8 passes, 4 lanes (a few seconds at most, no swap storm).
     pub const PRODUCTION: Self = Self {
-        min: KdfParams {
-            memory_kib: 19 * 1024,
-            iterations: 2,
-            parallelism: 1,
-        },
+        min: KdfParams::DEFAULT,
         max: KdfParams {
-            memory_kib: 1024 * 1024,
-            iterations: 10,
-            parallelism: 8,
+            memory_kib: 256 * 1024,
+            iterations: 8,
+            parallelism: 4,
         },
     };
 
@@ -211,6 +228,8 @@ pub enum VaultError {
     PassphraseTooShort { min: usize },
     #[error("vault {} was re-keyed by another process", path.display())]
     ChangedOnDisk { path: PathBuf },
+    #[error("vault {} was replaced by an older copy", path.display())]
+    Rollback { path: PathBuf },
     #[error("the system keyring is the secret store: the vault is not in use")]
     NotInUse,
     #[error("vault cryptography failed: {0}")]
@@ -241,6 +260,12 @@ impl VaultError {
                 Some("A vault already exists: unlock it instead of creating a new one."),
             ),
             Self::Missing { .. } => ("vault_missing", Some("Create a vault first.")),
+            Self::UnsupportedVersion { found } if *found < VAULT_VERSION => (
+                "vault_version",
+                Some(
+                    "This vault was written by an older development build of Portico: move it away and recreate the vault.",
+                ),
+            ),
             Self::UnsupportedVersion { .. } => (
                 "vault_version",
                 Some("This vault was written by a newer Portico: update Portico."),
@@ -258,6 +283,12 @@ impl VaultError {
             Self::ChangedOnDisk { .. } => (
                 "vault_changed",
                 Some("Another Portico changed the vault passphrase: unlock it again."),
+            ),
+            Self::Rollback { .. } => (
+                "vault_rollback",
+                Some(
+                    "The vault file was replaced by an older version (restored backup or tampering): check it, then unlock it again.",
+                ),
             ),
             Self::NotInUse => (
                 "vault_not_in_use",
@@ -348,17 +379,36 @@ struct DerivedKeys {
     check: Zeroizing<[u8; KEY_LEN]>,
 }
 
+/// Decrypted content (see the module docs).
+struct Content {
+    generation: u64,
+    entries: BTreeMap<String, SecretString>,
+}
+
+/// Borrowed view of the decrypted JSON: values are base64, so they never
+/// need unescaping (no scratch copy).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentView<'a> {
+    generation: u64,
+    #[serde(borrow)]
+    entries: BTreeMap<Cow<'a, str>, &'a str>,
+}
+
 /// In-memory state of an unlocked vault.
 struct Unlocked {
     key: Zeroizing<[u8; KEY_LEN]>,
     header: Header,
     check_tag: [u8; TAG_LEN],
+    /// Generation of the content last read or written: never goes back.
+    generation: u64,
     entries: BTreeMap<String, SecretString>,
 }
 
 impl std::fmt::Debug for Unlocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Unlocked")
+            .field("generation", &self.generation)
             .field("entries", &self.entries.len())
             .finish_non_exhaustive()
     }
@@ -456,10 +506,12 @@ impl VaultStore {
     /// Creates the vault file (empty) and keeps it unlocked.
     pub fn create_in_place(&self, passphrase: &SecretString) -> Result<()> {
         check_new_passphrase(passphrase)?;
+        self.bounds.check(&self.new_params)?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let _file_lock = self.lock_file()?;
         if self.path.try_exists().unwrap_or(false) {
             return Err(self.exists().into());
         }
-        self.bounds.check(&self.new_params)?;
         let header = Header::generate(self.new_params)?;
         let keys = derive(passphrase, &header)?;
         let check_tag = check_tag(&keys, &header)?;
@@ -467,6 +519,7 @@ impl VaultStore {
             key: keys.encryption,
             header,
             check_tag,
+            generation: 0,
             entries: BTreeMap::new(),
         };
         let text = seal(&unlocked)?;
@@ -475,7 +528,7 @@ impl VaultStore {
             Err(WriteNewError::Exists) => return Err(self.exists().into()),
             Err(WriteNewError::Other(e)) => return Err(e),
         }
-        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = Some(unlocked);
+        *state = Some(unlocked);
         Ok(())
     }
 
@@ -485,12 +538,13 @@ impl VaultStore {
         let sealed = self.read_sealed()?;
         let keys = derive(passphrase, &sealed.header)?;
         verify_check(&keys, &sealed)?;
-        let entries = self.open_entries(&keys.encryption, &sealed)?;
+        let content = self.open_content(&keys.encryption, &sealed)?;
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = Some(Unlocked {
             key: keys.encryption,
             header: sealed.header,
             check_tag: sealed.check_tag,
-            entries,
+            generation: content.generation,
+            entries: content.entries,
         });
         Ok(())
     }
@@ -510,13 +564,23 @@ impl VaultStore {
     /// parameters. Leaves the vault unlocked.
     pub fn change_passphrase(&self, old: &SecretString, new: &SecretString) -> Result<()> {
         check_new_passphrase(new)?;
-        // Held throughout so that no concurrent write is lost.
+        // Both held throughout so that no concurrent write (this process or
+        // another one) is lost or reverts the new key.
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let _file_lock = self.lock_file()?;
         let sealed = self.read_sealed()?;
         let old_keys = derive(old, &sealed.header)?;
         verify_check(&old_keys, &sealed)?;
-        let entries = self.open_entries(&old_keys.encryption, &sealed)?;
+        let content = self.open_content(&old_keys.encryption, &sealed)?;
         drop(old_keys);
+        if let Some(unlocked) = state.as_ref()
+            && unlocked.header == sealed.header
+            && content.generation < unlocked.generation
+        {
+            *state = None;
+            return Err(self.rollback().into());
+        }
+        let generation = next_generation(content.generation)?;
 
         self.bounds.check(&self.new_params)?;
         let header = Header::generate(self.new_params)?;
@@ -526,17 +590,23 @@ impl VaultStore {
             key: keys.encryption,
             header,
             check_tag,
-            entries,
+            generation,
+            entries: content.entries,
         };
         store::write_atomic(&self.path, seal(&unlocked)?.as_bytes())?;
         *state = Some(unlocked);
         Ok(())
     }
 
-    /// Read-modify-write of the entries, under the state lock. The file is
-    /// re-read so that entries written by another process are kept.
+    /// Read-modify-write of the entries, under the state lock and the file
+    /// lock. The file is re-read so that entries written by another process
+    /// are kept; an older generation than the one in memory is a rollback.
     fn mutate(&self, change: impl FnOnce(&mut BTreeMap<String, SecretString>)) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.is_none() {
+            return Err(VaultError::Locked.into());
+        }
+        let _file_lock = self.lock_file()?;
         let Some(unlocked) = state.as_mut() else {
             return Err(VaultError::Locked.into());
         };
@@ -561,16 +631,38 @@ impl VaultStore {
             }
             .into());
         }
-        let mut entries = self.open_entries(&unlocked.key, &sealed)?;
+        let Content {
+            generation,
+            mut entries,
+        } = self.open_content(&unlocked.key, &sealed)?;
+        if generation < unlocked.generation {
+            *state = None;
+            return Err(self.rollback().into());
+        }
+        let next = next_generation(generation)?;
         change(&mut entries);
-        let previous = std::mem::replace(&mut unlocked.entries, entries);
+        let previous_entries = std::mem::replace(&mut unlocked.entries, entries);
+        let previous_generation = std::mem::replace(&mut unlocked.generation, next);
         match seal(unlocked).and_then(|text| store::write_atomic(&self.path, text.as_bytes())) {
             Ok(()) => Ok(()),
             Err(e) => {
-                unlocked.entries = previous;
+                unlocked.entries = previous_entries;
+                unlocked.generation = previous_generation;
                 Err(e)
             }
         }
+    }
+
+    /// `vault.toml.lock`, next to the vault.
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        PathBuf::from(name)
+    }
+
+    /// Exclusive cross-process lock, released when the file is dropped.
+    fn lock_file(&self) -> Result<std::fs::File> {
+        store::lock_exclusive(&self.lock_path())
     }
 
     fn read_sealed(&self) -> Result<Sealed> {
@@ -663,13 +755,13 @@ impl VaultStore {
         <[u8; N]>::try_from(self.decode(field, reason)?).map_err(|_| self.corrupt(reason))
     }
 
-    /// Decrypts and decodes the entries (the check tag already proved the
+    /// Decrypts and decodes the content (the check tag already proved the
     /// key, so a failure here means a damaged or altered ciphertext).
-    fn open_entries(
+    fn open_content(
         &self,
         key: &[u8; KEY_LEN],
         sealed: &Sealed,
-    ) -> std::result::Result<BTreeMap<String, SecretString>, VaultError> {
+    ) -> std::result::Result<Content, VaultError> {
         let mut buffer = Zeroizing::new(sealed.ciphertext.clone());
         cipher(key)
             .decrypt_in_place(
@@ -678,18 +770,29 @@ impl VaultStore {
                 &mut *buffer,
             )
             .map_err(|_| self.corrupt("ciphertext authentication failed"))?;
-        let map: BTreeMap<String, String> =
+        let view: ContentView<'_> =
             serde_json::from_slice(&buffer).map_err(|_| self.corrupt("invalid content"))?;
-        Ok(map
-            .into_iter()
-            .map(|(account, secret)| (account, SecretString::from(secret)))
-            .collect())
+        let mut entries = BTreeMap::new();
+        for (account, encoded) in view.entries {
+            let secret = decode_secret(encoded).ok_or_else(|| self.corrupt("invalid content"))?;
+            entries.insert(account.into_owned(), secret);
+        }
+        Ok(Content {
+            generation: view.generation,
+            entries,
+        })
     }
 
     fn corrupt(&self, reason: &'static str) -> VaultError {
         VaultError::Corrupt {
             path: self.path.clone(),
             reason,
+        }
+    }
+
+    fn rollback(&self) -> VaultError {
+        VaultError::Rollback {
+            path: self.path.clone(),
         }
     }
 
@@ -735,6 +838,26 @@ fn check_new_passphrase(passphrase: &SecretString) -> std::result::Result<(), Va
         });
     }
     Ok(())
+}
+
+fn next_generation(generation: u64) -> std::result::Result<u64, VaultError> {
+    generation
+        .checked_add(1)
+        .ok_or(VaultError::Crypto("the generation counter overflowed"))
+}
+
+/// Base64 → secret, through zeroized buffers only. The final `String` has
+/// exactly the needed capacity, so turning it into a `SecretString` does not
+/// reallocate (no stray copy).
+fn decode_secret(encoded: &str) -> Option<SecretString> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(base64::decoded_len_estimate(
+        encoded.len(),
+    )));
+    B64.decode_vec(encoded, &mut bytes).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let mut secret = String::with_capacity(text.len());
+    secret.push_str(text);
+    Some(SecretString::from(secret))
 }
 
 fn random<const N: usize>() -> std::result::Result<[u8; N], VaultError> {
@@ -802,7 +925,7 @@ fn verify_check(keys: &DerivedKeys, sealed: &Sealed) -> std::result::Result<(), 
 
 /// Encrypts the entries under a fresh nonce and renders the file.
 fn seal(unlocked: &Unlocked) -> Result<String> {
-    let plaintext = encode_entries(&unlocked.entries)?;
+    let plaintext = encode_content(unlocked.generation, &unlocked.entries)?;
     let mut buffer = plaintext;
     let nonce = random::<NONCE_LEN>()?;
     cipher(&unlocked.key)
@@ -835,37 +958,53 @@ fn seal(unlocked: &Unlocked) -> Result<String> {
     Ok(format!("{FILE_COMMENT}{body}"))
 }
 
-/// JSON object, padded with spaces. The buffer is allocated once, large
-/// enough for the worst-case escaping, padding and tag, so no reallocation
-/// leaves a stray plaintext copy behind.
-fn encode_entries(
+/// `{"generation": n, "entries": {account: base64(secret)}}`, padded with
+/// spaces. Written by hand into one buffer allocated up front, large enough
+/// for the content, padding and tag: no reallocation leaves a stray
+/// plaintext copy behind, and base64 never needs escaping.
+fn encode_content(
+    generation: u64,
     entries: &BTreeMap<String, SecretString>,
 ) -> std::result::Result<Zeroizing<Vec<u8>>, VaultError> {
-    let borrowed: BTreeMap<&str, &str> = entries
-        .iter()
-        .map(|(account, secret)| (account.as_str(), secret.expose_secret()))
-        .collect();
-    let worst_case = borrowed
-        .iter()
-        .map(|(k, v)| {
-            k.len()
-                .saturating_add(v.len())
-                .saturating_mul(6)
-                .saturating_add(8)
-        })
-        .fold(2usize, usize::saturating_add)
+    // `{"generation":<20 digits>,"entries":{` + `}}`.
+    const FRAME: usize = 64;
+    let fail = || VaultError::Crypto("cannot encode the secrets");
+    let mut capacity = FRAME;
+    for (account, secret) in entries {
+        let encoded = base64::encoded_len(secret.expose_secret().len(), true).ok_or_else(fail)?;
+        capacity = capacity
+            .saturating_add(account.len().saturating_mul(6))
+            .saturating_add(encoded)
+            .saturating_add(8);
+    }
+    let capacity = capacity
         .saturating_add(PADDING_BLOCK)
         .saturating_add(TAG_LEN);
-    let mut buffer = Zeroizing::new(Vec::with_capacity(worst_case));
-    serde_json::to_writer(&mut *buffer, &borrowed)
-        .map_err(|_| VaultError::Crypto("cannot encode the secrets"))?;
-    let padded = buffer
+    let mut text = Zeroizing::new(String::with_capacity(capacity));
+    text.push_str("{\"generation\":");
+    text.push_str(&generation.to_string());
+    text.push_str(",\"entries\":{");
+    for (index, (account, secret)) in entries.iter().enumerate() {
+        if index > 0 {
+            text.push(',');
+        }
+        // Accounts are identifiers, not secrets: ordinary JSON escaping.
+        text.push_str(&serde_json::to_string(account).map_err(|_| fail())?);
+        text.push_str(":\"");
+        B64.encode_string(secret.expose_secret().as_bytes(), &mut text);
+        text.push('"');
+    }
+    text.push_str("}}");
+    let padded = text
         .len()
         .div_ceil(PADDING_BLOCK)
         .max(1)
         .saturating_mul(PADDING_BLOCK);
-    buffer.resize(padded, b' ');
-    Ok(buffer)
+    while text.len() < padded {
+        text.push(' ');
+    }
+    // Moves the allocation (no copy).
+    Ok(Zeroizing::new(std::mem::take(&mut *text).into_bytes()))
 }
 
 #[cfg(test)]
@@ -1074,7 +1213,7 @@ mod tests {
         assert_eq!(unlock_code(&vault), "vault_wrong_passphrase");
         // Structure.
         let vault = new_vault(&dir.path().join("v"));
-        tamper(vault.path(), |f| f.version = 2);
+        tamper(vault.path(), |f| f.version = VAULT_VERSION + 1);
         assert_eq!(unlock_code(&vault), "vault_version");
         let vault = new_vault(&dir.path().join("a"));
         tamper(vault.path(), |f| f.cipher.algorithm = "aes-256-gcm".into());
@@ -1133,11 +1272,39 @@ mod tests {
                 f.kdf.parallelism = 1;
             });
         }
-        // Production defaults sit inside the production bounds.
+        // Production defaults sit inside the production bounds, and are the
+        // floor: a file cannot ask for a weaker derivation.
         KdfBounds::PRODUCTION
             .check(&KdfParams::DEFAULT)
             .expect("defaults in bounds");
-        const { assert!(KdfBounds::PRODUCTION.min.memory_kib >= 19 * 1024) };
+        const {
+            let b = KdfBounds::PRODUCTION;
+            let d = KdfParams::DEFAULT;
+            assert!(b.min.memory_kib == d.memory_kib && d.memory_kib == 64 * 1024);
+            assert!(b.min.iterations == d.iterations && d.iterations == 3);
+            assert!(b.min.parallelism == d.parallelism && d.parallelism == 1);
+            assert!(b.max.memory_kib == 256 * 1024);
+            assert!(b.max.iterations == 8);
+            assert!(b.max.parallelism == 4);
+        };
+        for (param, below, above) in [
+            ("memory_kib", 64 * 1024 - 1, 256 * 1024 + 1),
+            ("iterations", 2, 9),
+            ("parallelism", 0, 5),
+        ] {
+            for value in [below, above] {
+                let mut params = KdfParams::DEFAULT;
+                match param {
+                    "memory_kib" => params.memory_kib = value,
+                    "iterations" => params.iterations = value,
+                    _ => params.parallelism = value,
+                }
+                assert!(
+                    KdfBounds::PRODUCTION.check(&params).is_err(),
+                    "{param} = {value}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1298,6 +1465,148 @@ mod tests {
         let e = stale.set(&host_key("c"), &pass("z")).expect_err("stale");
         assert_eq!(code(&e), "vault_changed");
         assert!(!stale.is_unlocked());
+    }
+
+    #[test]
+    fn rekey_is_not_reverted_by_a_concurrent_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rekeyer = new_vault(dir.path());
+        rekeyer.set(&host_key("a"), &pass("x")).expect("set");
+        let writer = reopen(&rekeyer);
+        writer
+            .unlock_in_place(&pass("correct horse"))
+            .expect("unlock");
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                rekeyer
+                    .change_passphrase(&pass("correct horse"), &pass("battery staple"))
+                    .expect("rekey");
+            });
+            scope.spawn(|| {
+                start.wait();
+                for i in 0..200 {
+                    if let Err(e) = writer.set(&host_key(&format!("w{i}")), &pass("y")) {
+                        // The writer notices the new key and stops.
+                        assert_eq!(code(&e), "vault_changed");
+                        assert!(!writer.is_unlocked());
+                        break;
+                    }
+                }
+            });
+        });
+        let after = reopen(&rekeyer);
+        after
+            .unlock_in_place(&pass("battery staple"))
+            .expect("the new passphrase still opens the vault");
+        assert!(after.get(&host_key("a")).expect("get").is_some());
+        let old = reopen(&rekeyer);
+        let e = old
+            .unlock_in_place(&pass("correct horse"))
+            .expect_err("the old passphrase is gone");
+        assert_eq!(code(&e), "vault_wrong_passphrase");
+        // The lock file sits next to the vault, private.
+        let lock = dir.path().join("data/vault.toml.lock");
+        assert!(lock.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&lock).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn older_ciphertext_is_refused_while_unlocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = new_vault(dir.path());
+        vault.set(&host_key("a"), &pass("x")).expect("set");
+        let older = std::fs::read(vault.path()).expect("read");
+        vault.set(&host_key("b"), &pass("y")).expect("set");
+        // Same key and header, authentic but older content put back.
+        std::fs::write(vault.path(), &older).expect("restore");
+        let e = vault.set(&host_key("c"), &pass("z")).expect_err("rollback");
+        assert_eq!(code(&e), "vault_rollback");
+        assert!(e.summary().hint.is_some());
+        assert!(!vault.is_unlocked());
+        // The file was not rewritten.
+        assert_eq!(std::fs::read(vault.path()).expect("read"), older);
+        // Known limit: a fresh unlock accepts the older file.
+        vault
+            .unlock_in_place(&pass("correct horse"))
+            .expect("unlock");
+        assert!(vault.get(&host_key("b")).expect("get").is_none());
+        vault.set(&host_key("c"), &pass("z")).expect("set");
+    }
+
+    #[test]
+    fn content_is_versioned_and_base64() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = new_vault(dir.path());
+        vault
+            .set(&host_key("root"), &pass("quote\" back\\ \u{1}"))
+            .expect("set");
+        vault.set(&host_key("other"), &pass("")).expect("set");
+        let text = std::fs::read_to_string(vault.path()).expect("read");
+        assert!(text.contains("version = 2"), "{text}");
+        let sealed = vault.parse(&text).expect("parse");
+        let state = vault.state.lock().expect("lock");
+        let unlocked = state.as_ref().expect("unlocked");
+        let mut buffer = sealed.ciphertext.clone();
+        cipher(&unlocked.key)
+            .decrypt_in_place(
+                &XNonce::from(sealed.nonce),
+                &sealed.header.aad(),
+                &mut buffer,
+            )
+            .expect("decrypt");
+        let json: serde_json::Value = serde_json::from_slice(&buffer).expect("json");
+        assert_eq!(json["generation"], 2);
+        assert_eq!(
+            json["entries"]["password:root@db:22#SHA256:abc"],
+            B64.encode("quote\" back\\ \u{1}")
+        );
+        // No escape sequence in the whole plaintext but the account names'.
+        assert!(!buffer.windows(2).any(|w| w == b"\\u"));
+        drop(state);
+        let other = reopen(&vault);
+        other
+            .unlock_in_place(&pass("correct horse"))
+            .expect("unlock");
+        assert_eq!(
+            other
+                .get(&host_key("root"))
+                .expect("get")
+                .expect("some")
+                .expose_secret(),
+            "quote\" back\\ \u{1}"
+        );
+        assert_eq!(
+            other
+                .get(&host_key("other"))
+                .expect("get")
+                .expect("some")
+                .expose_secret(),
+            ""
+        );
+    }
+
+    #[test]
+    fn version_1_is_refused_with_a_recreate_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = new_vault(dir.path());
+        tamper(vault.path(), |f| f.version = 1);
+        let e = reopen(&vault)
+            .unlock_in_place(&pass("correct horse"))
+            .expect_err("v1");
+        let summary = e.summary();
+        assert_eq!(summary.code, "vault_version");
+        assert!(summary.hint.expect("hint").contains("recreate the vault"));
+        // A write through a handle unlocked before also locks it.
+        let e = vault.set(&host_key("a"), &pass("x")).expect_err("v1");
+        assert_eq!(code(&e), "vault_version");
+        assert!(!vault.is_unlocked());
     }
 
     #[test]

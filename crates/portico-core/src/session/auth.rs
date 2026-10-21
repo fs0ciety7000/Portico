@@ -690,15 +690,21 @@ impl Auth<'_> {
         let store = std::sync::Arc::clone(&self.ctx.engine.config().secrets);
         let key = self.password_key();
         let saved = tokio::task::spawn_blocking(move || store.set(&key, &secret)).await;
-        if matches!(saved, Ok(Ok(()))) {
-            self.ctx.log(
+        match saved {
+            Ok(Ok(())) => self.ctx.log(
                 LogLevel::Info,
                 "secrets",
                 "password remembered in the secret store",
-            );
-        } else {
-            self.ctx
-                .log(LogLevel::Warn, "secrets", "could not remember the password");
+            ),
+            // The error code only (`vault_locked`, `secrets`…): never a secret.
+            Ok(Err(e)) => self.ctx.log(
+                LogLevel::Warn,
+                "secrets",
+                format!("could not remember the password ({})", e.summary().code),
+            ),
+            Err(_) => self
+                .ctx
+                .log(LogLevel::Warn, "secrets", "could not remember the password"),
         }
     }
 }
