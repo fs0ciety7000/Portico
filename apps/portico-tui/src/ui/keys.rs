@@ -124,10 +124,13 @@ fn draw(panel: &mut KeysPanel, ctx: &Context, frame: &mut Frame<'_>) {
             }
             if let Some(line) = &panel.public_line {
                 extra.extend(
-                    fmt::wrap(line, w)
-                        .into_iter()
+                    // Cut at the edge, not at the space: the type and the
+                    // key stay one selectable run.
+                    line.chars()
+                        .collect::<Vec<_>>()
+                        .chunks(w.max(1))
                         .take(4)
-                        .map(|l| Line::from(Span::styled(l, s.title()))),
+                        .map(|c| Line::from(Span::styled(c.iter().collect::<String>(), s.title()))),
                 );
             }
             extra.push(vault_line(ctx));
@@ -181,7 +184,7 @@ fn footer(
 fn mode_lines(panel: &KeysPanel, s: Styles, width: usize, lines: &mut Vec<Line<'static>>) {
     let warning = s.status(s.theme.status.warning);
     match &panel.mode {
-        Mode::ConfirmRemove { label, .. } => {
+        Mode::ConfirmRemove { label, fingerprint } => {
             lines.push(Line::from(vec![
                 Span::styled("▲ ", warning),
                 Span::styled(
@@ -192,8 +195,13 @@ fn mode_lines(panel: &KeysPanel, s: Styles, width: usize, lines: &mut Vec<Line<'
                     s.title(),
                 ),
             ]));
+            let has_file = panel.locals().iter().any(|k| k.fingerprint == *fingerprint);
             lines.push(Line::from(Span::styled(
-                "The key file stays in ~/.ssh.",
+                if has_file {
+                    "The key file stays in ~/.ssh: a adds it back."
+                } else {
+                    "Only the agent's copy is removed."
+                },
                 s.secondary(),
             )));
         }
@@ -366,8 +374,10 @@ fn key_item(
         first.push(b);
         first.push(Span::raw("  "));
     }
-    let fp_room = width.saturating_sub(5).min(52);
-    let fp = short_fingerprint(fingerprint, fp_room.min(width.saturating_sub(5) / 2 + 10));
+    // The whole fingerprint when the comment still fits beside it.
+    let comment_need = comment.chars().count().min(20) + 2;
+    let fp_room = width.saturating_sub(5 + comment_need).max(24);
+    let fp = short_fingerprint(fingerprint, fp_room);
     let comment_room = width.saturating_sub(fp.chars().count() + 7);
     let comment = crate::form::display_safe(comment);
     let second = Line::from(vec![

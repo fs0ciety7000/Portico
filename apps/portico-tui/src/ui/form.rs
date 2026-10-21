@@ -75,7 +75,7 @@ pub(crate) fn select(
     };
     let mut spans = vec![
         Span::styled(format!("{label:<label_width$}"), label_style),
-        Span::styled("‹ ", arrows),
+        Span::styled(" ‹ ", arrows),
         Span::styled(choice.to_owned(), s.title()),
         Span::styled(" ›", arrows),
     ];
@@ -99,7 +99,7 @@ pub(crate) fn toggle(
     Line::from(vec![
         Span::styled(format!("{label:<label_width$}"), label_style),
         Span::styled(
-            format!("{mark} {text}"),
+            format!(" {mark} {text}"),
             if focused { s.accent() } else { s.secondary() },
         ),
     ])

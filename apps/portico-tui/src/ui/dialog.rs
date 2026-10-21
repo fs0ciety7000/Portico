@@ -362,13 +362,19 @@ fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) 
         ]));
     } else if let Some(e) = &d.error {
         lines.push(Line::from(""));
-        let count = if d.failures > 1 {
-            format!(" ({} attempts)", d.failures)
+        let count = match d.failures {
+            0 => String::new(),
+            1 => " · 1 failed attempt".to_owned(),
+            n => format!(" · {n} failed attempts"),
+        };
+        // The key path is already in the text above: keep it short.
+        let message = if e.code == "key_wrong_passphrase" {
+            "wrong passphrase"
         } else {
-            String::new()
+            e.message.as_str()
         };
         lines.push(Line::from(Span::styled(
-            format!("{}{count}", e.message),
+            format!("{message}{count}"),
             s.status(s.theme.status.error),
         )));
         if let Some(h) = &e.hint {
@@ -382,7 +388,10 @@ fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) 
         vec![("Esc", cancel), ("↵", primary)]
     };
     lines.push(footer(s, &actions));
-    let area = modal(frame, PROMPT_WIDTH, wrapped_height(&lines, PROMPT_WIDTH));
+    // Word wrapping can take a row more than the estimate: keep the
+    // actions visible.
+    let height = wrapped_height(&lines, PROMPT_WIDTH).saturating_add(1);
+    let area = modal(frame, PROMPT_WIDTH, height);
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()

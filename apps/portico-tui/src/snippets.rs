@@ -69,7 +69,8 @@ impl SnippetBytes for portico_core::Result<Vec<u8>> {
 pub(crate) fn scope_label(scope: &SnippetScope) -> String {
     match scope {
         SnippetScope::Global => "global".to_owned(),
-        SnippetScope::Hosts(hosts) => hosts.join(", "),
+        SnippetScope::Hosts(hosts) if hosts.len() == 1 => format!("host {}", hosts.join("")),
+        SnippetScope::Hosts(hosts) => format!("hosts {}", hosts.join(", ")),
         SnippetScope::Tags(tags) => tags
             .iter()
             .map(|t| format!("#{t}"))
