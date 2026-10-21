@@ -55,6 +55,11 @@ impl Styles {
     pub(crate) fn selected(self) -> Style {
         Style::new().bg(c(self.theme.palette.bg_selected))
     }
+    /// Selection of a pane that does not have the focus: visible, but
+    /// quieter than [`Self::selected`].
+    pub(crate) fn elevated(self) -> Style {
+        Style::new().bg(c(self.theme.palette.bg_elevated))
+    }
     /// Header / chrome surface.
     pub(crate) fn chrome(self) -> Style {
         Style::new()

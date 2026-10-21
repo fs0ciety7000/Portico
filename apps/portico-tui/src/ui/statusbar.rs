@@ -18,7 +18,14 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         s.mode_pill()
     };
     let mut spans = vec![Span::styled(mode, pill), Span::raw(" ")];
+    // Hints are listed by importance: drop the tail rather than overflow.
+    let mut used: usize = spans.iter().map(Span::width).sum();
     for (key, label) in hints {
+        let need = key.chars().count() + label.chars().count() + 4;
+        if used + need > usize::from(area.width) {
+            break;
+        }
+        used += need;
         spans.push(Span::styled(format!(" {key} "), s.key_hint()));
         spans.push(Span::styled(format!(" {label} "), s.muted()));
     }
@@ -59,30 +66,48 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
 }
 
-/// Mode pill and the key hints that fit 80 columns (the rest is in `?`).
-fn mode_and_hints(app: &App) -> (&'static str, &'static [(&'static str, &'static str)]) {
-    match app.focus {
+type Hints = Vec<(&'static str, &'static str)>;
+
+/// Mode pill and the key hints, most important first (what does not fit is
+/// in `?`). Only keys that work right now are listed.
+fn mode_and_hints(app: &App) -> (&'static str, Hints) {
+    let (mode, hints): (&'static str, &[(&'static str, &'static str)]) = match app.focus {
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
         _ if app.prefix => (
             " PREFIX ",
             &[
                 ("h", "hosts"),
                 ("1-9", "tab"),
+                ("f", "files"),
+                ("p", "tunnels"),
                 ("n", "new"),
                 ("w", "close"),
                 ("d", "disconnect"),
                 ("Esc", "cancel"),
             ],
         ),
-        _ if app.overlay == Some(crate::app::Overlay::Tunnels) => (
-            " TUNNELS ",
-            &[
-                ("a", "add"),
-                ("↵", "start"),
-                ("x", "stop"),
-                ("Esc", "close"),
-            ],
-        ),
+        _ if app.overlay == Some(crate::app::Overlay::Tunnels) => {
+            let hints = app
+                .tunnels_panel
+                .as_ref()
+                .map_or_else(|| vec![("Esc", "close")], |p| p.hints(&app.tunnels));
+            return (" TUNNELS ", hints);
+        }
+        Focus::Files
+            if app.files.as_ref().is_some_and(|f| {
+                f.side == crate::files::Side::Remote && !app.session_alive(f.session)
+            }) =>
+        {
+            (
+                " FILES ",
+                &[
+                    ("↵", "reconnect"),
+                    ("Tab", "local pane"),
+                    ("?", "help"),
+                    ("Esc", "back"),
+                ],
+            )
+        }
         Focus::Files => (
             " FILES ",
             &[
@@ -118,5 +143,6 @@ fn mode_and_hints(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("Esc", "done"),
             ],
         ),
-    }
+    };
+    (mode, hints.to_vec())
 }

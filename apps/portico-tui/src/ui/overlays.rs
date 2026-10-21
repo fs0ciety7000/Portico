@@ -7,12 +7,15 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::app::{App, Overlay};
 use crate::keymap::HELP;
+use crate::ui::fmt;
 
-pub(crate) fn render(app: &App, frame: &mut Frame<'_>) {
+/// `toast_zone`: the inside of the right-hand panel, so a toast never
+/// covers a border.
+pub(crate) fn render(app: &App, frame: &mut Frame<'_>, toast_zone: Rect) {
     if let Some(Overlay::Help) = app.overlay {
         render_help(app, frame);
     }
-    render_toast(app, frame);
+    render_toast(app, frame, toast_zone);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -25,18 +28,31 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     h
 }
 
-/// Lines of one help section.
+/// Width of the widest key cell in [`HELP`].
+fn help_key_width() -> usize {
+    HELP.iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Lines of one help section; a description that still does not fit its
+/// column ends with `…` rather than being cut mid-word.
 fn help_section<'a>(
     s: crate::theme::Styles,
     title: &'a str,
     rows: &'a [(&'a str, &'a str)],
     key_width: usize,
+    column_width: usize,
 ) -> Vec<Line<'a>> {
     let mut lines = vec![Line::from(Span::styled(title, s.title()))];
+    // Indent (2) + key + gap (2).
+    let room = column_width.saturating_sub(key_width + 4);
     for (k, d) in rows {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<key_width$}"), s.accent()),
-            Span::styled(*d, s.secondary()),
+            Span::styled(format!("  {k:<key_width$}  "), s.accent()),
+            Span::styled(fmt::truncate(d, room), s.secondary()),
         ]));
     }
     lines
@@ -49,8 +65,16 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
     let screen = frame.area();
     let rows: usize = HELP.iter().map(|(_, r)| r.len() + 2).sum();
     let one_column = rows + 2 <= usize::from(screen.height);
-    let (key_width, width) = if one_column { (16, 60) } else { (15, 84) };
+    let key_width = help_key_width();
+    let width = if one_column { 60 } else { 84 };
     let width = width.min(screen.width.saturating_sub(2));
+    // Borders (2) + padding (4), then two columns 2 apart.
+    let inner = usize::from(width.saturating_sub(6));
+    let column_width = if one_column {
+        inner
+    } else {
+        inner.saturating_sub(2) / 2
+    };
     let mut columns: Vec<Vec<Line<'_>>> = vec![Vec::new()];
     let half = rows.div_ceil(2);
     for (title, section) in HELP {
@@ -63,7 +87,7 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
             if !current.is_empty() {
                 current.push(Line::from(""));
             }
-            current.extend(help_section(s, title, section, key_width));
+            current.extend(help_section(s, title, section, key_width, column_width));
         }
     }
     let tallest = columns.iter().map(Vec::len).max().unwrap_or(0);
@@ -91,7 +115,7 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
 
 /// Bottom-right toast: neutral for information, error-coloured for
 /// failures (message, then hint on its own line).
-fn render_toast(app: &App, frame: &mut Frame<'_>) {
+fn render_toast(app: &App, frame: &mut Frame<'_>, zone: Rect) {
     let Some(toast) = &app.toast else { return };
     let s = app.styles();
     let (icon, icon_style, border) = if toast.is_error {
@@ -100,48 +124,63 @@ fn render_toast(app: &App, frame: &mut Frame<'_>) {
     } else {
         ("·", s.accent(), s.border_strong())
     };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{icon}  "), icon_style),
-        Span::styled(toast.message.clone(), s.title()),
-    ])];
-    if let Some(hint) = &toast.hint {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(hint.clone(), s.secondary()),
-        ]));
+    // Too narrow a panel: fall back to the screen, above the status bar.
+    let area = if zone.width >= 24 && zone.height >= 4 {
+        zone
+    } else {
+        let screen = frame.area();
+        Rect {
+            height: screen.height.saturating_sub(1),
+            ..screen
+        }
+    };
+    // Borders + one column of padding on each side, then the icon column.
+    let max_width = area.width.saturating_sub(1).min(72);
+    let text_room = usize::from(max_width.saturating_sub(4 + 3)).max(1);
+    // Wrapped, not truncated; continuation lines align under the text.
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    for (i, part) in fmt::wrap(&toast.message, text_room).into_iter().enumerate() {
+        let lead = if i == 0 {
+            Span::styled(format!("{icon}  "), icon_style)
+        } else {
+            Span::raw("   ")
+        };
+        lines.push(Line::from(vec![lead, Span::styled(part, s.title())]));
     }
-    let area = frame.area();
-    // Wrap long messages instead of truncating them.
-    let max_width = area.width.saturating_sub(4).clamp(20, 72);
+    if let Some(hint) = &toast.hint {
+        for part in fmt::wrap(hint, text_room) {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(part, s.secondary()),
+            ]));
+        }
+    }
     let longest = lines.iter().map(Line::width).max().unwrap_or(0);
     let width = u16::try_from(longest)
         .unwrap_or(u16::MAX)
         .saturating_add(4)
         .min(max_width);
-    // Borders + one column of padding on each side.
-    let inner = usize::from(width.saturating_sub(4)).max(1);
-    let rows: usize = lines.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
-    let height = u16::try_from(rows)
+    let height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .clamp(1, 6)
-        .saturating_add(2);
+        .saturating_add(2)
+        .min(area.height);
+    // Bottom-right of the zone, one column from its edge.
     let rect = Rect {
-        x: area.right().saturating_sub(width + 2),
-        y: area.bottom().saturating_sub(height + 2),
+        x: area.right().saturating_sub(width + 1).max(area.x),
+        y: area.bottom().saturating_sub(height).max(area.y),
         width,
         height,
     };
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(border)
-                    .padding(Padding::horizontal(1))
-                    .style(s.overlay()),
-            ),
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(border)
+                .padding(Padding::horizontal(1))
+                .style(s.overlay()),
+        ),
         rect,
     );
 }

@@ -69,7 +69,8 @@ impl SessionView {
         )
     }
 
-    fn usable(&self) -> bool {
+    /// Connected or on its way: something can still be served on it.
+    pub(crate) fn usable(&self) -> bool {
         self.in_flight() || self.phase == SessionPhase::Connected
     }
 }
@@ -172,6 +173,10 @@ impl App {
     pub(crate) async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         let mut input = EventStream::new();
         let mut ticker = tokio::time::interval(TICK);
+        // The ticker is only polled while animating: after an idle spell it
+        // must not replay the missed ticks in a burst (a fresh toast would
+        // vanish at once).
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut engine_events = self.engine.subscribe();
         self.spawn_load_hosts();
 
@@ -356,10 +361,15 @@ impl App {
                 self.open_files();
             }
             Action::FilesKey(key) => {
-                if let Some(files) = &mut self.files
-                    && let KeyOutcome::Leave = files.handle_key(key)
-                {
-                    self.leave_files();
+                let down = self
+                    .files
+                    .as_ref()
+                    .is_some_and(|f| !self.session_alive(f.session));
+                let outcome = self.files.as_mut().map(|f| f.handle_key(key, down));
+                match outcome {
+                    Some(KeyOutcome::Leave) => self.leave_files(),
+                    Some(KeyOutcome::Reconnect) => self.reconnect_files(),
+                    Some(KeyOutcome::Handled) | None => {}
                 }
             }
             Action::Files(event) => {
@@ -394,7 +404,7 @@ impl App {
                 }
                 Err(e) => {
                     if let Some(panel) = &mut self.tunnels_panel {
-                        panel.error = Some(e.message);
+                        panel.error = Some(e);
                     } else {
                         self.notify_error(e);
                     }
@@ -424,6 +434,12 @@ impl App {
 
     pub(crate) fn session_by_id(&self, id: SessionId) -> Option<&SessionView> {
         self.sessions.values().find(|s| s.id == id)
+    }
+
+    /// The session is connected or connecting (not failed, closed or
+    /// replaced by a newer one for the same host).
+    pub(crate) fn session_alive(&self, id: SessionId) -> bool {
+        self.session_by_id(id).is_some_and(SessionView::usable)
     }
 
     // ── tabs ───────────────────────────────────────────────────────────────
@@ -577,6 +593,37 @@ impl App {
         self.focus = Focus::Files;
     }
 
+    /// `↵ reconnect` in a remote pane whose session is down: reuse a live
+    /// session of the host if one exists, else connect, then reopen SFTP.
+    fn reconnect_files(&mut self) {
+        let Some(alias) = self.files.as_ref().map(|f| f.alias.clone()) else {
+            return;
+        };
+        let session = match self.session_for(&alias).filter(|s| s.usable()) {
+            Some(s) => s.id,
+            None => match self.engine.connect(ConnectRequest::new(alias.clone())) {
+                Ok(id) => {
+                    self.sessions.insert(
+                        alias,
+                        SessionView {
+                            id,
+                            phase: SessionPhase::Resolving,
+                            latency: None,
+                        },
+                    );
+                    id
+                }
+                Err(e) => {
+                    self.notify_error(e.summary());
+                    return;
+                }
+            },
+        };
+        if let Some(files) = &mut self.files {
+            files.rebind(session);
+        }
+    }
+
     fn leave_files(&mut self) {
         self.focus = if self.active_terminal().is_some() {
             Focus::Terminal
@@ -586,7 +633,11 @@ impl App {
     }
 
     fn open_tunnels(&mut self) {
-        let session = self.current_session(false);
+        // Only a live session can take new tunnels; otherwise the panel
+        // just lists what runs and offers `Esc`.
+        let session = self
+            .current_session(false)
+            .filter(|(id, _)| self.session_alive(*id));
         let alias_of = |id: SessionId| -> String {
             self.sessions
                 .iter()
@@ -814,11 +865,20 @@ impl App {
                         self.end_terminals(id);
                     }
                     SessionPhase::Failed { error } => {
-                        self.notify_error(error);
+                        // The open explorer already shows it, with its hint
+                        // and `↵ reconnect`: no duplicate toast on top.
+                        let shown = self.focus == Focus::Files
+                            && self.files.as_ref().is_some_and(|f| f.session == id);
+                        if !shown {
+                            self.notify_error(error);
+                        }
                         self.end_terminals(id);
                     }
                     SessionPhase::Closed { .. } => self.end_terminals(id),
                     _ => {}
+                }
+                if !self.session_alive(id) {
+                    self.drop_tunnels_target(id);
                 }
             }
             SessionEvent::Latency { rtt } => view.latency = Some(rtt),
@@ -842,6 +902,19 @@ impl App {
                 }));
             }
             _ => {}
+        }
+    }
+
+    /// The tunnels panel stops offering to add tunnels to a dead session.
+    fn drop_tunnels_target(&mut self, session: SessionId) {
+        let Some(panel) = &mut self.tunnels_panel else {
+            return;
+        };
+        if panel.session.as_ref().is_some_and(|(id, _)| *id == session) {
+            panel.session = None;
+            panel.input = None;
+            panel.confirm = None;
+            self.rebuild_tunnels_panel();
         }
     }
 
@@ -912,29 +985,36 @@ impl App {
     }
 }
 
+/// An app on an engine that never touches the real `~/.ssh` (tests only).
 #[cfg(test)]
-mod tests {
+pub(crate) fn test_app() -> App {
     use std::sync::Arc;
 
     use portico_core::EngineConfig;
-    use portico_core::events::{Prompt, PromptKind};
-    use portico_core::ids::PromptId;
     use portico_core::secrets::MemoryStore;
     use portico_core::store::Paths;
+
+    let engine = Engine::new(EngineConfig {
+        paths: Paths::rooted(std::path::Path::new("/nonexistent")),
+        local_user: "alice".into(),
+        event_capacity: 16,
+        secrets: Arc::new(MemoryStore::default()),
+        agent_socket: None,
+        connect_timeout: Duration::from_secs(1),
+        keepalive: Duration::from_secs(1),
+    });
+    App::new(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use portico_core::events::{Prompt, PromptKind};
+    use portico_core::ids::PromptId;
 
     use super::*;
 
     fn app() -> App {
-        let engine = Engine::new(EngineConfig {
-            paths: Paths::rooted(std::path::Path::new("/nonexistent")),
-            local_user: "alice".into(),
-            event_capacity: 16,
-            secrets: Arc::new(MemoryStore::default()),
-            agent_socket: None,
-            connect_timeout: Duration::from_secs(1),
-            keepalive: Duration::from_secs(1),
-        });
-        App::new(engine)
+        test_app()
     }
 
     #[test]
@@ -968,5 +1048,168 @@ mod tests {
             panic!("dialog")
         };
         assert_eq!(p.fields[0].value.as_str(), "s3cr3t");
+    }
+}
+
+/// Rendering checks at 80×24 (the smallest supported terminal).
+#[cfg(test)]
+mod render_tests {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use portico_core::forward::ForwardSpec;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use crate::keymap::HELP;
+
+    fn screen(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        terminal.draw(|f| ui::render(app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn contains(lines: &[String], needle: &str) -> bool {
+        lines.iter().any(|l| l.contains(needle))
+    }
+
+    #[test]
+    fn every_help_label_fits_80x24() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Help);
+        let lines = screen(&mut app, 80, 24);
+        for (title, rows) in HELP {
+            assert!(
+                contains(&lines, title),
+                "section {title}\n{}",
+                lines.join("\n")
+            );
+            for (key, label) in *rows {
+                let row = format!("{key}  ");
+                assert!(
+                    lines.iter().any(|l| l.contains(&row) && l.contains(label)),
+                    "`{key}` / `{label}` is not shown in full:\n{}",
+                    lines.join("\n")
+                );
+            }
+        }
+        // The only ellipsis is the one in "Ctrl-Space, then…": nothing cut.
+        let ellipses = lines.iter().map(|l| l.matches('…').count()).sum::<usize>();
+        assert_eq!(ellipses, 1, "{}", lines.join("\n"));
+    }
+
+    fn files_on(app: &mut App, phase: SessionPhase) -> SessionId {
+        let id = SessionId::next();
+        app.sessions.insert(
+            "db-primary".into(),
+            SessionView {
+                id,
+                phase,
+                latency: None,
+            },
+        );
+        app.files = Some(FilesView::open(
+            app.engine.clone(),
+            app.tx.clone(),
+            id,
+            "db-primary".into(),
+        ));
+        app.focus = Focus::Files;
+        id
+    }
+
+    #[tokio::test]
+    async fn connecting_remote_pane_shows_the_phase() {
+        let mut app = test_app();
+        files_on(
+            &mut app,
+            SessionPhase::Connecting {
+                hop: 1,
+                hops: 2,
+                target: "bastion".into(),
+            },
+        );
+        let lines = screen(&mut app, 80, 24);
+        assert!(
+            contains(&lines, "Connecting · bastion (1/2)"),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(
+            !contains(&lines, "db-primary:"),
+            "no `alias:` with an empty path"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_remote_pane_offers_reconnect_not_retry() {
+        let mut app = test_app();
+        let old = files_on(
+            &mut app,
+            SessionPhase::Failed {
+                error: ErrorSummary {
+                    code: "connect_failed".into(),
+                    message: "connection refused".into(),
+                    hint: Some("Is sshd running?".into()),
+                },
+            },
+        );
+        let lines = screen(&mut app, 80, 24);
+        let text = lines.join("\n");
+        assert!(contains(&lines, "connection refused"), "{text}");
+        assert!(contains(&lines, "Is sshd running?"), "{text}");
+        assert!(contains(&lines, "↵  reconnect"), "{text}");
+        assert!(!contains(&lines, "Ctrl-R"), "{text}");
+        assert!(!contains(&lines, "db-primary:"), "{text}");
+
+        app.update(Action::FilesKey(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        // Either a new session is on its way, or the refusal is reported.
+        let rebound = app.files.as_ref().is_some_and(|f| f.session != old);
+        assert!(rebound || app.toast.is_some());
+    }
+
+    #[test]
+    fn tunnels_without_a_live_session_only_offer_close() {
+        let mut app = test_app();
+        app.update(Action::OpenTunnels);
+        let lines = screen(&mut app, 80, 24);
+        let text = lines.join("\n");
+        assert!(contains(&lines, "Esc close"), "{text}");
+        for inert in ["a  add", "start suggested", "x  stop"] {
+            assert!(!contains(&lines, inert), "`{inert}` offered:\n{text}");
+        }
+    }
+
+    #[test]
+    fn tunnel_errors_wrap_above_the_hints() {
+        let mut app = test_app();
+        let mut panel = TunnelsPanel::new(Some((SessionId::next(), "web".into())));
+        panel.rebuild(&[], &[ForwardSpec::parse_cli("-L 8080:db:5432").unwrap()]);
+        let long = "the remote side refused to forward port 5432 to db because the \
+                    administrator disabled TCP forwarding for this account";
+        panel.error = Some(ErrorSummary {
+            code: "forward_refused".into(),
+            message: long.into(),
+            hint: Some("Ask for AllowTcpForwarding.".into()),
+        });
+        app.tunnels_panel = Some(panel);
+        app.overlay = Some(Overlay::Tunnels);
+        let lines = screen(&mut app, 80, 24);
+        let text = lines.join("\n");
+        let message_row = lines.iter().position(|l| l.contains("administrator"));
+        let hint_row = lines.iter().position(|l| l.contains("AllowTcpForwarding"));
+        let keys_row = lines.iter().position(|l| l.contains("a  add"));
+        assert!(contains(&lines, "account"), "not truncated:\n{text}");
+        assert!(message_row < hint_row && hint_row < keys_row, "{text}");
+        assert!(contains(&lines, "↵  start"), "{text}");
     }
 }

@@ -46,11 +46,19 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         rows: body.height.max(1),
     };
     let tick = app.tick;
+    // Where toasts go: inside the right-hand panel, clear of its borders.
+    let toast_zone;
+    let link = app
+        .files
+        .as_ref()
+        .map(|f| files::RemoteLink::of(app.session_by_id(f.session), s));
     if app.focus == crate::app::Focus::Files
         && let Some(view) = &mut app.files
     {
-        files::render(
+        let link = link.unwrap_or(files::RemoteLink::Up);
+        toast_zone = files::render(
             view,
+            &link,
             s,
             tick,
             frame,
@@ -59,6 +67,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     } else if let Some(view) = app.active_terminal() {
         let focused = app.dialogs.is_empty() && app.overlay.is_none();
         terminal::render(view, focused, s, frame, body);
+        toast_zone = body.inner(ratatui::layout::Margin::new(1, 1));
     } else {
         let [sidebar, main] =
             Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
@@ -66,9 +75,10 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
                 .areas(body.inner(ratatui::layout::Margin::new(1, 0)));
         hosts::render(app, frame, sidebar);
         details::render(app, frame, main);
+        toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
     }
     statusbar::render(app, frame, status);
-    overlays::render(app, frame);
+    overlays::render(app, frame, toast_zone);
     if app.overlay == Some(crate::app::Overlay::Tunnels)
         && let Some(panel) = &mut app.tunnels_panel
     {

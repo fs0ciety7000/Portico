@@ -7,26 +7,37 @@ use crate::action::Action;
 use crate::app::{Focus, Overlay};
 
 /// (keys, description) rows shown in the `?` overlay, by section.
+///
+/// Notation: keys for the *same* action are separated by a space (`c F5`);
+/// keys for *different* actions by ` · `, matched in order by the
+/// description (`g · G` → `First · last`). Keys stay within 12 columns and
+/// descriptions within 19 so two columns fit 80×24 (checked by a test).
 pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Hosts",
         &[
-            ("j k  ↓ ↑", "Move"),
+            ("j k ↓ ↑", "Move"),
             ("g · G", "First · last"),
-            ("/ · Ctrl-K", "Search (#tag, *fav)"),
-            ("Enter", "Connect"),
+            ("/ Ctrl-K", "Search"),
+            ("#tag · *", "Tag · favorites"),
+            ("↵", "Connect"),
             ("d", "Disconnect"),
             ("f · p", "Files · tunnels"),
-            ("1-9  ] [", "Tab · next · prev"),
-            ("r · t · q", "Reload, theme, quit"),
+            ("1-9 · ] · [", "Tab · next · prev"),
+            ("r · t", "Reload · theme"),
+            ("q", "Quit"),
         ],
     ),
-    ("Terminal", &[("Shift-PgUp/Dn", "Scroll back")]),
+    ("Terminal", &[("Shift-PgUp", "Scroll back")]),
+    (
+        "Tunnels",
+        &[("a", "Add -L / -R"), ("↵ · x", "Start · stop")],
+    ),
     (
         "Ctrl-Space, then…",
         &[
-            ("h · 0", "Back to hosts"),
-            ("1-9  ] [", "Tab · next · prev"),
+            ("h 0", "Back to hosts"),
+            ("1-9 · ] · [", "Tab · next · prev"),
             ("n · w", "New tab · close tab"),
             ("d", "Disconnect host"),
             ("f · p", "Files · tunnels"),
@@ -38,16 +49,14 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Tab", "Switch pane"),
             ("↵ · Bksp", "Open · parent"),
-            ("c  F5", "Copy across"),
-            ("n F7 · r F2", "New folder · rename"),
-            ("d  F8", "Delete (asks)"),
-            ("x · .", "Cancel · hidden"),
+            ("c F5", "Copy across"),
+            ("n F7", "New folder"),
+            ("r F2", "Rename"),
+            ("d Del F8", "Delete (asks)"),
+            ("x", "Cancel transfer"),
+            (".", "Hidden files"),
             ("Ctrl-R · Esc", "Refresh · back"),
         ],
-    ),
-    (
-        "Tunnels",
-        &[("a", "Add -L / -R"), ("↵ · x", "Start · stop")],
     ),
 ];
 

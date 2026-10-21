@@ -69,6 +69,7 @@ Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas 
 | Afficher / masquer les fichiers cachés | `.` |
 | Rafraîchir les deux panneaux | `Ctrl-R` |
 | Destination existante | `k` garder les deux (`nom (1).ext`) · `o` écraser · `s` ignorer · `Esc` annuler |
+| Session distante pas prête / terminée | le panneau distant affiche la phase, ou l'erreur et son hint ; `↵` reconnecte puis rouvre SFTP |
 | Aide | `?` |
 | Revenir (terminal ou liste des hôtes) | `Esc`, `q`, `Ctrl-C` |
 
