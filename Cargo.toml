@@ -68,7 +68,7 @@ argon2 = "0.6"
 chacha20poly1305 = "0.11"
 
 # Process hardening (safe wrappers: setrlimit, prctl).
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 # Search
 nucleo-matcher = "0.3"

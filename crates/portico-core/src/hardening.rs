@@ -4,12 +4,26 @@
 //! key passphrases, the vault key). [`harden_process`] reduces the ways
 //! another process of the same user, or a crash, could read them:
 //!
-//! - **`RLIMIT_CORE = 0`** (Unix, soft and hard): no core dump is written
-//!   on a crash, so memory never lands on disk that way;
-//! - **`PR_SET_DUMPABLE = 0`** (Linux): the process cannot be attached with
-//!   `ptrace` by other processes of the same user (root aside), and
-//!   `/proc/<pid>/mem`, `environ`… become root-owned. Also disables core
-//!   dumps independently of the rlimit.
+//! - **`RLIMIT_CORE = 0`** (Unix, soft *and hard*): no core dump is written
+//!   on a crash. Resource limits are inherited across `fork` and `execve`,
+//!   and an unprivileged process cannot raise a hard limit, so this one
+//!   covers **every** child process too (including the `WebKitGTK` helper
+//!   processes of the GUI on Linux);
+//! - **`PR_SET_DUMPABLE = 0`** (Linux): the *Rust process itself* cannot be
+//!   attached with `ptrace` by other processes of the same user (root and
+//!   `CAP_SYS_PTRACE` aside), and `/proc/<pid>/mem`, `environ`… become
+//!   root-owned. Also disables core dumps independently of the rlimit.
+//!
+//! What this does **not** cover: the dumpable flag is reset by the kernel on
+//! `execve` of an ordinary (non set-uid) binary. On Linux the GUI's
+//! `WebKitWebProcess` and `WebKitNetworkProcess`, which `WebKitGTK` starts with
+//! `exec`, are therefore traceable again by the same user. The web process
+//! renders the UI, so it briefly sees what the user types in a prompt field
+//! (password, passphrase) before it crosses the IPC; keys, the vault key and
+//! the SSH transport stay in the Rust process. Core dumps stay blocked in
+//! those helpers through the inherited hard `RLIMIT_CORE`. Linux distributions
+//! that set `kernel.yama.ptrace_scope >= 1` already restrict same-user
+//! `ptrace` to ancestors, which covers that gap for most desktops.
 //!
 //! macOS: there is no safe wrapper for `ptrace(PT_DENY_ATTACH)` in the crates
 //! already in the tree (rustix, nix), and `unsafe` is forbidden in the

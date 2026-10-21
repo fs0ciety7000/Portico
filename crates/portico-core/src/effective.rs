@@ -12,7 +12,22 @@
 //! value of a multi-valued keyword, in config order), then the defaults.
 //! Values are shown as written in the config, except `hostname`, `user` and
 //! `port` which are the resolved ones (`%h` expanded, `-l` override
-//! applied). No secret can appear here: the config holds none (paths only).
+//! applied).
+//!
+//! ## Sensitive values
+//!
+//! `ssh_config` is not meant to hold secrets, but nothing stops a user from
+//! putting one in an environment value or a command line. So:
+//!
+//! - `SetEnv NAME=value` is **masked here**, in the core: each value is
+//!   shown as `NAME=•••` (the name stays, for debugging). The real value
+//!   never leaves this module;
+//! - commands that run locally or remotely ([`SENSITIVE_KEYWORDS`]:
+//!   `ProxyCommand`, `LocalCommand`, `RemoteCommand`, `KnownHostsCommand`)
+//!   are kept as written, because seeing them is the point of the view, but
+//!   flagged [`EffectiveOption::sensitive`] so the UIs hide them until the
+//!   user reveals them, and never copy them into logs. `PermitLocalCommand`
+//!   is a yes/no switch, not sensitive.
 
 use serde::Serialize;
 
@@ -41,7 +56,22 @@ pub struct EffectiveOption {
     pub key: String,
     pub values: Vec<String>,
     pub origin: OptionOrigin,
+    /// The values may hold a secret (a command line, see
+    /// [`SENSITIVE_KEYWORDS`]): UIs mask them until the user asks.
+    pub sensitive: bool,
 }
+
+/// Keywords whose values are commands that may embed tokens or passwords:
+/// shown on demand only (see the module doc).
+pub const SENSITIVE_KEYWORDS: [&str; 4] = [
+    "proxycommand",
+    "localcommand",
+    "remotecommand",
+    "knownhostscommand",
+];
+
+/// Shown instead of a `SetEnv` value.
+const MASKED_VALUE: &str = "•••";
 
 /// Where a value comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,10 +109,25 @@ fn origin(source: &Source) -> OptionOrigin {
 }
 
 fn option(key: &str, values: Vec<String>, origin: OptionOrigin) -> EffectiveOption {
+    let values = if key == "setenv" {
+        values.iter().map(|v| mask_setenv(v)).collect()
+    } else {
+        values
+    };
     EffectiveOption {
         key: key.to_owned(),
         values,
         origin,
+        sensitive: SENSITIVE_KEYWORDS.contains(&key),
+    }
+}
+
+/// `NAME=value` becomes `NAME=•••`; an argument without `=` (invalid for
+/// OpenSSH) is masked whole.
+fn mask_setenv(arg: &str) -> String {
+    match arg.split_once('=') {
+        Some((name, _)) => format!("{name}={MASKED_VALUE}"),
+        None => MASKED_VALUE.to_owned(),
     }
 }
 
@@ -410,5 +455,61 @@ mod tests {
                 at(Path::new("cfg"), 6)
             )]
         );
+    }
+
+    #[test]
+    fn setenv_values_are_masked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parsed = SshConfig::parse_str(
+            "Host s\n  SetEnv API_TOKEN=hunter2-secret LANG=\"fr hunter2-secret\"\n  SetEnv OTHER=hunter2-secret\n",
+            Path::new("cfg"),
+            Path::new("/x"),
+        )
+        .expect("parse");
+        let view = compute(&parsed, &config(dir.path()), "s", None);
+        let setenv = line(&view, "setenv");
+        let values: Vec<&String> = setenv.iter().flat_map(|(v, _)| v).collect();
+        assert!(!values.is_empty(), "{setenv:?}");
+        assert!(values.iter().all(|v| v.ends_with("=•••")), "{values:?}");
+        assert!(
+            values.iter().any(|v| v.as_str() == "API_TOKEN=•••"),
+            "{values:?}"
+        );
+        let json = serde_json::to_string(&view).expect("json");
+        assert!(!json.contains("hunter2"), "{json}");
+        assert_eq!(mask_setenv("novalue"), "•••");
+    }
+
+    #[test]
+    fn commands_are_flagged_sensitive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parsed = SshConfig::parse_str(
+            "Host s\n  ProxyCommand nc %h %p\n  LocalCommand echo tok\n  RemoteCommand run --token x\n  KnownHostsCommand /bin/kh %H\n  PermitLocalCommand yes\n  User bob\n",
+            Path::new("cfg"),
+            Path::new("/x"),
+        )
+        .expect("parse");
+        let view = compute(&parsed, &config(dir.path()), "s", None);
+        let sensitive = |key: &str| {
+            view.options
+                .iter()
+                .find(|o| o.key == key)
+                .map(|o| o.sensitive)
+        };
+        for key in SENSITIVE_KEYWORDS {
+            assert_eq!(sensitive(key), Some(true), "{key}");
+        }
+        for key in ["permitlocalcommand", "user", "host", "identityfile"] {
+            assert_eq!(sensitive(key), Some(false), "{key}");
+        }
+        // Commands stay readable on demand.
+        assert_eq!(
+            line(&view, "remotecommand")
+                .first()
+                .map(|(v, _)| v.join(" ")),
+            Some("run --token x".to_owned())
+        );
+        let json = serde_json::to_string(&view).expect("json");
+        assert!(json.contains(r#""sensitive":true"#), "{json}");
     }
 }

@@ -121,6 +121,16 @@ pub enum Error {
     #[error("{} is larger than {max} bytes", path.display())]
     FileTooLarge { path: PathBuf, max: u64 },
 
+    /// A write was refused before touching the disk: the new content would
+    /// exceed what the reader accepts (`file_too_large`).
+    #[error("{} would grow larger than {max} bytes; the change was not saved", path.display())]
+    WriteTooLarge { path: PathBuf, max: u64 },
+
+    /// A Portico file is a symlink (writes only), a FIFO, a directory or a
+    /// device: it is neither replaced nor opened.
+    #[error("{} is not a regular file", path.display())]
+    NotRegularFile { path: PathBuf },
+
     #[error(transparent)]
     HostMeta(#[from] crate::hosts::HostMetaError),
 
@@ -281,6 +291,18 @@ impl Error {
             Self::FileTooLarge { .. } => (
                 "file_too_large",
                 Some("This Portico file was edited by hand and is too large: trim it."),
+            ),
+            Self::WriteTooLarge { .. } => (
+                "file_too_large",
+                Some(
+                    "Portico would not be able to read this file back: remove entries you no longer need (long notes, old hosts) and retry.",
+                ),
+            ),
+            Self::NotRegularFile { .. } => (
+                "not_regular_file",
+                Some(
+                    "Portico does not replace a symlinked hosts.toml or settings.toml: edit the target directly or replace the link with a regular file.",
+                ),
             ),
             Self::HostMeta(e) => e.code_and_hint(),
             Self::Settings(e) => e.code_and_hint(),

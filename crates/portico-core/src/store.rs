@@ -121,6 +121,13 @@ pub fn load_toml<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
 /// Reads a UTF-8 file of at most `max` bytes; `None` when it is missing.
 /// The size is checked before reading and again on what was read (the
 /// file may grow in between).
+///
+/// Only a regular file is read: a symlink to a regular file is followed,
+/// but a FIFO, socket, device or directory is refused with
+/// [`Error::NotRegularFile`] *before* it is opened (opening a FIFO for
+/// reading blocks until a writer shows up). On Unix the open is also
+/// non-blocking, which closes the window where the path is swapped for a
+/// FIFO between the check and the open; the opened file is checked again.
 pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Option<String>> {
     use std::io::Read;
 
@@ -128,12 +135,34 @@ pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Option<String>> {
         path: path.to_path_buf(),
         max,
     };
-    let file = match std::fs::File::open(path) {
+    let not_regular = || Error::NotRegularFile {
+        path: path.to_path_buf(),
+    };
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => return Err(not_regular()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(path, e)),
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // `O_NONBLOCK` has no effect on a regular file.
+        let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+        opts.custom_flags(nonblock);
+    }
+    let file = match opts.open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Error::io(path, e)),
     };
-    if file.metadata().is_ok_and(|m| m.len() > max) {
+    let meta = file.metadata().map_err(|e| Error::io(path, e))?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    if meta.len() > max {
         return Err(too_large());
     }
     let mut text = String::new();
@@ -144,6 +173,31 @@ pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Option<String>> {
         return Err(too_large());
     }
     Ok(Some(text))
+}
+
+/// Writes a file that [`read_capped`] with the same `max` reads back:
+/// refuses, before touching the disk, content larger than `max`
+/// ([`Error::WriteTooLarge`]) and a destination that is not a regular file
+/// ([`Error::NotRegularFile`]: a symlink would be replaced by the rename,
+/// silently breaking the user's link). Then [`write_atomic`].
+pub(crate) fn write_atomic_capped(path: &Path, bytes: &[u8], max: u64) -> Result<()> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
+        return Err(Error::WriteTooLarge {
+            path: path.to_path_buf(),
+            max,
+        });
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(Error::NotRegularFile {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(path, e)),
+    }
+    write_atomic(path, bytes)
 }
 
 /// Parses TOML text read from `path` (errors name the file).

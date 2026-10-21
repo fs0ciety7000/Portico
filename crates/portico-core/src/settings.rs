@@ -159,7 +159,7 @@ pub(crate) fn save(path: &Path, settings: &Settings) -> Result<Settings> {
     let written = doc.to_string();
     // Same parse as `load`: never report settings the next read would not see.
     let stored: Settings = store::parse_toml(path, &written)?;
-    store::write_atomic(path, written.as_bytes())?;
+    store::write_atomic_capped(path, written.as_bytes(), MAX_SETTINGS_FILE_BYTES)?;
     Ok(stored)
 }
 
@@ -262,6 +262,41 @@ mod tests {
         assert!(
             save(&path, &sample()).is_err(),
             "never replaces a non-table"
+        );
+    }
+
+    #[test]
+    fn save_never_writes_a_file_the_reader_rejects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let filler = usize::try_from(MAX_SETTINGS_FILE_BYTES).expect("usize") - 20;
+        let original = format!("#{}\n", "x".repeat(filler));
+        std::fs::write(&path, &original).expect("write");
+        let err = save(&path, &sample()).expect_err("too large");
+        assert_eq!(err.summary().code, "file_too_large");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_settings_are_never_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real.toml");
+        std::fs::write(&target, "theme = \"basalt\"\n").expect("write");
+        let path = dir.path().join("settings.toml");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+        assert_eq!(load(&path).expect("load").theme.as_deref(), Some("basalt"));
+        let err = save(&path, &sample()).expect_err("symlink");
+        assert_eq!(err.summary().code, "not_regular_file");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read"),
+            "theme = \"basalt\"\n"
         );
     }
 }

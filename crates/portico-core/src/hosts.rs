@@ -22,6 +22,13 @@
 //! [`MAX_NOTES_CHARS`] characters where `\n` is the only control character.
 //! Bidi controls and invisible format characters are refused everywhere.
 //!
+//! The same rules apply when `hosts.toml` is **read** ([`load_meta`]): a
+//! hand-edited value that the editor would refuse is dropped (the alias'
+//! other fields are kept), and an entry whose alias is invalid is dropped
+//! whole. Each drop yields an inventory warning naming the file, the line
+//! of the alias, the alias (when valid) and the field, never the value.
+//! Normalization (trim, leading `#`, duplicate tags) is applied silently.
+//!
 //! `last_used` is **deprecated** (replaced by `state/recent.toml`, see
 //! [`crate::recent`]): still read (leniently), never written by Portico.
 
@@ -32,7 +39,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
 
 use crate::error::Result;
-use crate::ssh_config::{HostAlias, ResolveContext, ResolvedHost, Source, SshConfig};
+use crate::ssh_config::{
+    ConfigWarning, HostAlias, ResolveContext, ResolvedHost, Source, SshConfig,
+};
 use crate::store;
 
 /// Most tags on one host.
@@ -128,9 +137,73 @@ pub fn inventory(config: &SshConfig, meta: &HostMetaFile, ctx: &ResolveContext) 
         .collect()
 }
 
-/// Reads `hosts.toml` (missing file: no metadata).
-pub(crate) fn load_meta(path: &Path) -> Result<HostMetaFile> {
-    store::load_toml_capped(path, MAX_HOSTS_FILE_BYTES)
+/// Reads `hosts.toml` (missing file: no metadata) and applies the editing
+/// rules to what was read (see the module doc): invalid values are dropped
+/// and reported as warnings.
+pub(crate) fn load_meta(path: &Path) -> Result<(HostMetaFile, Vec<ConfigWarning>)> {
+    let Some(text) = store::read_capped(path, MAX_HOSTS_FILE_BYTES)? else {
+        return Ok((HostMetaFile::default(), Vec::new()));
+    };
+    let mut file: HostMetaFile = store::parse_toml(path, &text)?;
+    let warnings = sanitize_meta(path, &text, &mut file);
+    Ok((file, warnings))
+}
+
+/// Normalizes every entry of `file` in place, dropping what the editor
+/// would refuse. Returns one warning per drop (no value in the message).
+fn sanitize_meta(path: &Path, text: &str, file: &mut HostMetaFile) -> Vec<ConfigWarning> {
+    let document = toml_edit::Document::parse(text).ok();
+    let line_of = |alias: &str| -> usize {
+        let start = document
+            .as_ref()
+            .and_then(|d| d.get("hosts"))
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|hosts| hosts.get_key_value(alias))
+            .and_then(|(key, _)| key.span())
+            .map_or(0, |span| span.start);
+        let before = text.get(..start).unwrap_or_default();
+        before.matches('\n').count().saturating_add(1)
+    };
+    let mut warnings = Vec::new();
+    let mut warn = |alias: &str, message: String| {
+        warnings.push(ConfigWarning {
+            source: Source {
+                file: path.to_path_buf(),
+                line: line_of(alias),
+            },
+            message,
+        });
+    };
+
+    file.hosts.retain(|alias, meta| {
+        if let Err(e) = check_alias(alias) {
+            warn(alias, format!("ignored a hosts.toml entry: {e}"));
+            return false;
+        }
+        match normalize_tags(&meta.tags) {
+            Ok(tags) => meta.tags = tags,
+            Err(e) => {
+                warn(alias, format!("ignored `tags` of {alias}: {e}"));
+                meta.tags.clear();
+            }
+        }
+        match normalize_group(meta.group.as_deref()) {
+            Ok(group) => meta.group = group,
+            Err(e) => {
+                warn(alias, format!("ignored `group` of {alias}: {e}"));
+                meta.group = None;
+            }
+        }
+        match normalize_notes(meta.notes.as_deref()) {
+            Ok(notes) => meta.notes = notes,
+            Err(e) => {
+                warn(alias, format!("ignored `notes` of {alias}: {e}"));
+                meta.notes = None;
+            }
+        }
+        true
+    });
+    warnings
 }
 
 // ── Editing ─────────────────────────────────────────────────────────────
@@ -316,7 +389,9 @@ pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Resul
     let _lock = store::lock_exclusive(&store::lock_path(path))?;
     let text = store::read_capped(path, MAX_HOSTS_FILE_BYTES)?.unwrap_or_default();
     // The typed view must parse too: never write a file `load_hosts` rejects.
-    let current: HostMetaFile = store::parse_toml(path, &text)?;
+    let mut current: HostMetaFile = store::parse_toml(path, &text)?;
+    // The returned metadata is what `load_meta` will see: sanitized.
+    let _ = sanitize_meta(path, &text, &mut current);
     let mut doc = store::parse_document(path, &text)?;
 
     let hosts = store::child_table(doc.as_table_mut(), "hosts", path)?;
@@ -361,7 +436,7 @@ pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Resul
 
     let mut meta = current.hosts.get(alias).cloned().unwrap_or_default();
     change.apply(&mut meta);
-    store::write_atomic(path, doc.to_string().as_bytes())?;
+    store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)?;
     Ok(meta)
 }
 
@@ -521,7 +596,7 @@ when = 2026-05-04T10:00:00Z
         )
         .expect("notes");
         update_meta(&path, "api", MetaChange::Favorite(true)).expect("api");
-        let file = load_meta(&path).expect("load");
+        let (file, _) = load_meta(&path).expect("load");
         assert_eq!(
             file.hosts.get("db").expect("db").notes.as_deref(),
             Some("line 1\nline 2")
@@ -570,7 +645,7 @@ when = 2026-05-04T10:00:00Z
         let path = dir.path().join("hosts.toml");
         std::fs::write(&path, "hosts = { prod = { tags = [\"a\"], x = 1 } }\n").expect("write");
         update_meta(&path, "prod", MetaChange::Favorite(true)).expect("edit");
-        let file = load_meta(&path).expect("load");
+        let (file, _) = load_meta(&path).expect("load");
         let prod = file.hosts.get("prod").expect("prod");
         assert!(prod.favorite);
         assert_eq!(prod.tags, ["a"]);
@@ -598,7 +673,7 @@ when = 2026-05-04T10:00:00Z
         for t in threads {
             t.join().expect("thread");
         }
-        let file = load_meta(&path).expect("load");
+        let (file, _) = load_meta(&path).expect("load");
         for i in 0..8 {
             assert!(file.hosts.get(&format!("h{i}")).expect("alias").favorite);
         }
@@ -617,5 +692,148 @@ when = 2026-05-04T10:00:00Z
         };
         let json = serde_json::to_string(&meta).expect("json");
         assert!(!json.contains("last_used"), "{json}");
+    }
+
+    #[test]
+    fn hand_edited_invalid_meta_is_dropped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        let long_notes = "n".repeat(MAX_NOTES_CHARS + 1);
+        std::fs::write(
+            &path,
+            format!(
+                "[hosts.good]\ntags = [\"#Ops\", \"ops\", \" eu \"]\ngroup = \" Team \"\nfavorite = true\n\n\
+                 [hosts.web]\ntags = [\"ok\", \"bad tag SECRET1\"]\ngroup = \"a\\u202eSECRET2\"\nnotes = \"{long_notes}\"\nfavorite = true\n\n\
+                 [hosts.\"bad alias SECRET3\"]\nfavorite = true\n\n\
+                 [hosts.db]\nnotes = \"bell \\u0007 SECRET4\"\ntags = [\"fine\"]\n"
+            ),
+        )
+        .expect("write");
+        let (file, warnings) = load_meta(&path).expect("load");
+
+        // Valid values are normalized like an edit would.
+        let good = file.hosts.get("good").expect("good");
+        assert_eq!(good.tags, ["Ops", "eu"]);
+        assert_eq!(good.group.as_deref(), Some("Team"));
+        assert!(good.favorite);
+        // Invalid fields are dropped, the rest of the alias is kept.
+        let web = file.hosts.get("web").expect("web");
+        assert!(web.tags.is_empty());
+        assert_eq!(web.group, None);
+        assert_eq!(web.notes, None);
+        assert!(web.favorite);
+        let db = file.hosts.get("db").expect("db");
+        assert_eq!(db.notes, None);
+        assert_eq!(db.tags, ["fine"]);
+        // An invalid alias drops the whole entry.
+        assert_eq!(file.hosts.len(), 3, "{:?}", file.hosts.keys());
+
+        let described: Vec<(usize, &str)> = warnings
+            .iter()
+            .map(|w| (w.source.line, w.message.as_str()))
+            .collect();
+        assert_eq!(warnings.len(), 5, "{described:?}");
+        assert!(warnings.iter().all(|w| w.source.file == path));
+        for w in &warnings {
+            assert!(!w.message.contains("SECRET"), "value echoed: {w:?}");
+            assert!(!w.message.contains('\u{202e}'), "{w:?}");
+        }
+        let has = |line: usize, needle: &str| {
+            warnings
+                .iter()
+                .any(|w| w.source.line == line && w.message.contains(needle))
+        };
+        assert!(has(6, "`tags` of web"), "{described:?}");
+        assert!(has(6, "`group` of web"), "{described:?}");
+        assert!(has(6, "`notes` of web"), "{described:?}");
+        assert!(has(12, "invalid host alias"), "{described:?}");
+        assert!(has(15, "`notes` of db"), "{described:?}");
+
+        // An edit returns what the next load reads (sanitized).
+        let meta = update_meta(&path, "web", MetaChange::Favorite(false)).expect("edit");
+        assert_eq!(
+            &meta,
+            file.hosts
+                .get("web")
+                .map(|m| HostMeta {
+                    favorite: false,
+                    ..m.clone()
+                })
+                .as_ref()
+                .expect("web")
+        );
+    }
+
+    #[test]
+    fn edit_never_writes_a_file_the_reader_rejects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        // A hand-edited file just under the read limit.
+        let filler = usize::try_from(MAX_HOSTS_FILE_BYTES).expect("usize") - 100;
+        let original = format!("#{}\n[hosts.a]\nfavorite = true\n", "x".repeat(filler));
+        std::fs::write(&path, &original).expect("write");
+        assert!(load_meta(&path).is_ok());
+
+        let err = update_meta(&path, "a", MetaChange::Notes(Some("n".repeat(500))))
+            .expect_err("too large");
+        let summary = err.summary();
+        assert_eq!(summary.code, "file_too_large");
+        assert!(summary.hint.is_some());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), original);
+        assert!(load_meta(&path).is_ok());
+        // A smaller change still fits.
+        update_meta(&path, "a", MetaChange::Group(Some("g".into()))).expect("fits");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_or_special_files_are_never_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("dotfiles-hosts.toml");
+        std::fs::write(&target, "[hosts.a]\nfavorite = true\n").expect("write");
+        let path = dir.path().join("hosts.toml");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+
+        // Reading through a link to a regular file is fine.
+        let (file, _) = load_meta(&path).expect("load");
+        assert!(file.hosts.get("a").expect("a").favorite);
+        // Writing would replace the link: refused, link and target intact.
+        let err = update_meta(&path, "a", MetaChange::Favorite(false)).expect_err("symlink");
+        let summary = err.summary();
+        assert_eq!(summary.code, "not_regular_file");
+        assert!(
+            summary
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("symlink")),
+            "{summary:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&target)
+                .expect("read")
+                .contains("favorite = true")
+        );
+
+        // A FIFO is refused on read without blocking.
+        let fifo = dir.path().join("fifo-hosts.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if made {
+            let err = load_meta(&fifo).expect_err("fifo");
+            assert_eq!(err.summary().code, "not_regular_file");
+            let err = update_meta(&fifo, "a", MetaChange::Favorite(true)).expect_err("fifo");
+            assert_eq!(err.summary().code, "not_regular_file");
+        }
+        // A directory too.
+        let err = load_meta(dir.path()).expect_err("dir");
+        assert_eq!(err.summary().code, "not_regular_file");
     }
 }

@@ -302,9 +302,10 @@ impl Engine {
         let config = self.inner.config.clone();
         tokio::task::spawn_blocking(move || {
             let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
-            let meta = crate::hosts::load_meta(&config.paths.hosts_meta())?;
+            let (meta, meta_warnings) = crate::hosts::load_meta(&config.paths.hosts_meta())?;
             let hosts = inventory(&ssh, &meta, &config.resolve_context(None));
             let mut warnings = ssh.warnings().to_vec();
+            warnings.extend(meta_warnings);
             warnings.extend(
                 hosts
                     .iter()
