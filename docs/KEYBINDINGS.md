@@ -19,8 +19,8 @@
 | Vider la recherche | `Ctrl-U` (ou `Esc` hors recherche) | `Esc` |
 | Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `↵`, double-clic |
 | Se déconnecter (hôte sélectionné) | `d` | `d` |
-| Explorateur de fichiers (SFTP) de l'hôte (se connecte au besoin) | `f` | (phase 2, GUI) |
-| Tunnels | `p` | (phase 2, GUI) |
+| Explorateur de fichiers (SFTP) de l'hôte (se connecte au besoin) | `f` | `f` |
+| Tunnels | `p` | `p` |
 | Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | `⌘1`…`⌘9` (Linux : `Alt-1`…`9`), `Ctrl-Tab` / `Ctrl-Shift-Tab` |
 | Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | — |
 | Palette de commandes | — | `⌘K` |
@@ -106,6 +106,8 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app ci
 | Onglet n / liste des hôtes | `⌘1`…`⌘9` / `⌘0` | `Alt-1`…`Alt-9` / `Alt-0` |
 | Onglet suivant / précédent | `Ctrl-Tab` / `Ctrl-Shift-Tab`, `⌘]` / `⌘[` | `Ctrl-Tab` / `Ctrl-Shift-Tab` |
 | Palette de commandes | `⌘K` | `Ctrl-Shift-K` |
+| Fichiers (SFTP) de cet hôte, à côté du terminal | `⌘⇧F` | `Ctrl-Shift-F` |
+| Tunnels | `⌘⇧P` | `Ctrl-Shift-P` |
 | Copier la sélection / coller | `⌘C` / `⌘V` | `Ctrl-Shift-C` / `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
 | Reconnecter un onglet terminé ou en échec | `↵` | `↵` |
 | Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` | `Esc` |
@@ -114,12 +116,37 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app ci
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
 
+## Fichiers (GUI)
+
+Panneau à droite du terminal de l'onglet actif. Il prend le clavier à l'ouverture ; un clic dans le terminal le lui rend.
+Les fichiers à envoyer viennent du sélecteur natif ou d'un glisser-déposer sur la fenêtre ; les téléchargements vont dans
+le dossier affiché en bas du panneau (« Change » ou la palette pour en choisir un autre).
+
+| Action | Touches |
+|---|---|
+| Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
+| Ouvrir le dossier, ou télécharger le fichier | `↵`, `→`, double-clic |
+| Dossier parent | `Backspace`, `←`, fil d'Ariane |
+| Envoyer des fichiers (sélecteur natif) | `u`, ou déposer des fichiers sur le panneau |
+| Nouveau dossier / renommer (saisie en place, `↵` valide, `Esc` annule) | `n` / `F2` |
+| Supprimer (confirmation) | `Suppr`, `F8` |
+| Fichiers cachés / rafraîchir | `.` / `r` |
+| Destination existante | `Keep both` (copie numérotée) · `Replace` · `Skip` · `Esc` annule |
+| Revenir au terminal (le panneau reste ouvert) | clic dans le terminal ; `⌘⇧F` / `Ctrl-Shift-F` ou `Esc` le ferme |
+
+## Tunnels (GUI)
+
+| Action | Touches |
+|---|---|
+| Ajouter | saisir `-L 8080:db:5432` ou `-R 9000:localhost:3000`, puis `↵` |
+| Démarrer un forward proposé par `ssh_config` / arrêter | bouton `Start` / `Stop` |
+| Écoute exposée (hors loopback) | bloc d'avertissement, `Expose tunnel` actif après 400 ms sans frappe · `Esc` annule |
+| Fermer | `Esc` |
+
 ## Prévus
 
 | Action | TUI | GUI | Phase |
 |---|---|---|---|
 | Snippets | `Ctrl-Space s` | `⌘K` puis « Snippet » | 3 |
-| Explorateur SFTP | livré | `⌘⇧F` | 2 |
-| Tunnels | livré | `⌘⇧P` | 2 |
 | Logs / debug de la session | `Ctrl-Space l` | `⌘⇧L` | 4 |
 | Favori on/off | `*` (`f` ouvre l'explorateur) | `⌘D` | 4 |
