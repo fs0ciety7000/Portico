@@ -108,19 +108,64 @@ Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié
 
 ---
 
-## Roadmap post-MVP
+## Après le MVP : phases 5 à 8 (ordre validé le 2026-10-21)
+
+Mêmes règles que pour le MVP : une phase n'est close qu'après `agent-security` (et `agent-design-review` si elle
+touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
+
+### Phase 5 : gains rapides et distribution ⏳ *(Opus pour le core, Sonnet pour l'UI)*
+- `-D` (SOCKS5) dans `forward/` : SOCKS5 sans authentification (CONNECT, IPv4/IPv6/domaine), écoute sur `localhost`
+  par défaut, écoute exposée sur confirmation armée, panneau Tunnels des deux UIs ; `DynamicForward` de `ssh_config` proposé
+- Distribution : tap **Homebrew** (formula TUI, cask GUI) et paquet **AUR** `-bin`, générés depuis les artefacts et
+  checksums de la release, mis à jour par le workflow de release
+- Import **Termius** (après vérification du format d'export réel) : génère un fichier de config dans le dossier de Portico
+  (jamais dans `~/.ssh`) et indique la ligne `Include` à ajouter soi-même ; tags et groupes importés dans `hosts.toml`.
+  Aucun secret importé en clair
+
+**Sortie** : `curl --socks5-hostname localhost:1080` passe par un hôte via Portico (les deux UIs) ; `brew install` et
+l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Termius de test donne les mêmes hôtes dans Portico.
+
+### Phase 6 : terminal ⏳
+- **Split panes** : divisions horizontales et verticales dans un onglet, focus et redimensionnement au clavier, chaque
+  panneau étant un terminal indépendant (même session ou autre hôte) ; TUI et GUI
+- **Enregistrement asciicast v2** (ADR préalable : exception encadrée à l'interdit « contenu de terminal en clair ») :
+  opt-in explicite par session, indicateur « REC » toujours visible, sortie seulement (les saisies, donc les mots de passe,
+  ne sont pas enregistrées), fichiers `0600`, avertissement, chiffrement optionnel ; relecture dans les deux UIs
+
+**Sortie** : quatre panneaux sur deux hôtes utilisables au clavier seul ; une session enregistrée se relit à l'identique.
+
+### Phase 7 : synchronisation locale optionnelle ⏳
+- Sync de `hosts.toml`, des snippets et des réglages via un dossier choisi (Syncthing, git…) : **jamais de cloud imposé,
+  jamais de secret** (le vault reste local, ou s'exporte chiffré à part) ; fusion par entrée, conflits montrés à
+  l'utilisateur et jamais résolus en silence
+
+**Sortie** : deux machines partagent métadonnées et snippets via un dossier synchronisé, conflit d'édition compris.
+
+### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
+- Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
+- **Modèle de sécurité des fichiers refait avec des ACL** (équivalents de `0600`/`0700`, refus des liens), durcissement du
+  processus côté Windows
+- Distribution **Scoop** et **Winget**, installeur signé
+
+**Sortie** : les 14 fonctionnalités du MVP sur Windows 11 dans les deux UIs ; audit sécurité Windows.
+
+### À évaluer séparément (ADR et prototype avant toute décision)
+| Sujet | Question à trancher |
+|---|---|
+| Mosh | Piloter `mosh-client` à travers un PTY local (pragmatique) ou réimplémenter SSP/UDP en Rust (gros chantier, crypto à revoir) ; revue `agent-ssh-protocols` |
+| Snap / Flatpak | Le confinement strict bloque `~/.ssh` (interface `ssh-keys` à connecter à la main, mode classic soumis au Store) : publier ou non, et sous quelle forme |
+
+## Roadmap au-delà
 
 | Thème | Contenu |
 |---|---|
 | Multi-hop avancé | `ProxyCommand` arbitraire (process stdio comme transport), repli « system ssh » pour `Match exec`, visualisation du chemin de hops avec latence par hop |
-| Forwarding | `-D` (SOCKS5), forwards persistants avec redémarrage auto, forwarding d'agent (opt-in et averti) |
+| Forwarding | Forwards persistants avec redémarrage auto, forwarding d'agent (opt-in et averti) |
 | Vault enrichi | Plusieurs coffres, export et import chiffrés, déverrouillage biométrique (Touch ID via Keychain `protected`) |
-| Enregistrement de session | Format asciicast v2, rejouable, avec masquage des saisies de mot de passe |
-| Synchronisation locale optionnelle | Sync des métadonnées et snippets via un dossier (Syncthing, git) ou un fichier chiffré : **jamais de cloud imposé** |
-| Terminal | Split panes, broadcast d'input multi-hôtes (avec garde-fou), recherche dans le scrollback, liens cliquables |
-| Plateformes | Windows (Credential Manager, ConPTY non requis côté remote), thème clair |
+| Terminal | Broadcast d'input multi-hôtes (avec garde-fou), recherche dans le scrollback, liens cliquables |
+| Plateformes | Thème clair |
 | GUI native | Réévaluation de `gpui` si la GUI web atteint ses limites de performance |
-| Intégrations | Mosh, Teleport ou certificats éphémères (CA SSH d'entreprise), import depuis Termius |
+| Intégrations | Teleport ou certificats éphémères (CA SSH d'entreprise) |
 
 ## Tableau de bord
 
@@ -133,6 +178,10 @@ Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié
 | 2 SFTP / tunnels | ✅ | 146 + 12 GUI + interop (11 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, tmux 80×24 et 110×28, re-vérifiée) |
 | 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
 | 4 Finition | ⏳ | | | |
+| 5 SOCKS5, distribution, import Termius | ⏳ | | | |
+| 6 Split panes, asciicast | ⏳ | | | |
+| 7 Sync locale | ⏳ | | | |
+| 8 Windows | ⏳ | | | |
 
 ## Revues de la phase 3 (2026-10-21)
 
