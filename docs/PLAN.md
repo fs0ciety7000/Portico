@@ -97,14 +97,46 @@ reste à démontrer manuellement.
 passphrase de la sonde), puis reconnexion avec cette clé seule acceptée par sshd, ajout à l'agent et reconnexion depuis Portico.
 Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié en mode démo (pas encore dans l'app de bureau réelle).
 
-## Phase 4 : finition MVP ⏳ *(Sonnet, revues Opus)*
-- Sessions récentes (`state/recent.toml`), favoris, édition des tags et groupes
-- Panneau debug : logs par session, filtrables et copiables, avec la vue « config effective » (`ssh -G`)
-- Raccourcis configurables (`settings.toml`) et doc `KEYBINDINGS.md` générée depuis la keymap
-- Packaging : `.dmg` (signature et notarisation), `.deb`, AppImage, binaire TUI (cargo-dist ou équivalent)
-- Mesures : démarrage à froid, RAM au repos et avec 5 sessions, comparées aux objectifs de `CLAUDE.md` §2
+## Phase 4 : finition MVP ✅ *(Opus ; revues `agent-security` ×2 et `agent-design-review`)*
+- [x] Sessions récentes (`state/recent.toml`, 50 entrées), favoris (`*` / `⌘D`), édition des tags, groupes et notes (`e`) dans
+  `hosts.toml` (verrou, clés et commentaires conservés, validation identique en lecture), sections Recent / groupes / Other, filtre `@groupe`
+- [x] Panneau de logs de session (`l` / `⌘⇧L`) : sessions colorées par issue, logs filtrables (texte, niveau), suivi en direct,
+  copie en texte borné ; onglet « Effective config » (`ssh -G` avec origines `file:line`, route ProxyJump, options sensibles masquées
+  et jamais copiées) ; logs conservés pour les 20 dernières sessions terminées
+- [x] Raccourcis configurables (`settings.toml`, `[keymap.tui]` / `[keymap.gui]`, entrées invalides signalées), thème mémorisé,
+  tables de `KEYBINDINGS.md` **générées** depuis chaque keymap avec test de fraîcheur
+- [x] Packaging : `.deb` et AppImage construits et lancés ici, tarballs TUI (glibc et musl statique) ; workflow de release (tag `v*`,
+  6 cibles TUI, bundles GUI, `SHA256SUMS`, Release brouillon) ; signature et notarisation macOS isolées dans un environnement `release`
+  (secrets du propriétaire requis, voir `docs/RELEASE.md`) ; outillage AppImage et actions épinglés
+- [x] Mesures (`docs/PERF.md`, `bench/`) : objectifs TUI tenus, fenêtre GUI tenue ; chargement des gros `ssh_config` rendu linéaire
+- [x] Durcissement du processus (pas de core dump, pas de `ptrace` sous Linux), CLI TUI (`--help`, `--version`, sans terminal)
+- [x] Audit sécurité final, `SECURITY.md`, licences MIT et Apache 2.0, `cargo deny` vert
 
-**Sortie MVP** : les 14 fonctionnalités de `CLAUDE.md` §7 sont démontrables dans les deux UIs. Audit sécurité final.
+**Sortie MVP** ✅ : les 14 fonctionnalités de `CLAUDE.md` §7 dans les deux UIs (matrice ci-dessous). Audit sécurité final passé.
+
+### Matrice de sortie du MVP
+
+| # | Fonctionnalité | TUI | GUI | Preuve |
+|---|---|---|---|---|
+| 1 | Parsing de `~/.ssh/config` (ProxyJump, wildcards, héritage, Include, Match) | ✅ | ✅ | 23 tests du parser, interop OpenSSH, index linéaire |
+| 2 | Recherche floue, tags et groupes | ✅ | ✅ | `#tag`, `@groupe`, `*` ; édition `e` ; tests core et UI |
+| 3 | Connexion SSH interactive (PTY) | ✅ | ✅ | Vérifiée en réel (vim, top, resize, ProxyJump) en 1b/1c |
+| 4 | SFTP : explorateur, upload, download | ✅ | ✅ | 1 Gio dans chaque sens contre OpenSSH, annulation sans résidu |
+| 5 | Clés locales, ssh-agent, certificats | ✅ | ✅ | Interop scénario 12 (agent réel), badges de validité |
+| 6 | Génération de clés (ed25519 / rsa ≥ 3072 / ecdsa) avec passphrase | ✅ | ✅ | Tests par algorithme, relecture par `ssh-keygen` |
+| 7 | Copie de clé publique (`ssh-copy-id`) | ✅ | ✅ (démo) | Réel en TUI et en interop ; GUI en mode démo |
+| 8 | Port forwarding local et distant | ✅ | ✅ | Interop scénarios 10 et 11, `nc` sur un tunnel exposé |
+| 9 | Sessions récentes et favorites, onglets multi-sessions | ✅ | ✅ | Tests d'intégration (récents), rendu 80×24, captures |
+| 10 | Snippets (CRUD, portée, placeholders, exécution) | ✅ | ✅ | Tests de rendu sûr, exécution réelle sous `sh` en TUI |
+| 11 | Statut de connexion et latence | ✅ | ✅ | Barre de statut vérifiée de 880 à 1400 px, tmux 80×24 |
+| 12 | 3 thèmes sombres et raccourcis documentés | ✅ | ✅ | Tests de contraste WCAG, `KEYBINDINGS.md` généré et testé |
+| 13 | Secrets dans le keyring (vault chiffré en repli) | ✅ | ✅ | Vault v2 testé (verrou, anti-retour), déverrouillage au démarrage |
+| 14 | Mode debug : logs de connexion par session | ✅ | ✅ | Panneau de logs, sessions terminées conservées |
+
+**Non vérifié dans l'app de bureau réelle** : les parcours des phases 3 et 4 de la GUI (clés, copy-id, vault, snippets, logs, édition)
+ont été vérifiés en mode démo (Playwright) et par les tests Rust des commandes, pas dans l'app Tauri sous WebKitGTK avec un vrai
+serveur ; l'app réelle a été vérifiée jusqu'à la phase 1c (et la phase 2 pour le panneau de fichiers). À faire avant la première
+release publique, avec la re-mesure du CPU au repos de la GUI (`bench/run-all.sh`).
 
 ---
 
@@ -177,11 +209,25 @@ l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Ter
 | 1c Terminal GUI | ✅ | 106 + 3 GUI + interop | ✅ (voir ci-dessous) | ✅ (captures démo 3 thèmes + app réelle WebKitGTK) |
 | 2 SFTP / tunnels | ✅ | 146 + 12 GUI + interop (11 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, tmux 80×24 et 110×28, re-vérifiée) |
 | 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
-| 4 Finition | ⏳ | | | |
+| 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
 | 5 SOCKS5, distribution, import Termius | ⏳ | | | |
 | 6 Split panes, asciicast | ⏳ | | | |
 | 7 Sync locale | ⏳ | | | |
 | 8 Windows | ⏳ | | | |
+
+## Revues de la phase 4 (2026-10-21)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les autres ont été traités, sauf mention.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` core 4a et release | 3 MOYEN, 5 FAIBLE | Signature macOS isolée (environnement `release`, outils Apple seulement), aucun cache en release, outillage AppImage épinglé et vérifié, actions épinglées par SHA, métadonnées validées en lecture, options sensibles (`SetEnv` masqué, commandes signalées), écritures plafonnées, liens et FIFO refusés |
+| `agent-security` audit final MVP | 1 MOYEN, 1 FAIBLE | `cargo deny` remis au vert (apps `publish = false`, 5 avis triés par ID), log TUI hors de `/tmp` (`0600`, lien refusé), `SECURITY.md` avec les risques résiduels ; aucun interdit de `CLAUDE.md` §11 violé |
+| `agent-design-review` | 1 BLOQUANT, 10 IMPORTANT | Barre de statut GUI qui perdait statut et latence au-delà de 1100 px ; couleurs des niveaux de log (INFO neutre), même grammaire du panneau de logs dans les deux UIs, aide `?` complète, avertissement `settings.toml` commun, « voir les logs » dans les états d'erreur, alias longs, chips de tags au clavier, `*` et `Shift-X` partagés |
+| Mesures (`docs/PERF.md`) | 3 écarts | Chargement des gros `ssh_config` : 564 ms → 12 ms pour 2 000 hôtes ; curseur GUI fixe au repos (à re-mesurer) ; premier rendu GUI à ~1,1 s sous Xvfb sans GPU (environnement défavorable, à mesurer sur un vrai poste) |
+
+Restent mineurs : un `draw` TUI à chaque sonde keepalive (invisible), « ↵ connect » dans la barre de statut alors que les détails
+d'un hôte en échec disent « ↵ retry », l'aide TUI en 80×24 qui recouvre la barre de statut.
 
 ## Revues de la phase 3 (2026-10-21)
 
