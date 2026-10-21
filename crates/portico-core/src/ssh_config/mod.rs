@@ -117,6 +117,71 @@ pub struct HostAlias {
 pub struct SshConfig {
     pub(crate) blocks: Vec<Block>,
     warnings: Vec<ConfigWarning>,
+    /// Built on first use (blocks are complete by then).
+    index: std::sync::OnceLock<BlockIndex>,
+}
+
+/// Which blocks can apply to an alias, so resolving every alias of a large
+/// config does not test every block against every alias (quadratic).
+/// A block whose only condition is `Host` with literal names (no wildcard,
+/// no negation) can only apply to those names: it is indexed by them
+/// (lowercased, matching is case-insensitive). Every other block is generic
+/// and is always tested. Order is kept: resolving walks the merged block
+/// numbers in file order, so OpenSSH's first-value-wins is unchanged.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BlockIndex {
+    literal: std::collections::HashMap<String, Vec<usize>>,
+    generic: Vec<usize>,
+}
+
+impl BlockIndex {
+    fn build(blocks: &[Block]) -> Self {
+        let mut index = Self::default();
+        for (i, block) in blocks.iter().enumerate() {
+            match block.conditions.as_slice() {
+                [Condition::Host(patterns)]
+                    if !patterns.is_empty() && patterns.iter().all(HostPattern::is_concrete) =>
+                {
+                    for p in patterns {
+                        let list = index.literal.entry(p.glob.to_lowercase()).or_default();
+                        if list.last() != Some(&i) {
+                            list.push(i);
+                        }
+                    }
+                }
+                _ => index.generic.push(i),
+            }
+        }
+        index
+    }
+
+    /// Block numbers that may apply to `alias`, in file order.
+    pub(crate) fn candidates(&self, alias: &str) -> Vec<usize> {
+        let literal = self
+            .literal
+            .get(&alias.to_lowercase())
+            .map_or(&[][..], Vec::as_slice);
+        let mut out = Vec::with_capacity(self.generic.len() + literal.len());
+        let (mut g, mut l) = (self.generic.iter().peekable(), literal.iter().peekable());
+        loop {
+            let next = match (g.peek(), l.peek()) {
+                (Some(&&a), Some(&&b)) if a <= b => g.next(),
+                (Some(_) | None, Some(_)) => l.next(),
+                (Some(_), None) => g.next(),
+                (None, None) => break,
+            };
+            if let Some(&n) = next {
+                out.push(n);
+            }
+        }
+        out
+    }
+}
+
+impl SshConfig {
+    pub(crate) fn block_index(&self) -> &BlockIndex {
+        self.index.get_or_init(|| BlockIndex::build(&self.blocks))
+    }
 }
 
 impl SshConfig {
@@ -161,6 +226,7 @@ impl SshConfig {
     /// Concrete host aliases in declaration order, de-duplicated.
     pub fn host_aliases(&self) -> Vec<HostAlias> {
         let mut out: Vec<HostAlias> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for block in &self.blocks {
             // Only the block's own (last) condition declares names.
             let Some(Condition::Host(patterns)) = block.conditions.last() else {
@@ -174,7 +240,7 @@ impl SshConfig {
                 |d| d.source.clone(),
             );
             for p in patterns.iter().filter(|p| p.is_concrete()) {
-                if !out.iter().any(|a| a.name == p.glob) {
+                if seen.insert(p.glob.as_str()) {
                     out.push(HostAlias {
                         name: p.glob.clone(),
                         source: source.clone(),

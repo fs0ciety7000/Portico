@@ -254,3 +254,11 @@ python3 bench/perf.py gui-start --bin target/release/portico-gui --runs 10 --war
 python3 bench/perf.py gui-idle  --bin target/release/portico-gui --seconds 30 --sessions 5
 python3 bench/fixtures.py /tmp/cfg --hosts 2000 --includes 8   # la config seule, pour l'inspecter
 ```
+
+## Correctifs après mesures (2026-10-21)
+
+| Constat | Correctif | Effet mesuré |
+|---|---|---|
+| Chargement quadratique d'un gros `~/.ssh/config` (1,54 s pour 2 000 hôtes de bout en bout, 47 s pour 10 000) | Index des blocs `Host` à noms littéraux (`ssh_config::BlockIndex`) : pour un alias, seuls ses blocs littéraux et les blocs génériques sont testés, dans l'ordre du fichier (sémantique « premier gagne » inchangée, test dédié) ; HostName/User calculés seulement pour un `Match host`/`Match user` ; déduplication des alias par `HashSet` | Parsing + résolution de 2 000 alias (test `large_config_resolves_every_alias`, release) : **564 ms → 12 ms** |
+| GUI : ~12 % de CPU au repos avec un onglet terminal focalisé (repeint du curseur clignotant en rendu logiciel) | Le curseur clignote pendant l'activité (frappe, sortie) et devient fixe après 5 s de calme | À re-mesurer avec `bench/run-all.sh` (build release + Xvfb) |
+| TUI : un `draw` à chaque sonde keepalive (25 octets, aucun changement visible) | Non traité (mineur) | — |

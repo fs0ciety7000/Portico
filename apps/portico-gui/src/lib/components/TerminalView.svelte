@@ -145,8 +145,24 @@
     }
   }
 
+  // The cursor blinks while something happens and goes solid after a few
+  // quiet seconds: a blinking cursor repaints forever, which costs real CPU
+  // with software rendering (docs/PERF.md) for no information.
+  const BLINK_WHILE_ACTIVE_MS = 5000;
+  let blinkTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function wake() {
+    if (!term) return;
+    if (!term.options.cursorBlink) term.options.cursorBlink = true;
+    clearTimeout(blinkTimer);
+    blinkTimer = setTimeout(() => {
+      if (term) term.options.cursorBlink = false;
+    }, BLINK_WHILE_ACTIVE_MS);
+  }
+
   function write(flow: Flow, bytes: Uint8Array) {
     if (!term || flow.generation !== tab.generation) return;
+    wake();
     term.write(bytes, () => {
       if (flow.generation !== tab.generation) return;
       flow.parsed += bytes.length;
@@ -242,6 +258,7 @@
       destroyed = true;
       observer.disconnect();
       clearTimeout(resizeTimer);
+      clearTimeout(blinkTimer);
       term?.dispose();
       term = undefined;
     };
@@ -296,7 +313,10 @@
       }
       return false;
     });
-    term.onData((d) => send(d, false));
+    term.onData((d) => {
+      wake();
+      send(d, false);
+    });
     term.onBinary((d) => send(d, true));
     term.onTitleChange((t) => (tab.title = sanitizeTitle(t)));
 
@@ -310,6 +330,7 @@
     host.addEventListener("paste", onPaste, true);
 
     void open();
+    wake();
     if (active && autofocus) requestAnimationFrame(() => term?.focus());
   }
 

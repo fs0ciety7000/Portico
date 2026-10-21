@@ -251,3 +251,49 @@ fn identity_agent_expansion() {
     );
     assert_eq!(super::resolve::expand_env("${PORTICO_UNSET_VAR}/x"), "/x");
 }
+
+/// Loading a large config (docs/PERF.md): run with
+/// `cargo test -p portico-core --release large_config -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing, run on demand"]
+#[allow(clippy::print_stderr)] // the timing is the output
+fn large_config_resolves_every_alias() {
+    use std::fmt::Write;
+    let mut text = String::from(
+        "Host *\n    ServerAliveInterval 30\n\nMatch host *.internal\n    User ops\n\n",
+    );
+    for i in 0..2000 {
+        let _ = write!(
+            text,
+            "Host h{i}\n    HostName h{i}.internal\n    Port {}\n\n",
+            2000 + i
+        );
+    }
+    let started = std::time::Instant::now();
+    let config = parse(&text);
+    let aliases = config.host_aliases();
+    for a in &aliases {
+        let _ = config.resolve(&a.name, &ctx());
+    }
+    eprintln!("2000 hosts: {:?}", started.elapsed());
+    assert_eq!(aliases.len(), 2000);
+}
+
+#[test]
+fn block_index_keeps_file_order_and_case() {
+    // Generic and literal blocks interleaved: first value still wins in file
+    // order, names match without case, a negated or wildcard block stays
+    // generic.
+    let config = parse(
+        "Host *\n    Port 1\nHost Web\n    Port 2\n    User a\nHost * !db\n    User b\n\
+         Host web\n    User c\n    HostName web.example\nHost db web\n    Compression yes\n",
+    );
+    let web = config.resolve("WEB", &ctx());
+    assert_eq!(web.port, 1, "Host * comes first");
+    assert_eq!(web.user.as_deref(), Some("a"));
+    assert_eq!(web.hostname, "web.example");
+    assert!(web.options.contains_key("compression"));
+    let db = config.resolve("db", &ctx());
+    assert_eq!(db.user, None, "`Host * !db` does not apply to db");
+    assert!(db.options.contains_key("compression"));
+}

@@ -95,22 +95,27 @@ impl SshConfig {
         // ProxyCommand and ProxyJump share one slot: the first one wins.
         let mut proxy_winner: Option<&'static str> = None;
 
-        for block in &self.blocks {
-            // Re-evaluated per block: `Match host` sees the HostName set so far.
-            let hostname = current_hostname(&options, alias);
-            let user = ctx
-                .user_override
-                .clone()
-                .or_else(|| first_arg(&options, "user").map(str::to_owned))
-                .unwrap_or_else(|| ctx.local_user.clone());
+        let candidates = self.block_index().candidates(alias);
+        for block in candidates.iter().filter_map(|&i| self.blocks.get(i)) {
+            // Re-evaluated per block (`Match host` sees the HostName set so
+            // far), but only for blocks that ask: most are plain `Host`
+            // blocks, and computing these for every block of every alias made
+            // loading a large config quadratic in string work.
+            let hostname = || current_hostname(&options, alias);
+            let user = || {
+                ctx.user_override
+                    .clone()
+                    .or_else(|| first_arg(&options, "user").map(str::to_owned))
+                    .unwrap_or_else(|| ctx.local_user.clone())
+            };
 
             let applies = block.conditions.iter().all(|c| match c {
                 Condition::Host(patterns) => match_pattern_list(patterns, alias),
                 Condition::Match(criteria) => criteria.iter().all(|m| match m {
                     MatchCriterion::All => true,
-                    MatchCriterion::Host(p, neg) => match_pattern_list(p, &hostname) != *neg,
+                    MatchCriterion::Host(p, neg) => match_pattern_list(p, &hostname()) != *neg,
                     MatchCriterion::OriginalHost(p, neg) => match_pattern_list(p, alias) != *neg,
-                    MatchCriterion::User(p, neg) => match_pattern_list(p, &user) != *neg,
+                    MatchCriterion::User(p, neg) => match_pattern_list(p, &user()) != *neg,
                     MatchCriterion::LocalUser(p, neg) => {
                         match_pattern_list(p, &ctx.local_user) != *neg
                     }
