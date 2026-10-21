@@ -8,8 +8,10 @@
 //! | `snippets.toml`   | command snippets                          |
 //! | `settings.toml`   | theme, keymap overrides, preferences      |
 //! | `state/recent.toml` | recent sessions (data dir)              |
+//! | `vault.toml`      | encrypted secrets fallback (data dir)     |
 //!
-//! Secrets are **never** written here (see [`crate::secrets`]).
+//! Secrets are **never** written here in clear text (see [`crate::secrets`]
+//! and [`crate::vault`]).
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +72,16 @@ impl Paths {
         self.ssh_dir.join("known_hosts")
     }
 
+    /// `snippets.toml` (config dir).
+    pub fn snippets(&self) -> PathBuf {
+        self.config_dir.join("snippets.toml")
+    }
+
+    /// Encrypted fallback vault (data dir), see [`crate::vault`].
+    pub fn vault(&self) -> PathBuf {
+        self.data_dir.join("vault.toml")
+    }
+
     /// OpenSSH default identities, in OpenSSH's order.
     pub fn default_identities(&self) -> Vec<PathBuf> {
         ["id_rsa", "id_ecdsa", "id_ed25519"]
@@ -102,6 +114,37 @@ pub fn save_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = write_temp(path, bytes)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        Error::io(path, e)
+    })
+}
+
+/// Like [`write_atomic`] but never replaces an existing file: the complete
+/// temp file is hard-linked to `path`, which fails with
+/// [`std::io::ErrorKind::AlreadyExists`] (no check-then-write race).
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> std::result::Result<(), WriteNewError> {
+    let tmp = write_temp(path, bytes).map_err(WriteNewError::Other)?;
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(WriteNewError::Exists),
+        Err(e) => Err(WriteNewError::Other(Error::io(path, e))),
+    }
+}
+
+/// Failure of [`write_new`].
+#[derive(Debug)]
+pub(crate) enum WriteNewError {
+    /// The destination already exists (it was left untouched).
+    Exists,
+    Other(Error),
+}
+
+/// Writes `bytes` to a `0600` temp file next to `path`, synced to disk.
+fn write_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     use std::io::Write;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -120,9 +163,14 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         opts.mode(0o600);
     }
     let mut file = opts.open(&tmp).map_err(|e| Error::io(&tmp, e))?;
-    file.write_all(bytes).map_err(|e| Error::io(&tmp, e))?;
-    file.sync_all().map_err(|e| Error::io(&tmp, e))?;
-    std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| Error::io(&tmp, e));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map(|()| tmp)
 }
 
 #[cfg(test)]
@@ -151,5 +199,19 @@ mod tests {
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn write_new_refuses_to_replace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("new.txt");
+        write_new(&path, b"first").expect("create");
+        assert!(matches!(
+            write_new(&path, b"second"),
+            Err(WriteNewError::Exists)
+        ));
+        assert_eq!(std::fs::read(&path).expect("read"), b"first");
+        // No temp file left behind.
+        assert_eq!(std::fs::read_dir(dir.path()).expect("ls").count(), 1);
     }
 }

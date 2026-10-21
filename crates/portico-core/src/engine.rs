@@ -35,7 +35,7 @@ use crate::hosts::{HostEntry, HostMetaFile, inventory};
 use crate::ids::{PromptId, SessionId, TerminalId, TransferId, TunnelId};
 use crate::logs::LogLevel;
 use crate::logs::{LogRecord, LogRing};
-use crate::secrets::{KeyringStore, SecretStore};
+use crate::secrets::SecretStore;
 use crate::session::{self, Attached, SessionCommand, SessionCtx};
 use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
 use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
@@ -73,13 +73,15 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
-    /// Platform defaults.
+    /// Platform defaults. Secrets go to the system keyring, or to the
+    /// encrypted vault when no keyring is available (Phase 3).
     pub fn discover() -> Result<Self> {
+        let paths = Paths::discover()?;
         Ok(Self {
-            paths: Paths::discover()?,
+            secrets: crate::secrets::default_store(&paths),
+            paths,
             local_user: local_user(),
             event_capacity: DEFAULT_EVENT_CAPACITY,
-            secrets: Arc::new(KeyringStore),
             agent_socket: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             keepalive: DEFAULT_KEEPALIVE,
@@ -245,6 +247,8 @@ struct Inner {
     shutdown: CancellationToken,
     /// Session actors, so a shutdown can wait for clean closes.
     tasks: TaskTracker,
+    // ── Phase 3: snippets ──
+    snippets: Arc<crate::snippets::SnippetStore>,
 }
 
 #[derive(Debug)]
@@ -261,8 +265,10 @@ impl Engine {
     /// are implemented (they spawn tasks).
     pub fn new(config: EngineConfig) -> Self {
         let (events, _) = broadcast::channel(config.event_capacity.max(16));
+        let snippets = Arc::new(crate::snippets::SnippetStore::new(config.paths.snippets()));
         Self {
             inner: Arc::new(Inner {
+                snippets,
                 config,
                 sftp: Mutex::default(),
                 transfers: Mutex::default(),
@@ -750,6 +756,125 @@ impl Engine {
     }
 }
 
+// ════ Phase 3: vault and snippets (additive block) ═══════════════════════
+//
+// Every operation here is blocking underneath (Argon2, file I/O) and runs on
+// `spawn_blocking`, so no async task ever waits on it.
+
+impl Engine {
+    /// State of the fallback vault: [`VaultStatus::NotInUse`] when the
+    /// system keyring is the secret store.
+    ///
+    /// [`VaultStatus::NotInUse`]: crate::vault::VaultStatus::NotInUse
+    pub async fn vault_status(&self) -> Result<crate::vault::VaultStatus> {
+        let store = Arc::clone(&self.inner.config.secrets);
+        tokio::task::spawn_blocking(move || {
+            store.vault().map_or(
+                crate::vault::VaultStatus::NotInUse,
+                crate::vault::VaultStore::status,
+            )
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)
+    }
+
+    /// Creates the vault (refused if one exists) and leaves it unlocked.
+    pub async fn vault_create(&self, passphrase: SecretString) -> Result<()> {
+        self.with_vault(move |vault| vault.create_in_place(&passphrase))
+            .await
+    }
+
+    /// Unlocks the vault: remembered secrets become readable and new ones
+    /// can be remembered. While it is locked, sessions still connect; they
+    /// only skip remembering (and say so in the session log).
+    pub async fn vault_unlock(&self, passphrase: SecretString) -> Result<()> {
+        self.with_vault(move |vault| vault.unlock_in_place(&passphrase))
+            .await
+    }
+
+    /// Forgets the vault key and every decrypted secret.
+    pub async fn vault_lock(&self) -> Result<()> {
+        self.with_vault(|vault| {
+            vault.lock();
+            Ok(())
+        })
+        .await
+    }
+
+    /// Re-keys the vault under a new master passphrase.
+    pub async fn vault_change_passphrase(
+        &self,
+        old: SecretString,
+        new: SecretString,
+    ) -> Result<()> {
+        self.with_vault(move |vault| vault.change_passphrase(&old, &new))
+            .await
+    }
+
+    async fn with_vault<T, F>(&self, op: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&crate::vault::VaultStore) -> Result<T> + Send + 'static,
+    {
+        let store = Arc::clone(&self.inner.config.secrets);
+        tokio::task::spawn_blocking(move || {
+            let vault = store.vault().ok_or(crate::vault::VaultError::NotInUse)?;
+            op(vault)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Every snippet of `snippets.toml`, in file order.
+    pub async fn snippets(&self) -> Result<Vec<crate::snippets::Snippet>> {
+        let store = Arc::clone(&self.inner.snippets);
+        tokio::task::spawn_blocking(move || store.list())
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Creates or updates (by id) a snippet after validation; an empty id
+    /// is derived from the name. Returns the snippet as stored.
+    pub async fn save_snippet(
+        &self,
+        snippet: crate::snippets::Snippet,
+    ) -> Result<crate::snippets::Snippet> {
+        let store = Arc::clone(&self.inner.snippets);
+        tokio::task::spawn_blocking(move || store.save(snippet))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    pub async fn delete_snippet(&self, id: &str) -> Result<()> {
+        let store = Arc::clone(&self.inner.snippets);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || store.delete(&id))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Snippets whose scope covers `host_alias` (global ones, those naming
+    /// the alias, those sharing one of its inventory tags). An alias absent
+    /// from the inventory has no tags.
+    pub async fn snippets_for(&self, host_alias: &str) -> Result<Vec<crate::snippets::Snippet>> {
+        let inventory = self.load_hosts().await?;
+        let tags = inventory
+            .hosts
+            .iter()
+            .find(|h| h.alias == host_alias)
+            .map(|h| h.meta.tags.clone())
+            .unwrap_or_default();
+        Ok(self
+            .snippets()
+            .await?
+            .into_iter()
+            .filter(|s| s.applies_to_alias(host_alias, &tags))
+            .collect())
+    }
+}
+
+// ════ end Phase 3 ════════════════════════════════════════════════════════
+
 /// Removes a pending prompt and tells the UIs, when the asking side stops
 /// waiting for any reason.
 struct WithdrawPrompt<'a> {
@@ -827,5 +952,182 @@ mod tests {
             engine.respond(id, PromptResponse::Cancel),
             Err(Error::UnknownPrompt(_))
         ));
+    }
+
+    // ── Phase 3: vault and snippets ──
+
+    fn vault_engine(root: &std::path::Path) -> Engine {
+        let paths = Paths::rooted(root);
+        Engine::new(EngineConfig {
+            secrets: Arc::new(crate::vault::VaultStore::open_for_tests(paths.vault())),
+            ..engine(root).config().clone()
+        })
+    }
+
+    fn secret(s: &str) -> SecretString {
+        SecretString::from(s.to_owned())
+    }
+
+    #[tokio::test]
+    async fn vault_lifecycle() {
+        use crate::secrets::SecretKey;
+        use crate::vault::VaultStatus;
+        use secrecy::ExposeSecret;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = vault_engine(dir.path());
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            VaultStatus::Absent
+        );
+        let e = engine
+            .vault_unlock(secret("correct horse"))
+            .await
+            .expect_err("missing");
+        assert_eq!(e.summary().code, "vault_missing");
+
+        engine
+            .vault_create(secret("correct horse"))
+            .await
+            .expect("create");
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            VaultStatus::Unlocked
+        );
+        let e = engine
+            .vault_create(secret("correct horse"))
+            .await
+            .expect_err("exists");
+        assert_eq!(e.summary().code, "vault_exists");
+
+        // The session code path: secrets go through `config().secrets`.
+        let key = SecretKey::KeyPassphrase {
+            fingerprint: "SHA256:k".into(),
+        };
+        let store = Arc::clone(&engine.config().secrets);
+        store.set(&key, &secret("pw")).expect("set");
+
+        engine.vault_lock().await.expect("lock");
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            VaultStatus::Locked
+        );
+        // Locked: lookups fail softly (the session treats it as "nothing
+        // remembered") and remembering is refused with a typed error.
+        assert_eq!(
+            store.get(&key).expect_err("locked").summary().code,
+            "vault_locked"
+        );
+        assert_eq!(
+            store
+                .set(&key, &secret("x"))
+                .expect_err("locked")
+                .summary()
+                .code,
+            "vault_locked"
+        );
+
+        let e = engine
+            .vault_unlock(secret("wrong horse"))
+            .await
+            .expect_err("wrong");
+        assert_eq!(e.summary().code, "vault_wrong_passphrase");
+        engine
+            .vault_unlock(secret("correct horse"))
+            .await
+            .expect("unlock");
+        assert_eq!(
+            store.get(&key).expect("get").expect("some").expose_secret(),
+            "pw"
+        );
+
+        engine
+            .vault_change_passphrase(secret("correct horse"), secret("battery staple"))
+            .await
+            .expect("rekey");
+        engine.vault_lock().await.expect("lock");
+        engine
+            .vault_unlock(secret("battery staple"))
+            .await
+            .expect("unlock");
+    }
+
+    #[tokio::test]
+    async fn vault_not_in_use_with_another_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path());
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            crate::vault::VaultStatus::NotInUse
+        );
+        let e = engine
+            .vault_unlock(secret("correct horse"))
+            .await
+            .expect_err("n/a");
+        assert_eq!(e.summary().code, "vault_not_in_use");
+    }
+
+    #[tokio::test]
+    async fn snippet_crud_and_scope() {
+        use crate::snippets::{Snippet, SnippetScope};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+        std::fs::create_dir_all(root.join("config")).expect("mkdir");
+        std::fs::write(
+            root.join(".ssh/config"),
+            "Host prod\n  HostName 10.0.0.1\nHost dev\n",
+        )
+        .expect("w");
+        std::fs::write(
+            root.join("config/hosts.toml"),
+            "[hosts.prod]\ntags = [\"Prod\"]\n",
+        )
+        .expect("w");
+        let engine = engine(root);
+        assert!(engine.snippets().await.expect("list").is_empty());
+
+        let make = |name: &str, scope| Snippet {
+            id: String::new(),
+            name: name.into(),
+            command: "uptime".into(),
+            description: None,
+            scope,
+            run: true,
+        };
+        let global = engine
+            .save_snippet(make("Up", SnippetScope::Global))
+            .await
+            .expect("save");
+        assert_eq!(global.id, "up");
+        let tagged = engine
+            .save_snippet(make("Up", SnippetScope::Tags(vec!["prod".into()])))
+            .await
+            .expect("save");
+        assert_eq!(tagged.id, "up-2");
+        engine
+            .save_snippet(make("Dev only", SnippetScope::Hosts(vec!["dev".into()])))
+            .await
+            .expect("save");
+
+        let ids = |list: Vec<Snippet>| list.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(engine.snippets_for("prod").await.expect("for")),
+            ["up", "up-2"]
+        );
+        assert_eq!(
+            ids(engine.snippets_for("dev").await.expect("for")),
+            ["up", "dev-only"]
+        );
+        assert_eq!(
+            ids(engine.snippets_for("unknown").await.expect("for")),
+            ["up"]
+        );
+
+        engine.delete_snippet("up-2").await.expect("delete");
+        assert_eq!(engine.snippets().await.expect("list").len(), 2);
+        let e = engine.delete_snippet("up-2").await.expect_err("gone");
+        assert_eq!(e.summary().code, "snippet_not_found");
     }
 }

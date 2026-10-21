@@ -36,6 +36,7 @@ pub mod sftp;
 pub mod snippets;
 pub mod ssh_config;
 pub mod store;
+pub mod vault;
 
 pub use agent::{AgentCertificate, AgentKey};
 pub use copy_id::CopyIdOutcome;

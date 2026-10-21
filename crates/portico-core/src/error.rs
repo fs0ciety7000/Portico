@@ -108,6 +108,14 @@ pub enum Error {
 
     #[error(transparent)]
     Key(#[from] crate::keys::KeyError),
+
+    // ── Phase 3: vault and snippets ─────────────────────────────────────
+    #[error(transparent)]
+    Vault(#[from] crate::vault::VaultError),
+
+    #[error(transparent)]
+    Snippet(#[from] crate::snippets::SnippetError),
+    // ── end Phase 3 ─────────────────────────────────────────────────────
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -254,6 +262,10 @@ impl Error {
             Self::Sftp(e) => e.code_and_hint(),
             Self::Tunnel(e) => e.code_and_hint(),
             Self::Key(e) => e.code_and_hint(),
+
+            // ── Phase 3: vault and snippets ──
+            Self::Vault(e) => e.code_and_hint(),
+            Self::Snippet(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),
