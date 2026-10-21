@@ -960,3 +960,192 @@ async fn a_stalled_local_peer_does_not_freeze_the_session() {
     // for a channel the client closed, so this fixture cannot show it.
     assert!(f.env.engine.tunnels().iter().any(|t| t.id == busy));
 }
+
+// ── -D (SOCKS5) ────────────────────────────────────────────────────────────
+
+/// A SOCKS5 client written for the test: no authentication, CONNECT to
+/// `host` (sent as a domain name unless it parses as an IPv4 address).
+/// Returns the reply code and the stream, ready to carry data on success.
+async fn socks_connect(proxy: u16, host: &str, port: u16) -> (u8, tokio::net::TcpStream) {
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+        .await
+        .unwrap();
+    s.write_all(&[5, 1, 0]).await.unwrap();
+    let mut chosen = [0_u8; 2];
+    s.read_exact(&mut chosen).await.unwrap();
+    assert_eq!(chosen, [5, 0], "no authentication chosen");
+    let mut request = vec![5, 1, 0];
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        request.push(1);
+        request.extend(ip.octets());
+    } else {
+        request.push(3);
+        request.push(u8::try_from(host.len()).unwrap());
+        request.extend(host.as_bytes());
+    }
+    request.extend(port.to_be_bytes());
+    s.write_all(&request).await.unwrap();
+    let mut reply = [0_u8; 10];
+    tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut reply))
+        .await
+        .expect("SOCKS reply in time")
+        .unwrap();
+    assert_eq!((reply[0], reply[3]), (5, 1), "VER, ATYP IPv4");
+    (reply[1], s)
+}
+
+async fn echo_through(s: &mut tokio::net::TcpStream) {
+    s.write_all(b"portico socks").await.unwrap();
+    let mut buf = [0_u8; 13];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf))
+        .await
+        .expect("echo in time")
+        .unwrap();
+    assert_eq!(&buf, b"portico socks");
+}
+
+async fn start_socks(f: &mut Fixture) -> (TunnelId, u16) {
+    let spec = ForwardSpec::Dynamic {
+        bind: ep("127.0.0.1", 0),
+    };
+    let id = f
+        .env
+        .engine
+        .start_tunnel(f.id, spec.clone(), false)
+        .await
+        .unwrap();
+    let TunnelEvent::Listening { bind } = tunnel_event(&mut f.env, id).await else {
+        panic!("expected Listening");
+    };
+    assert_eq!(f.env.engine.tunnels().first().unwrap().spec, spec);
+    (id, port_of(&bind))
+}
+
+#[tokio::test]
+async fn dynamic_forward_by_address_and_by_name() {
+    let echo = echo_server().await;
+    let mut f = connected(Behaviour {
+        allow_direct_tcpip: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let (id, proxy) = start_socks(&mut f).await;
+
+    let (code, mut by_ip) = socks_connect(proxy, "127.0.0.1", echo).await;
+    assert_eq!(code, 0);
+    echo_through(&mut by_ip).await;
+    assert!(matches!(
+        tunnel_event(&mut f.env, id).await,
+        TunnelEvent::ConnectionOpened { .. }
+    ));
+
+    let (code, mut by_name) = socks_connect(proxy, "localhost", echo).await;
+    assert_eq!(code, 0);
+    echo_through(&mut by_name).await;
+    // The name reached the server as is: resolved there, not here.
+    let asked = f.server.behaviour.direct_targets.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        [format!("127.0.0.1:{echo}"), format!("localhost:{echo}")]
+    );
+    drop((by_ip, by_name));
+}
+
+#[tokio::test]
+async fn dynamic_forward_reports_channel_failures() {
+    let closed = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut f = connected(Behaviour {
+        allow_direct_tcpip: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let (_, proxy) = start_socks(&mut f).await;
+    // sshd's ConnectFailed → "connection refused".
+    let (code, _) = socks_connect(proxy, "127.0.0.1", closed).await;
+    assert_eq!(code, 0x05);
+    // Unsupported command: 0x07, and the tunnel keeps serving.
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+        .await
+        .unwrap();
+    s.write_all(&[5, 1, 0, 5, 2, 0, 1, 127, 0, 0, 1, 0, 80])
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut answer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer, [5, 0, 5, 7, 0, 1, 0, 0, 0, 0, 0, 0]);
+    let echo = echo_server().await;
+    let (code, mut ok) = socks_connect(proxy, "127.0.0.1", echo).await;
+    assert_eq!(code, 0);
+    echo_through(&mut ok).await;
+
+    // A server that forbids forwarding → "not allowed by ruleset".
+    let mut f = connected(Behaviour {
+        allow_tcpip_forward: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let (_, proxy) = start_socks(&mut f).await;
+    let (code, _) = socks_connect(proxy, "localhost", echo).await;
+    assert_eq!(code, 0x02);
+}
+
+#[tokio::test]
+async fn dynamic_forward_exposure_and_stop() {
+    let echo = echo_server().await;
+    let mut f = connected(Behaviour {
+        allow_direct_tcpip: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let err = f
+        .env
+        .engine
+        .start_tunnel(
+            f.id,
+            ForwardSpec::Dynamic {
+                bind: ep("0.0.0.0", 0),
+            },
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.summary().code, "tunnel_exposed");
+    assert!(f.env.engine.tunnels().is_empty());
+
+    let (id, proxy) = start_socks(&mut f).await;
+    let (code, mut open) = socks_connect(proxy, "127.0.0.1", echo).await;
+    assert_eq!(code, 0);
+    echo_through(&mut open).await;
+    // A client that never finishes its handshake.
+    let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+        .await
+        .unwrap();
+    idle.write_all(&[5, 1]).await.unwrap();
+
+    f.env.engine.stop_tunnel(id).unwrap();
+    loop {
+        if matches!(tunnel_event(&mut f.env, id).await, TunnelEvent::Stopped) {
+            break;
+        }
+    }
+    // Stopping cuts the connections in progress, handshakes included.
+    for s in [&mut open, &mut idle] {
+        let mut buf = [0_u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+            .await
+            .expect("closed in time");
+        assert!(matches!(n, Ok(0) | Err(_)), "{n:?}");
+    }
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+            .await
+            .is_err(),
+        "port released"
+    );
+}

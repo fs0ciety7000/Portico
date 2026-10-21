@@ -575,7 +575,7 @@ impl Engine {
 
     // ── Tunnels ─────────────────────────────────────────────────────────
 
-    /// Starts a `-L` / `-R` tunnel on `session` (waits while it connects).
+    /// Starts a `-L` / `-R` / `-D` tunnel on `session` (waits while it connects).
     /// `Listening` or `Failed` follows on the event bus.
     /// A spec reachable from other machines ([`ForwardSpec::is_exposed`])
     /// is refused unless `allow_exposed` (the UI asked the user).
@@ -586,9 +586,8 @@ impl Engine {
         allow_exposed: bool,
     ) -> Result<TunnelId> {
         if spec.is_exposed() && !allow_exposed {
-            let (ForwardSpec::Local { bind, .. } | ForwardSpec::Remote { bind, .. }) = &spec;
             return Err(crate::forward::TunnelError::ExposedNotConfirmed {
-                bind: bind.to_string(),
+                bind: spec.bind().to_string(),
             }
             .into());
         }

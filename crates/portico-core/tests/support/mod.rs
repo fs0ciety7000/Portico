@@ -91,6 +91,8 @@ pub struct Behaviour {
     pub rogue_refused: AtomicUsize,
     /// How many rogue channel opens the client accepted.
     pub rogue_accepted: AtomicUsize,
+    /// `host:port` of every `direct-tcpip` asked for, as the client sent it.
+    pub direct_targets: std::sync::Mutex<Vec<String>>,
 }
 
 pub struct TestServer {
@@ -461,8 +463,11 @@ impl russh::server::Handler for ServerHandler {
             return Ok(()); // dropping `reply` rejects the channel
         }
         let target = format!("{host}:{port}");
+        self.b.direct_targets.lock().unwrap().push(target.clone());
         tokio::spawn(async move {
             let Ok(tcp) = tokio::net::TcpStream::connect(target).await else {
+                // Like sshd: the destination refused or is unreachable.
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
                 return;
             };
             reply.accept().await;

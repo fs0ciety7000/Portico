@@ -1,4 +1,4 @@
-//! Port forwarding (`-L`, `-R`; `-D` post-MVP).
+//! Port forwarding (`-L`, `-R`, `-D`).
 //!
 //! Each running forward is a task under its session's cancellation token;
 //! state changes are published as [`crate::events::TunnelEvent`]s.
@@ -9,6 +9,9 @@
 //!   the client handler accepts a `forwarded-tcpip` channel **only** if it
 //!   matches a route this session asked for, then connects to the local
 //!   target. Every other server-opened channel is refused.
+//! - `-D`: listens locally like `-L` and speaks SOCKS5 ([`crate::socks`]) to
+//!   each client; the destination it asks for (a domain is resolved by the
+//!   server, never here) becomes the `direct-tcpip` target.
 //! - Binding defaults to `localhost`; any other address must be explicit.
 
 use std::collections::HashMap;
@@ -53,6 +56,10 @@ pub(crate) fn stall_limit(keepalive: Duration, count_max: u32, disconnects: bool
     let budget = keepalive.saturating_mul(count_max.max(1)) / 2;
     STALL_TIMEOUT.min(budget).max(MIN_STALL)
 }
+/// Time a SOCKS client has to send its greeting and request.
+const SOCKS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a refused SOCKS client may keep sending before it is closed.
+const SOCKS_LINGER: Duration = Duration::from_millis(500);
 /// Pause after a failed `accept` (e.g. too many open files).
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(200);
 
@@ -80,6 +87,9 @@ pub enum ForwardSpec {
     Local { bind: Endpoint, target: Endpoint },
     /// Ask the server to listen on `bind`, connect locally to `target`.
     Remote { bind: Endpoint, target: Endpoint },
+    /// Listen locally as a SOCKS5 proxy; each client picks its destination,
+    /// reached from the server.
+    Dynamic { bind: Endpoint },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -104,8 +114,40 @@ impl ForwardSpec {
         Ok(Self::Remote { bind, target })
     }
 
+    /// Parses OpenSSH `DynamicForward` / `-D` syntax: `[bind_address:]port`
+    /// (IPv6 bind addresses in brackets). Like `-L`, the bind address
+    /// defaults to `localhost`; empty or `*` means every IPv4 interface.
+    pub fn parse_dynamic(input: &str) -> Result<Self, ForwardParseError> {
+        let text = input.trim();
+        let err = |reason| ForwardParseError {
+            input: text.to_owned(),
+            reason,
+        };
+        let parts = split_colons(text);
+        let (host, port) = match parts.as_slice() {
+            [port] => ("localhost", port),
+            [host, port] => (host.as_str(), port),
+            _ => return Err(err("expected [bind:]port, e.g. 1080")),
+        };
+        if host.chars().any(char::is_whitespace) {
+            return Err(err("expected [bind:]port, e.g. 1080"));
+        }
+        let port = port.parse::<u16>().map_err(|_| err("invalid bind port"))?;
+        let host = if host.is_empty() || host == "*" {
+            "0.0.0.0"
+        } else {
+            host
+        };
+        Ok(Self::Dynamic {
+            bind: Endpoint {
+                host: host.to_owned(),
+                port,
+            },
+        })
+    }
+
     /// What a user types in a UI: `-L 8080:db:5432`, `L 8080 db:5432`,
-    /// `-R 9000:localhost:3000`.
+    /// `-R 9000:localhost:3000`, `-D 1080`.
     pub fn parse_cli(input: &str) -> Result<Self, ForwardParseError> {
         let text = input.trim();
         let err = |reason| ForwardParseError {
@@ -114,11 +156,12 @@ impl ForwardSpec {
         };
         let (kind, rest) = text
             .split_once(char::is_whitespace)
-            .ok_or_else(|| err("start with -L or -R, e.g. -L 8080:db.internal:5432"))?;
+            .ok_or_else(|| err("start with -L, -R or -D, e.g. -L 8080:db.internal:5432"))?;
         match kind.trim_start_matches('-') {
             "L" | "l" => Self::parse_local(rest.trim()),
             "R" | "r" => Self::parse_remote(rest.trim()),
-            _ => Err(err("start with -L or -R")),
+            "D" | "d" => Self::parse_dynamic(rest.trim()),
+            _ => Err(err("start with -L, -R or -D")),
         }
     }
 }
@@ -187,15 +230,22 @@ impl fmt::Display for ForwardSpec {
         match self {
             Self::Local { bind, target } => write!(f, "-L {bind} → {target}"),
             Self::Remote { bind, target } => write!(f, "-R {bind} → {target}"),
+            Self::Dynamic { bind } => write!(f, "SOCKS · {bind}"),
         }
     }
 }
 
 impl ForwardSpec {
+    /// Where the tunnel listens (locally for `-L` / `-D`, on the server
+    /// for `-R`).
+    pub fn bind(&self) -> &Endpoint {
+        let (Self::Local { bind, .. } | Self::Remote { bind, .. } | Self::Dynamic { bind }) = self;
+        bind
+    }
+
     /// True when the listening side is reachable from other machines.
     pub fn is_exposed(&self) -> bool {
-        let (Self::Local { bind, .. } | Self::Remote { bind, .. }) = self;
-        !matches!(bind.host.as_str(), "localhost" | "127.0.0.1" | "::1")
+        !matches!(self.bind().host.as_str(), "localhost" | "127.0.0.1" | "::1")
     }
 }
 
@@ -287,8 +337,9 @@ pub(crate) async fn run(
     let ctx = attached.ctx.clone();
     let result = match &spec {
         ForwardSpec::Local { bind, target } => {
-            run_local(&attached, id, bind, target, &cancel).await
+            run_listener(&attached, id, bind, Some(target), &cancel).await
         }
+        ForwardSpec::Dynamic { bind } => run_listener(&attached, id, bind, None, &cancel).await,
         ForwardSpec::Remote { bind, target } => {
             run_remote(&attached, id, bind, target, &cancel).await
         }
@@ -307,7 +358,11 @@ pub(crate) async fn run(
 }
 
 /// Listens on every address `bind` resolves to, all on the same port.
-async fn bind_all(ctx: &SessionCtx, bind: &Endpoint) -> crate::Result<Vec<TcpListener>> {
+async fn bind_all(
+    ctx: &SessionCtx,
+    flag: &str,
+    bind: &Endpoint,
+) -> crate::Result<Vec<TcpListener>> {
     let bind_error = |source| TunnelError::Bind {
         bind: bind.to_string(),
         source,
@@ -334,7 +389,7 @@ async fn bind_all(ctx: &SessionCtx, bind: &Endpoint) -> crate::Result<Vec<TcpLis
                     ctx.log(
                         LogLevel::Warn,
                         "tunnel",
-                        format!("-L cannot listen on {addr}: {e}"),
+                        format!("{flag} cannot listen on {addr}: {e}"),
                     );
                 }
                 last_error = Some(e);
@@ -350,25 +405,29 @@ async fn bind_all(ctx: &SessionCtx, bind: &Endpoint) -> crate::Result<Vec<TcpLis
     Ok(listeners)
 }
 
-async fn run_local(
+/// `-L` (`target` set) or `-D` (`None`: each client names its target over
+/// SOCKS5): listens, then serves every accepted connection on its own task.
+async fn run_listener(
     attached: &Attached,
     id: TunnelId,
     bind: &Endpoint,
-    target: &Endpoint,
+    target: Option<&Endpoint>,
     cancel: &CancellationToken,
 ) -> crate::Result<()> {
     let ctx = &attached.ctx;
-    let listeners = bind_all(ctx, bind).await?;
+    let flag = if target.is_some() { "-L" } else { "-D" };
+    let listeners = bind_all(ctx, flag, bind).await?;
     let shown = listeners
         .iter()
         .filter_map(|l| l.local_addr().ok())
         .map(|a| a.to_string())
         .collect::<Vec<_>>()
         .join(", ");
+    let to = target.map_or_else(|| "SOCKS5".to_owned(), ToString::to_string);
     ctx.log(
         LogLevel::Info,
         "tunnel",
-        format!("-L listening on {shown} → {target}"),
+        format!("{flag} listening on {shown} → {to}"),
     );
     emit(ctx, id, TunnelEvent::Listening { bind: shown });
 
@@ -414,15 +473,25 @@ async fn run_local(
             );
             continue;
         };
-        tokio::spawn(serve_local(
-            attached.clone(),
-            id,
-            target.clone(),
-            peer,
-            socket,
-            permit,
-            cancel.child_token(),
-        ));
+        match target {
+            Some(target) => tokio::spawn(serve_local(
+                attached.clone(),
+                id,
+                target.clone(),
+                peer,
+                socket,
+                permit,
+                cancel.child_token(),
+            )),
+            None => tokio::spawn(serve_dynamic(
+                attached.clone(),
+                id,
+                peer,
+                socket,
+                permit,
+                cancel.child_token(),
+            )),
+        };
     }
 }
 
@@ -463,6 +532,124 @@ async fn serve_local(
         }
     };
     pipe(ctx, id, peer.to_string(), channel, socket, &cancel).await;
+}
+
+/// One `-D` connection: SOCKS5 handshake (bounded in time), `direct-tcpip`
+/// to the destination the client named, the matching reply, then pipes.
+async fn serve_dynamic(
+    attached: Attached,
+    id: TunnelId,
+    peer: SocketAddr,
+    mut socket: TcpStream,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    cancel: CancellationToken,
+) {
+    use crate::socks::{Reply, SocksError};
+
+    let ctx = &attached.ctx;
+    let negotiated = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return,
+        r = tokio::time::timeout(SOCKS_HANDSHAKE_TIMEOUT, crate::socks::negotiate(&mut socket)) => {
+            r.unwrap_or(Err(SocksError::Timeout))
+        }
+    };
+    let target = match negotiated {
+        Ok(target) => target,
+        Err(e) => {
+            ctx.log(LogLevel::Warn, "tunnel", format!("-D {peer}: {e}"));
+            if !matches!(e, SocksError::Timeout) {
+                close_gently(&mut socket, &cancel).await;
+            }
+            return;
+        }
+    };
+    // Named by a local program: shown in logs, so made display-safe.
+    let shown = format!(
+        "{}:{}",
+        crate::sftp::display_safe(&target.host, 255),
+        target.port
+    );
+    let opened = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return,
+        r = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            attached.handle.channel_open_direct_tcpip(
+                target.host.clone(),
+                u32::from(target.port),
+                peer.ip().to_string(),
+                u32::from(peer.port()),
+            ),
+        ) => r,
+    };
+    let refusal = match opened {
+        Ok(Ok(channel)) => {
+            if crate::socks::reply(&mut socket, Reply::Succeeded)
+                .await
+                .is_ok()
+            {
+                ctx.log(LogLevel::Debug, "tunnel", format!("-D {peer} → {shown}"));
+                pipe(ctx, id, peer.to_string(), channel, socket, &cancel).await;
+            }
+            return;
+        }
+        Ok(Err(e)) => {
+            ctx.log(
+                LogLevel::Warn,
+                "tunnel",
+                format!("-D {peer} → {shown}: {e}"),
+            );
+            socks_reply_for(&e)
+        }
+        Err(_) => {
+            ctx.log(
+                LogLevel::Warn,
+                "tunnel",
+                format!("-D {peer} → {shown}: timed out"),
+            );
+            Reply::HostUnreachable
+        }
+    };
+    // Best effort: the client may be gone already.
+    if crate::socks::reply(&mut socket, refusal).await.is_ok() {
+        close_gently(&mut socket, &cancel).await;
+    }
+}
+
+/// Closes after a SOCKS refusal so the client reads the reply: sends FIN,
+/// then discards what the client still sends for a short, bounded time
+/// (closing with unread input would reset the connection and lose the
+/// reply).
+async fn close_gently(socket: &mut TcpStream, cancel: &CancellationToken) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    if socket.shutdown().await.is_err() {
+        return;
+    }
+    let mut sink = [0_u8; 512];
+    let drain = async { while matches!(socket.read(&mut sink).await, Ok(n) if n > 0) {} };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {}
+        _ = tokio::time::timeout(SOCKS_LINGER, drain) => {}
+    }
+}
+
+/// SOCKS reply for a `direct-tcpip` the server refused. OpenSSH reports a
+/// refused port and an unknown or unreachable host alike (`ConnectFailed`):
+/// "connection refused" is what the client shows for both.
+fn socks_reply_for(error: &russh::Error) -> crate::socks::Reply {
+    use crate::socks::Reply;
+    match error {
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed) => {
+            Reply::ConnectionRefused
+        }
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited) => {
+            Reply::NotAllowed
+        }
+        _ => Reply::GeneralFailure,
+    }
 }
 
 async fn run_remote(
@@ -757,8 +944,80 @@ mod tests {
             Ok(ForwardSpec::Remote { .. })
         ));
         assert!(ForwardSpec::parse_cli("8080:db:5432").is_err());
-        assert!(ForwardSpec::parse_cli("-D 1080").is_err());
         assert!(ForwardSpec::parse_cli("-L nope").is_err());
+        assert!(ForwardSpec::parse_cli("-X 1080").is_err());
+    }
+
+    #[test]
+    fn parses_dynamic_forwards() {
+        let dynamic = |h: &str, p| ForwardSpec::Dynamic { bind: ep(h, p) };
+        assert_eq!(
+            ForwardSpec::parse_cli("-D 1080").unwrap(),
+            dynamic("localhost", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_cli(" d 1080 ").unwrap(),
+            dynamic("localhost", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_cli("-D 0.0.0.0:1080").unwrap(),
+            dynamic("0.0.0.0", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_cli("-D [::1]:1080").unwrap(),
+            dynamic("::1", 1080)
+        );
+        // `DynamicForward` values from ssh_config.
+        assert_eq!(
+            ForwardSpec::parse_dynamic("127.0.0.1:9050").unwrap(),
+            dynamic("127.0.0.1", 9050)
+        );
+        assert_eq!(
+            ForwardSpec::parse_dynamic("*:1080").unwrap(),
+            dynamic("0.0.0.0", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_dynamic(":1080").unwrap(),
+            dynamic("0.0.0.0", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_dynamic("0").unwrap(),
+            dynamic("localhost", 0),
+            "ephemeral port"
+        );
+        for bad in [
+            "",
+            "-D",
+            "-D ",
+            "-D nope",
+            "-D 70000",
+            "-D -1",
+            "-D ::1:1080",
+            "-D a:b:1080",
+            "-D 1080:db:22",
+            "-D a b:1080",
+        ] {
+            assert!(ForwardSpec::parse_cli(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn dynamic_display_exposure_and_serde() {
+        let socks = ForwardSpec::parse_cli("-D 1080").unwrap();
+        assert_eq!(socks.to_string(), "SOCKS · localhost:1080");
+        assert!(!socks.is_exposed());
+        assert_eq!(socks.bind(), &ep("localhost", 1080));
+        let exposed = ForwardSpec::parse_cli("-D 0.0.0.0:1080").unwrap();
+        assert!(exposed.is_exposed());
+        assert_eq!(
+            ForwardSpec::parse_cli("-D [::1]:1080").unwrap().to_string(),
+            "SOCKS · [::1]:1080"
+        );
+        let json = serde_json::to_string(&socks).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"dynamic","bind":{"host":"localhost","port":1080}}"#
+        );
     }
 
     #[test]

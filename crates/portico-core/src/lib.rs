@@ -38,6 +38,7 @@ pub mod session;
 pub mod settings;
 pub mod sftp;
 pub mod snippets;
+mod socks;
 pub mod ssh_config;
 pub mod store;
 pub mod vault;
