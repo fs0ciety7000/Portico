@@ -7,8 +7,18 @@
   import { vault } from "../state/vault.svelte";
   import Modal from "./Modal.svelte";
 
-  let { prompt, alias, onanswer }: { prompt: Prompt; alias: string | undefined; onanswer: (a: PromptAnswer) => void } =
-    $props();
+  let {
+    prompt,
+    alias,
+    context = null,
+    onanswer,
+  }: {
+    prompt: Prompt;
+    alias: string | undefined;
+    /** What asked for it when it is not a terminal (`Copy id_ed25519 to web-01 · Verifying`). */
+    context?: string | null;
+    onanswer: (a: PromptAnswer) => void;
+  } = $props();
 
   let armed = $state(false);
   let armedAt = $state(0);
@@ -76,6 +86,7 @@
   {/snippet}
 
   <div class="content" role="presentation" {onkeydown}>
+    {#if context}<p class="context">{context}</p>{/if}
     {#if kind.kind === "unknown_host_key"}
       <p class="lead">First connection to <span class="mono">{target}</span>.</p>
       <p>Verify this fingerprint with the server's administrator before trusting it.</p>
@@ -162,6 +173,11 @@
 <style>
   .content { display: grid; gap: var(--space-3); }
   .lead { color: var(--text-primary); }
+  .context {
+    margin-top: calc(-1 * var(--space-2));
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
   .fingerprint { font-weight: 600; letter-spacing: 0.01em; }
   .warning { color: var(--status-warning); }
   .retry { color: var(--status-error); font-size: var(--text-sm); }

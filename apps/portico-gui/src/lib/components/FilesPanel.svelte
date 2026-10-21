@@ -8,7 +8,7 @@
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
   import { flip } from "svelte/animate";
-  import { describe, formatEta, formatSize, displayPath, type RemoteEntry } from "../api";
+  import { describe, formatEta, formatSize, displayPath, sentence, type RemoteEntry } from "../api";
   import { dur } from "../motion";
   import { crumbs, displaySafe, files, type Transfer } from "../state/files.svelte";
   import { isLive, workspace } from "../state/workspace.svelte";
@@ -259,7 +259,7 @@
     {#if ended || ex?.error?.code === "session_ended"}
       {@const err = ended ?? ex?.error}
       <div class="state error" role="alert">
-        <strong>{err?.message}</strong>
+        <strong>{sentence(err?.message ?? "")}</strong>
         {#if err?.hint}<span>{err.hint}</span>{/if}
         {#if !refused}
           <div class="actions">
@@ -275,7 +275,7 @@
       </div>
     {:else if ex?.error}
       <div class="state error" role="alert">
-        <strong>{ex.error.message}</strong>
+        <strong>{sentence(ex.error.message)}</strong>
         {#if ex.error.hint}<span>{ex.error.hint}</span>{/if}
         <div class="actions">
           <button class="secondary" onclick={() => files.refresh(session)}>Retry <kbd>Ctrl-R</kbd></button>

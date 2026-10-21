@@ -3,9 +3,8 @@
   // never a path); the passphrase is sent once, as a SecretString on the
   // Rust side, and the fields are cleared right after.
   import { onMount } from "svelte";
-  import type { ErrorSummary, KeyAlgorithm } from "../api";
+  import { asError, sentence, type ErrorSummary, type KeyAlgorithm } from "../api";
   import { backend } from "../backend";
-  import { asError } from "../api";
   import { keys } from "../state/keys.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
@@ -43,6 +42,10 @@
   let confirm = $state("");
   let busy = $state(false);
   let error: ErrorSummary | null = $state(null);
+  /** A passphrase was sent, refused with the rest of the form, and cleared:
+   * never create the key without one unless the user says so. */
+  let passphraseCleared = $state(false);
+  let withoutPassphrase = $state(false);
 
   /** First free name: id_ed25519, id_ed25519_2, … */
   function freeName(base: string): string {
@@ -62,9 +65,16 @@
     backend.keyDefaults().then((d) => (comment ||= d.comment), () => {});
   });
 
+  /** Shortest non-empty passphrase (same rule as the TUI); empty = none. */
+  const MIN_PASSPHRASE = 8;
+  const passphraseChars = $derived([...passphrase].length);
+  const tooShort = $derived(passphraseChars > 0 && passphraseChars < MIN_PASSPHRASE);
   const mismatch = $derived(confirm.length > 0 && passphrase !== confirm);
   const taken = $derived(keys.local.some((k) => k.id === name.trim()));
-  const canCreate = $derived(armed && !busy && name.trim().length > 0 && !mismatch && passphrase === confirm && !taken);
+  const passphraseDecided = $derived(!passphraseCleared || passphrase.length > 0 || withoutPassphrase);
+  const canCreate = $derived(
+    armed && !busy && name.trim().length > 0 && !mismatch && !tooShort && passphrase === confirm && !taken && passphraseDecided,
+  );
   const slow = $derived(current?.algorithm.kind === "rsa");
 
   async function create() {
@@ -82,6 +92,10 @@
       workspace.notify({ code: "key_created", message: `Created ${key.id}`, hint: `${key.privateDisplay} and ${key.publicDisplay}` }, "info");
     } catch (e) {
       error = asError(e);
+      if (secret) {
+        passphraseCleared = true;
+        withoutPassphrase = false;
+      }
     } finally {
       busy = false;
     }
@@ -141,7 +155,12 @@
     <div class="pair">
       <label class="field">
         <span>Passphrase</span>
-        <input type="password" bind:value={passphrase} autocomplete="new-password" spellcheck="false" />
+        <input type="password" bind:value={passphrase} autocomplete="new-password" spellcheck="false" aria-describedby="keygen-passphrase-rule" />
+        <span class="help rule" id="keygen-passphrase-rule">
+          <span>At least {MIN_PASSPHRASE} characters</span>
+          <!-- Capped: never tells the length beyond the minimum. -->
+          <span class="count" class:met={passphraseChars >= MIN_PASSPHRASE}>{Math.min(passphraseChars, MIN_PASSPHRASE)} / {MIN_PASSPHRASE} min</span>
+        </span>
       </label>
       <label class="field">
         <span>Confirm passphrase</span>
@@ -150,12 +169,20 @@
     </div>
     {#if mismatch}
       <span class="inline-error" role="alert">The passphrases differ.</span>
+    {:else if passphraseCleared && !passphrase}
+      <div class="cleared" role="status">
+        <span class="soft-warning">Type the passphrase again: it was cleared when the key was refused.</span>
+        <label class="check">
+          <input type="checkbox" bind:checked={withoutPassphrase} />
+          <span>Create it without a passphrase</span>
+        </label>
+      </div>
     {:else if !passphrase}
       <span class="soft-warning">Without a passphrase, anyone who copies this file can use the key.</span>
     {/if}
 
     {#if error}
-      <div class="inline-error" role="alert"><span>{error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
     {/if}
   </div>
 
@@ -171,5 +198,9 @@
   .choices { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
   .warn { color: var(--status-warning); }
+  .rule { display: flex; justify-content: space-between; gap: var(--space-2); }
+  .count { font-variant-numeric: tabular-nums; }
+  .count.met { color: var(--text-secondary); }
+  .cleared { display: grid; gap: var(--space-2); }
   .busy { display: inline-flex; align-items: center; gap: var(--space-2); }
 </style>

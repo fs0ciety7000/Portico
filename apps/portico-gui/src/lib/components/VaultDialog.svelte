@@ -2,12 +2,16 @@
   // Vault: unlock (startup, keys view, after "remember"), create, change the
   // passphrase. Passphrases go to Rust as SecretString; fields are cleared
   // as soon as they are sent.
-  import type { ErrorSummary } from "../api";
+  import { untrack } from "svelte";
+  import { sentence, type ErrorSummary } from "../api";
   import { vault, type VaultMode, type VaultReason } from "../state/vault.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
 
-  let { mode, reason }: { mode: VaultMode; reason: VaultReason } = $props();
+  let { dialog }: { dialog: { mode: VaultMode; reason: VaultReason } } = $props();
+  // Captured once (the parent re-keys this dialog per opening): closing it
+  // sets `vault.dialog` to null, and nothing here may read through it then.
+  const { mode, reason } = untrack(() => dialog);
 
   /** Minimum length of a new master passphrase (portico-core). */
   const MIN = 8;
@@ -38,9 +42,9 @@
     const failed = await vault.submit(mode, secret, old);
     busy = false;
     if (!failed) {
-      vault.dialog = null;
       const message = mode === "unlock" ? "Vault unlocked" : mode === "create" ? "Vault created and unlocked" : "Vault passphrase changed";
       workspace.notify({ code: "vault", message, hint: null }, "info");
+      vault.dialog = null;
       return;
     }
     if (failed.code === "vault_wrong_passphrase") wrong++;
@@ -108,10 +112,10 @@
       <span class="soft-warning">Too short: at least {MIN} characters.</span>
     {/if}
     {#if error}
-      <div class="inline-error" role="alert"><span>{error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
     {/if}
     {#if reason === "startup"}
-      <p class="note">Continue without it and Portico neither uses nor saves remembered secrets until you unlock it (Keys, <kbd>v</kbd>).</p>
+      <p class="note">Continue without it and Portico neither uses nor saves remembered secrets until you unlock it (Keys, then <kbd>v</kbd>).</p>
     {/if}
   </div>
 

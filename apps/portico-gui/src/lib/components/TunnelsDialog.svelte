@@ -5,7 +5,7 @@
   // Keyboard: ↑↓ select a tunnel or a suggestion · ↵ start the suggestion
   // (or what was typed) · Del stop the selected tunnel · Esc close.
   import { fly } from "svelte/transition";
-  import { asError, type ErrorSummary, type Host } from "../api";
+  import { asError, sentence, type ErrorSummary, type Host } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
   import { tunnels } from "../state/tunnels.svelte";
@@ -159,7 +159,7 @@
             <span class="sub">
               <span>{t.alias}</span>
               {#if t.status === "failed"}
-                <span class="err">{t.error?.message}</span>
+                <span class="err">{sentence(t.error?.message ?? "")}</span>
                 {#if t.error?.hint}<span class="hint">{t.error.hint}</span>{/if}
               {:else if t.bind}
                 <span class="mono">{t.bind}</span>
@@ -210,7 +210,7 @@
         {onkeydown}
       />
       <span class="help">
-        {#if error}<span class="err">{error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}
+        {#if error}<span class="err">{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}
         {:else if rows}<span class="mono">↑↓</span> choose a row · <span class="mono">-L</span> local port → host:port via the server · <span class="mono">-R</span> server port → here{/if}
       </span>
     </div>

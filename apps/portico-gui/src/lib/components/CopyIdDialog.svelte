@@ -4,10 +4,10 @@
   // this dialog for a moment). Portico never edits ~/.ssh/config: the
   // IdentityFile line is offered as text to copy.
   import { fly } from "svelte/transition";
-  import { describe, type Host, type LocalKey } from "../api";
+  import { describe, sentence, type Host, type LocalKey } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
-  import { keys, type CopyStep } from "../state/keys.svelte";
+  import { COPY_STEP_LABEL, keys, type CopyStep } from "../state/keys.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
 
@@ -40,8 +40,8 @@
   }
 
   function onSearchKey(e: KeyboardEvent) {
-    if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) cursor = Math.min(cursor + 1, hosts.length - 1);
-    else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) cursor = Math.max(cursor - 1, 0);
+    if (e.key === "ArrowDown") cursor = Math.min(cursor + 1, hosts.length - 1);
+    else if (e.key === "ArrowUp") cursor = Math.max(cursor - 1, 0);
     else if (e.key === "Enter") start(hosts[cursor]);
     else return;
     e.preventDefault();
@@ -49,11 +49,10 @@
 
   // ── Progress ──
   const run = $derived(keys.copy);
-  const STEPS: { step: CopyStep; label: string }[] = [
-    { step: "connecting", label: "Connecting" },
-    { step: "installing", label: "Installing" },
-    { step: "verifying", label: "Verifying" },
-  ];
+  const STEPS: { step: CopyStep; label: string }[] = (["connecting", "installing", "verifying"] as const).map((step) => ({
+    step,
+    label: COPY_STEP_LABEL[step],
+  }));
   const ORDER: Record<CopyStep, number> = { connecting: 0, installing: 1, verifying: 2 };
 
   function stateOf(step: CopyStep): "done" | "active" | "failed" | "pending" | "skipped" {
@@ -69,6 +68,15 @@
     return ORDER[step] < now ? "done" : ORDER[step] === now ? "active" : "pending";
   }
 
+  // The footer changes with the outcome (Hide → Done / Retry): its new
+  // default button takes the focus the removed one had.
+  $effect(() => {
+    const step = run?.step;
+    if (step === "done" || step === "failed") {
+      queueMicrotask(() => document.querySelector<HTMLElement>(".modal footer [data-autofocus]")?.focus());
+    }
+  });
+
   const identity = $derived(run ? `Host ${run.alias}\n    IdentityFile ${run.key.privateDisplay}` : "");
   let copied = $state(false);
   async function copyIdentity() {
@@ -81,11 +89,14 @@
     }
   }
 
+  /** Retrying makes sense unless the host key changed (nothing to retry). */
+  const canRetry = $derived(run?.step === "failed" && run.error?.code !== "host_key_changed");
+
   function onkey(k: string): boolean {
     if (!run) return false;
-    if (k === "Enter") {
-      if (run.step === "failed") keys.retryCopy();
-      else if (run.step === "done") keys.cancelCopy();
+    if (k === "Enter" || k === "r") {
+      if (canRetry) keys.retryCopy();
+      else if (run.step === "done" && k === "Enter") keys.dismissCopy();
       else return false;
       return true;
     }
@@ -99,7 +110,7 @@
 
 {#if pick}
   <Modal onescape={() => (keys.view = { kind: "list" })} labelledBy="copy-pick-title">
-    {#snippet title()}Copy key to a host<span class="title-host">· {pick.id}</span>{/snippet}
+    {#snippet title()}Copy to host<span class="title-host">· {pick.id}</span>{/snippet}
     <p>Adds the public key to <span class="mono">~/.ssh/authorized_keys</span> on the host, then logs in with it to check.</p>
     <label class="field">
       <span>Host</span>
@@ -125,7 +136,7 @@
     {/snippet}
   </Modal>
 {:else if run}
-  <Modal onescape={() => keys.cancelCopy()} {onkey} labelledBy="copy-title">
+  <Modal onescape={() => keys.hideCopy()} {onkey} labelledBy="copy-title">
     {#snippet title()}Copy {run.key.id}<span class="title-host">· {run.alias}</span>{/snippet}
 
     <ol class="steps" aria-live="polite">
@@ -166,7 +177,7 @@
       </div>
     {:else if run.step === "failed" && run.error}
       <div class="inline-error" role="alert" in:fly={{ y: 6, duration: dur("base") }}>
-        <span>{run.error.message}</span>
+        <span>{sentence(run.error.message)}</span>
         {#if run.error.hint}<span class="hint">{run.error.hint}</span>{/if}
       </div>
     {/if}
@@ -174,14 +185,15 @@
     {#snippet footer()}
       {#if run.step === "done"}
         <button class="secondary" onclick={copyIdentity}>{copied ? "Copied" : "Copy config lines"} <kbd>c</kbd></button>
-        <button class="primary" data-autofocus onclick={() => keys.cancelCopy()}>Done <kbd>↵</kbd></button>
+        <button class="primary" data-autofocus onclick={() => keys.dismissCopy()}>Done <kbd>↵</kbd></button>
       {:else if run.step === "failed"}
-        <button class="secondary" onclick={() => keys.cancelCopy()}>Close <kbd>Esc</kbd></button>
-        {#if run.error?.code !== "host_key_changed"}
-          <button class="primary" data-autofocus onclick={() => keys.retryCopy()}>Retry <kbd>↵</kbd></button>
+        <button class="secondary" onclick={() => keys.dismissCopy()}>Close <kbd>Esc</kbd></button>
+        {#if canRetry}
+          <button class="primary" data-autofocus onclick={() => keys.retryCopy()}>Retry <kbd>r</kbd> <kbd>↵</kbd></button>
         {/if}
       {:else}
-        <button class="secondary" data-autofocus onclick={() => keys.cancelCopy()}>Cancel <kbd>Esc</kbd></button>
+        <span class="footer-note">The copy goes on in the background; a notice tells how it ended.</span>
+        <button class="secondary" data-autofocus onclick={() => keys.hideCopy()}>Hide <kbd>Esc</kbd></button>
       {/if}
     {/snippet}
   </Modal>

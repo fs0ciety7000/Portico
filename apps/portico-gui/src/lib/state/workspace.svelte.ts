@@ -37,6 +37,9 @@ export const isLive = (s: SessionInfo | undefined): boolean => !!s && LIVE.inclu
 
 let nextKey = 1;
 
+/** How long a notice stays (design system: 4 s). */
+const TOAST_MS = 4000;
+
 class Workspace {
   sessions: Record<number, SessionInfo> = $state({});
   tabs: Tab[] = $state([]);
@@ -72,7 +75,7 @@ class Workspace {
   notify(e: unknown, tone: "error" | "info" = "error") {
     this.toast = { ...asError(e), tone };
     clearTimeout(this.#toastTimer);
-    this.#toastTimer = setTimeout(() => (this.toast = null), 5000);
+    this.#toastTimer = setTimeout(() => (this.toast = null), TOAST_MS);
   }
 
   // ── Tabs ────────────────────────────────────────────────────────────

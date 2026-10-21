@@ -2,7 +2,7 @@
   // ssh-add: lifetime, and the key's passphrase when the engine says it is
   // encrypted (`key_needs_passphrase`) or wrong (`key_wrong_passphrase`).
   // The passphrase field is cleared as soon as it is sent.
-  import { asError, type ErrorSummary, type LocalKey } from "../api";
+  import { asError, sentence, type ErrorSummary, type LocalKey } from "../api";
   import { backend } from "../backend";
   import { keys } from "../state/keys.svelte";
   import { workspace } from "../state/workspace.svelte";
@@ -89,7 +89,7 @@
       {/if}
     {/if}
     {#if error}
-      <div class="inline-error" role="alert"><span>{error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
     {/if}
   </div>
 
