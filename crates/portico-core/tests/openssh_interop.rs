@@ -191,6 +191,8 @@ async fn follow(
     }
 }
 
+// Fixed-size buffers sliced by what `read` returned.
+#[allow(clippy::indexing_slicing, clippy::many_single_char_names)]
 fn same_content(a: &Path, b: &Path) -> bool {
     use std::io::Read;
     let (mut a, mut b) = (
@@ -210,6 +212,8 @@ fn same_content(a: &Path, b: &Path) -> bool {
     }
 }
 
+// Fixed-size blocks; the throughput line is the report of this opt-in run.
+#[allow(clippy::indexing_slicing, clippy::print_stderr)]
 async fn big_transfers(
     env: &mut Env,
     id: portico_core::ids::SessionId,
