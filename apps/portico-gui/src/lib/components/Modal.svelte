@@ -14,6 +14,7 @@
     armed = $bindable(false),
     armedAt = $bindable(0),
     onescape,
+    onkey,
     children,
     footer,
   }: {
@@ -24,6 +25,8 @@
     /** `performance.now()` when the dialog armed. */
     armedAt?: number;
     onescape: () => void;
+    /** Single-key answers (`y`, `k`…), once armed; true when handled. */
+    onkey?: (key: string) => boolean;
     children: Snippet;
     footer: Snippet;
   } = $props();
@@ -77,6 +80,10 @@
     if (e.key === "Escape") {
       e.preventDefault();
       if (armed) onescape();
+      return;
+    }
+    if (armed && onkey && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target instanceof HTMLInputElement) && onkey(e.key)) {
+      e.preventDefault();
       return;
     }
     if (e.key !== "Tab") return;
@@ -221,5 +228,5 @@
     scrollbar-width: thin;
   }
   .modal :global(p) { margin: 0; }
-  .modal :global(.title-host) { color: var(--text-muted); font-weight: 450; }
+  .modal :global(.title-host) { margin-left: var(--space-2); color: var(--text-muted); font-weight: 450; }
 </style>

@@ -5,7 +5,7 @@
   import { backend } from "./lib/backend";
   import { appShortcut, isMac, kbd, kbdShift, tabKbd } from "./lib/keys";
   import { dur } from "./lib/motion";
-  import { workspace } from "./lib/state/workspace.svelte";
+  import { isLive, workspace } from "./lib/state/workspace.svelte";
   import { files } from "./lib/state/files.svelte";
   import { tunnels } from "./lib/state/tunnels.svelte";
   import FilesPanel from "./lib/components/FilesPanel.svelte";
@@ -52,12 +52,10 @@
 
   /** Session the tunnels panel adds to: the active tab's, else the selected host's live one. */
   const tunnelSession = $derived.by(() => {
-    if (tab) return { id: tab.session, alias: tab.alias };
+    if (tab) return isLive(workspace.sessions[tab.session]) ? { id: tab.session, alias: tab.alias } : null;
     const alias = hosts[selected]?.alias;
     const live = alias ? workspace.byAlias[alias] : undefined;
-    return live && alias && ["connected", "authenticating", "handshake", "connecting", "resolving", "verifying_host_key"].includes(live.phase.phase)
-      ? { id: live.id, alias }
-      : null;
+    return live && alias && isLive(live) ? { id: live.id, alias } : null;
   });
 
   function toggleFiles() {
@@ -142,7 +140,15 @@
       run: toggleFiles,
     },
     ...(showFiles && tab
-      ? [{ id: "upload", title: `Upload files to ${tab.alias}`, run: () => void files.pickAndUpload(tab.session) }]
+      ? [
+          { id: "upload", title: `Upload files to ${tab.alias}`, shortcut: "u", run: () => filesPanel?.run("upload") },
+          { id: "mkdir", title: "New folder", shortcut: "n", run: () => filesPanel?.run("mkdir") },
+          { id: "rename", title: "Rename selected file", shortcut: "r", run: () => filesPanel?.run("rename") },
+          { id: "delete", title: "Delete selected file", shortcut: "d", run: () => filesPanel?.run("delete") },
+          { id: "refresh", title: "Refresh files", shortcut: "Ctrl-R", run: () => filesPanel?.run("refresh") },
+          { id: "hidden", title: files.showHidden ? "Hide hidden files" : "Show hidden files", shortcut: ".", run: () => filesPanel?.run("hidden") },
+          { id: "cancel-transfer", title: "Cancel the latest transfer", shortcut: "x", run: () => filesPanel?.run("cancel") },
+        ]
       : []),
     { id: "tunnels", title: "Tunnels", hint: tunnels.list.length ? `${tunnels.list.length} running` : undefined, shortcut: kbdShift("P"), run: () => (tunnelsOpen = true) },
     { id: "download-dir", title: "Change download folder", hint: files.downloadDir || undefined, run: () => void files.chooseDownloadDir() },
@@ -279,7 +285,7 @@
     </div>
     {#if showFiles && tab}
       {#key tab.session}
-        <FilesPanel bind:this={filesPanel} session={tab.session} alias={tab.alias} onclose={closeFiles} />
+        <FilesPanel bind:this={filesPanel} session={tab.session} alias={tab.alias} onclose={closeFiles} onreconnect={() => workspace.reconnect(tab.key)} />
       {/key}
     {/if}
   </main>
@@ -336,16 +342,24 @@
   {/key}
 {:else if conflict}
   {#key conflict}
-    <Modal onescape={() => files.answerConflict(null)} labelledBy="conflict-title">
+    <Modal
+      onescape={() => files.answerConflict(null)}
+      onkey={(k) => {
+        const policy = ({ k: "rename", o: "overwrite", s: "skip" } as const)[k as "k" | "o" | "s"];
+        if (policy) files.answerConflict(policy);
+        return !!policy;
+      }}
+      labelledBy="conflict-title"
+    >
       {#snippet title()}<span class="mono">{conflict.name}</span> already exists{/snippet}
       <p>
         {conflict.retry.kind === "download" ? "Your download folder" : "The remote folder"} already has a file with this name.
         Keep both to save this one as a numbered copy.
       </p>
       {#snippet footer()}
-        <button class="secondary" onclick={() => files.answerConflict("skip")}>Skip</button>
-        <button class="secondary" onclick={() => files.answerConflict("overwrite")}>Replace</button>
-        <button class="primary" data-autofocus onclick={() => files.answerConflict("rename")}>Keep both</button>
+        <button class="secondary" onclick={() => files.answerConflict("skip")}>Skip <kbd>s</kbd></button>
+        <button class="secondary" onclick={() => files.answerConflict("overwrite")}>Overwrite <kbd>o</kbd></button>
+        <button class="primary" data-autofocus onclick={() => files.answerConflict("rename")}>Keep both <kbd>k</kbd></button>
       {/snippet}
     </Modal>
   {/key}

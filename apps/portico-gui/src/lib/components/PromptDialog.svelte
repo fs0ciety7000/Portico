@@ -71,7 +71,7 @@
     {:else if kind.kind === "password"}Password
     {:else if kind.kind === "key_passphrase"}Key passphrase
     {:else}Authentication{/if}
-    {#if alias}<span class="title-host"> · {alias}</span>{/if}
+    {#if alias}<span class="title-host">· {alias}</span>{/if}
   {/snippet}
 
   <div class="content" role="presentation" {onkeydown}>

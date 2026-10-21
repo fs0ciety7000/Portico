@@ -88,7 +88,7 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
-    #[error("session {0} ended before the request could be served")]
+    #[error("the session ended before the request could be served")]
     SessionEnded(SessionId),
 
     #[error("the server refused to open a {what}")]
@@ -225,7 +225,10 @@ impl Error {
             Self::ProxyJumpTooDeep { .. } => ("proxy_jump_too_deep", None),
             Self::Transport { .. } => ("ssh", None),
             Self::Cancelled => ("cancelled", None),
-            Self::SessionEnded(_) => ("session_ended", None),
+            Self::SessionEnded(_) => (
+                "session_ended",
+                Some("Reconnect to the host, then try again."),
+            ),
             Self::TerminalRefused { .. } => (
                 "terminal_refused",
                 Some("The account may have no shell, or the server forbids PTYs (PermitTTY no)."),

@@ -2,8 +2,10 @@
   // Tunnels of every session, forwards suggested by ssh_config for the
   // current host (never started on their own), and the -L / -R form. A bind
   // beyond loopback needs an explicit, armed confirmation.
+  // Keyboard: ↑↓ select a tunnel or a suggestion · ↵ start the suggestion
+  // (or what was typed) · Del stop the selected tunnel · Esc close.
   import { fly } from "svelte/transition";
-  import type { Host } from "../api";
+  import { asError, type ErrorSummary, type Host } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
   import { tunnels } from "../state/tunnels.svelte";
@@ -17,7 +19,9 @@
   }: { session: number | null; alias: string | undefined; host: Host | undefined; onclose: () => void } = $props();
 
   let spec = $state("-L ");
-  let error: string | null = $state(null);
+  let error: ErrorSummary | null = $state(null);
+  /** Row chosen with ↑↓: running tunnels first, then suggestions. */
+  let cursor: number | null = $state(null);
   let busy = $state(false);
   let armed = $state(false);
   /** Exposed spec waiting for confirmation. */
@@ -86,7 +90,7 @@
       }
       if (await tunnels.start(session, text, false)) spec = "-L ";
     } catch (e) {
-      error = (e as { message?: string }).message ?? String(e);
+      error = asError(e);
     } finally {
       busy = false;
     }
@@ -105,28 +109,53 @@
     queueMicrotask(() => input?.focus());
   }
 
+  const rows = $derived(tunnels.list.length + offered.length);
+
   function onkeydown(e: KeyboardEvent) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!rows) return;
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      const next = cursor === null ? (step > 0 ? 0 : rows - 1) : cursor + step;
+      cursor = next < 0 || next >= rows ? null : next;
+      return;
+    }
     if (e.key === "Enter") {
       e.preventDefault();
-      void submit(spec);
+      const s = cursor !== null ? offered[cursor - tunnels.list.length] : undefined;
+      void submit(s ? s.spec : spec);
+      return;
     }
+    if (e.key === "Delete" && cursor !== null) {
+      const t = tunnels.list[cursor];
+      if (t) {
+        e.preventDefault();
+        tunnels.stop(t.id);
+        cursor = null;
+      }
+      return;
+    }
+    // Typing goes back to the form.
+    cursor = null;
+    error = null;
   }
 </script>
 
 <Modal onescape={() => (confirm ? cancelConfirm() : onclose())} bind:armed labelledBy="tunnels-title">
-  {#snippet title()}Tunnels{#if alias}<span class="title-host"> · {alias}</span>{/if}{/snippet}
+  {#snippet title()}Tunnels{#if alias}<span class="title-host">· {alias}</span>{/if}{/snippet}
 
   {#if tunnels.list.length || offered.length}
     <ul class="tunnels" inert={confirm !== null}>
-      {#each tunnels.list as t (t.id)}
-        <li data-status={t.status} in:fly={{ y: 6, duration: dur("base") }}>
+      {#each tunnels.list as t, i (t.id)}
+        <li data-status={t.status} class:cursor={cursor === i} in:fly={{ y: 6, duration: dur("base") }}>
           <span class="dot" class:busy={t.status === "starting"}></span>
           <div class="main">
             <span class="spec mono">{t.display}</span>
             <span class="sub">
               <span>{t.alias}</span>
               {#if t.status === "failed"}
-                <span class="err">{t.error?.message}{t.error?.hint ? ` — ${t.error.hint}` : ""}</span>
+                <span class="err">{t.error?.message}</span>
+                {#if t.error?.hint}<span class="hint">{t.error.hint}</span>{/if}
               {:else if t.bind}
                 <span class="mono">{t.bind}</span>
                 {#if t.connections}<span>{t.connections} {t.connections === 1 ? "connection" : "connections"}</span>{/if}
@@ -136,17 +165,17 @@
               {#if t.exposed}<span class="exposed">exposed</span>{/if}
             </span>
           </div>
-          <button class="secondary small" onclick={() => tunnels.stop(t.id)}>{t.status === "failed" ? "Dismiss" : "Stop"}</button>
+          <button class="secondary small" tabindex="-1" onclick={() => tunnels.stop(t.id)}>{t.status === "failed" ? "Dismiss" : "Stop"}{#if cursor === i} <kbd>Del</kbd>{/if}</button>
         </li>
       {/each}
-      {#each offered as s (s.spec)}
-        <li class="suggested">
+      {#each offered as s, j (s.spec)}
+        <li class="suggested" class:cursor={cursor === tunnels.list.length + j}>
           <span class="dot hollow"></span>
           <div class="main">
             <span class="spec mono">{s.display}</span>
             <span class="sub"><span>Declared in ssh_config · not started</span></span>
           </div>
-          <button class="secondary small" onclick={() => submit(s.spec)} disabled={busy}>Start</button>
+          <button class="secondary small" tabindex="-1" onclick={() => submit(s.spec)} disabled={busy}>Start{#if cursor === tunnels.list.length + j} <kbd>↵</kbd>{/if}</button>
         </li>
       {/each}
     </ul>
@@ -176,8 +205,8 @@
         {onkeydown}
       />
       <span class="help">
-        {#if error}<span class="err">{error}</span>
-        {:else}<span class="mono">-L</span> local port → host:port via the server · <span class="mono">-R</span> server port → here{/if}
+        {#if error}<span class="err">{error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}
+        {:else if rows}<span class="mono">↑↓</span> choose a row · <span class="mono">-L</span> local port → host:port via the server · <span class="mono">-R</span> server port → here{/if}
       </span>
     </div>
   {:else}
@@ -243,14 +272,28 @@
   }
   input:focus { border-color: var(--accent); }
   input[aria-invalid="true"] { border-color: var(--status-error); }
-  .help { color: var(--text-muted); font-size: var(--text-xs); }
+  .help { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
+  .hint { color: var(--text-secondary); }
+  .sub .hint { flex-basis: 100%; }
+  .sub .hint::before { content: none; }
+  li { position: relative; }
+  li.cursor { background: var(--bg-selected); }
+  li.cursor::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: var(--space-2);
+    bottom: var(--space-2);
+    width: 2px;
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+  }
   .confirm {
     display: grid;
     gap: var(--space-1);
     margin-top: var(--space-2);
     padding: var(--space-3) var(--space-4);
     border: 1px solid color-mix(in srgb, var(--status-warning) 45%, transparent);
-    border-left: 3px solid var(--status-warning);
     border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--status-warning) 6%, var(--bg-elevated));
   }
