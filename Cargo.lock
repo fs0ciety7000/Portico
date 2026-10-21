@@ -4212,6 +4212,7 @@ dependencies = [
  "portico-theme",
  "ratatui",
  "secrecy",
+ "tempfile",
  "time",
  "tokio",
  "tracing",

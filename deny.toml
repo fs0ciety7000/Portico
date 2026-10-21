@@ -5,6 +5,23 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+# Triaged advisories (ADR in docs/STACK.md, 2026-10-21). Each entry must say why it
+# does not apply and when to revisit it; a new advisory still fails the build.
+ignore = [
+    # rsa (Marvin timing attack): concerns PKCS#1 v1.5 *decryption*. Portico only
+    # generates RSA keys and signs (blinded); no RSA decryption anywhere. No fixed
+    # release exists yet; Ed25519 is the default key type. Revisit when rsa 0.10 ships.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA decryption in Portico (sign/generate only); no fix released" },
+    # Unmaintained, not vulnerable. zvariant / zvariant_derive / zbus_names were merged
+    # into zbus 6; they come through keyring 4 -> zbus 5 (Secret Service). Revisit when
+    # keyring moves to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; transitive via keyring -> zbus 5" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; transitive via keyring -> zbus 5" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; transitive via keyring -> zbus 5" },
+    # Unmaintained proc macro, build time only, through glib-macros 0.18 (GTK 3
+    # bindings of Tauri/wry on Linux). Revisit with Tauri's move off gtk-rs 0.18.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: build-time only, via glib-macros 0.18 (tauri/wry)" },
+]
 
 [licenses]
 version = 2

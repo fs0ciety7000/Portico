@@ -147,15 +147,27 @@ async fn run_tui() -> Result<()> {
 }
 
 /// Logs go to a file (never to the terminal we draw on). `PORTICO_LOG`
-/// controls the filter, e.g. `PORTICO_LOG=portico_core=debug`.
+/// controls the filter, e.g. `PORTICO_LOG=portico_core=debug`. The file
+/// lives in Portico's data dir (`portico-tui.log`, private), not in a
+/// shared `/tmp` where another account could read or pre-create it.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
 
     let Ok(filter) = EnvFilter::try_from_env("PORTICO_LOG") else {
         return;
     };
-    let path = std::env::temp_dir().join("portico-tui.log");
-    if let Ok(file) = std::fs::File::create(path) {
+    let Ok(paths) = portico_core::store::Paths::discover() else {
+        return;
+    };
+    let opened = open_private_log(&paths.data_dir);
+    if let Err(e) = &opened {
+        // Before the TUI takes the terminal: stderr is still the user's.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("portico: no log file in {}: {e}", paths.data_dir.display());
+        }
+    }
+    if let Ok(file) = opened {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::sync::Mutex::new(file))
@@ -164,9 +176,60 @@ fn init_tracing() {
     }
 }
 
+/// Opens `<dir>/portico-tui.log` for this run: directory created `0700`,
+/// file `0600`, and a symlink in its place is refused (never followed).
+fn open_private_log(dir: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let path = dir.join("portico-tui.log");
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| !m.file_type().is_file())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "portico-tui.log is not a regular file",
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(&path)?;
+    // An older file may have been created with looser permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_log_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("data");
+        open_private_log(&dir).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("portico-tui.log")), 0o600);
+        // A symlink planted in its place is refused, its target untouched.
+        let target = root.path().join("elsewhere");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::remove_file(dir.join("portico-tui.log")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("portico-tui.log")).unwrap();
+        assert!(open_private_log(&dir).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
