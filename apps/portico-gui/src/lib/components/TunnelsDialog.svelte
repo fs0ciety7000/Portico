@@ -23,6 +23,32 @@
   /** Exposed spec waiting for confirmation. */
   let confirm: { spec: string; display: string } | null = $state(null);
   let input: HTMLInputElement | undefined = $state();
+  let cancelButton: HTMLButtonElement | undefined = $state();
+
+  // The dialog armed when it opened; the exposure confirmation arms again on
+  // its own, after a pause without keystroke or click, so a double click or a
+  // held Enter on "Start" can never confirm it unread.
+  const CONFIRM_ARM_DELAY = 400;
+  let confirmArmed = $state(false);
+  $effect(() => {
+    if (!confirm) return;
+    confirmArmed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const restart = () => {
+      confirmArmed = false;
+      clearTimeout(timer);
+      timer = setTimeout(() => (confirmArmed = true), CONFIRM_ARM_DELAY);
+    };
+    restart();
+    queueMicrotask(() => cancelButton?.focus());
+    window.addEventListener("keydown", restart, true);
+    window.addEventListener("pointerdown", restart, true);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("keydown", restart, true);
+      window.removeEventListener("pointerdown", restart, true);
+    };
+  });
 
   $effect(() => {
     void tunnels.sync();
@@ -68,7 +94,7 @@
 
   async function expose() {
     const c = confirm;
-    if (!c || session === null) return;
+    if (!c || session === null || !armed || !confirmArmed) return;
     confirm = null;
     if (await tunnels.start(session, c.spec, true)) spec = "-L ";
     queueMicrotask(() => input?.focus());
@@ -91,7 +117,7 @@
   {#snippet title()}Tunnels{#if alias}<span class="title-host"> · {alias}</span>{/if}{/snippet}
 
   {#if tunnels.list.length || offered.length}
-    <ul class="tunnels">
+    <ul class="tunnels" inert={confirm !== null}>
       {#each tunnels.list as t (t.id)}
         <li data-status={t.status} in:fly={{ y: 6, duration: dur("base") }}>
           <span class="dot" class:busy={t.status === "starting"}></span>
@@ -160,8 +186,10 @@
 
   {#snippet footer()}
     {#if confirm}
-      <button class="secondary" onclick={cancelConfirm}>Cancel <kbd>Esc</kbd></button>
-      <button class="warning" disabled={!armed} onclick={expose}>Expose tunnel</button>
+      <!-- Re-armed on appearance and after every click: a double click on
+           "Start" lands on a disabled button. -->
+      <button class="secondary" bind:this={cancelButton} onclick={cancelConfirm}>Cancel <kbd>Esc</kbd></button>
+      <button class="warning" disabled={!armed || !confirmArmed} onclick={expose}>Expose tunnel</button>
     {:else}
       <button class="secondary" onclick={onclose}>Close <kbd>Esc</kbd></button>
       {#if session !== null}

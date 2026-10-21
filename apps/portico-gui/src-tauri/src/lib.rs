@@ -132,7 +132,8 @@ pub fn run() {
     });
 }
 
-/// Dropped files become upload tokens; their paths stay in Rust.
+/// Dropped files become upload tokens. Tauri also tells the page their paths
+/// (`tauri://drag-drop`): names leak, but no command takes a path (see `files`).
 fn forward_drag_drop(window: &tauri::Window, event: &WindowEvent) {
     let WindowEvent::DragDrop(drag) = event else {
         return;

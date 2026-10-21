@@ -8,7 +8,7 @@
   import { flip } from "svelte/animate";
   import { formatEta, formatSize, displayPath, type RemoteEntry } from "../api";
   import { dur } from "../motion";
-  import { crumbs, files, type Transfer } from "../state/files.svelte";
+  import { crumbs, displaySafe, files, type Transfer } from "../state/files.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
 
@@ -60,7 +60,8 @@
     if (kind === "rename") {
       if (!selectedEntry) return;
       editing = { kind, target: selectedEntry };
-      draft = selectedEntry.name;
+      // A name that needed cleaning for display is not offered for editing.
+      draft = selectedEntry.display === selectedEntry.name ? selectedEntry.name : "";
     } else {
       editing = { kind };
       draft = "";
@@ -278,7 +279,7 @@
       <div class="drop" transition:fly={{ y: 6, duration: dur("fast") }}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V3M4.5 6.5 8 3l3.5 3.5M3 13h10" /></svg>
         <strong>Drop to upload</strong>
-        <span class="mono">{ex.cwd}</span>
+        <span class="mono">{displaySafe(ex.cwd)}</span>
       </div>
     {/if}
   </div>
@@ -393,6 +394,7 @@
     white-space: nowrap;
   }
   .crumbs button {
+    unicode-bidi: isolate;
     padding: 2px var(--space-1);
     border: 0;
     border-radius: var(--radius-sm);
@@ -538,7 +540,7 @@
     pointer-events: none;
   }
   .drop strong { color: var(--text-primary); font-weight: 550; }
-  .drop .mono { color: var(--text-muted); font-size: var(--text-sm); }
+  .drop .mono { color: var(--text-muted); font-size: var(--text-sm); unicode-bidi: isolate; }
   footer {
     display: grid;
     gap: var(--space-2);

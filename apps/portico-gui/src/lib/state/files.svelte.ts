@@ -55,12 +55,24 @@ const parentOf = (path: string): string => {
 export const joinRemote = (dir: string, name: string): string => (dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`);
 
 /** `/srv/app/releases` → `["/", "srv", "app", "releases"]` with their paths. */
+/** Controls and bidi overrides, as in `portico_core::sftp::display_safe`. */
+const UNSAFE_CHARS = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+
+/**
+ * Text chosen by the server (a remote path) made safe to show: a name like
+ * `invoice\u202Efdp.sh` cannot disguise itself. The raw text is kept for
+ * operations.
+ */
+export function displaySafe(text: string): string {
+  return text.replace(UNSAFE_CHARS, "\uFFFD");
+}
+
 export function crumbs(path: string): { label: string; path: string }[] {
   const out = [{ label: "/", path: "/" }];
   let acc = "";
   for (const part of path.split("/").filter(Boolean)) {
     acc += `/${part}`;
-    out.push({ label: part, path: acc });
+    out.push({ label: displaySafe(part), path: acc });
   }
   return out;
 }
