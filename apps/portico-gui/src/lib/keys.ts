@@ -56,7 +56,9 @@ export type AppShortcut =
   | { action: "paste" }
   | { action: "reload" }
   | { action: "files" }
-  | { action: "tunnels" };
+  | { action: "tunnels" }
+  | { action: "keys" }
+  | { action: "snippets" };
 
 /**
  * Maps a keydown to an app shortcut, or null when the key belongs to the
@@ -93,6 +95,11 @@ export function appShortcut(e: KeyboardEvent, inTerminal: boolean): AppShortcut 
       return isMac && !e.shiftKey ? null : { action: "files" };
     case "p":
       return isMac && !e.shiftKey ? null : { action: "tunnels" };
+    // ⌘I / ⌘S stay free on macOS (italic, save): Shift there too.
+    case "i":
+      return isMac && !e.shiftKey ? null : { action: "keys" };
+    case "s":
+      return isMac && !e.shiftKey ? null : { action: "snippets" };
     // ⌘C / ⌘V on macOS go through the native Edit menu; Linux needs ours.
     case "c":
       return inTerminal && !isMac ? { action: "copy" } : null;

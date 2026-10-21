@@ -7,6 +7,7 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
+import { demoKeys } from "./demo-keys";
 
 const base = { identityFiles: [], localForwards: [], remoteForwards: [], warnings: [], group: null };
 
@@ -161,6 +162,9 @@ function exec(id: number, t: DemoTerminal, cmd: string) {
       for (let i = 0; i < 16; i++) out(`\x1b[48;5;${i}m  ${String(i).padStart(2)}  \x1b[0m${i === 7 ? "\r\n" : ""}`);
       out("\r\n");
       break;
+    case "df":
+      out("Filesystem      Size  Used Avail Use% Mounted on\r\n/dev/vda1        78G   31G   44G  42% /\r\ntmpfs           3.9G     0  3.9G   0% /dev/shm\r\n");
+      break;
     case "uptime":
       out(" 17:42:08 up 41 days,  3:12,  1 user,  load average: 0.08, 0.11, 0.09\r\n");
       break;
@@ -277,7 +281,22 @@ window.addEventListener("drop", (e) => {
   if (files.length) dropListener?.(files);
 });
 
+const keyDemo = demoKeys({
+  emit,
+  ask,
+  sleep: (ms) => sleep(ms).then(() => {}),
+  nextId: () => nextId++,
+  aliasOf: (session) => sessions.get(session)?.alias,
+  tagsOf: (alias) => demoHosts.find((h) => h.alias === alias)?.tags ?? [],
+  type(terminal, data) {
+    if (!terminals.has(terminal)) return false;
+    void demoBackend.terminalInput(terminal, data, false);
+    return true;
+  },
+});
+
 export const demoBackend: Backend = {
+  ...keyDemo,
   listHosts: async () => demoHosts,
   searchHosts: async (q) =>
     demoHosts.filter((h) => `${h.alias} ${h.hostname} ${h.tags.map((t) => "#" + t).join(" ")}`.includes(q)),
