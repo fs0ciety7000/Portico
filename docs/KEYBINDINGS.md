@@ -118,6 +118,9 @@ Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le te
 
 ## Fichiers (GUI)
 
+Même grammaire que la TUI (`r` renommer, `d` supprimer, `x` annuler, `Ctrl-R` rafraîchir, `k`/`o`/`s` en cas de conflit) ;
+chaque action figure aussi dans la palette avec sa touche.
+
 Panneau à droite du terminal de l'onglet actif. Il prend le clavier à l'ouverture ; un clic dans le terminal le lui rend.
 Les fichiers à envoyer viennent du sélecteur natif ou d'un glisser-déposer sur la fenêtre ; les téléchargements vont dans
 le dossier affiché en bas du panneau (« Change » ou la palette pour en choisir un autre).
@@ -128,10 +131,14 @@ le dossier affiché en bas du panneau (« Change » ou la palette pour en choisi
 | Ouvrir le dossier, ou télécharger le fichier | `↵`, `→`, double-clic |
 | Dossier parent | `Backspace`, `←`, fil d'Ariane |
 | Envoyer des fichiers (sélecteur natif) | `u`, ou déposer des fichiers sur le panneau |
-| Nouveau dossier / renommer (saisie en place, `↵` valide, `Esc` annule) | `n` / `F2` |
-| Supprimer (confirmation) | `Suppr`, `F8` |
-| Fichiers cachés / rafraîchir | `.` / `r` |
-| Destination existante | `Keep both` (copie numérotée) · `Replace` · `Skip` · `Esc` annule |
+| Nouveau dossier (saisie en place, `↵` valide, `Esc` annule) | `n` |
+| Renommer (saisie en place) | `r` ou `F2` |
+| Supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde) | `d`, `F8` ou `Suppr` |
+| Annuler le dernier transfert en cours | `x` |
+| Afficher / masquer les fichiers cachés | `.` |
+| Rafraîchir (dans le panneau ; ailleurs `Ctrl-R` recharge `ssh_config`) | `Ctrl-R` |
+| Destination existante | `k` garder les deux (copie numérotée) · `o` écraser · `s` ignorer · `Esc` annuler |
+| Session pas encore prête / terminée | le panneau affiche la phase, ou l'erreur avec son hint ; `↵` reconnecte |
 | Revenir au terminal (le panneau reste ouvert) | clic dans le terminal ; `⌘⇧F` / `Ctrl-Shift-F` ou `Esc` le ferme |
 
 ## Tunnels (GUI)
@@ -139,8 +146,9 @@ le dossier affiché en bas du panneau (« Change » ou la palette pour en choisi
 | Action | Touches |
 |---|---|
 | Ajouter | saisir `-L 8080:db:5432` ou `-R 9000:localhost:3000`, puis `↵` |
-| Démarrer un forward proposé par `ssh_config` / arrêter | bouton `Start` / `Stop` |
-| Écoute exposée (hors loopback) | bloc d'avertissement, `Expose tunnel` actif après 400 ms sans frappe · `Esc` annule |
+| Choisir un tunnel ou un forward proposé | `↑` / `↓` |
+| Démarrer le forward proposé choisi / arrêter le tunnel choisi | `↵` / `Suppr` (ou boutons `Start` / `Stop`) |
+| Écoute exposée (hors loopback) | bloc d'avertissement, focus sur `Cancel` ; `Expose tunnel` actif après 400 ms sans frappe ni clic · `Esc` annule |
 | Fermer | `Esc` |
 
 ## Prévus
