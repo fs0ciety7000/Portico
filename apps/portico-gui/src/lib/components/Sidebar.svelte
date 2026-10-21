@@ -70,7 +70,8 @@
       bind:this={searchEl}
       bind:value={query}
       {onkeydown}
-      placeholder="Search hosts, #tag, @group, * favorites"
+      placeholder="Search · #tag @group *"
+      title="Fuzzy search · #tag, @group, * favorites"
       spellcheck="false"
       autocomplete="off"
       aria-label="Search hosts"
@@ -85,7 +86,7 @@
   {#if loading}
     <ul class="list" aria-busy="true">
       {#each [0, 1, 2, 3, 4] as i (i)}
-        <li class="skeleton" style:animation-delay="{i * 80}ms"></li>
+        <li class="skeleton" style:--i={i}></li>
       {/each}
     </ul>
   {:else if rows.length === 0}
@@ -131,7 +132,10 @@
             onkeydown={() => {}}
           >
             <span class="dot" data-status={st.status} class:busy={st.busy}></span>
-            <span class="alias">{host.alias}{#if host.favorite}<span class="star" aria-label="favorite">★</span>{/if}</span>
+            <span class="name">
+              <span class="alias" title={host.alias}>{host.alias}</span>
+              {#if host.favorite}<span class="star" aria-label="favorite" title="Favorite">★</span>{/if}
+            </span>
             <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
             {#if row.section.kind === "recent"}
               <button
@@ -219,7 +223,9 @@
   li {
     position: relative;
     display: grid;
-    grid-template-columns: 8px auto 1fr;
+    /* The alias takes what it needs, up to the whole row (then an
+       ellipsis); `user@host` gets the rest, right-aligned. */
+    grid-template-columns: 8px minmax(0, max-content) minmax(0, 1fr);
     align-items: center;
     gap: var(--space-2);
     flex: 0 0 34px;
@@ -229,9 +235,8 @@
     cursor: default;
     transition: background var(--motion-fast) var(--ease-standard);
   }
-  li.recent { grid-template-columns: 8px auto 1fr 20px; }
-  li:hover { background: var(--bg-elevated); }
-  li.selected { background: var(--bg-selected); }
+  li:hover { --row-bg: var(--bg-elevated); background: var(--row-bg); }
+  li.selected { --row-bg: var(--bg-selected); background: var(--row-bg); }
   li.selected::before {
     content: "";
     position: absolute;
@@ -287,8 +292,10 @@
     0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent); }
     100% { box-shadow: 0 0 0 5px transparent; }
   }
-  .alias { font-weight: 550; }
-  .star { margin-left: var(--space-1); color: var(--accent); font-size: var(--text-xs); }
+  /* The star stays outside the truncated alias: always visible. */
+  .name { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
+  .alias { min-width: 0; overflow: hidden; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+  .star { flex: 0 0 auto; color: var(--accent); font-size: var(--text-xs); }
   .target {
     color: var(--text-muted);
     font-size: var(--text-xs);
@@ -297,21 +304,30 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Over the end of the row (no column of its own: `user@host` lines up
+     with the other sections); shown on hover and on the selected row. */
   .forget {
+    position: absolute;
+    top: 50%;
+    right: var(--space-2);
     display: grid;
     place-items: center;
     width: 20px;
     height: 20px;
+    margin-top: -10px;
     padding: 0;
     border: 0;
     border-radius: var(--radius-sm);
-    background: transparent;
+    /* The row's own background, fading over the end of `user@host`. */
+    background: var(--row-bg, var(--bg-surface));
+    box-shadow: calc(-1 * var(--space-2)) 0 var(--space-2) var(--space-1) var(--row-bg, var(--bg-surface));
     color: var(--text-muted);
     opacity: 0;
+    pointer-events: none;
     transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
   }
   li:hover .forget,
-  li.selected .forget { opacity: 1; }
+  li.selected .forget { opacity: 1; pointer-events: auto; }
   .forget:hover { background: var(--bg-overlay); color: var(--text-primary); }
   .forget svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
   .empty { display: grid; gap: var(--space-1); padding: var(--space-2); color: var(--text-secondary); }
@@ -323,6 +339,8 @@
     background: linear-gradient(90deg, var(--bg-elevated), var(--bg-selected), var(--bg-elevated));
     background-size: 200% 100%;
     animation: shimmer var(--motion-loop) var(--ease-standard) infinite;
+    /* Rows start one after the other: a short stagger, from the tokens. */
+    animation-delay: calc(var(--i, 0) * var(--motion-fast) * 2 / 3);
   }
   @keyframes shimmer {
     from { background-position: 100% 0; }

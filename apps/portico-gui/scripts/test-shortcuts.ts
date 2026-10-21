@@ -79,6 +79,20 @@ test("Mod on Linux: Ctrl in the host list, Ctrl-Shift in a terminal", () => {
   assert.equal(t.terminal.get(eventSignature(key("e", "KeyE"))!), undefined);
 });
 
+test("shared host-list keys: `*` toggles a favorite, Shift-X clears recent", () => {
+  for (const p of ["mac", "linux"] as Platform[]) {
+    const t = matchTables(defaultBindings(p), p);
+    // `*` is Shift-8 on US layouts, unshifted on others.
+    assert.equal(t.hosts.get(eventSignature(key("*", "Digit8", { shiftKey: true }))!), "hosts.favorite", p);
+    assert.equal(t.hosts.get(eventSignature(key("*", "NumpadMultiply"))!), "hosts.favorite", p);
+    assert.equal(t.terminal.get(eventSignature(key("*", "Digit8", { shiftKey: true }))!), undefined, p);
+    assert.equal(t.hosts.get(eventSignature(key("X", "KeyX", { shiftKey: true }))!), "hosts.clear-recent", p);
+    assert.equal(t.hosts.get(eventSignature(key("x", "KeyX"))!), "hosts.forget-recent", p);
+  }
+  assert.equal(formatCombo(parseCombo("Shift+X")!, "linux", "hosts"), "Shift-X");
+  assert.equal(formatCombo(parseCombo("Shift+X")!, "mac", "hosts"), "⇧X");
+});
+
 test("overrides replace defaults; invalid entries are reported", () => {
   const ok = resolveKeymap({ "app.files": "Mod+Shift+O", "app.reload": "none", "hosts.clear-recent": "F9" }, "linux");
   assert.deepEqual(ok.problems, []);

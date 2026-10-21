@@ -15,6 +15,7 @@
   import { backend } from "../backend";
   import { chunks, sanitizePaste, sanitizeTitle } from "../keys";
   import { keymap } from "../state/keymap.svelte";
+  import { logs } from "../state/logs.svelte";
   import { dur } from "../motion";
   import { isLive, workspace, type Tab } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
@@ -32,6 +33,7 @@
     autofocus?: boolean;
   } = $props();
   const closeKey = $derived(keymap.label("tab.close"));
+  const logsKey = $derived(keymap.label("app.logs"));
 
   /** Acknowledge parsed output at least this often (bytes). */
   const ACK_EVERY = 128 * 1024;
@@ -389,6 +391,10 @@
           <p class="message">{sentence(error.message)}</p>
           {#if error.hint}<p class="hint">{error.hint}</p>{/if}
         {/if}
+        <!-- Same entry point as the host details: the connection records. -->
+        <button class="link" onclick={() => void logs.show(tab.session)}>
+          Show session logs{#if logsKey} <kbd>{logsKey}</kbd>{/if}
+        </button>
         <div class="actions">
           {#if keyChanged}
             <button class="secondary" onclick={() => workspace.reconnect(tab.key)}>Retry</button>

@@ -12,6 +12,7 @@
   let armed = $state(false);
   let filterEl: HTMLInputElement | undefined = $state();
   let listEl: HTMLDivElement | undefined = $state();
+  let configEl: HTMLDivElement | undefined = $state();
   let sessionsEl: HTMLUListElement | undefined = $state();
   /** Text to select by hand when the clipboard is not available. */
   let fallback: string | null = $state(null);
@@ -35,9 +36,36 @@
   const clockMs = (ms: number) => `${clock(ms)}.${pad(new Date(ms).getMilliseconds(), 3)}`;
   const fullDate = (ms: number) => new Date(ms).toLocaleString();
 
-  /** Status of a listed session: the live phase when the workspace knows it. */
-  function statusOf(s: SessionLogInfo): { status: string; label: string } {
-    if (s.outcome?.kind === "failed") return { status: "error", label: s.outcome.error.code === "host_key_rejected" ? "Refused" : "Failed" };
+  /** Short wording of a failure, by error code (the code itself is the tooltip). */
+  const FAILURES: Record<string, string> = {
+    host_key_changed: "host key changed",
+    host_key_new_algorithm: "new host key type",
+    host_key_unknown: "unknown host key",
+    host_key_revoked: "host key revoked",
+    host_cert_invalid: "invalid host certificate",
+    auth_failed: "authentication failed",
+    auth_disconnected: "dropped during authentication",
+    dns: "host name not resolved",
+    connect: "unreachable",
+    timeout: "timed out",
+    proxy_jump_cycle: "ProxyJump cycle",
+    proxy_jump_too_deep: "ProxyJump too deep",
+    unsupported: "unsupported option",
+    invalid_host: "invalid host name",
+    config: "ssh config error",
+    terminal_refused: "terminal refused",
+    cancelled: "cancelled",
+    ssh: "SSH error",
+  };
+
+  /** Status of a listed session: the live phase when the workspace knows it.
+   * "Refused" (the user turned a host key down) is neutral, not an error. */
+  function statusOf(s: SessionLogInfo): { status: string; label: string; code?: string } {
+    if (s.outcome?.kind === "failed") {
+      const code = s.outcome.error.code;
+      if (code === "host_key_rejected") return { status: "idle", label: "Refused", code };
+      return { status: "error", label: `Failed · ${FAILURES[code] ?? code.replaceAll("_", " ")}`, code };
+    }
     if (s.outcome?.kind === "closed") return { status: "idle", label: s.outcome.reason === "remote_closed" ? "Closed by server" : s.outcome.reason === "timeout" ? "Timed out" : "Closed" };
     const view = workspace.sessions[s.id];
     if (!view) return { status: "connecting", label: "Live" };
@@ -93,6 +121,36 @@
     }
   }
 
+  function refresh() {
+    void logs.refreshSessions();
+    void logs.loadLines();
+    if (logs.tab === "config") void logs.loadConfig(true);
+  }
+
+  /** `v`: the next minimum level (Debug → Info → Warn → Error → Debug). */
+  function cycleLevel() {
+    const at = LEVELS.findIndex((l) => l.id === logs.minLevel);
+    logs.minLevel = LEVELS[(at + 1) % LEVELS.length]?.id ?? "debug";
+  }
+
+  /** Scrolls the records (or the options): page, top, bottom. The bottom
+   * turns following back on; anything else stops it (see `onscroll`). */
+  function scroll(to: "up" | "down" | "top" | "bottom") {
+    const el = logs.tab === "logs" ? listEl : configEl;
+    if (!el) return;
+    // A page, minus a little overlap to keep the reading place.
+    const page = el.clientHeight * 0.9;
+    if (to === "up") el.scrollBy({ top: -page });
+    else if (to === "down") el.scrollBy({ top: page });
+    else if (to === "top") el.scrollTop = 0;
+    else {
+      el.scrollTop = el.scrollHeight;
+      if (logs.tab === "logs") logs.follow = true;
+    }
+  }
+
+  // Same grammar as the TUI: `y` copies, Ctrl-R refreshes, Tab switches the
+  // view, `v` steps the level; `c`, `r`, `1` / `2` stay as aliases.
   function onkey(key: string): boolean {
     switch (key) {
       case "j":
@@ -102,6 +160,9 @@
       case "k":
       case "ArrowUp":
         move(-1);
+        return true;
+      case "Tab":
+        void logs.setTab(logs.tab === "logs" ? "config" : "logs");
         return true;
       case "1":
         void logs.setTab("logs");
@@ -115,17 +176,39 @@
       case "f":
         logs.follow = !logs.follow;
         return true;
+      case "v":
+        if (logs.tab === "logs") cycleLevel();
+        return true;
+      case "y":
       case "c":
         if (logs.tab === "logs" && logs.selected !== null) void copyAll();
         return true;
       case "r":
-        void logs.refreshSessions();
-        void logs.loadLines();
-        if (logs.tab === "config") void logs.loadConfig(true);
+        refresh();
+        return true;
+      case "PageUp":
+        scroll("up");
+        return true;
+      case "PageDown":
+        scroll("down");
+        return true;
+      case "Home":
+      case "g":
+        scroll("top");
+        return true;
+      case "End":
+      case "G":
+        scroll("bottom");
         return true;
       default:
         return false;
     }
+  }
+
+  function onshortcut(e: KeyboardEvent): boolean {
+    if (e.key.toLowerCase() !== "r" || e.shiftKey || e.altKey) return false;
+    refresh();
+    return true;
   }
 
   function onescape() {
@@ -134,7 +217,7 @@
   }
 </script>
 
-<Modal bind:armed size="full" scroll={false} {onescape} {onkey} labelledBy="logs-title">
+<Modal bind:armed size="full" scroll={false} {onescape} {onkey} {onshortcut} labelledBy="logs-title">
   {#snippet title()}Session logs{#if info}<span class="title-host">· {info.alias}</span>{/if}{/snippet}
 
   <div class="panel">
@@ -143,7 +226,7 @@
       {#if logs.sessionsError}
         <p class="inline-error"><span>{sentence(logs.sessionsError.message)}</span>{#if logs.sessionsError.hint}<span class="hint">{logs.sessionsError.hint}</span>{/if}</p>
       {:else if logs.sessions.length === 0}
-        <p class="note">No session yet. Connect to a host: its connection log shows here, and stays after it ends.</p>
+        <p class="note">No session yet. Connect to a host: its connection records show here, and stay after it ends.</p>
       {:else}
         <ul role="listbox" aria-label="Sessions" bind:this={sessionsEl}>
           {#each listed as s (s.id)}
@@ -152,6 +235,7 @@
               role="option"
               aria-selected={s.id === logs.selected}
               class:selected={s.id === logs.selected}
+              class:with-probe={s.probe}
               title={`Started ${fullDate(s.started)}${s.ended ? ` · ended ${fullDate(s.ended)}` : ""}`}
               onclick={() => void logs.select(s.id)}
               onkeydown={() => {}}
@@ -159,9 +243,7 @@
               <span class="dot" data-status={st.status} class:hollow={s.ended !== null}></span>
               <span class="alias">{s.alias}</span>
               <span class="time mono">{clock(s.started)}</span>
-              <span class="outcome">
-                {st.label}{#if s.outcome?.kind === "failed"}&nbsp;· <span class="mono">{s.outcome.error.code}</span>{/if}
-              </span>
+              <span class="outcome" data-status={st.status} title={st.code}>{st.label}</span>
               {#if s.probe}<span class="probe" title="A copy-id verification, not a session you opened">probe</span>{/if}
             </li>
           {/each}
@@ -171,8 +253,9 @@
 
     <section class="main">
       <div class="tabs" role="tablist" aria-label="Debug views">
-        <button role="tab" aria-selected={logs.tab === "logs"} class:active={logs.tab === "logs"} onclick={() => void logs.setTab("logs")}>Logs <kbd>1</kbd></button>
-        <button role="tab" aria-selected={logs.tab === "config"} class:active={logs.tab === "config"} onclick={() => void logs.setTab("config")}>Effective config <kbd>2</kbd></button>
+        <button role="tab" aria-selected={logs.tab === "logs"} class:active={logs.tab === "logs"} title="Tab switches the view (also 1)" onclick={() => void logs.setTab("logs")}>Logs</button>
+        <button role="tab" aria-selected={logs.tab === "config"} class:active={logs.tab === "config"} title="Tab switches the view (also 2)" onclick={() => void logs.setTab("config")}>Effective config</button>
+        <kbd class="tab-key">Tab</kbd>
         <span class="spacer"></span>
         <label class="filter">
           <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
@@ -189,29 +272,30 @@
       </div>
 
       {#if logs.selected === null}
-        <div class="state"><p>Select a session to read its log.</p></div>
+        <div class="state"><p>Select a session to read its records.</p></div>
       {:else if logs.tab === "logs"}
         <div class="toolbar">
-          <div class="segmented" role="group" aria-label="Minimum level">
+          <div class="segmented" role="group" aria-label="Minimum level" title="Minimum level (v steps through)">
             {#each LEVELS as l (l.id)}
               <button aria-pressed={logs.minLevel === l.id} onclick={() => (logs.minLevel = l.id)}>{l.label}</button>
             {/each}
           </div>
+          <kbd class="level-key">v</kbd>
           <button class="small secondary" aria-pressed={logs.follow} class:on={logs.follow} onclick={() => (logs.follow = !logs.follow)} title="Keep the newest record in view (f)">
             <span class="live-dot" class:on={logs.follow && info?.ended === null}></span>Follow <kbd>f</kbd>
           </button>
           <span class="spacer"></span>
           <span class="note count-note">{logs.visible.length === logs.lines.length ? `${logs.lines.length} records` : `${logs.visible.length} of ${logs.lines.length}`}</span>
-          <button class="small secondary" onclick={() => void copyAll()} disabled={!logs.lines.length}>{copied ? "Copied" : "Copy all"} <kbd>c</kbd></button>
+          <button class="small secondary" onclick={() => void copyAll()} disabled={!logs.lines.length}>{copied ? "Copied" : "Copy all"} <kbd>y</kbd></button>
         </div>
 
         {#if fallback !== null}
           <div class="fallback">
             <p class="note">The clipboard is not available here: the text is selected, copy it with {isMac ? "⌘C" : "Ctrl-C"}. <kbd>Esc</kbd> hides it.</p>
-            <textarea bind:this={fallbackEl} readonly value={fallback} aria-label="Session log text"></textarea>
+            <textarea bind:this={fallbackEl} readonly value={fallback} aria-label="Session records as text"></textarea>
           </div>
         {:else if logs.loading}
-          <div class="state"><span class="spinner" aria-hidden="true"></span><p>Loading the log…</p></div>
+          <div class="state"><span class="spinner" aria-hidden="true"></span><p>Loading records…</p></div>
         {:else if logs.error}
           <div class="state"><p class="inline-error"><span>{sentence(logs.error.message)}</span>{#if logs.error.hint}<span class="hint">{logs.error.hint}</span>{/if}</p></div>
         {:else if logs.lines.length === 0}
@@ -232,7 +316,7 @@
           <p class="cap note">The engine keeps the last 500 records of each session.</p>
         {/if}
       {:else}
-        <div class="config">
+        <div class="config" bind:this={configEl}>
           {#if logs.configLoading && !logs.config}
             <div class="state"><span class="spinner" aria-hidden="true"></span><p>Resolving {info?.alias}…</p></div>
           {:else if logs.configError}
@@ -245,7 +329,7 @@
                 <p class="inline-error"><span>{sentence(c.routeError.message)}</span>{#if c.routeError.hint}<span class="hint">{c.routeError.hint}</span>{/if}</p>
               {:else}
                 <span class="hops mono">
-                  <span class="muted">you</span>
+                  <span class="muted">You</span>
                   {#each c.route as hop, i (i)}
                     <span class="arrow">→</span><span class:final={i === c.route.length - 1}>{hop.user}@{hop.hostname}{#if hop.port !== 22}<span class="muted">:{hop.port}</span>{/if}</span>
                   {/each}
@@ -264,12 +348,12 @@
                     <span class="key mono" role="cell">{o.key}</span>
                     <span class="values mono" role="cell">
                       {#if o.sensitive}
-                        <span class="hidden">•••</span> <span class="muted" title="Runs a command: never shown nor copied by Portico">hidden</span>
+                        <span class="hidden" aria-hidden="true">•••</span> <span class="hidden-note">Hidden: may contain a secret · never copied</span>
                       {:else}
                         {o.values.join(" ")}
                       {/if}
                     </span>
-                    <span class="origin mono" role="cell">{o.origin ?? (o.command ? "connect" : "default")}</span>
+                    <span class="origin mono" role="cell">{o.origin ?? (o.command ? "at connect" : "default")}</span>
                   </div>
                 {/each}
               </div>
@@ -281,7 +365,7 @@
   </div>
 
   {#snippet footer()}
-    <span class="footer-note"><kbd>j</kbd> <kbd>k</kbd> sessions · <kbd>r</kbd> refresh · texts are shown escaped, as copied</span>
+    <span class="footer-note"><kbd>j</kbd> <kbd>k</kbd> sessions · <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>g</kbd> <kbd>G</kbd> scroll · <kbd>Ctrl-R</kbd> refresh · texts are shown escaped, as copied</span>
     <button class="secondary" onclick={() => logs.close()}>Close <kbd>Esc</kbd></button>
   {/snippet}
 </Modal>
@@ -315,7 +399,7 @@
   .sessions ul {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     margin: 0;
     padding: 0;
     list-style: none;
@@ -362,6 +446,13 @@
   .alias { grid-area: alias; overflow: hidden; color: var(--text-primary); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
   .time { grid-area: time; color: var(--text-muted); font-size: var(--text-xs); }
   .outcome { grid-area: outcome; overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+  /* Without a probe badge, the outcome uses the whole second line. */
+  .sessions li:not(.with-probe) .outcome { grid-column: 2 / -1; }
+  .outcome[data-status="error"] { color: var(--status-error); }
+  /* A refused host key was the user's choice: neutral, not an error. */
+  .outcome[data-status="idle"] { color: var(--status-idle); }
+  .tab-key,
+  .level-key { color: var(--text-muted); }
   .probe {
     grid-area: probe;
     padding: 0 var(--space-1);
@@ -429,12 +520,13 @@
     display: grid;
     grid-template-columns: max-content 5ch 11ch minmax(0, 1fr);
     gap: var(--space-3);
-    padding: 1px var(--space-3);
+    /* No padding off the 4 px scale: the line height spaces the records. */
+    padding: 0 var(--space-3);
     font-size: var(--text-sm);
-    line-height: 1.6;
+    line-height: 1.75;
     /* Off-screen rows skip layout and paint (500 records at most). */
     content-visibility: auto;
-    contain-intrinsic-size: auto 20px;
+    contain-intrinsic-size: auto 24px;
   }
   .record:hover { background: var(--bg-surface); }
   .at { color: var(--text-muted); }
@@ -483,5 +575,6 @@
   .key { color: var(--text-primary); }
   .values { color: var(--text-secondary); overflow-wrap: anywhere; user-select: text; }
   .hidden { letter-spacing: 0.2em; color: var(--text-muted); }
+  .hidden-note { color: var(--text-muted); font-family: var(--font-ui); font-size: var(--text-xs); }
   .origin { color: var(--text-muted); text-align: right; white-space: nowrap; }
 </style>

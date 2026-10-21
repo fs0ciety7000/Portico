@@ -9,7 +9,7 @@
 // Tauri injects `State` (and deserialized arguments) by value.
 #![allow(clippy::needless_pass_by_value)]
 
-use portico_core::hosts::HostMeta;
+use portico_core::hosts::{HostMeta, HostMetaError, normalize_tags};
 use portico_core::recent::{MAX_RECENT, RecentHost};
 use portico_core::{Engine, ErrorSummary};
 use serde::Serialize;
@@ -55,6 +55,33 @@ pub(crate) async fn set_notes(
     notes: Option<String>,
 ) -> Result<HostMeta, ErrorSummary> {
     engine.set_notes(&alias, notes).await.map_err(summary)
+}
+
+/// A refused tag list: the core's summary, plus the 1-based position of the
+/// offending tag when the error names one (`HostMetaError::Tag`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TagsErrorDto {
+    #[serde(flatten)]
+    pub summary: ErrorSummary,
+    pub position: Option<usize>,
+}
+
+/// Validates and normalizes tags as `set_tags` would, without writing:
+/// the edit dialog checks each chip as it is created. Synchronous (pure
+/// computation, no I/O).
+#[tauri::command]
+pub(crate) fn check_tags(tags: Vec<String>) -> Result<Vec<String>, TagsErrorDto> {
+    normalize_tags(&tags).map_err(|e| {
+        let position = match &e {
+            HostMetaError::Tag { position, .. } => Some(*position),
+            _ => None,
+        };
+        TagsErrorDto {
+            summary: portico_core::Error::from(e).summary(),
+            position,
+        }
+    })
 }
 
 /// One recent host; `last` in Unix milliseconds.
@@ -121,5 +148,27 @@ mod tests {
             serde_json::to_value(&dto).unwrap(),
             serde_json::json!({ "alias": "web", "last": 1500, "count": 3 })
         );
+    }
+
+    #[test]
+    fn check_tags_normalizes_like_set_tags() {
+        let ok = check_tags(vec!["#prod".into(), "db".into(), "PROD".into(), " ".into()]).unwrap();
+        assert_eq!(ok, vec!["prod".to_owned(), "db".to_owned()]);
+    }
+
+    #[test]
+    fn check_tags_names_the_offending_tag() {
+        let err = check_tags(vec!["prod".into(), "bad tag".into()]).unwrap_err();
+        assert_eq!(err.summary.code, "host_tag");
+        assert_eq!(err.position, Some(2));
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], "host_tag");
+        assert_eq!(json["position"], 2);
+        assert!(json["hint"].is_string());
+
+        let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
+        let err = check_tags(many).unwrap_err();
+        assert_eq!(err.summary.code, "host_tags");
+        assert_eq!(err.position, None);
     }
 }

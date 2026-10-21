@@ -37,6 +37,9 @@ export const isLive = (s: SessionInfo | undefined): boolean => !!s && LIVE.inclu
 
 let nextKey = 1;
 
+/** Severity of a notice: icon and border colour. */
+export type ToastTone = "error" | "warning" | "info";
+
 /** How long a notice stays (design system: 4 s). */
 const TOAST_MS = 4000;
 
@@ -47,7 +50,7 @@ class Workspace {
   active: number | null = $state(null);
   prompts: Prompt[] = $state([]);
   alerts: Alert[] = $state([]);
-  toast: (ErrorSummary & { tone: "error" | "info" }) | null = $state(null);
+  toast: (ErrorSummary & { tone: ToastTone }) | null = $state(null);
   #toastTimer: ReturnType<typeof setTimeout> | undefined;
   /** Last changed-key alert per session ("Show details" on the failure card). */
   #alertBySession = new Map<number, Alert>();
@@ -73,10 +76,15 @@ class Workspace {
   activeTab: Tab | undefined = $derived(this.tabs.find((t) => t.key === this.active));
 
   /** `ms`: longer for a notice that lists things (ignored settings). */
-  notify(e: unknown, tone: "error" | "info" = "error", ms = TOAST_MS) {
+  notify(e: unknown, tone: ToastTone = "error", ms = TOAST_MS) {
     this.toast = { ...asError(e), tone };
     clearTimeout(this.#toastTimer);
     this.#toastTimer = setTimeout(() => (this.toast = null), ms);
+  }
+
+  dismissToast() {
+    clearTimeout(this.#toastTimer);
+    this.toast = null;
   }
 
   // ── Tabs ────────────────────────────────────────────────────────────

@@ -37,9 +37,9 @@
     {#key host.alias}
       <div class="content" in:fly={{ y: 6, duration: dur("base") }}>
         <header>
-          <div>
+          <div class="identity">
             <div class="title-row">
-              <h1>{host.alias}</h1>
+              <h1 title={host.alias}>{host.alias}</h1>
               <button
                 class="star"
                 class:on={host.favorite}
@@ -126,7 +126,7 @@
     <div class="placeholder">
       <Mark size={56} />
       <p>Select a host to see its effective configuration.</p>
-      <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect{#if keymap.label("app.palette")} · <kbd>{keymap.label("app.palette")}</kbd> commands{/if}</p>
+      <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect{#if keymap.label("app.palette")}{" · "}<kbd>{keymap.label("app.palette")}</kbd> commands{/if}</p>
     </div>
   {/if}
 </section>
@@ -147,8 +147,16 @@
   @media (max-width: 1100px) {
     .details { padding: var(--space-5); }
   }
+  /* Long aliases wrap anywhere, two lines at most (full name in the tooltip). */
   h1 {
+    display: -webkit-box;
+    min-width: 0;
     margin: 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     font-family: var(--font-display);
     font-weight: 600;
     font-size: var(--text-display);
@@ -203,7 +211,10 @@
     color: inherit;
   }
 
+  .identity { flex: 1 1 auto; min-width: 0; }
   .title-row { display: flex; align-items: center; gap: var(--space-2); }
+  .title-row button.star { flex: 0 0 auto; }
+  .target { overflow-wrap: anywhere; }
   button.star {
     display: grid;
     place-items: center;

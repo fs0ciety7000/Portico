@@ -33,10 +33,11 @@ function normalizeTags(tags: string[]): string[] {
   tags.forEach((raw, i) => {
     const tag = raw.trim().replace(/^#/, "").trim();
     if (!tag) return;
+    const hint = "Tags use letters, digits, `_`, `.` and `-`, up to 32 characters.";
     if (!/^[A-Za-z0-9_.-]+$/.test(tag)) {
-      throw fail("host_tag", `invalid tag ${i + 1}: only letters, digits, \`_\`, \`.\` and \`-\` are allowed`, "Tags use letters, digits, `_`, `.` and `-`, up to 32 characters.");
+      throw { ...fail("host_tag", `invalid tag ${i + 1}: use only letters, digits, underscore, dot and dash`, hint), position: i + 1 };
     }
-    if (tag.length > 32) throw fail("host_tag", `invalid tag ${i + 1}: longer than 32 characters`, "Tags use letters, digits, `_`, `.` and `-`, up to 32 characters.");
+    if (tag.length > 32) throw { ...fail("host_tag", `invalid tag ${i + 1}: longer than 32 characters`, hint), position: i + 1 };
     if (!out.some((t) => t.toLowerCase() === tag.toLowerCase())) out.push(tag);
   });
   if (out.length > 16) throw fail("host_tags", "too many tags (at most 16)", "Keep at most 16 tags per host.");
@@ -140,6 +141,9 @@ export function demoMeta(hooks: MetaHooks) {
     backend: {
       async setFavorite(alias: string, favorite: boolean) {
         return edit(alias, (h) => (h.favorite = favorite));
+      },
+      async checkTags(tags: string[]) {
+        return normalizeTags(tags);
       },
       async setTags(alias: string, tags: string[]) {
         const clean = normalizeTags(tags);

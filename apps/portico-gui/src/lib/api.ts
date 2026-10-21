@@ -33,6 +33,18 @@ export interface ErrorSummary {
   hint: string | null;
 }
 
+/** Mirrors `meta::TagsErrorDto`: a refused tag list, with the 1-based
+ * position of the offending tag when the core names one. */
+export interface TagsError extends ErrorSummary {
+  position: number | null;
+}
+
+/** The offending tag's 1-based position carried by a tags error, if any. */
+export function tagPosition(e: unknown): number | null {
+  const p = e && typeof e === "object" && "position" in e ? (e as { position: unknown }).position : null;
+  return typeof p === "number" && Number.isInteger(p) && p > 0 ? p : null;
+}
+
 export type Phase =
   | { phase: "resolving" }
   | { phase: "connecting"; hop: number; hops: number; target: string }
@@ -376,6 +388,7 @@ export const api = {
     invoke<void>("run_snippet", { terminal, id, values, bracketedPaste, run }),
   setFavorite: (alias: string, favorite: boolean) => invoke<HostMeta>("set_favorite", { alias, favorite }),
   setTags: (alias: string, tags: string[]) => invoke<HostMeta>("set_tags", { alias, tags }),
+  checkTags: (tags: string[]) => invoke<string[]>("check_tags", { tags }),
   setGroup: (alias: string, group: string | null) => invoke<HostMeta>("set_group", { alias, group }),
   setNotes: (alias: string, notes: string | null) => invoke<HostMeta>("set_notes", { alias, notes }),
   recentHosts: (limit: number) => invoke<RecentHost[]>("recent_hosts", { limit }),
