@@ -50,13 +50,10 @@ pub(crate) async fn save_theme(
     theme: String,
 ) -> Result<(), ErrorSummary> {
     check_theme(&theme)?;
-    let mut settings = engine.settings().await.map_err(|e| e.summary())?;
-    if settings.theme.as_deref() == Some(theme.as_str()) {
-        return Ok(());
-    }
-    settings.theme = Some(theme);
+    // Only the theme changes, under the core's lock: a keymap saved
+    // meanwhile (TUI, another window) is kept.
     engine
-        .save_settings(settings)
+        .set_theme(Some(theme))
         .await
         .map(|_| ())
         .map_err(|e| e.summary())

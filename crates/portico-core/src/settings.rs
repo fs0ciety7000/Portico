@@ -142,6 +142,20 @@ fn set_string(table: &mut toml_edit::Table, key: &str, text: &str) {
 pub(crate) fn save(path: &Path, settings: &Settings) -> Result<Settings> {
     settings.validate()?;
     let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    save_locked(path, settings)
+}
+
+/// Changes only the theme: read and write happen under one lock, so a
+/// keymap saved meanwhile by another UI is never overwritten. Blocking.
+pub(crate) fn set_theme(path: &Path, theme: Option<&str>) -> Result<Settings> {
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let mut settings = load(path)?;
+    settings.theme = theme.map(str::to_owned);
+    settings.validate()?;
+    save_locked(path, &settings)
+}
+
+fn save_locked(path: &Path, settings: &Settings) -> Result<Settings> {
     let text = store::read_capped(path, MAX_SETTINGS_FILE_BYTES)?.unwrap_or_default();
     let mut doc = store::parse_document(path, &text)?;
     let root = doc.as_table_mut();
@@ -183,6 +197,24 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn set_theme_keeps_a_keymap_saved_in_between() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        // A UI read the settings before the other UI saved its keymap…
+        let stale = load(&path).expect("load");
+        let mut other = stale.clone();
+        other.keymap.gui.insert("app.logs".into(), "F12".into());
+        save(&path, &other).expect("save");
+        // …then changes the theme: the keymap survives.
+        let saved = set_theme(&path, Some("basalt")).expect("theme");
+        assert_eq!(saved.theme.as_deref(), Some("basalt"));
+        assert_eq!(
+            saved.keymap.gui.get("app.logs").map(String::as_str),
+            Some("F12")
+        );
+    }
 
     #[test]
     fn comments_next_to_saved_keys_survive() {

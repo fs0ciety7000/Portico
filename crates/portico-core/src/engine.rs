@@ -1102,6 +1102,16 @@ impl Engine {
             .await
             .map_err(|_| Error::EngineClosed)?
     }
+
+    /// Remembers the theme without touching the rest of `settings.toml`
+    /// (read and write under one lock: two UIs never lose each other's
+    /// changes).
+    pub async fn set_theme(&self, theme: Option<String>) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::set_theme(&path, theme.as_deref()))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
 }
 
 // ════ end Phase 4 ════════════════════════════════════════════════════════

