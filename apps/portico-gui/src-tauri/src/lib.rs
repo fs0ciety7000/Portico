@@ -7,6 +7,7 @@
 
 mod commands;
 mod dto;
+mod files;
 mod terminals;
 
 use std::sync::Arc;
@@ -14,12 +15,17 @@ use std::time::Duration;
 
 use portico_core::{Engine, EngineConfig};
 use tauri::webview::PageLoadEvent;
-use tauri::{Emitter, Manager, RunEvent};
+use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 
+use crate::files::Files;
 use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
 pub const ENGINE_EVENT: &str = "engine://event";
+/// Files dropped on the window, as upload tokens (`files::UploadDto`).
+pub const DROPPED_EVENT: &str = "portico://dropped";
+/// A drag with files entered (`true`) or left (`false`) the window.
+pub const DRAGGING_EVENT: &str = "portico://dragging";
 
 /// Longest wait for sessions to close when quitting.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
@@ -34,30 +40,19 @@ pub fn run() {
         .init();
 
     let app = tauri::Builder::default()
+        // Rust-side dialogs only: no `dialog:` permission is granted to the
+        // webview (see capabilities/default.json).
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let engine = Engine::new(EngineConfig::discover()?);
-            let mut events = engine.subscribe();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match events.recv().await {
-                        Ok(event) => {
-                            if let Err(e) = handle.emit(ENGINE_EVENT, &event) {
-                                tracing::warn!(error = %e, "failed to forward engine event");
-                            }
-                        }
-                        // A burst overflowed the channel: keep forwarding.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(skipped = n, "engine events lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
+            forward_engine_events(&engine, app.handle().clone());
             app.manage(engine);
             app.manage(Arc::new(Terminals::default()));
+            app.manage(Files::default());
             Ok(())
         })
+        // Dropped files become upload tokens; their paths stay in Rust.
+        .on_window_event(forward_drag_drop)
         // A (re)loading page has lost every Channel and dialog: close what
         // the previous page opened instead of leaving shells and prompts
         // with no UI.
@@ -65,6 +60,9 @@ pub fn run() {
             if payload.event() == PageLoadEvent::Started {
                 if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
                     terminals.close_all();
+                }
+                if let Some(files) = webview.try_state::<Files>() {
+                    files.clear();
                 }
                 if let Some(engine) = webview.try_state::<Engine>() {
                     engine.disconnect_all();
@@ -84,6 +82,21 @@ pub fn run() {
             commands::terminal_resize,
             commands::terminal_ack,
             commands::close_terminal,
+            files::sftp_home,
+            files::sftp_list,
+            files::sftp_mkdir,
+            files::sftp_rename,
+            files::sftp_remove,
+            files::pick_uploads,
+            files::upload,
+            files::download,
+            files::cancel_transfer,
+            files::download_dir,
+            files::choose_download_dir,
+            files::check_forward,
+            files::list_tunnels,
+            files::start_tunnel,
+            files::stop_tunnel,
         ])
         .build(tauri::generate_context!());
 
@@ -115,6 +128,49 @@ pub fn run() {
                 }
                 handle.exit(0);
             });
+        }
+    });
+}
+
+/// Dropped files become upload tokens; their paths stay in Rust.
+fn forward_drag_drop(window: &tauri::Window, event: &WindowEvent) {
+    let WindowEvent::DragDrop(drag) = event else {
+        return;
+    };
+    let emitted = match drag {
+        DragDropEvent::Enter { .. } => window.emit(DRAGGING_EVENT, true),
+        DragDropEvent::Leave => window.emit(DRAGGING_EVENT, false),
+        DragDropEvent::Drop { paths, .. } => {
+            let _ = window.emit(DRAGGING_EVENT, false);
+            match window.try_state::<Files>() {
+                Some(files) => window.emit(DROPPED_EVENT, files.register(paths.clone())),
+                None => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    };
+    if let Err(e) = emitted {
+        tracing::warn!(error = %e, "failed to forward a drag and drop event");
+    }
+}
+
+/// Re-emits every engine event to the webview as [`ENGINE_EVENT`].
+fn forward_engine_events(engine: &Engine, handle: tauri::AppHandle) {
+    let mut events = engine.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Err(e) = handle.emit(ENGINE_EVENT, &event) {
+                        tracing::warn!(error = %e, "failed to forward engine event");
+                    }
+                }
+                // A burst overflowed the channel: keep forwarding.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "engine events lagged");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 }

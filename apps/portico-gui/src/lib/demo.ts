@@ -5,7 +5,7 @@
 // new host key, `db-prod` goes through a jump host and asks for a password
 // (anything but "wrong" works), `staging` presents a changed host key.
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, ThemeInfo } from "./api";
+import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
 
 const base = { identityFiles: [], localForwards: [], remoteForwards: [], warnings: [], group: null };
@@ -176,6 +176,107 @@ function exec(id: number, t: DemoTerminal, cmd: string) {
   out(promptOf(t));
 }
 
+// ── Files ────────────────────────────────────────────────────────────────
+
+const DAY = 86_400;
+const now = Math.floor(Date.UTC(2026, 9, 21, 9, 30) / 1000);
+type DemoNode = { kind: RemoteEntry["kind"]; size: number; modified: number };
+const tree = new Map<string, DemoNode>();
+function put(path: string, kind: RemoteEntry["kind"], size = 0, age = 0) {
+  tree.set(path, { kind, size, modified: now - age });
+}
+for (const home of ["/home/deploy", "/home/ops", "/var/lib/postgresql"]) {
+  put(home, "dir");
+  put(`${home}/app`, "dir", 0, DAY * 2);
+  put(`${home}/app/releases`, "dir", 0, DAY * 2);
+  put(`${home}/app/current`, "symlink", 0, DAY * 2);
+  put(`${home}/app/package.json`, "file", 1_874, DAY * 9);
+  put(`${home}/logs`, "dir", 0, 3600);
+  put(`${home}/logs/app.log`, "file", 12_582_912, 120);
+  put(`${home}/logs/error.log`, "file", 348_160, 3600);
+  put(`${home}/backup-2026-10-19.tar.gz`, "file", 505_413_632, DAY * 2);
+  put(`${home}/config.yml`, "file", 1_203, DAY * 30);
+  put(`${home}/deploy.sh`, "file", 2_150, DAY * 400);
+  put(`${home}/README.md`, "file", 4_096, DAY * 400);
+  put(`${home}/.bashrc`, "file", 3_771, DAY * 900);
+}
+for (const dir of ["/", "/home", "/var", "/var/lib", "/root", "/etc"]) put(dir, "dir", 0, DAY * 120);
+
+const demoHomes: Record<string, string> = { "db-prod": "/var/lib/postgresql", bastion: "/home/ops" };
+const notFound = (path: string): ErrorSummary => ({ code: "not_found", message: `${path}: no such file or directory`, hint: null });
+const parentOf = (path: string) => (path === "/" ? "" : path.replace(/\/[^/]+$/, "") || "/");
+const nameOf = (path: string) => path.split("/").pop() ?? path;
+
+function list(path: string): RemoteEntry[] {
+  if (path === "/root") {
+    throw { code: "permission_denied", message: "/root: permission denied", hint: "Your user cannot read this folder." } satisfies ErrorSummary;
+  }
+  if (tree.get(path)?.kind !== "dir") throw notFound(path);
+  const out: RemoteEntry[] = [];
+  for (const [p, n] of tree) {
+    if (p !== path && parentOf(p) === path) {
+      const name = nameOf(p);
+      out.push({ name, display: name, path: p, kind: n.kind, size: n.size, mode: n.kind === "dir" ? 0o755 : 0o644, modified: n.modified });
+    }
+  }
+  return out.sort((a, b) => Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.localeCompare(b.name));
+}
+
+const uploads = new Map<number, { name: string; size: number }>();
+const transfers = new Map<number, { cancelled: boolean }>();
+const local = new Set<string>(["config.yml"]);
+
+async function simulate(session: number, direction: "upload" | "download", name: string, total: number, onConflict: string, done: (final: string) => void) {
+  const id = nextId++;
+  const sftp = 1;
+  const send = (event: Extract<EngineEvent, { type: "sftp" }>["event"]) => emit({ type: "sftp", id: sftp, session, event });
+  transfers.set(id, { cancelled: false });
+  void (async () => {
+    await sleep(60);
+    const exists = direction === "download" ? local.has(name) : false;
+    if (exists && onConflict === "ask") {
+      send({ kind: "transfer_failed", transfer: id, error: { code: "destination_exists", message: `${name} already exists`, hint: null } });
+      return;
+    }
+    if (exists && onConflict === "skip") return send({ kind: "transfer_skipped", transfer: id });
+    const final = exists && onConflict === "rename" ? name.replace(/(\.[^.]*)?$/, " (1)$1") : name;
+    send({ kind: "transfer_started", transfer: id, direction, name, total });
+    // ~6 s for the large archive, instant for small files.
+    const steps = total > 50_000_000 ? 60 : 4;
+    for (let i = 1; i <= steps; i++) {
+      await sleep(100);
+      if (transfers.get(id)?.cancelled) return send({ kind: "transfer_cancelled", transfer: id });
+      send({ kind: "transfer_progress", transfer: id, done: Math.round((total * i) / steps), total });
+    }
+    done(final);
+    send({ kind: "transfer_finished", transfer: id, destination: final });
+  })();
+  return id;
+}
+
+let downloadDir = "/home/demo/Downloads";
+const tunnels = new Map<number, TunnelInfo>();
+let dropListener: ((files: Upload[]) => void) | null = null;
+let dragListener: ((dragging: boolean) => void) | null = null;
+// Browser preview: an HTML5 drop stands in for the native one.
+window.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dragListener?.(true);
+});
+window.addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) dragListener?.(false);
+});
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragListener?.(false);
+  const files = [...(e.dataTransfer?.files ?? [])].map((f) => {
+    const token = nextId++;
+    uploads.set(token, { name: f.name, size: f.size });
+    return { token, display: f.name, size: f.size };
+  });
+  if (files.length) dropListener?.(files);
+});
+
 export const demoBackend: Backend = {
   listHosts: async () => demoHosts,
   searchHosts: async (q) =>
@@ -264,5 +365,103 @@ export const demoBackend: Backend = {
   async onEngineEvent(cb): Promise<UnlistenFn> {
     listeners.add(cb);
     return () => listeners.delete(cb);
+  },
+  async sftpHome(session) {
+    const s = sessions.get(session);
+    return (s && demoHosts.find((h) => h.alias === s.alias)?.user && demoHomes[s.alias]) || "/home/deploy";
+  },
+  async sftpList(_session, path) {
+    await sleep(path.includes("logs") ? 600 : 180);
+    return list(path);
+  },
+  async sftpMkdir(_session, path) {
+    if (tree.has(path)) throw { code: "remote_failure", message: `${path} already exists`, hint: null } satisfies ErrorSummary;
+    put(path, "dir");
+  },
+  async sftpRename(_session, from, to) {
+    for (const [p, n] of [...tree]) {
+      if (p === from || p.startsWith(`${from}/`)) {
+        tree.delete(p);
+        tree.set(to + p.slice(from.length), n);
+      }
+    }
+  },
+  async sftpRemove(_session, path) {
+    if ([...tree.keys()].some((p) => parentOf(p) === path && p !== path)) {
+      throw { code: "remote_failure", message: `${nameOf(path)} is not empty`, hint: "Remove what it contains first." } satisfies ErrorSummary;
+    }
+    tree.delete(path);
+  },
+  async pickUploads() {
+    const token = nextId++;
+    uploads.set(token, { name: "release-notes.md", size: 18_432 });
+    return [{ token, display: "release-notes.md", size: 18_432 }];
+  },
+  async upload(session, token, remoteDir, onConflict) {
+    const file = uploads.get(token);
+    if (!file) throw { code: "unknown_upload", message: "this file is no longer available", hint: "Choose it again." } satisfies ErrorSummary;
+    const path = `${remoteDir.replace(/\/$/, "")}/${file.name}`;
+    if (tree.has(path) && onConflict === "ask") {
+      const id = nextId++;
+      emit({ type: "sftp", id: 1, session, event: { kind: "transfer_failed", transfer: id, error: { code: "destination_exists", message: `${file.name} already exists`, hint: null } } });
+      return id;
+    }
+    return simulate(session, "upload", file.name, file.size, onConflict === "ask" ? "overwrite" : onConflict, () => put(path, "file", file.size));
+  },
+  async download(session, remotePath, onConflict) {
+    const node = tree.get(remotePath);
+    if (!node) throw notFound(remotePath);
+    return simulate(session, "download", nameOf(remotePath), node.size, onConflict, (final) => local.add(final));
+  },
+  async cancelTransfer(id) {
+    const t = transfers.get(id);
+    if (t) t.cancelled = true;
+  },
+  downloadDir: async () => downloadDir,
+  async chooseDownloadDir() {
+    downloadDir = "/home/demo/Projects/incidents";
+    return downloadDir;
+  },
+  async checkForward(spec) {
+    const m = /^\s*-?([LR])\s+(?:([^\s:]+):)?(\d+)[:\s]([^\s:]+):(\d+)\s*$/i.exec(spec);
+    if (!m) throw { code: "invalid_forward", message: "expected [bind:]port:host:hostport", hint: "For example -L 8080:db.internal:5432 or -R 9000:localhost:3000." } satisfies ErrorSummary;
+    const bind = m[2] ?? "localhost";
+    return {
+      display: `-${(m[1] ?? "L").toUpperCase()} ${bind}:${m[3]} → ${m[4]}:${m[5]}`,
+      exposed: !["localhost", "127.0.0.1", "::1"].includes(bind),
+    };
+  },
+  listTunnels: async () => [...tunnels.values()],
+  async startTunnel(session, spec, allowExposed) {
+    const check = await demoBackend.checkForward(spec);
+    if (check.exposed && !allowExposed) throw { code: "tunnel_exposed", message: "this tunnel listens beyond this machine", hint: "Confirm to expose it." } satisfies ErrorSummary;
+    const id = nextId++;
+    tunnels.set(id, { id, session, display: check.display, exposed: check.exposed });
+    void (async () => {
+      await sleep(250);
+      if (spec.includes(":5433")) {
+        tunnels.delete(id);
+        return emit({ type: "tunnel", id, session, event: { kind: "failed", error: { code: "port_in_use", message: "127.0.0.1:5433 is already in use", hint: "Pick another local port." } } });
+      }
+      const bind = check.display.split(" ")[1]?.replace("localhost", "127.0.0.1") ?? "";
+      emit({ type: "tunnel", id, session, event: { kind: "listening", bind } });
+      await sleep(900);
+      emit({ type: "tunnel", id, session, event: { kind: "connection_opened", peer: "127.0.0.1:53412" } });
+    })();
+    return id;
+  },
+  async stopTunnel(id) {
+    const t = tunnels.get(id);
+    if (!t) throw { code: "unknown_tunnel", message: "this tunnel is not running", hint: null } satisfies ErrorSummary;
+    tunnels.delete(id);
+    emit({ type: "tunnel", id, session: t.session, event: { kind: "stopped" } });
+  },
+  async onDropped(cb) {
+    dropListener = cb;
+    return () => (dropListener = null);
+  },
+  async onDragging(cb) {
+    dragListener = cb;
+    return () => (dragListener = null);
   },
 };

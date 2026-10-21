@@ -82,13 +82,73 @@ export type TerminalEvent =
   | { kind: "exited"; status: number | null; signal: string | null }
   | { kind: "closed" };
 
+export type Direction = "upload" | "download";
+
+/** Mirrors `portico_core::events::SftpEvent`. */
+export type SftpEvent =
+  | { kind: "ready"; home: string }
+  | { kind: "transfer_started"; transfer: number; direction: Direction; name: string; total: number | null }
+  | { kind: "transfer_progress"; transfer: number; done: number; total: number | null }
+  | { kind: "transfer_finished"; transfer: number; destination: string }
+  | { kind: "transfer_skipped"; transfer: number }
+  | { kind: "transfer_cancelled"; transfer: number }
+  | { kind: "transfer_failed"; transfer: number; error: ErrorSummary }
+  | { kind: "closed" };
+
+/** Mirrors `portico_core::events::TunnelEvent`. */
+export type TunnelEvent =
+  | { kind: "listening"; bind: string }
+  | { kind: "connection_opened"; peer: string }
+  | { kind: "connection_closed"; peer: string }
+  | { kind: "stopped" }
+  | { kind: "failed"; error: ErrorSummary };
+
 /** Mirrors `portico_core::events::EngineEvent` (only the variants the UI uses). */
 export type EngineEvent =
   | { type: "session"; id: number; event: SessionEvent }
   | { type: "terminal"; id: number; session: number; event: TerminalEvent }
   | ({ type: "prompt" } & Prompt)
   | { type: "prompt_resolved"; id: number }
-  | { type: "tunnel" | "sftp" | "log" };
+  | { type: "sftp"; id: number; session: number; event: SftpEvent }
+  | { type: "tunnel"; id: number; session: number; event: TunnelEvent }
+  | { type: "log" };
+
+export type EntryKind = "file" | "dir" | "symlink" | "other";
+
+/** Mirrors `files::EntryDto`. Show `display`; `name` is raw (operations). */
+export interface RemoteEntry {
+  name: string;
+  display: string;
+  path: string;
+  kind: EntryKind;
+  size: number;
+  mode: number | null;
+  /** Unix seconds. */
+  modified: number | null;
+}
+
+/** A local file handed over by the native picker or a drop (`files::UploadDto`). */
+export interface Upload {
+  token: number;
+  display: string;
+  size: number;
+}
+
+export type OnConflict = "ask" | "overwrite" | "skip" | "rename";
+
+/** Mirrors `files::ForwardDto`. */
+export interface ForwardCheck {
+  display: string;
+  exposed: boolean;
+}
+
+/** Mirrors `files::TunnelDto`. */
+export interface TunnelInfo {
+  id: number;
+  session: number;
+  display: string;
+  exposed: boolean;
+}
 
 /** Mirrors `dto::PtySizeDto`: cells and pixels. */
 export interface PtySize {
@@ -125,6 +185,32 @@ export const api = {
   closeTerminal: (id: number) => invoke<void>("close_terminal", { id }),
   onEngineEvent: (cb: (event: EngineEvent) => void): Promise<UnlistenFn> =>
     listen<EngineEvent>("engine://event", (e) => cb(e.payload)),
+
+  sftpHome: (session: number) => invoke<string>("sftp_home", { session }),
+  sftpList: (session: number, path: string) => invoke<RemoteEntry[]>("sftp_list", { session, path }),
+  sftpMkdir: (session: number, path: string) => invoke<void>("sftp_mkdir", { session, path }),
+  sftpRename: (session: number, from: string, to: string) => invoke<void>("sftp_rename", { session, from, to }),
+  sftpRemove: (session: number, path: string) => invoke<void>("sftp_remove", { session, path }),
+  /** Native file picker (Rust side); the files come back as tokens. */
+  pickUploads: () => invoke<Upload[]>("pick_uploads"),
+  upload: (session: number, token: number, remoteDir: string, onConflict: OnConflict) =>
+    invoke<number>("upload", { session, token, remoteDir, onConflict }),
+  /** Into the download folder, under the remote name. */
+  download: (session: number, remotePath: string, onConflict: OnConflict) =>
+    invoke<number>("download", { session, remotePath, onConflict }),
+  cancelTransfer: (id: number) => invoke<void>("cancel_transfer", { id }),
+  downloadDir: () => invoke<string>("download_dir"),
+  chooseDownloadDir: () => invoke<string | null>("choose_download_dir"),
+  checkForward: (spec: string) => invoke<ForwardCheck>("check_forward", { spec }),
+  listTunnels: () => invoke<TunnelInfo[]>("list_tunnels"),
+  startTunnel: (session: number, spec: string, allowExposed: boolean) =>
+    invoke<number>("start_tunnel", { session, spec, allowExposed }),
+  stopTunnel: (id: number) => invoke<void>("stop_tunnel", { id }),
+  /** Files dropped on the window, already registered as upload tokens. */
+  onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
+    listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),
+  onDragging: (cb: (dragging: boolean) => void): Promise<UnlistenFn> =>
+    listen<boolean>("portico://dragging", (e) => cb(e.payload)),
 };
 
 let home: string | null = null;
@@ -192,6 +278,27 @@ export function describe(view: SessionView | undefined): { status: Status; label
     default:
       return { status: "idle", label: "Disconnected", busy: false };
   }
+}
+
+/** `96 B`, `1.5 KiB`, `381 MiB` (IEC, like the TUI). */
+export function formatSize(bytes: number): string {
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  if (bytes < 1024) return `${bytes} B`;
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/** `42 s`, `3 min`, `1 h 20`. */
+export function formatEta(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}`;
 }
 
 /** `<1 ms`, `4.2 ms`, `38 ms`. */

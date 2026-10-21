@@ -2,7 +2,20 @@
 // simulation in a plain browser (`pnpm dev`, design captures).
 import { Channel } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { api, isTauri, type EngineEvent, type Host, type PromptAnswer, type PtySize, type ThemeInfo } from "./api";
+import {
+  api,
+  isTauri,
+  type EngineEvent,
+  type ForwardCheck,
+  type Host,
+  type OnConflict,
+  type PromptAnswer,
+  type PtySize,
+  type RemoteEntry,
+  type ThemeInfo,
+  type TunnelInfo,
+  type Upload,
+} from "./api";
 import { demoBackend } from "./demo";
 
 export interface Backend {
@@ -20,6 +33,23 @@ export interface Backend {
   terminalAck(id: number, total: number): Promise<void>;
   closeTerminal(id: number): Promise<void>;
   onEngineEvent(cb: (event: EngineEvent) => void): Promise<UnlistenFn>;
+  sftpHome(session: number): Promise<string>;
+  sftpList(session: number, path: string): Promise<RemoteEntry[]>;
+  sftpMkdir(session: number, path: string): Promise<void>;
+  sftpRename(session: number, from: string, to: string): Promise<void>;
+  sftpRemove(session: number, path: string): Promise<void>;
+  pickUploads(): Promise<Upload[]>;
+  upload(session: number, token: number, remoteDir: string, onConflict: OnConflict): Promise<number>;
+  download(session: number, remotePath: string, onConflict: OnConflict): Promise<number>;
+  cancelTransfer(id: number): Promise<void>;
+  downloadDir(): Promise<string>;
+  chooseDownloadDir(): Promise<string | null>;
+  checkForward(spec: string): Promise<ForwardCheck>;
+  listTunnels(): Promise<TunnelInfo[]>;
+  startTunnel(session: number, spec: string, allowExposed: boolean): Promise<number>;
+  stopTunnel(id: number): Promise<void>;
+  onDropped(cb: (files: Upload[]) => void): Promise<UnlistenFn>;
+  onDragging(cb: (dragging: boolean) => void): Promise<UnlistenFn>;
 }
 
 const tauriBackend: Backend = {

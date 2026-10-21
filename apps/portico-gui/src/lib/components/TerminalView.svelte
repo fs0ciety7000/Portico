@@ -18,7 +18,18 @@
   import { isLive, workspace, type Tab } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
 
-  let { tab, active, themeId }: { tab: Tab; active: boolean; themeId: string } = $props();
+  let {
+    tab,
+    active,
+    themeId,
+    autofocus = true,
+  }: {
+    tab: Tab;
+    active: boolean;
+    themeId: string;
+    /** False while another panel (files) owns the keyboard: no automatic focus. */
+    autofocus?: boolean;
+  } = $props();
 
   /** Acknowledge parsed output at least this often (bytes). */
   const ACK_EVERY = 128 * 1024;
@@ -185,7 +196,7 @@
       fitNow();
       pushSize();
       schedule();
-      if (active) term.focus();
+      if (active && autofocus) term.focus();
     } catch (e) {
       if (destroyed || flow.generation !== tab.generation) return;
       const err = asError(e);
@@ -295,7 +306,7 @@
     host.addEventListener("paste", onPaste, true);
 
     void open();
-    if (active) requestAnimationFrame(() => term?.focus());
+    if (active && autofocus) requestAnimationFrame(() => term?.focus());
   }
 
   // (Re)open whenever the tab asks for a new generation.
@@ -311,9 +322,10 @@
 
   $effect(() => {
     if (active && term) {
+      const focus = autofocus;
       requestAnimationFrame(() => {
         onResize();
-        term?.focus();
+        if (focus) term?.focus();
       });
     }
   });

@@ -103,6 +103,24 @@ impl ForwardSpec {
         let (bind, target) = parse_pair(input)?;
         Ok(Self::Remote { bind, target })
     }
+
+    /// What a user types in a UI: `-L 8080:db:5432`, `L 8080 db:5432`,
+    /// `-R 9000:localhost:3000`.
+    pub fn parse_cli(input: &str) -> Result<Self, ForwardParseError> {
+        let text = input.trim();
+        let err = |reason| ForwardParseError {
+            input: text.to_owned(),
+            reason,
+        };
+        let (kind, rest) = text
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| err("start with -L or -R, e.g. -L 8080:db.internal:5432"))?;
+        match kind.trim_start_matches('-') {
+            "L" | "l" => Self::parse_local(rest.trim()),
+            "R" | "r" => Self::parse_remote(rest.trim()),
+            _ => Err(err("start with -L or -R")),
+        }
+    }
 }
 
 fn parse_pair(input: &str) -> Result<(Endpoint, Endpoint), ForwardParseError> {
@@ -722,6 +740,25 @@ mod tests {
             host: h.into(),
             port: p,
         }
+    }
+
+    #[test]
+    fn parses_what_users_type() {
+        assert!(matches!(
+            ForwardSpec::parse_cli("-L 8080:db:5432"),
+            Ok(ForwardSpec::Local { .. })
+        ));
+        assert!(matches!(
+            ForwardSpec::parse_cli(" L 8080 db:5432"),
+            Ok(ForwardSpec::Local { .. })
+        ));
+        assert!(matches!(
+            ForwardSpec::parse_cli("-R 9000:localhost:3000"),
+            Ok(ForwardSpec::Remote { .. })
+        ));
+        assert!(ForwardSpec::parse_cli("8080:db:5432").is_err());
+        assert!(ForwardSpec::parse_cli("-D 1080").is_err());
+        assert!(ForwardSpec::parse_cli("-L nope").is_err());
     }
 
     #[test]

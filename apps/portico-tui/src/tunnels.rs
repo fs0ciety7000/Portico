@@ -160,16 +160,7 @@ impl TunnelsPanel {
 
 /// `-L 8080:db:5432`, `L 8080 db:5432`, `-R 9000:localhost:3000`.
 pub(crate) fn parse(input: &str) -> Result<ForwardSpec, String> {
-    let text = input.trim();
-    let (kind, rest) = text
-        .split_once(char::is_whitespace)
-        .ok_or_else(|| "start with -L or -R, e.g. -L 8080:db.internal:5432".to_owned())?;
-    let rest = rest.trim();
-    match kind.trim_start_matches('-') {
-        "L" | "l" => ForwardSpec::parse_local(rest).map_err(|e| e.to_string()),
-        "R" | "r" => ForwardSpec::parse_remote(rest).map_err(|e| e.to_string()),
-        _ => Err("start with -L or -R".to_owned()),
-    }
+    ForwardSpec::parse_cli(input).map_err(|e| e.to_string())
 }
 
 /// Applies an engine event to the rows; returns true when something changed.

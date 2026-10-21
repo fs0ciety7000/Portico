@@ -3,9 +3,14 @@
   import { fly } from "svelte/transition";
   import { describe, formatRtt, isTauri, setHome, type Host, type ThemeInfo } from "./lib/api";
   import { backend } from "./lib/backend";
-  import { appShortcut, isMac, kbd, tabKbd } from "./lib/keys";
+  import { appShortcut, isMac, kbd, kbdShift, tabKbd } from "./lib/keys";
   import { dur } from "./lib/motion";
   import { workspace } from "./lib/state/workspace.svelte";
+  import { files } from "./lib/state/files.svelte";
+  import { tunnels } from "./lib/state/tunnels.svelte";
+  import FilesPanel from "./lib/components/FilesPanel.svelte";
+  import TunnelsDialog from "./lib/components/TunnelsDialog.svelte";
+  import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
@@ -24,6 +29,10 @@
   let loading = $state(true);
   let paletteOpen = $state(false);
   let searchEl: HTMLInputElement | undefined = $state();
+  /** Files panel beside the active terminal. */
+  let filesOpen = $state(false);
+  let tunnelsOpen = $state(false);
+  let filesPanel: FilesPanel | undefined = $state();
   /** Terminal components by tab key (copy, paste, focus). */
   const views: Record<number, TerminalView> = $state({});
 
@@ -37,7 +46,31 @@
   const tabStatus = $derived(describe(tabSession));
   const prompt = $derived(workspace.prompts[0]);
   const alert = $derived(workspace.alerts[0]);
-  const modalOpen = $derived(!!prompt || !!alert);
+  const conflict = $derived(files.conflicts[0]);
+  const modalOpen = $derived(!!prompt || !!alert || !!conflict || tunnelsOpen);
+  const showFiles = $derived(filesOpen && !!tab);
+
+  /** Session the tunnels panel adds to: the active tab's, else the selected host's live one. */
+  const tunnelSession = $derived.by(() => {
+    if (tab) return { id: tab.session, alias: tab.alias };
+    const alias = hosts[selected]?.alias;
+    const live = alias ? workspace.byAlias[alias] : undefined;
+    return live && alias && ["connected", "authenticating", "handshake", "connecting", "resolving", "verifying_host_key"].includes(live.phase.phase)
+      ? { id: live.id, alias }
+      : null;
+  });
+
+  function toggleFiles() {
+    if (!tab) {
+      // From the host list: open (or reuse) the host's tab, files beside it.
+      const host = hosts[selected];
+      if (!host) return;
+      filesOpen = true;
+      void workspace.open(host.alias);
+      return;
+    }
+    filesOpen = !filesOpen;
+  }
 
   // Ranking lives in portico-core (same results as the TUI).
   $effect(() => {
@@ -102,6 +135,17 @@
           { id: "disconnect", title: `Disconnect ${tab.alias}`, run: () => void workspace.disconnect(tab.alias) },
         ]
       : [{ id: "connect", title: "Connect to selected host", shortcut: "↵", run: connectSelected }]),
+    {
+      id: "files",
+      title: tab ? (showFiles ? "Hide files" : `Files on ${tab.alias}`) : `Files on ${hosts[selected]?.alias ?? "host"}`,
+      shortcut: kbdShift("F"),
+      run: toggleFiles,
+    },
+    ...(showFiles && tab
+      ? [{ id: "upload", title: `Upload files to ${tab.alias}`, run: () => void files.pickAndUpload(tab.session) }]
+      : []),
+    { id: "tunnels", title: "Tunnels", hint: tunnels.list.length ? `${tunnels.list.length} running` : undefined, shortcut: kbdShift("P"), run: () => (tunnelsOpen = true) },
+    { id: "download-dir", title: "Change download folder", hint: files.downloadDir || undefined, run: () => void files.chooseDownloadDir() },
     { id: "home", title: "Go to hosts", shortcut: tabKbd(0), run: () => (workspace.active = null) },
     ...workspace.tabs.map((t, i) => ({
       id: `tab-${t.key}`,
@@ -139,6 +183,8 @@
         case "copy": copy(); break;
         case "paste": void paste(); break;
         case "reload": void load(); break;
+        case "files": toggleFiles(); break;
+        case "tunnels": tunnelsOpen = true; break;
       }
       return;
     }
@@ -151,6 +197,8 @@
     else if (e.key === "k" || e.key === "ArrowUp") selected = Math.max(selected - 1, 0);
     else if (e.key === "Enter") connectSelected();
     else if (e.key === "t") cycleTheme();
+    else if (e.key === "f") toggleFiles();
+    else if (e.key === "p") tunnelsOpen = true;
     else if (e.key === "d") {
       const host = hosts[selected];
       if (host) void workspace.disconnect(host.alias);
@@ -164,19 +212,37 @@
     if (el instanceof HTMLElement && el.closest(".terminal")) el.blur();
   });
 
-  // Give the keyboard back to the terminal when an overlay closes.
+  // Give the keyboard back when an overlay closes: to the files panel when
+  // it is open (and just opened), else to the terminal.
   $effect(() => {
     if (!paletteOpen && !modalOpen && tab) {
       const view = views[tab.key];
-      queueMicrotask(() => view?.focus());
+      const panel = showFiles ? filesPanel : undefined;
+      queueMicrotask(() => (panel ? panel.focus() : view?.focus()));
     }
   });
 
+  function closeFiles() {
+    filesOpen = false;
+  }
+
   onMount(() => {
     load();
-    const unlisten = backend.onEngineEvent((ev) => workspace.onEvent(ev));
+    void files.init();
+    const unlisten = [
+      backend.onEngineEvent((ev) => {
+        workspace.onEvent(ev);
+        if (ev.type === "sftp") files.onEvent(ev.session, ev.event);
+        else if (ev.type === "tunnel") tunnels.onEvent(ev.id, ev.session, ev.event);
+        else if (ev.type === "session" && ev.event.kind === "phase" && ["closed", "failed"].includes(ev.event.phase)) {
+          files.forget(ev.id);
+        }
+      }),
+      backend.onDragging((d) => (files.dragging = d)),
+      backend.onDropped((list) => files.dropped(list, showFiles && tab ? tab.session : null)),
+    ];
     return () => {
-      unlisten.then((f) => f());
+      for (const u of unlisten) void u.then((f) => f());
     };
   });
 </script>
@@ -196,7 +262,7 @@
     </button>
   </header>
 
-  <main>
+  <main class:with-files={showFiles}>
     <div class="hosts" class:hidden={!!tab}>
       <Sidebar {hosts} sessions={workspace.byAlias} {loading} bind:query bind:selected bind:searchEl onconnect={(h) => workspace.open(h.alias)} />
       <HostDetails
@@ -206,9 +272,16 @@
         ondisconnect={(h) => workspace.disconnect(h.alias)}
       />
     </div>
-    {#each workspace.tabs as t (t.key)}
-      <TerminalView bind:this={views[t.key]} tab={t} active={workspace.active === t.key} themeId={theme?.id ?? ""} />
-    {/each}
+    <div class="stage">
+      {#each workspace.tabs as t (t.key)}
+        <TerminalView bind:this={views[t.key]} tab={t} active={workspace.active === t.key} themeId={theme?.id ?? ""} autofocus={!showFiles} />
+      {/each}
+    </div>
+    {#if showFiles && tab}
+      {#key tab.session}
+        <FilesPanel bind:this={filesPanel} session={tab.session} alias={tab.alias} onclose={closeFiles} />
+      {/key}
+    {/if}
   </main>
 
   <footer class="statusbar">
@@ -227,6 +300,7 @@
       <span class="hints">
         <span class="optional"><kbd>{kbd("T")}</kbd> new tab</span>
         <span class="optional"><kbd>{kbd("W")}</kbd> close</span>
+        <span class="optional"><kbd>{kbdShift("F")}</kbd> files</span>
         <span class="optional"><kbd>{tabKbd(0)}</kbd> hosts</span>
         <span><kbd>{kbd("K")}</kbd> commands</span>
       </span>
@@ -237,6 +311,8 @@
         <span><kbd>/</kbd> search</span>
         <span><kbd>↵</kbd> connect</span>
         <span class="optional"><kbd>d</kbd> disconnect</span>
+        <span class="optional"><kbd>f</kbd> files</span>
+        <span class="optional"><kbd>p</kbd> tunnels</span>
         <span class="optional"><kbd>t</kbd> theme</span>
         <span><kbd>{kbd("K")}</kbd> commands</span>
       </span>
@@ -258,6 +334,28 @@
   {#key prompt.id}
     <PromptDialog {prompt} alias={workspace.aliasOf(prompt.session)} onanswer={(a) => workspace.answer(prompt, a)} />
   {/key}
+{:else if conflict}
+  {#key conflict}
+    <Modal onescape={() => files.answerConflict(null)} labelledBy="conflict-title">
+      {#snippet title()}<span class="mono">{conflict.name}</span> already exists{/snippet}
+      <p>
+        {conflict.retry.kind === "download" ? "Your download folder" : "The remote folder"} already has a file with this name.
+        Keep both to save this one as a numbered copy.
+      </p>
+      {#snippet footer()}
+        <button class="secondary" onclick={() => files.answerConflict("skip")}>Skip</button>
+        <button class="secondary" onclick={() => files.answerConflict("overwrite")}>Replace</button>
+        <button class="primary" data-autofocus onclick={() => files.answerConflict("rename")}>Keep both</button>
+      {/snippet}
+    </Modal>
+  {/key}
+{:else if tunnelsOpen}
+  <TunnelsDialog
+    session={tunnelSession?.id ?? null}
+    alias={tunnelSession?.alias}
+    host={allHosts.find((h) => h.alias === tunnelSession?.alias)}
+    onclose={() => (tunnelsOpen = false)}
+  />
 {/if}
 
 {#if workspace.toast}
@@ -313,8 +411,16 @@
   }
   .palette-trigger:hover { border-color: var(--border-strong); }
   .palette-trigger svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
-  main { position: relative; min-height: 0; }
-  main > :global(*) { position: absolute; inset: 0; }
+  main {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+  main.with-files { grid-template-columns: minmax(0, 1fr) min(420px, 42%); }
+  main > .hosts { position: absolute; inset: 0; }
+  .stage { position: relative; min-width: 0; min-height: 0; }
+  .stage > :global(*) { position: absolute; inset: 0; }
   .hosts {
     display: grid;
     grid-template-columns: minmax(280px, 340px) 1fr;

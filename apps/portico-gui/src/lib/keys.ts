@@ -18,6 +18,11 @@ export function kbd(key: string): string {
   return isMac ? `⌘${key}` : `Ctrl-Shift-${key}`;
 }
 
+/** Label of a shortcut that also needs Shift on macOS (⌘⇧F). */
+export function kbdShift(key: string): string {
+  return isMac ? `⌘⇧${key}` : `Ctrl-Shift-${key}`;
+}
+
 /** Label of "go to tab n" (0 = host list). */
 export function tabKbd(n: number): string {
   return isMac ? `⌘${n}` : `Alt-${n}`;
@@ -49,7 +54,9 @@ export type AppShortcut =
   | { action: "prev-tab" }
   | { action: "copy" }
   | { action: "paste" }
-  | { action: "reload" };
+  | { action: "reload" }
+  | { action: "files" }
+  | { action: "tunnels" };
 
 /**
  * Maps a keydown to an app shortcut, or null when the key belongs to the
@@ -81,6 +88,11 @@ export function appShortcut(e: KeyboardEvent, inTerminal: boolean): AppShortcut 
       return { action: "close-tab" };
     case "r":
       return inTerminal ? null : { action: "reload" };
+    // ⌘F / ⌘P stay free on macOS (find, print): these need Shift there too.
+    case "f":
+      return isMac && !e.shiftKey ? null : { action: "files" };
+    case "p":
+      return isMac && !e.shiftKey ? null : { action: "tunnels" };
     // ⌘C / ⌘V on macOS go through the native Edit menu; Linux needs ours.
     case "c":
       return inTerminal && !isMac ? { action: "copy" } : null;

@@ -74,6 +74,7 @@ alacritty_terminal = "0.26"
 # GUI
 tauri = { version = "2.11", features = [] }
 tauri-build = { version = "2.6", features = [] }
+tauri-plugin-dialog = "=2.8.1"
 
 # Dev
 tempfile = "3"

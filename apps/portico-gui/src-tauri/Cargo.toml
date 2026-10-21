@@ -19,13 +19,19 @@ tauri-build.workspace = true
 portico-core.workspace = true
 portico-theme.workspace = true
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 tokio.workspace = true
+directories.workspace = true
+time.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 secrecy = { workspace = true, features = ["serde"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
