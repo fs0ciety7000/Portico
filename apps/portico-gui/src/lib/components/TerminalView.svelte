@@ -13,7 +13,8 @@
   import "@xterm/xterm/css/xterm.css";
   import { asError, describe, sentence } from "../api";
   import { backend } from "../backend";
-  import { appShortcut, chunks, kbd, sanitizePaste, sanitizeTitle } from "../keys";
+  import { chunks, sanitizePaste, sanitizeTitle } from "../keys";
+  import { keymap } from "../state/keymap.svelte";
   import { dur } from "../motion";
   import { isLive, workspace, type Tab } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
@@ -30,6 +31,7 @@
     /** False while another panel (files) owns the keyboard: no automatic focus. */
     autofocus?: boolean;
   } = $props();
+  const closeKey = $derived(keymap.label("tab.close"));
 
   /** Acknowledge parsed output at least this often (bytes). */
   const ACK_EVERY = 128 * 1024;
@@ -273,7 +275,7 @@
     }
 
     term.attachCustomKeyEventHandler((e) => {
-      if (appShortcut(e, true)) return false; // handled by the app (bubbles to window)
+      if (e.type === "keydown" && keymap.match(e, "terminal")) return false; // handled by the app (bubbles to window)
       // A hidden view never takes input (focus may linger after switching).
       if (!active) {
         e.preventDefault();
@@ -363,10 +365,10 @@
         <h2>{tab.alias}</h2>
         <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
         {#if waiting}
-          <p class="muted">Press <kbd>Esc</kbd> or <kbd>{kbd("W")}</kbd> to cancel</p>
+          <p class="muted">Press <kbd>Esc</kbd>{#if closeKey} or <kbd>{closeKey}</kbd>{/if} to cancel</p>
         {:else}
           <div class="actions">
-            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
             <button class="primary" onclick={() => workspace.reconnect(tab.key)}>Connect <kbd>↵</kbd></button>
           </div>
         {/if}
@@ -393,10 +395,10 @@
             {#if workspace.hasAlert(tab.session)}
               <button class="secondary" onclick={() => workspace.showAlert(tab.session)}>Show details</button>
             {/if}
-            <button class="primary" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+            <button class="primary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
           {:else}
             <button class="secondary" onclick={() => (workspace.active = null)}>Hosts <kbd>Esc</kbd></button>
-            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
             <button class="primary" onclick={() => workspace.reconnect(tab.key)}>Retry <kbd>↵</kbd></button>
           {/if}
         </div>
@@ -409,7 +411,7 @@
       {#if isLive(session)}<span class="muted-inline">· session still connected</span>{/if}
       <span class="spacer"></span>
       <button class="link" onclick={() => workspace.reconnect(tab.key)}>Reconnect <kbd>↵</kbd></button>
-      <button class="link" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+      <button class="link" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
     </div>
   {/if}
 </section>

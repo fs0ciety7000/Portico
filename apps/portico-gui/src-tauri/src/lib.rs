@@ -6,9 +6,12 @@
 //! terminal (ordered, binary, flow-controlled), never the global event bus.
 
 mod commands;
+mod debug;
 mod dto;
 mod files;
 mod keys;
+mod meta;
+mod settings;
 mod snippets;
 mod terminals;
 
@@ -51,6 +54,8 @@ fn init_tracing() {
         .init();
 }
 
+// One builder chain: its length is the list of IPC commands.
+#[allow(clippy::too_many_lines)]
 fn run_app() {
     let app = tauri::Builder::default()
         // Rust-side dialogs only: no `dialog:` permission is granted to the
@@ -121,6 +126,19 @@ fn run_app() {
             snippets::save_snippet,
             snippets::delete_snippet,
             snippets::run_snippet,
+            meta::set_favorite,
+            meta::set_tags,
+            meta::set_group,
+            meta::set_notes,
+            meta::recent_hosts,
+            meta::clear_recent,
+            meta::forget_recent,
+            debug::sessions_with_logs,
+            debug::session_logs,
+            debug::session_logs_text,
+            debug::effective_config,
+            settings::get_settings,
+            settings::save_theme,
         ])
         .build(tauri::generate_context!());
 

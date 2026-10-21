@@ -1,26 +1,42 @@
 <script lang="ts">
-  import { describe, type Host, type SessionView } from "../api";
-  import { kbd } from "../keys";
+  // Host list: search, then either the ranked results (flat) or the
+  // sections (Recent, groups, Other) whose headers are rows too: the
+  // keyboard moves over both, ↵ / ← / → fold a section.
+  import { describe, type SessionView } from "../api";
+  import type { Row } from "../hostlist";
+  import { keymap } from "../state/keymap.svelte";
 
   let {
-    hosts,
+    rows,
+    total,
     sessions = {},
     query = $bindable(""),
     selected = $bindable(0),
     loading = false,
     searchEl = $bindable(),
-    onconnect,
+    onactivate,
+    onforget,
+    ontoggle,
   }: {
-    hosts: Host[];
+    rows: Row[];
+    /** Hosts in the config (empty-state wording). */
+    total: number;
     sessions?: Record<string, SessionView>;
     query?: string;
     selected?: number;
     loading?: boolean;
     searchEl?: HTMLInputElement;
-    onconnect: (host: Host) => void;
+    /** ↵ or double-click: connect a host, fold or unfold a section. */
+    onactivate: (row: Row) => void;
+    /** "Remove from recent" on a Recent row. */
+    onforget: (alias: string) => void;
+    ontoggle: (sectionId: string) => void;
   } = $props();
 
   let listEl: HTMLUListElement | undefined = $state();
+
+  const flat = $derived(rows.every((r) => r.section.kind === "flat"));
+  const flatTitle = $derived(rows[0]?.section.title ?? (query ? "Results" : "Hosts"));
 
   // Keep the selected row visible when navigating with the keyboard.
   $effect(() => {
@@ -30,19 +46,21 @@
 
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
-      selected = Math.min(selected + 1, hosts.length - 1);
+      selected = Math.min(selected + 1, rows.length - 1);
       e.preventDefault();
     } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
       selected = Math.max(selected - 1, 0);
       e.preventDefault();
     } else if (e.key === "Enter") {
-      const host = hosts[selected];
-      if (host) onconnect(host);
+      const row = rows[selected];
+      if (row) onactivate(row);
     } else if (e.key === "Escape") {
       if (query) query = "";
       else searchEl?.blur();
     }
   }
+
+  const forgetTip = $derived(keymap.tip("Remove from recent", "hosts.forget-recent"));
 </script>
 
 <aside class="sidebar">
@@ -52,15 +70,17 @@
       bind:this={searchEl}
       bind:value={query}
       {onkeydown}
-      placeholder="Search hosts, #tags…"
+      placeholder="Search hosts, #tag, @group, * favorites"
       spellcheck="false"
       autocomplete="off"
       aria-label="Search hosts"
     />
-    <kbd>{kbd("K")}</kbd>
+    {#if keymap.label("hosts.search")}<kbd>{keymap.label("hosts.search")}</kbd>{/if}
   </label>
 
-  <div class="section-title">Hosts <span class="count">{hosts.length}</span></div>
+  {#if flat || loading}
+    <div class="section-title static">{flatTitle} <span class="count">{loading ? "" : rows.length}</span></div>
+  {/if}
 
   {#if loading}
     <ul class="list" aria-busy="true">
@@ -68,24 +88,67 @@
         <li class="skeleton" style:animation-delay="{i * 80}ms"></li>
       {/each}
     </ul>
-  {:else if hosts.length === 0}
-    <p class="empty">{query ? "No host matches this search." : "No hosts in ~/.ssh/config yet."}</p>
+  {:else if rows.length === 0}
+    <div class="empty">
+      {#if query}
+        <p>No host matches this search.</p>
+        <p class="muted"><kbd>Esc</kbd> clears it · <span class="mono">#tag</span>, <span class="mono">@group</span> and <span class="mono">*</span> narrow it</p>
+      {:else if total === 0}
+        <p>No hosts in ~/.ssh/config yet.</p>
+        <p class="muted">Add a <span class="mono">Host</span> block, then reload{#if keymap.label("app.reload")} with <kbd>{keymap.label("app.reload")}</kbd>{/if}.</p>
+      {/if}
+    </div>
   {:else}
     <ul class="list" role="listbox" aria-label="Hosts" bind:this={listEl}>
-      {#each hosts as host, i (host.alias)}
-        {@const st = describe(sessions[host.alias])}
-        <li
-          role="option"
-          aria-selected={i === selected}
-          class:selected={i === selected}
-          onclick={() => (selected = i)}
-          ondblclick={() => onconnect(host)}
-          onkeydown={() => {}}
-        >
-          <span class="dot" data-status={st.status} class:busy={st.busy}></span>
-          <span class="alias">{host.alias}{#if host.favorite}<span class="star" aria-label="favorite"> ★</span>{/if}</span>
-          <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
-        </li>
+      {#each rows as row, i (row.key)}
+        {#if row.kind === "header"}
+          <li
+            class="header"
+            class:selected={i === selected}
+            role="option"
+            aria-selected={i === selected}
+            aria-label={`${row.section.title}, ${row.section.count} ${row.section.count === 1 ? "host" : "hosts"}, ${row.section.collapsed ? "folded" : "unfolded"}`}
+            onclick={() => {
+              selected = i;
+              ontoggle(row.section.id);
+            }}
+            onkeydown={() => {}}
+          >
+            <svg class="chevron" class:collapsed={row.section.collapsed} viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6" /></svg>
+            <span class="section-name">{row.section.title}</span>
+            <span class="count">{row.section.count}</span>
+          </li>
+        {:else}
+          {@const host = row.host}
+          {@const st = describe(sessions[host.alias])}
+          <li
+            role="option"
+            aria-selected={i === selected}
+            class:selected={i === selected}
+            class:recent={row.section.kind === "recent"}
+            onclick={() => (selected = i)}
+            ondblclick={() => onactivate(row)}
+            onkeydown={() => {}}
+          >
+            <span class="dot" data-status={st.status} class:busy={st.busy}></span>
+            <span class="alias">{host.alias}{#if host.favorite}<span class="star" aria-label="favorite">★</span>{/if}</span>
+            <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
+            {#if row.section.kind === "recent"}
+              <button
+                class="forget"
+                tabindex="-1"
+                title={forgetTip}
+                aria-label={`Remove ${host.alias} from recent`}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  onforget(host.alias);
+                }}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
+              </button>
+            {/if}
+          </li>
+        {/if}
       {/each}
     </ul>
   {/if}
@@ -159,12 +222,14 @@
     grid-template-columns: 8px auto 1fr;
     align-items: center;
     gap: var(--space-2);
+    flex: 0 0 34px;
     height: 34px;
     padding: 0 var(--space-3);
     border-radius: var(--radius-md);
     cursor: default;
     transition: background var(--motion-fast) var(--ease-standard);
   }
+  li.recent { grid-template-columns: 8px auto 1fr 20px; }
   li:hover { background: var(--bg-elevated); }
   li.selected { background: var(--bg-selected); }
   li.selected::before {
@@ -177,6 +242,34 @@
     border-radius: 2px;
     background: var(--accent);
   }
+  /* Section headers: spaced capitals, muted; space above marks the break. */
+  li.header {
+    grid-template-columns: 12px 1fr auto;
+    flex-basis: 28px;
+    height: 28px;
+    margin-top: var(--space-2);
+    padding: 0 var(--space-2);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  li.header:first-child { margin-top: 0; }
+  li.header:hover { color: var(--text-secondary); background: transparent; }
+  li.header.selected { color: var(--text-secondary); background: var(--bg-selected); }
+  .section-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .count { font-variant-numeric: tabular-nums; letter-spacing: normal; }
+  .chevron {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform var(--motion-fast) var(--ease-standard);
+  }
+  .chevron.collapsed { transform: rotate(-90deg); }
   .dot {
     --c: var(--status-idle);
     width: 6px;
@@ -195,7 +288,7 @@
     100% { box-shadow: 0 0 0 5px transparent; }
   }
   .alias { font-weight: 550; }
-  .star { color: var(--accent); font-size: var(--text-xs); }
+  .star { margin-left: var(--space-1); color: var(--accent); font-size: var(--text-xs); }
   .target {
     color: var(--text-muted);
     font-size: var(--text-xs);
@@ -204,7 +297,26 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .empty { color: var(--text-muted); padding: var(--space-2); }
+  .forget {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+  }
+  li:hover .forget,
+  li.selected .forget { opacity: 1; }
+  .forget:hover { background: var(--bg-overlay); color: var(--text-primary); }
+  .forget svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .empty { display: grid; gap: var(--space-1); padding: var(--space-2); color: var(--text-secondary); }
+  .empty p { margin: 0; }
+  .muted { color: var(--text-muted); font-size: var(--text-sm); }
 
   .skeleton {
     height: 34px;

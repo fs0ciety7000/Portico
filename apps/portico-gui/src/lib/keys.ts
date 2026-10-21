@@ -1,114 +1,12 @@
-// Application shortcuts and their platform modifier.
+// Platform and text helpers for keyboard input. The shortcut table, its
+// parsing and matching live in `shortcuts.ts` (pure, also used to generate
+// docs/KEYBINDINGS.md) and `state/keymap.svelte.ts` (effective keymap).
 //
 // macOS: ⌘ never reaches the remote shell, so ⌘T / ⌘W / ⌘1..9 are free.
 // Linux: Ctrl-T, Ctrl-W, Ctrl-K… belong to the shell (readline, vim, tmux),
 // so inside a terminal the app modifier is Ctrl+Shift, like GNOME Terminal.
-// Outside a terminal plain Ctrl also works. Tabs by number use Alt+digit on
-// Linux (Ctrl-Shift-2 / -6 are Ctrl-@ and Ctrl-^, used by emacs and vim).
-//
-// Letters are matched on the produced character (AZERTY, Dvorak, Bépo put
-// W, K… elsewhere); digits on the physical key (they need Shift on AZERTY).
 
 export const isMac: boolean = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-
-/** Label of the app modifier for `<kbd>` hints. */
-export const MOD = isMac ? "⌘" : "Ctrl-Shift-";
-
-export function kbd(key: string): string {
-  return isMac ? `⌘${key}` : `Ctrl-Shift-${key}`;
-}
-
-/** Label of a shortcut that also needs Shift on macOS (⌘⇧F). */
-export function kbdShift(key: string): string {
-  return isMac ? `⌘⇧${key}` : `Ctrl-Shift-${key}`;
-}
-
-/** Label of "go to tab n" (0 = host list). */
-export function tabKbd(n: number): string {
-  return isMac ? `⌘${n}` : `Alt-${n}`;
-}
-
-/** The letter a key event stands for: the typed character on any Latin
- * layout, the physical key otherwise (Cyrillic, Greek…). */
-function letterOf(e: KeyboardEvent): string | null {
-  const key = e.key.length === 1 ? e.key.toLowerCase() : "";
-  if (/^[a-z]$/.test(key)) return key;
-  const code = /^Key([A-Z])$/.exec(e.code);
-  return code?.[1] ? code[1].toLowerCase() : null;
-}
-
-/** True when `e` uses the app modifier (`inTerminal`: stricter on Linux). */
-export function hasMod(e: KeyboardEvent, inTerminal: boolean): boolean {
-  if (isMac) return e.metaKey && !e.ctrlKey;
-  if (e.metaKey || e.altKey || !e.ctrlKey) return false;
-  return inTerminal ? e.shiftKey : true;
-}
-
-export type AppShortcut =
-  | { action: "palette" }
-  | { action: "new-tab" }
-  | { action: "close-tab" }
-  | { action: "go-tab"; index: number }
-  | { action: "go-home" }
-  | { action: "next-tab" }
-  | { action: "prev-tab" }
-  | { action: "copy" }
-  | { action: "paste" }
-  | { action: "reload" }
-  | { action: "files" }
-  | { action: "tunnels" }
-  | { action: "keys" }
-  | { action: "snippets" };
-
-/**
- * Maps a keydown to an app shortcut, or null when the key belongs to the
- * focused view (and, in a terminal, to the remote program).
- */
-export function appShortcut(e: KeyboardEvent, inTerminal: boolean): AppShortcut | null {
-  if (e.type !== "keydown") return null;
-  // Ctrl-Tab / Ctrl-Shift-Tab cycle tabs everywhere (rarely used by shells).
-  if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") {
-    return { action: e.shiftKey ? "prev-tab" : "next-tab" };
-  }
-  const digit = /^Digit([0-9])$/.exec(e.code);
-  const tabMod = isMac
-    ? e.metaKey && !e.ctrlKey && !e.altKey
-    : e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
-  if (digit?.[1] && tabMod) {
-    const n = Number(digit[1]);
-    return n === 0 ? { action: "go-home" } : { action: "go-tab", index: n - 1 };
-  }
-  if (!hasMod(e, inTerminal)) return null;
-  if (isMac && e.code === "BracketRight") return { action: "next-tab" };
-  if (isMac && e.code === "BracketLeft") return { action: "prev-tab" };
-  switch (letterOf(e)) {
-    case "k":
-      return { action: "palette" };
-    case "t":
-      return { action: "new-tab" };
-    case "w":
-      return { action: "close-tab" };
-    case "r":
-      return inTerminal ? null : { action: "reload" };
-    // ⌘F / ⌘P stay free on macOS (find, print): these need Shift there too.
-    case "f":
-      return isMac && !e.shiftKey ? null : { action: "files" };
-    case "p":
-      return isMac && !e.shiftKey ? null : { action: "tunnels" };
-    // ⌘I / ⌘S stay free on macOS (italic, save): Shift there too.
-    case "i":
-      return isMac && !e.shiftKey ? null : { action: "keys" };
-    case "s":
-      return isMac && !e.shiftKey ? null : { action: "snippets" };
-    // ⌘C / ⌘V on macOS go through the native Edit menu; Linux needs ours.
-    case "c":
-      return inTerminal && !isMac ? { action: "copy" } : null;
-    case "v":
-      return inTerminal && !isMac ? { action: "paste" } : null;
-    default:
-      return null;
-  }
-}
 
 /**
  * Pasted text may come from anywhere: remove ESC and C1 controls so it can

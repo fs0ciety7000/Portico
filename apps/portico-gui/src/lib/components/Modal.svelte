@@ -24,8 +24,8 @@
   }: {
     title: Snippet;
     tone?: "default" | "danger";
-    /** `wide` for list views (keys, snippets). */
-    size?: "default" | "wide";
+    /** `wide` for list views (keys, snippets), `full` for the debug panel. */
+    size?: "default" | "wide" | "full";
     labelledBy?: string;
     armed?: boolean;
     /** `performance.now()` when the dialog armed. */
@@ -135,7 +135,8 @@
   <div
     class="modal"
     class:danger={tone === "danger"}
-    class:wide={size === "wide"}
+    class:wide={size === "wide" || size === "full"}
+    class:full={size === "full"}
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledBy}
@@ -178,6 +179,11 @@
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
     max-height: min(720px, calc(100vh - 2 * var(--space-6)));
+  }
+  .modal.full {
+    width: min(1180px, 100%);
+    height: min(780px, calc(100vh - 2 * var(--space-6)));
+    max-height: none;
   }
   .modal.wide .body { overflow-y: auto; }
   .modal.wide .body.fixed {

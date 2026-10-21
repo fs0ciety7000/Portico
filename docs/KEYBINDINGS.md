@@ -1,39 +1,23 @@
 # Raccourcis clavier : Portico
 
-> Source de vérité : `apps/portico-tui/src/keymap.rs` (TUI : aide `?`, barre de statut et tables TUI de ce
-> fichier, générées entre les marqueurs `BEGIN/END GENERATED: tui`) et la palette de
-> `apps/portico-gui/src/App.svelte` (GUI). Toute modification de raccourci met à jour ce fichier ; côté TUI,
-> `cargo run -p portico-tui -- --write-keybindings docs/KEYBINDINGS.md` régénère le bloc, et un test échoue
-> s'il est périmé.
+> Sources de vérité : `apps/portico-tui/src/keymap.rs` pour la TUI (aide `?`, barre de statut, tables du bloc
+> `BEGIN/END GENERATED: tui`, régénérées par `cargo run -p portico-tui -- --write-keybindings docs/KEYBINDINGS.md`)
+> et `apps/portico-gui/src/lib/shortcuts.ts` pour la GUI (palette, infobulles, bloc `BEGIN/END GENERATED: gui`,
+> régénéré par `pnpm gen:keybindings`). Un test échoue de chaque côté si son bloc est périmé : ne modifiez pas
+> ces blocs à la main. Les raccourcis se personnalisent dans `settings.toml` (voir les sections dédiées).
 > `⌘` désigne `Cmd` sur macOS. Sur Linux, le modificateur de l'app est `Ctrl` dans la liste des hôtes et
 > **`Ctrl-Shift`** dès qu'un terminal a le focus (`Ctrl-T`, `Ctrl-W`, `Ctrl-K`… appartiennent au shell, à vim, à tmux),
 > comme GNOME Terminal. `Ctrl-Shift` fonctionne partout, c'est ce que l'UI affiche. Les onglets numérotés passent par
 > **`Alt-1`…`Alt-9`** (`Ctrl-Shift-2` et `-6` sont `Ctrl-@` et `Ctrl-^`, utilisés par emacs et vim).
 > Les lettres sont reconnues par le caractère produit (AZERTY, Dvorak, Bépo) ; les chiffres par la touche physique.
 
-## Liste des hôtes
+## Vue d'ensemble
 
-> Colonne TUI : touches par défaut les plus courantes ; la table TUI complète (favoris, édition, récents,
-> panneau debug, identifiants configurables) est générée plus bas.
-
-| Action | TUI | GUI |
-|---|---|---|
-| Descendre / monter | `j` / `k`, `↓` / `↑` | `j` / `k`, `↓` / `↑` |
-| Premier / dernier hôte | `g` / `G` | — |
-| Rechercher (flou, `#tag`, `*` favoris) | `/` ou `Ctrl-K` | `/` |
-| Naviguer pendant la recherche | `↑` `↓`, `Ctrl-N` / `Ctrl-P` | `↑` `↓`, `Ctrl-N` / `Ctrl-P` |
-| Vider la recherche | `Ctrl-U` (ou `Esc` hors recherche) | `Esc` |
-| Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `↵`, double-clic |
-| Se déconnecter (hôte sélectionné) | `d` | `d` |
-| Explorateur de fichiers (SFTP) de l'hôte (se connecte au besoin) | `f` | `f` |
-| Tunnels | `p` | `p` |
-| Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | `⌘1`…`⌘9` (Linux : `Alt-1`…`9`), `Ctrl-Tab` / `Ctrl-Shift-Tab` |
-| Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | — |
-| Palette de commandes | — | `⌘K` |
-| Recharger `~/.ssh/config` | `r` | `⌘R` (Linux : `Ctrl-R`) |
-| Changer de thème | `t` | `t` |
-| Aide | `?` | (palette) |
-| Quitter | `q`, `Ctrl-C` | `⌘Q` (système) |
+Une seule grammaire dans les deux interfaces : `↵` se connecte, `/` cherche (`#tag`, `@groupe`, `*` favoris),
+`f` fichiers, `p` tunnels, `i` clés, `s` snippets, `e` édition des métadonnées d'un hôte, `*` (TUI) ou `⌘D`
+(GUI) favori, `l` (TUI) ou `⌘⇧L` (GUI) logs de session, `t` thème. La TUI passe par le préfixe `Ctrl-Space`
+dans un terminal ; la GUI par `⌘` (Linux : `Ctrl`, `Ctrl-Shift` quand un terminal a le focus) et la palette
+`⌘K`. Les tables complètes et à jour sont les blocs générés ci-dessous.
 
 ## Configurer les raccourcis et le thème (`settings.toml`)
 
@@ -267,37 +251,151 @@ Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, ap
 | Créer le vault / changer sa passphrase (TUI) | `Tab` champ suivant · `↵` valider · `Esc` annuler (« not now » quand il est proposé après « mémoriser ») ; au moins 8 caractères, compteur « n / 8 min » dès l'ouverture |
 | Passphrase d'une clé pour l'agent (TUI) | saisie masquée · `↵` ajouter · `Esc` annuler |
 
-## Terminal (GUI)
+## Raccourcis configurables (GUI)
 
-Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app ci-dessous.
+Les tableaux GUI ci-dessous sont **générés** depuis la table de commandes de la GUI
+(`apps/portico-gui/src/lib/shortcuts.ts`, touches fixes dans `keybindings-doc.ts`) par
+`pnpm gen:keybindings` ; `pnpm check` échoue si ce fichier est périmé. Chaque action a un identifiant
+stable, utilisable dans `settings.toml` (dossier de configuration de Portico : `~/.config/portico/` sous
+Linux, `~/Library/Application Support/dev.Portico.portico/` sous macOS) :
 
-| Action | macOS | Linux |
-|---|---|---|
-| Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `⌘T` | `Ctrl-Shift-T` |
-| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `⌘W` | `Ctrl-Shift-W` |
-| Onglet n / liste des hôtes | `⌘1`…`⌘9` / `⌘0` | `Alt-1`…`Alt-9` / `Alt-0` |
-| Onglet suivant / précédent | `Ctrl-Tab` / `Ctrl-Shift-Tab`, `⌘]` / `⌘[` | `Ctrl-Tab` / `Ctrl-Shift-Tab` |
-| Palette de commandes | `⌘K` | `Ctrl-Shift-K` |
-| Fichiers (SFTP) de cet hôte, à côté du terminal | `⌘⇧F` | `Ctrl-Shift-F` |
-| Tunnels | `⌘⇧P` | `Ctrl-Shift-P` |
-| Clés | `⌘⇧I` | `Ctrl-Shift-I` |
-| Snippets de cet hôte (la palette liste aussi « Run: <nom> » par snippet applicable) | `⌘⇧S` | `Ctrl-Shift-S` |
-| Copier la sélection / coller | `⌘C` / `⌘V` | `Ctrl-Shift-C` / `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
-| Reconnecter un onglet terminé ou en échec | `↵` | `↵` |
-| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` | `Esc` |
-| Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer | `←` `→`, `Home` / `End`, `Suppr` | idem |
-| Fermer un onglet (souris) | clic milieu sur l'onglet | clic milieu sur l'onglet |
+```toml
+theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé quand on change de thème
+
+[keymap.gui]
+"app.files" = "Mod+Shift+O"      # remplace ⌘⇧F / Ctrl-Shift-F
+"app.logs" = "F12"
+"hosts.clear-recent" = "Mod+Shift+Backspace"   # action de palette sans touche par défaut
+"app.reload" = "none"            # retire le raccourci
+```
+
+- Syntaxe : parties séparées par `+`, sans casse. Modificateurs `Mod` (⌘ sur macOS, `Ctrl` ailleurs, et
+  `Ctrl-Shift` dès qu'un terminal a le focus), `Ctrl`, `Alt` (`Option`), `Shift`, `Cmd` (`Meta`, `Super`).
+  Touches : `a`–`z`, `0`–`9`, `F1`–`F12`, `Enter`, `Esc`, `Tab`, `Space`, `Backspace`, `Delete`, `Insert`,
+  `Up` `Down` `Left` `Right`, `Home`, `End`, `PageUp`, `PageDown`, et les signes `/` `[` `]` `.` `,` `;` `'` `-` `=` `?` `*` `\` et `` ` ``. `none` retire.
+- Une entrée remplace toutes les combinaisons par défaut de l'action. Les actions globales exigent `Mod`,
+  `Ctrl`, `Alt` ou une touche `F` ; les actions de la liste des hôtes acceptent une touche seule.
+- Entrées ignorées (le défaut reste) et listées dans une notification au démarrage : action inconnue,
+  combinaison illisible, conflit avec une autre action, combinaison réservée (copier/coller du terminal
+  `Ctrl-Shift-C` / `Ctrl-Shift-V` / `Shift-Insert`, menu Édition et `⌘Q` / `⌘H` / `⌘M` sur macOS,
+  `Ctrl-<touche>` seul dans un terminal, `Esc` et `Tab`), action fixe (`tab.copy`, `tab.paste`).
+- Un `settings.toml` invalide (au sens du moteur) est ignoré entièrement et signalé ; Portico ne le réécrit
+  pas. La palette, les infobulles et la barre de statut affichent les combinaisons effectives.
+- Le thème est appliqué avant le premier rendu (dernier thème mémorisé localement, confirmé par
+  `settings.toml`) ; un nom inconnu donne le thème par défaut et une notification.
+
+<!-- BEGIN GENERATED: gui -->
+<!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
+
+## Application et onglets (GUI)
+
+Actions globales, actives partout (terminal compris). Sur Linux, `Ctrl-Shift-…` est affiché parce qu'il marche partout ;
+dans la liste des hôtes, `Ctrl-…` seul suffit (`Ctrl-K`, `Ctrl-D`). Un « — » : pas de touche par défaut, l'action reste
+dans la palette et peut recevoir une combinaison dans `settings.toml`.
+
+| Action | Identifiant | macOS | Linux |
+|---|---|---|---|
+| Palette de commandes | `app.palette` | `⌘K` | `Ctrl-Shift-K` |
+| Fichiers (SFTP) de l'hôte, à côté du terminal (ouvre ou ferme le panneau) | `app.files` | `⌘⇧F` | `Ctrl-Shift-F` |
+| Tunnels | `app.tunnels` | `⌘⇧P` | `Ctrl-Shift-P` |
+| Clés (locales, agent, vault) | `app.keys` | `⌘⇧I` | `Ctrl-Shift-I` |
+| Snippets de l'hôte (la palette liste aussi « Run: <nom> ») | `app.snippets` | `⌘⇧S` | `Ctrl-Shift-S` |
+| Journaux de session et config effective (panneau debug) | `app.logs` | `⌘⇧L` | `Ctrl-Shift-L` |
+| Favori on/off (hôte sélectionné, ou celui de l'onglet) | `app.favorite` | `⌘D` | `Ctrl-Shift-D` |
+| Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `tab.new` | `⌘T` | `Ctrl-Shift-T` |
+| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `tab.close` | `⌘W` | `Ctrl-Shift-W` |
+| Onglet suivant | `tab.next` | `Ctrl-Tab`, `⌘]` | `Ctrl-Tab` |
+| Onglet précédent | `tab.prev` | `Ctrl-Shift-Tab`, `⌘[` | `Ctrl-Shift-Tab` |
+| Liste des hôtes | `tab.hosts` | `⌘0` | `Alt-0` |
+| Aller à l'onglet n (`tab.goto-1` … `tab.goto-9`) | `tab.goto-1` | `⌘1` | `Alt-1` |
+| Copier la sélection du terminal (macOS : menu Édition, `⌘C`) | `tab.copy` (fixe) | — | `Ctrl-Shift-C` |
+| Coller (macOS : `⌘V` ; Linux aussi `Shift-Insert`, clic milieu) | `tab.paste` (fixe) | — | `Ctrl-Shift-V` |
+| Reconnecter l'hôte de l'onglet | `tab.reconnect` | — | — |
+| Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
+| Vider « Recent » (confirmation) | `hosts.clear-recent` | — | — |
+| Nouvelle clé | `keys.new` | — | — |
+| Nouveau snippet | `snippets.new` | — | — |
+| Changer de dossier de téléchargement | `files.download-dir` | — | — |
+
+## Liste des hôtes (GUI)
+
+Actives quand la liste des hôtes est affichée et que le focus n'est pas dans un champ (la recherche garde ses touches).
+
+| Action | Identifiant | macOS | Linux |
+|---|---|---|---|
+| Recharger `~/.ssh/config` et `hosts.toml` | `app.reload` | `⌘R` | `Ctrl-R` |
+| Rechercher (flou, `#tag`, `*` favoris, `@groupe`) | `hosts.search` | `/` | `/` |
+| Hôte suivant | `hosts.down` | `j`, `↓` | `j`, `↓` |
+| Hôte précédent | `hosts.up` | `k`, `↑` | `k`, `↑` |
+| Se connecter (ouvre un onglet terminal, ou y revient ; aussi double-clic) | `hosts.connect` | `↵` | `↵` |
+| Éditer tags, groupe et notes de l'hôte sélectionné (depuis un onglet : palette, « Edit <alias> ») | `hosts.edit` | `e` | `e` |
+| Se déconnecter (hôte sélectionné) | `hosts.disconnect` | `d` | `d` |
+| Fichiers (SFTP) de l'hôte sélectionné (se connecte au besoin) | `hosts.files` | `f` | `f` |
+| Tunnels | `hosts.tunnels` | `p` | `p` |
+| Clés | `hosts.keys` | `i` | `i` |
+| Snippets de l'hôte sélectionné | `hosts.snippets` | `s` | `s` |
+| Retirer de « Recent » (sur une ligne de la section Recent) | `hosts.forget-recent` | `x` | `x` |
+| Replier le groupe de l'hôte sélectionné | `hosts.collapse` | `←` | `←` |
+| Déplier le groupe | `hosts.expand` | `→` | `→` |
+| Thème suivant (mémorisé dans `settings.toml`) | `app.theme` | `t` | `t` |
+
+## Terminal (GUI) : touches fixes
+
+Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (tableau « Application et onglets »).
+
+| Action | Touches |
+|---|---|
+| Reconnecter un onglet terminé ou en échec | `↵` |
+| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` |
+| Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer | `←` `→`, `Home` / `End`, `Suppr` |
+| Fermer un onglet (souris) | clic milieu sur l'onglet |
+| Coller (Linux) | `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
 
+## Liste des hôtes (GUI) : sections
+
+Sans recherche, la liste montre « Recent » (les 5 derniers hôtes encore présents dans la config), puis un titre par groupe (ordre alphabétique), puis « Other » ; sans groupe ni récent, une liste plate. Avec une recherche, les résultats classés, à plat. Les titres de section sont des lignes : on s'y déplace comme sur un hôte.
+
+| Action | Touches |
+|---|---|
+| Plier / déplier la section (sur son titre) | `↵`, clic |
+| Retirer de « Recent » (souris) | `×` au survol de la ligne |
+| Naviguer pendant la recherche | `↑` `↓`, `Ctrl-N` / `Ctrl-P` |
+| Vider la recherche | `Esc` |
+| Favori (souris) | étoile à côté du nom, dans les détails |
+
+## Édition d'un hôte (GUI)
+
+« Edit <alias> » : tags, groupe et notes, enregistrés dans `hosts.toml` par le moteur (Portico n'écrit jamais `~/.ssh/config`). Les erreurs s'affichent sous le champ concerné, avec un conseil.
+
+| Action | Touches |
+|---|---|
+| Ajouter un tag (`#` facultatif) | `Espace`, `,` ou `↵` dans le champ Tags |
+| Retirer le dernier tag | `Backspace` dans le champ vide |
+| Groupe : choisir une suggestion (groupes existants) | `↓` / `↑`, puis `↵` |
+| Champ suivant | `Tab` |
+| Enregistrer | `Ctrl-S` (macOS : `⌘S`), `Ctrl-↵`, ou `↵` dans un champ d'une ligne |
+| Annuler | `Esc` |
+
+## Journaux de session (GUI)
+
+Panneau debug : sessions à gauche (vivantes et 20 dernières terminées, sondes « probe » de copy-id comprises), à droite les journaux ou la config effective (`ssh -G`). Ouvert depuis un onglet, il présélectionne sa session. Les textes sont affichés échappés (contrôles, bidi), comme dans « Copy all ». Les mots-clés qui exécutent des commandes (`ProxyCommand`, `LocalCommand`, `RemoteCommand`, `KnownHostsCommand`) sont masqués et jamais copiés.
+
+| Action | Touches |
+|---|---|
+| Session précédente / suivante | `k` / `j`, `↑` / `↓` |
+| Onglet Logs / Effective config | `1` / `2` |
+| Filtrer (texte ; `Esc` vide le filtre) | `/` |
+| Niveau minimal | boutons Debug, Info, Warn, Error |
+| Suivre en direct on/off (défiler vers le haut l'arrête) | `f` |
+| Copier tout le journal (texte `to_line` ; sans presse-papiers, le texte s'affiche sélectionné) | `c` |
+| Rafraîchir (et recalculer la config effective) | `r` |
+| Fermer | `Esc` |
+
 ## Fichiers (GUI)
 
-Même grammaire que la TUI (`r` renommer, `d` supprimer, `x` annuler, `Ctrl-R` rafraîchir, `k`/`o`/`s` en cas de conflit) ;
-chaque action figure aussi dans la palette avec sa touche.
-
-Panneau à droite du terminal de l'onglet actif. Il prend le clavier à l'ouverture ; un clic dans le terminal le lui rend.
-Les fichiers à envoyer viennent du sélecteur natif ou d'un glisser-déposer sur la fenêtre ; les téléchargements vont dans
-le dossier affiché en bas du panneau (« Change » ou la palette pour en choisir un autre).
+Même grammaire que la TUI (`r` renommer, `d` supprimer, `x` annuler, `Ctrl-R` rafraîchir, `k`/`o`/`s` en cas de conflit) ; chaque action figure aussi dans la palette avec sa touche. Panneau à droite du terminal de l'onglet actif. Il prend le clavier à l'ouverture ; un clic dans le terminal le lui rend. Les fichiers à envoyer viennent du sélecteur natif ou d'un glisser-déposer sur la fenêtre ; les téléchargements vont dans le dossier affiché en bas du panneau (« Change » ou la palette pour en choisir un autre).
 
 | Action | Touches |
 |---|---|
@@ -313,7 +411,7 @@ le dossier affiché en bas du panneau (« Change » ou la palette pour en choisi
 | Rafraîchir (dans le panneau ; ailleurs `Ctrl-R` recharge `ssh_config`) | `Ctrl-R` |
 | Destination existante | `k` garder les deux (copie numérotée) · `o` écraser · `s` ignorer · `Esc` annuler |
 | Session pas encore prête / terminée | le panneau affiche la phase, ou l'erreur avec son hint ; `↵` reconnecte |
-| Revenir au terminal (le panneau reste ouvert) | clic dans le terminal ; `⌘⇧F` / `Ctrl-Shift-F` ou `Esc` le ferme |
+| Revenir au terminal (le panneau reste ouvert) | clic dans le terminal ; le raccourci Fichiers ou `Esc` le ferme |
 
 ## Tunnels (GUI)
 
@@ -327,14 +425,10 @@ le dossier affiché en bas du panneau (« Change » ou la palette pour en choisi
 
 ## Clés (GUI)
 
-Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent (seules les listes défilent), puis le bandeau du
-vault, toujours visible (masqué quand le trousseau système est utilisé). Le premier focus est sur la liste ; chaque
-action a aussi son bouton (« Copy key », « Copy to host… », « Add to agent » / « Remove from agent », « New key ») et
-son entrée de palette, qui affiche la touche (« New key » : `⌘⇧I, n` / `Ctrl-Shift-I, n` ; vault : `…, v` / `…, V`).
+Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent (seules les listes défilent), puis le bandeau du vault, toujours visible (masqué quand le trousseau système est utilisé). Le premier focus est sur la liste ; chaque action a aussi son bouton (« Copy key », « Copy to host… », « Add to agent » / « Remove from agent », « New key ») et son entrée de palette, qui affiche la touche (« New key » : raccourci Clés, puis `n` ; vault : `v` / `V`).
 
 | Action | Touches |
 |---|---|
-| Ouvrir (depuis la liste des hôtes / partout ; aussi « Keys » dans la palette) | `i` / `⌘⇧I` (Linux : `Ctrl-Shift-I`) |
 | Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
 | Nouvelle clé (Ed25519 par défaut, RSA 3072/4096, ECDSA P-256/384/521 ; `↵` crée ; passphrase vide ou d’au moins 8 caractères, compteur plafonné « n / 8 min » ; après un refus, la passphrase effacée doit être ressaisie, ou son absence cochée, avant de recréer) | `n` |
 | Ajouter à l'agent (durée : « Until removed », 1 h, 8 h ; passphrase demandée si la clé est chiffrée) | `a` |
@@ -346,23 +440,15 @@ son entrée de palette, qui affiche la touche (« New key » : `⌘⇧I, n` / `C
 | Rafraîchir (rappelé dans le titre du dialogue) | `Ctrl-R` |
 | Fermer (depuis un sous-dialogue : revenir à la liste) | `Esc` |
 
-**Copy-id** (« Copy to host ») : étapes « Connecting · Installing · Verifying ». Réutilise la session vivante de l'hôte,
-sinon en ouvre une (prompts habituels) et la ferme ensuite. Un prompt lié à la copie (clé hôte, mot de passe,
-passphrase de la vérification) porte le sous-titre « Copy <clé> to <hôte> · <étape> ». Pendant la copie, `Esc`
-(« Hide ») masque le dialogue sans l'interrompre : une notification dit comment elle s'est terminée. Résultat : `↵`
-termine, `c` copie les lignes `Host` / `IdentityFile` à ajouter soi-même (Portico n'écrit jamais `~/.ssh/config`).
-Échec : message et hint, `r` ou `↵` réessaie, `Esc` ferme.
+**Copy-id** (« Copy to host ») : étapes « Connecting · Installing · Verifying ». Réutilise la session vivante de l'hôte, sinon en ouvre une (prompts habituels) et la ferme ensuite. Un prompt lié à la copie (clé hôte, mot de passe, passphrase de la vérification) porte le sous-titre « Copy <clé> to <hôte> · <étape> ». Pendant la copie, `Esc` (« Hide ») masque le dialogue sans l'interrompre : une notification dit comment elle s'est terminée. Résultat : `↵` termine, `c` copie les lignes `Host` / `IdentityFile` à ajouter soi-même (Portico n'écrit jamais `~/.ssh/config`). Échec : message et hint, `r` ou `↵` réessaie, `Esc` ferme.
 
-**Vault au démarrage** : verrouillé, Portico demande la passphrase maître une fois ; `Esc` (« Continue without ») laisse
-les secrets non mémorisés jusqu'au déverrouillage (`v` dans Clés). Cocher « Remember » sans vault (ou vault verrouillé)
-propose ensuite de le créer (ou de le déverrouiller).
+**Vault au démarrage** : verrouillé, Portico demande la passphrase maître une fois ; `Esc` (« Continue without ») laisse les secrets non mémorisés jusqu'au déverrouillage (`v` dans Clés). Cocher « Remember » sans vault (ou vault verrouillé) propose ensuite de le créer (ou de le déverrouiller).
 
 ## Snippets (GUI)
 
 | Action | Touches |
 |---|---|
-| Ouvrir (hôte sélectionné depuis la liste / onglet actif ; aussi « Snippets » dans la palette) | `s` / `⌘⇧S` (Linux : `Ctrl-Shift-S`) |
-| Exécuter depuis la palette (une entrée « Run: <nom> » par snippet de l'hôte de l'onglet actif) | `⌘K` (Linux : `Ctrl-Shift-K`) |
+| Exécuter depuis la palette (une entrée « Run: <nom> » par snippet de l'hôte de l'onglet actif) | palette |
 | Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
 | Filtrer (dans le filtre : `↑` `↓`, `↵` exécute, `Esc` vide puis rend la liste) | `/` |
 | Exécuter (« Run ») ou coller (« Paste ») dans l'onglet actif (formulaire des placeholders si besoin, `↵` envoie) | `↵`, double-clic |
@@ -372,13 +458,5 @@ propose ensuite de le créer (ou de le déverrouiller).
 | Snippet multi-ligne « paste only » refusé sans bracketed paste (garde-fou, encadré d'avertissement) | `r` « Run it » (exécute chaque ligne, Entrée envoyée), après réarmement (400 ms sans frappe) ; `↵` ne fait rien ; `Esc` annule |
 | Fermer | `Esc` |
 
-Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée ; la bannière « No open terminal » donne
-l'action suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé).
-Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.
-
-## Prévus
-
-| Action | TUI | GUI | Phase |
-|---|---|---|---|
-| Logs / debug de la session | `Ctrl-Space l` | `⌘⇧L` | 4 |
-| Favori on/off | `*` (`f` ouvre l'explorateur) | `⌘D` | 4 |
+Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée ; la bannière « No open terminal » donne l'action suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé). Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.
+<!-- END GENERATED: gui -->

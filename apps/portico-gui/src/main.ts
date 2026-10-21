@@ -9,6 +9,10 @@ import "@fontsource/geist-sans/latin-600.css";
 import "./lib/styles/tokens.css";
 import "./lib/styles/base.css";
 import App from "./App.svelte";
+import { applyCachedTheme } from "./lib/state/settings.svelte";
+
+// The last theme, before anything is painted (settings.toml confirms it once read).
+applyCachedTheme();
 
 const target = document.getElementById("app");
 if (!target) throw new Error("#app not found");

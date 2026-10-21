@@ -72,10 +72,11 @@ class Workspace {
 
   activeTab: Tab | undefined = $derived(this.tabs.find((t) => t.key === this.active));
 
-  notify(e: unknown, tone: "error" | "info" = "error") {
+  /** `ms`: longer for a notice that lists things (ignored settings). */
+  notify(e: unknown, tone: "error" | "info" = "error", ms = TOAST_MS) {
     this.toast = { ...asError(e), tone };
     clearTimeout(this.#toastTimer);
-    this.#toastTimer = setTimeout(() => (this.toast = null), TOAST_MS);
+    this.#toastTimer = setTimeout(() => (this.toast = null), ms);
   }
 
   // ── Tabs ────────────────────────────────────────────────────────────
@@ -206,11 +207,19 @@ class Workspace {
 
   // ── Prompts ─────────────────────────────────────────────────────────
 
-  async answer(prompt: Prompt, answer: Parameters<typeof backend.respondPrompt>[1]) {
+  /** Sends the answer; nothing here keeps a reference to a secret after
+   * the call (JS strings cannot be wiped: the least we can do is let them
+   * be collected as soon as the IPC has serialized them). */
+  answer(prompt: Prompt, answer: Parameters<typeof backend.respondPrompt>[1]): Promise<void> {
     this.prompts = this.prompts.filter((p) => p.id !== prompt.id);
-    await backend.respondPrompt(prompt.id, answer).catch((e) => this.notify(e));
-    // Without an unlocked vault the secret could not be remembered.
-    if (answer.kind === "secret" && answer.remember) vault.afterRemember();
+    const remembered = answer.kind === "secret" && answer.remember;
+    return backend
+      .respondPrompt(prompt.id, answer)
+      .catch((e) => this.notify(e))
+      .then(() => {
+        // Without an unlocked vault the secret could not be remembered.
+        if (remembered) vault.afterRemember();
+      });
   }
 
   dismissAlert() {

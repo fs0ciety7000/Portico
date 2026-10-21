@@ -11,7 +11,7 @@
   import { flip } from "svelte/animate";
   import { fly } from "svelte/transition";
   import { describe } from "../api";
-  import { tabKbd } from "../keys";
+  import { keymap } from "../state/keymap.svelte";
   import { dur } from "../motion";
   import { isLive, workspace, type Tab } from "../state/workspace.svelte";
 
@@ -78,7 +78,7 @@
     data-key="home"
     aria-selected={workspace.active === null}
     tabindex={workspace.active === null ? 0 : -1}
-    title={`Hosts (${tabKbd(0)})`}
+    title={keymap.tip("Hosts", "tab.hosts")}
     onclick={() => (workspace.active = null)}
     {onkeydown}
   >
