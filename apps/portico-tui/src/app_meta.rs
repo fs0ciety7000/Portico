@@ -684,6 +684,7 @@ mod render_tests {
             key: key.into(),
             values: vec![value.into()],
             origin,
+            sensitive: portico_core::effective::SENSITIVE_KEYWORDS.contains(&key),
         };
         app.update(Action::EffectiveLoaded {
             alias: "lab".into(),

@@ -32,11 +32,10 @@ pub(crate) enum DebugTab {
 ///
 /// Mirrors the core's `EffectiveOption::sensitive` flag; once the core
 /// carries it, this reads `option.sensitive` as well.
+/// The core decides (commands may embed tokens): masked by default, never
+/// copied.
 pub(crate) fn is_sensitive(option: &EffectiveOption) -> bool {
-    matches!(
-        option.key.as_str(),
-        "proxycommand" | "localcommand" | "remotecommand" | "knownhostscommand"
-    )
+    option.sensitive
 }
 
 #[derive(Debug)]
@@ -443,6 +442,7 @@ mod tests {
             key: key.into(),
             values: vec![value.into()],
             origin: OptionOrigin::Default,
+            sensitive: portico_core::effective::SENSITIVE_KEYWORDS.contains(&key),
         };
         panel.set_config(
             "web".into(),
