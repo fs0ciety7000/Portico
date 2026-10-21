@@ -19,6 +19,16 @@ use crate::host_list::RECENT_FETCHED;
 use crate::keymap::Keymap;
 use crate::keys::Notice;
 
+/// Common title of the settings warning (same words as the GUI):
+/// `settings.toml: 2 entries ignored`; `None` when nothing was ignored.
+pub(crate) fn settings_title(ignored: usize) -> Option<String> {
+    match ignored {
+        0 => None,
+        1 => Some("settings.toml: 1 entry ignored".to_owned()),
+        n => Some(format!("settings.toml: {n} entries ignored")),
+    }
+}
+
 /// Spawns `fut` and sends its result back as an action.
 fn spawn<F>(app: &App, fut: F)
 where
@@ -44,8 +54,19 @@ impl App {
             Action::ToggleFavorite => self.toggle_favorite(),
             Action::EditHost => self.open_edit(),
             Action::EditKey(key) => self.edit_key(key),
+            // Only the favorite toggle saves this way: a short confirmation.
             Action::MetaSaved { alias, result } => match result {
-                Ok(meta) => self.set_meta(&alias, &meta),
+                Ok(meta) => {
+                    self.notify(
+                        if meta.favorite {
+                            "Added to favorites"
+                        } else {
+                            "Removed from favorites"
+                        }
+                        .into(),
+                    );
+                    self.set_meta(&alias, &meta);
+                }
                 Err(e) => self.notify_error(e),
             },
             Action::HostEdited { alias, result } => match result {
@@ -361,6 +382,13 @@ impl App {
         });
     }
 
+    /// `?` from the session logs: the help over the panel, on the page
+    /// that has its keys.
+    fn open_help(&mut self) {
+        self.help.over_panel = true;
+        self.help.page = 0;
+    }
+
     fn debug_key(&mut self, key: KeyEvent) {
         let Some(panel) = &mut self.debug_panel else {
             return;
@@ -383,12 +411,22 @@ impl App {
                 }
                 self.load_debug_logs();
             }
+            DebugOutcome::Help => self.open_help(),
             DebugOutcome::Copy { text, lines, total } => {
                 self.osc52(&text);
-                let message = if lines < total {
-                    format!("Copied the last {lines} of {total} lines (OSC 52)")
-                } else {
-                    format!("Copied {lines} lines (OSC 52)")
+                let config = self
+                    .debug_panel
+                    .as_ref()
+                    .is_some_and(|p| p.tab == crate::debug::DebugTab::Config);
+                let message = match (config, lines < total) {
+                    (true, true) => format!(
+                        "Copied {lines} of {total} options (OSC 52); sensitive ones are never copied"
+                    ),
+                    (true, false) => format!("Copied {lines} options (OSC 52)"),
+                    (false, true) => {
+                        format!("Copied the last {lines} of {total} records (OSC 52)")
+                    }
+                    (false, false) => format!("Copied {lines} records (OSC 52)"),
                 };
                 if let Some(panel) = &mut self.debug_panel {
                     panel.notice = Some(Notice {
@@ -423,11 +461,13 @@ impl App {
     fn apply_settings(&mut self, result: Result<Settings, ErrorSummary>) {
         let settings = match result {
             Ok(s) => s,
+            // Portico goes on with its defaults: a warning, not an error.
             Err(e) => {
-                self.notify_error(ErrorSummary {
-                    message: format!("settings.toml ignored: {}", e.message),
-                    ..e
-                });
+                let detail = match &e.hint {
+                    Some(hint) => format!("{} {hint}", crate::ui::fmt::sentence(&e.message)),
+                    None => crate::ui::fmt::sentence(&e.message),
+                };
+                self.notify_warning("settings.toml ignored".into(), Some(detail));
                 return;
             }
         };
@@ -438,7 +478,7 @@ impl App {
             } else {
                 self.theme_index = 0;
                 problems.push(format!(
-                    "unknown theme “{}”: using {}",
+                    "Unknown theme “{}”: using {}",
                     crate::ui::fmt::truncate(id, 24),
                     Theme::default_theme().name
                 ));
@@ -446,21 +486,9 @@ impl App {
         }
         let (keymap, ignored) = Keymap::with_overrides(&settings.keymap.tui);
         self.keymap = keymap;
-        if !ignored.is_empty() {
-            let n = ignored.len();
-            problems.push(format!(
-                "{n} keymap entr{} ignored: {}",
-                if n == 1 { "y" } else { "ies" },
-                ignored.join(" · ")
-            ));
-        }
-        if !problems.is_empty() {
-            self.toast = Some(crate::app::Toast {
-                message: "settings.toml: some entries were ignored".into(),
-                hint: Some(problems.join(" — ")),
-                is_error: true,
-                ttl: 100,
-            });
+        problems.extend(ignored);
+        if let Some(title) = settings_title(problems.len()) {
+            self.notify_warning(title, Some(problems.join(" · ")));
         }
     }
 
@@ -489,6 +517,8 @@ mod render_tests {
     use portico_core::effective::{EffectiveConfig, EffectiveOption, OptionOrigin, RouteHop};
     use portico_core::engine::HostInventory;
     use portico_core::hosts::HostMeta;
+    use portico_core::ids::SessionId;
+    use portico_core::logs::{LogLevel, LogRecord, SessionLogInfo};
     use portico_core::recent::RecentHost;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -669,14 +699,15 @@ mod render_tests {
         check(
             &lines,
             &[
-                "Debug",
-                "Sessions",
+                "Session logs",
                 "No session yet.",
-                "Logs",
-                "Config",
-                " DEBUG ",
+                " Logs │ Effective config ",
+                "No session selected.",
+                " LOGS ",
             ],
         );
+        let lines = screen(&mut app, 110, 28);
+        check(&lines, &["Sessions", "No session yet."]);
         app.update(Action::DebugKey(key(KeyCode::Tab)));
         let option = |key: &str, value: &str, origin: OptionOrigin| EffectiveOption {
             key: key.into(),
@@ -702,6 +733,7 @@ mod render_tests {
                         "sshpass -p hunter2 ssh",
                         OptionOrigin::Default,
                     ),
+                    option("user", "alice", OptionOrigin::Command),
                     option("stricthostkeychecking", "ask", OptionOrigin::Default),
                 ],
                 route: vec![
@@ -727,19 +759,422 @@ mod render_tests {
             &lines,
             &[
                 "Route",
+                "You → bastion → lab",
                 "1/2",
                 "ops@b.example.com:2222",
                 "hostname",
                 "/etc/ssh/ssh_config:12",
                 "default",
-                "hidden · s reveals",
+                "at connect",
+                "•••  hidden · s reveals · never copied",
                 " s  reveal",
             ],
         );
         assert!(!lines.join("\n").contains("hunter2"));
         app.update(Action::DebugKey(key(KeyCode::Char('s'))));
         let lines = screen(&mut app, 80, 24);
-        check(&lines, &["hunter2"]);
+        check(&lines, &["hunter2", "· never copied"]);
+    }
+
+    fn record(session: portico_core::ids::SessionId, level: LogLevel, n: usize) -> LogRecord {
+        LogRecord {
+            at: OffsetDateTime::UNIX_EPOCH,
+            level,
+            session: Some(session),
+            target: "t".into(),
+            message: format!("message {n} {}", "word ".repeat(n % 3 * 12)),
+        }
+    }
+
+    /// The debug panel on three sessions, the first one's records loaded.
+    fn logs_app(records: Vec<LogRecord>) -> App {
+        let mut app = hosts_app();
+        let ids: Vec<_> = (0..3).map(|_| SessionId::next()).collect();
+        let infos = ids
+            .iter()
+            .zip(["lab", "web", "db"])
+            .map(|(id, alias)| SessionLogInfo {
+                id: *id,
+                alias: alias.into(),
+                probe: false,
+                started: OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(22 * 60 + 23),
+                ended: None,
+                outcome: None,
+            })
+            .collect();
+        // The oldest (lab) selected: newest first, it is the last of three.
+        let mut panel = crate::debug::DebugPanel::new(infos, ids.first().copied(), None);
+        let first = panel.session().map(|s| s.id);
+        panel.set_logs(
+            records
+                .into_iter()
+                .map(|r| LogRecord {
+                    session: first,
+                    ..r
+                })
+                .collect(),
+        );
+        app.debug_panel = Some(panel);
+        app.overlay = Some(Overlay::Debug);
+        app
+    }
+
+    fn fg_at(app: &mut App, cols: u16, rows: u16, needle: &str) -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..rows {
+            let line: String = (0..cols)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect();
+            if let Some(byte) = line.find(needle) {
+                let x = line.get(..byte).map_or(0, |p| p.chars().count());
+                let x = u16::try_from(x).unwrap();
+                return buffer.cell((x, y)).map(|c| c.fg);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn log_levels_keep_saturated_colour_for_meaning() {
+        let any = SessionId::next();
+        let rec = |level, message: &str| LogRecord {
+            message: message.into(),
+            ..record(any, level, 0)
+        };
+        let mut app = logs_app(vec![
+            rec(LogLevel::Debug, "kex done"),
+            rec(LogLevel::Info, "route ok"),
+            rec(LogLevel::Warn, "slow agent"),
+            rec(LogLevel::Error, "no method left"),
+        ]);
+        let s = app.styles();
+        let (p, st) = (s.theme.palette, s.theme.status);
+        let c = crate::theme::c;
+        assert_eq!(fg_at(&mut app, 110, 28, "DEBUG"), Some(c(p.text_muted)));
+        assert_eq!(fg_at(&mut app, 110, 28, "INFO "), Some(c(p.text_secondary)));
+        assert_ne!(fg_at(&mut app, 110, 28, "INFO "), Some(c(st.connected)));
+        assert_eq!(fg_at(&mut app, 110, 28, "WARN "), Some(c(st.warning)));
+        assert_eq!(fg_at(&mut app, 110, 28, "ERROR"), Some(c(st.error)));
+        // Messages are body text; only an ERROR's message is emphasised.
+        let mut terminal = Terminal::new(TestBackend::new(110, 28)).unwrap();
+        terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let modifier_of = |needle: &str| {
+            (0..28u16).find_map(|y| {
+                let line: String = (0..110u16)
+                    .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                    .collect();
+                let x = line.find(needle)?;
+                let x = u16::try_from(line.get(..x)?.chars().count()).ok()?;
+                buffer.cell((x, y)).map(|c| (c.fg, c.modifier))
+            })
+        };
+        let bold = ratatui::style::Modifier::BOLD;
+        let (fg, m) = modifier_of("route ok").unwrap();
+        assert_eq!(fg, c(p.text_primary));
+        assert!(!m.contains(bold));
+        let (_, m) = modifier_of("no method left").unwrap();
+        assert!(m.contains(bold));
+    }
+
+    #[test]
+    fn logs_start_on_a_record_and_follow_with_g() {
+        let any = SessionId::next();
+        // Records of 1, 2 and 3 rows at 80 columns.
+        let mut app = logs_app((0..40).map(|n| record(any, LogLevel::Info, n)).collect());
+        for (cols, rows) in [(80, 24), (110, 28)] {
+            for scroll in [0, 1, 3, 7] {
+                if let Some(panel) = &mut app.debug_panel {
+                    panel.scroll = scroll;
+                }
+                let lines = screen(&mut app, cols, rows);
+                // The first non-blank row under the tabs is a record's head
+                // (read from the tabs' column: the session column is left).
+                let tabs = lines.iter().position(|l| l.contains(" Logs │ ")).unwrap();
+                let col = lines
+                    .get(tabs)
+                    .and_then(|l| {
+                        l.find(" Logs │ ")
+                            .map(|b| l.get(..b).unwrap().chars().count())
+                    })
+                    .unwrap();
+                let first = lines
+                    .iter()
+                    .skip(tabs + 2)
+                    .map(|l| l.chars().skip(col).collect::<String>())
+                    .find(|l| !l.trim_matches(|c: char| c == '│' || c == ' ').is_empty())
+                    .unwrap();
+                assert!(
+                    first.trim_start().starts_with("00:00:00 INFO  t: message"),
+                    "{first}\n{}",
+                    lines.join("\n")
+                );
+                if scroll > 0 {
+                    let what = if scroll == 1 { "record" } else { "records" };
+                    check(&lines, &[&format!("↓ {scroll} newer {what} · G follows")]);
+                    check(&lines, &[" G  follow"]);
+                }
+            }
+        }
+        app.update(Action::DebugKey(key(KeyCode::Char('G'))));
+        assert_eq!(app.debug_panel.as_ref().map(|p| p.scroll), Some(0));
+        // A filter that hides everything says so, with the word "record".
+        app.update(Action::DebugKey(key(KeyCode::Char('/'))));
+        for c in "zzz".chars() {
+            app.update(Action::DebugKey(key(KeyCode::Char(c))));
+        }
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["No record matches."]);
+    }
+
+    #[test]
+    fn narrow_logs_use_a_session_selector() {
+        let mut app = logs_app(Vec::new());
+        let lines = screen(&mut app, 80, 24);
+        check(
+            &lines,
+            &[
+                "◂ ● lab · 22:23 (3/3) ▸",
+                "No record yet for this session.",
+                " [ ]  session",
+            ],
+        );
+        assert!(!lines.join("\n").contains("Sessions"), "no column");
+        // One column of margin inside the border.
+        let row = lines.iter().find(|l| l.contains("◂ ●")).unwrap();
+        assert!(row.starts_with(" │ ◂"), "{row}");
+        app.update(Action::DebugKey(key(KeyCode::Char('['))));
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["◂ ● web · 22:23 (2/3) ▸"]);
+        app.update(Action::DebugKey(key(KeyCode::Left)));
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["(1/3)"]);
+        // Wide: the column, and the arrows move in it.
+        let lines = screen(&mut app, 110, 28);
+        check(&lines, &["Sessions", " ↑↓  session", "Effective config"]);
+        assert!(!lines.join("\n").contains("(1/3)"));
+    }
+
+    #[test]
+    fn section_headers_fit_80x24_with_their_count() {
+        let mut app = test_app();
+        app.update(Action::HostsLoaded(Ok(HostInventory {
+            hosts: vec![
+                test_host("lab", Some("Production Europe West")),
+                test_host("broken", Some("Production Europe West")),
+                test_host("db", Some("Staging")),
+            ],
+            warnings: Vec::new(),
+        })));
+        let lines = screen(&mut app, 80, 24);
+        // Too long spaced: plain capitals; the count against the border.
+        let header = lines
+            .iter()
+            .find(|l| l.contains("PRODUCTION"))
+            .unwrap_or_else(|| panic!("{}", lines.join("\n")));
+        assert!(header.contains("PRODUCTION EUROPE W"), "{header}");
+        assert!(header.contains("2 │"), "count right-aligned: {header}");
+        check(&lines, &["S T A G I N G"]);
+        let staging = lines.iter().find(|l| l.contains("S T A G")).unwrap();
+        assert!(staging.contains("1 │"), "{staging}");
+        // Wide enough: spaced capitals.
+        let lines = screen(&mut app, 140, 30);
+        check(&lines, &["P R O D U C T I O N   E U R O P E   W E S T"]);
+    }
+
+    #[tokio::test]
+    async fn details_favorite_masked_commands_and_failure_remedies() {
+        let mut app = hosts_app();
+        // lab: a ProxyCommand with a password in it.
+        if let Some(inv) = &mut app.inventory {
+            for host in &mut inv.hosts {
+                host.resolved.options.insert(
+                    "proxycommand".into(),
+                    vec![(
+                        vec!["sshpass".into(), "-p".into(), "hunter2".into()],
+                        host.source.clone(),
+                    )],
+                );
+                host.resolved.proxy_command = Some("sshpass -p hunter2".into());
+            }
+        }
+        app.update(Action::MetaSaved {
+            alias: "lab".into(),
+            result: Ok(HostMeta {
+                favorite: true,
+                ..HostMeta::default()
+            }),
+        });
+        assert_eq!(
+            app.toast.as_ref().map(|t| t.message.as_str()),
+            Some("Added to favorites")
+        );
+        app.toast = None;
+        let lines = screen(&mut app, 110, 28);
+        check(
+            &lines,
+            &["lab ★", "ProxyCommand", "•••  hidden · l reveals in logs"],
+        );
+        assert!(!lines.join("\n").contains("hunter2"));
+        app.update(Action::MetaSaved {
+            alias: "lab".into(),
+            result: Ok(HostMeta::default()),
+        });
+        assert_eq!(
+            app.toast.as_ref().map(|t| t.message.as_str()),
+            Some("Removed from favorites")
+        );
+        app.toast = None;
+
+        // A failure on the host on screen: in the details, not in a toast.
+        let id = SessionId::next();
+        app.sessions.insert(
+            "lab".into(),
+            crate::app::SessionView {
+                id,
+                phase: portico_core::events::SessionPhase::Connecting {
+                    hop: 1,
+                    hops: 1,
+                    target: "lab".into(),
+                },
+                latency: None,
+            },
+        );
+        let failed = || {
+            Action::Engine(EngineEvent::Session {
+                id,
+                event: portico_core::events::SessionEvent::Phase(
+                    portico_core::events::SessionPhase::Failed {
+                        error: ErrorSummary {
+                            code: "connect_failed".into(),
+                            message: "cannot connect to lab:22: connection refused".into(),
+                            hint: Some("Is sshd running?".into()),
+                        },
+                    },
+                ),
+            })
+        };
+        app.update(failed());
+        assert!(app.toast.is_none(), "already in the details");
+        let lines = screen(&mut app, 80, 24);
+        check(
+            &lines,
+            &["Cannot connect to lab:22", " ↵  retry", " l  logs"],
+        );
+        // Another host selected: the toast is the only place it shows.
+        app.update(Action::SelectNext);
+        app.update(failed());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.kind == crate::app::ToastKind::Error)
+        );
+    }
+
+    #[test]
+    fn edit_form_says_esc_once_clears_its_edges_and_marks_the_bad_tag() {
+        let mut app = hosts_app();
+        app.update(Action::EditHost);
+        for c in "web ok bad! db".chars() {
+            app.update(Action::EditKey(key(KeyCode::Char(c))));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let lines: Vec<String> = (0..24u16)
+            .map(|y| {
+                (0..80u16)
+                    .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                    .collect()
+            })
+            .collect();
+        let text = lines.join("\n");
+        // `Esc` once in the panel (its border); the status bar has its own.
+        let panel_rows: Vec<&String> = lines.iter().take(23).collect();
+        let esc = panel_rows
+            .iter()
+            .map(|l| l.matches("Esc").count())
+            .sum::<usize>();
+        assert_eq!(esc, 1, "{text}");
+        // The panel's corners have a clear column beside them.
+        let top = lines.iter().position(|l| l.contains("╭ Edit lab")).unwrap();
+        let row = lines.get(top).unwrap();
+        let corner = row.chars().position(|c| c == '╭').unwrap();
+        assert_eq!(row.chars().nth(corner - 1), Some(' '), "{text}");
+        // The third tag is the refused one: drawn in the error colour.
+        let s = app.styles();
+        // (The chips' row is under the input, which has the same words.)
+        let chip_row = lines.iter().rposition(|l| l.contains(" bad! ")).unwrap();
+        let chip_x = lines
+            .get(chip_row)
+            .and_then(|l| {
+                l.find(" bad! ")
+                    .map(|b| l.get(..b).unwrap().chars().count() + 1)
+            })
+            .unwrap();
+        let cell = buffer
+            .cell((
+                u16::try_from(chip_x).unwrap(),
+                u16::try_from(chip_row).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(cell.fg, crate::theme::c(s.theme.status.error), "{text}");
+        let ok_x = lines
+            .get(chip_row)
+            .and_then(|l| {
+                l.find(" ok ")
+                    .map(|b| l.get(..b).unwrap().chars().count() + 1)
+            })
+            .unwrap();
+        let ok = buffer
+            .cell((
+                u16::try_from(ok_x).unwrap(),
+                u16::try_from(chip_row).unwrap(),
+            ))
+            .unwrap();
+        assert_ne!(ok.fg, crate::theme::c(s.theme.status.error));
+        check(&lines, &["Invalid tag 3"]);
+    }
+
+    #[test]
+    fn status_bar_words_match_and_quit_comes_last() {
+        let mut app = hosts_app();
+        for width in [80, 110] {
+            let lines = screen(&mut app, width, 24);
+            let bar = lines.last().unwrap();
+            assert!(bar.trim_end().ends_with("q  quit"), "{bar}");
+            assert!(!bar.contains("star"), "{bar}");
+        }
+        app.update(Action::AskClearRecent);
+        let lines = screen(&mut app, 80, 24);
+        let bar = lines.last().unwrap();
+        // The dialog says `y clear`: so does the bar.
+        assert!(
+            bar.contains(" y  clear") && bar.contains(" n / Esc  keep"),
+            "{bar}"
+        );
+        check(&lines, &[" y  clear "]);
+    }
+
+    #[test]
+    fn help_opens_over_the_logs_and_closes_back_to_them() {
+        let mut app = logs_app(Vec::new());
+        app.update(Action::DebugKey(key(KeyCode::Char('?'))));
+        assert!(app.help.over_panel);
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["Keyboard shortcuts", "Session logs", "Edit host"]);
+        check(&lines, &["Switch tab · reveal", "Scroll · G follows"]);
+        check(&lines, &["Next · prev field", "New line in notes"]);
+        let lines = screen(&mut app, 110, 28);
+        check(&lines, &[" HELP ", " Tab  page "]);
+        app.update(Action::CloseHelp);
+        assert!(!app.help.over_panel);
+        assert_eq!(app.overlay, Some(Overlay::Debug), "the panel is still open");
+        assert!(app.debug_panel.is_some());
+        let lines = screen(&mut app, 80, 24);
+        assert!(!lines.join("\n").contains("Keyboard shortcuts"));
     }
 
     #[test]
@@ -760,23 +1195,34 @@ mod render_tests {
         settings.keymap.tui.insert("hosts.nope".into(), "z".into());
         app.update(Action::SettingsLoaded(Ok(settings)));
         assert_eq!(app.styles().theme.id, "obsidian");
-        let hint = app
-            .toast
-            .as_ref()
-            .and_then(|t| t.hint.clone())
-            .unwrap_or_default();
-        assert!(hint.contains("unknown theme “solarized”"), "{hint}");
+        let toast = app.toast.clone().unwrap();
+        // A warning (Portico goes on), the common title, the detail under it.
+        assert_eq!(toast.kind, crate::app::ToastKind::Warning);
+        assert_eq!(toast.message, "settings.toml: 2 entries ignored");
+        let hint = toast.hint.unwrap_or_default();
+        assert!(hint.contains("Unknown theme “solarized”"), "{hint}");
         assert!(hint.contains("hosts.nope (unknown action)"), "{hint}");
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["▲  settings.toml: 2 entries ignored"]);
+        assert!(!lines.join("\n").contains('✕'), "not drawn as an error");
+        assert_eq!(
+            settings_title(1).as_deref(),
+            Some("settings.toml: 1 entry ignored")
+        );
+        assert_eq!(settings_title(0), None);
 
         app.update(Action::SettingsLoaded(Err(ErrorSummary {
             code: "settings_invalid".into(),
             message: "invalid setting theme: empty value".into(),
             hint: Some("Fix or remove the offending entry in settings.toml.".into()),
         })));
+        let toast = app.toast.clone().unwrap();
+        assert_eq!(toast.kind, crate::app::ToastKind::Warning);
+        assert_eq!(toast.message, "settings.toml ignored");
         assert!(
-            app.toast
-                .as_ref()
-                .is_some_and(|t| t.is_error && t.message.starts_with("settings.toml ignored"))
+            toast
+                .hint
+                .is_some_and(|h| h.starts_with("Invalid setting theme"))
         );
     }
 

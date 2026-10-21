@@ -6,7 +6,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Padding, Paragraph};
 
 use crate::app::{App, Focus};
-use crate::host_list::{Entry, spaced_caps};
+use crate::host_list::{Entry, section_title};
+
+/// Hosts listed under the section header at `header`.
+fn section_size(entries: &[Entry], header: usize) -> usize {
+    entries
+        .iter()
+        .skip(header.saturating_add(1))
+        .take_while(|e| e.host().is_some())
+        .count()
+}
 
 #[allow(clippy::too_many_lines)] // will split into SearchField + HostList widgets
 pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
@@ -73,7 +82,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled("Could not load hosts", s.status(status.error))),
-                Line::from(Span::styled(err.clone(), s.secondary())),
+                Line::from(Span::styled(super::fmt::sentence(err), s.secondary())),
             ])
             .block(block),
             list,
@@ -110,22 +119,30 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     let Some(inv) = &app.inventory else { return };
     // Leave room for the dot, a favourite star and some of the target.
     let alias_max = usize::from(area.width).saturating_sub(10).max(8);
-    let title_max = usize::from(list.width).saturating_sub(5);
+    // A section row: borders and padding (4), the selection symbol column
+    // and the space after it (2), then the title and its count on the right.
+    let row_width = usize::from(list.width).saturating_sub(6);
     let items: Vec<ListItem<'_>> = app
         .entries
         .iter()
-        .filter_map(|entry| match entry {
-            Entry::Header(title) => Some(Err(title)),
+        .enumerate()
+        .filter_map(|(i, entry)| match entry {
+            Entry::Header(title) => Some(Err((title, section_size(&app.entries, i)))),
             Entry::Host { index, .. } => inv.hosts.get(*index).map(Ok),
         })
         .map(|row| {
             let h = match row {
                 Ok(h) => h,
-                Err(title) => {
-                    return ListItem::new(Line::from(Span::styled(
-                        format!(" {}", spaced_caps(title, title_max)),
-                        s.muted(),
-                    )));
+                Err((title, count)) => {
+                    let count = count.to_string();
+                    let title_max = row_width.saturating_sub(count.len() + 2);
+                    let title = section_title(title, title_max);
+                    let pad = row_width.saturating_sub(title.chars().count() + count.len());
+                    return ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {title}"), s.muted()),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(count, s.muted()),
+                    ]));
                 }
             };
             let st = super::status::status(app.session_for(&h.alias), s);

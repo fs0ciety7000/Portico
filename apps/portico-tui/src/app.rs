@@ -62,8 +62,28 @@ pub(crate) struct Toast {
     pub(crate) message: String,
     /// Actionable advice, on its own line under the message.
     pub(crate) hint: Option<String>,
-    pub(crate) is_error: bool,
+    pub(crate) kind: ToastKind,
     pub(crate) ttl: u16,
+}
+
+/// The `?` overlay beyond `Overlay::Help`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HelpState {
+    /// `?` from a panel (session logs): the help shows over it, and the
+    /// panel keeps its state below.
+    pub(crate) over_panel: bool,
+    /// Page shown when the help does not fit at once (0: hosts, prefix,
+    /// logs, edit; 1: files and panels).
+    pub(crate) page: usize,
+}
+
+/// Severity of a toast: its icon and border colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToastKind {
+    Info,
+    /// Something was ignored or degraded; Portico goes on.
+    Warning,
+    Error,
 }
 
 /// Live state of one SSH session, derived from engine events.
@@ -138,6 +158,8 @@ pub(crate) struct App {
     pub(crate) snippets_panel: Option<SnippetsPanel>,
     /// Terminal tab the snippets panel types into.
     pub(crate) snippet_target: Option<TerminalId>,
+    /// Help overlay state (shown over a panel, page).
+    pub(crate) help: HelpState,
     /// Last placeholder values (this run only, never written to disk).
     pub(crate) snippet_values: HashMap<String, String>,
     /// Copy-id in progress or just finished (outlives the keys panel).
@@ -199,6 +221,7 @@ impl App {
             keys_panel: None,
             snippets_panel: None,
             snippet_target: None,
+            help: HelpState::default(),
             snippet_values: HashMap::new(),
             copy_job: None,
             copy_generation: 0,
@@ -273,16 +296,23 @@ impl App {
     fn map_event(&mut self, event: Event) -> Option<Action> {
         match event {
             Event::Key(key) => {
-                let action = map_key(
-                    key,
-                    KeyContext {
-                        focus: self.focus,
-                        overlay: self.overlay,
-                        dialog_open: !self.dialogs.is_empty(),
-                        prefix: self.prefix,
-                        keymap: &self.keymap,
-                    },
-                );
+                // Help over a panel: its keys only, the panel waits below.
+                let action = if self.help.over_panel && self.dialogs.is_empty() {
+                    (key.kind == crossterm::event::KeyEventKind::Press)
+                        .then(|| crate::keymap::help_key(key))
+                        .flatten()
+                } else {
+                    map_key(
+                        key,
+                        KeyContext {
+                            focus: self.focus,
+                            overlay: self.overlay,
+                            dialog_open: !self.dialogs.is_empty(),
+                            prefix: self.prefix,
+                            keymap: &self.keymap,
+                        },
+                    )
+                };
                 // The prefix applies to exactly one key.
                 if action.is_some() && !matches!(action, Some(Action::Prefix)) {
                     self.prefix = false;
@@ -366,11 +396,21 @@ impl App {
             Action::ToggleHelp => {
                 self.prefix = false;
                 self.close_panels();
+                // From the explorer, its page first.
+                self.help.page = usize::from(self.focus == Focus::Files);
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     _ => Some(Overlay::Help),
                 };
             }
+            Action::CloseHelp => {
+                if self.help.over_panel {
+                    self.help.over_panel = false;
+                } else if self.overlay == Some(Overlay::Help) {
+                    self.overlay = None;
+                }
+            }
+            Action::HelpPage => self.help.page = (self.help.page + 1) % 2,
             Action::CloseOverlay => {
                 self.overlay = None;
                 self.close_panels();
@@ -517,6 +557,7 @@ impl App {
         self.snippets_panel = None;
         self.edit_panel = None;
         self.debug_panel = None;
+        self.help.over_panel = false;
     }
 
     pub(crate) fn session_for(&self, alias: &str) -> Option<&SessionView> {
@@ -1025,9 +1066,11 @@ impl App {
                         // The open explorer already shows it, with its hint
                         // and `↵ reconnect`: no duplicate toast on top. Same
                         // for the copy-id view.
+                        // Same for the host's details, when they are on screen.
                         let shown = (self.focus == Focus::Files
                             && self.files.as_ref().is_some_and(|f| f.session == id))
-                            || self.copy_view_shows(id);
+                            || self.copy_view_shows(id)
+                            || self.details_show(id);
                         if !shown {
                             self.notify_error(error);
                         }
@@ -1043,6 +1086,20 @@ impl App {
             SessionEvent::Latency { rtt } => view.latency = Some(rtt),
             _ => {}
         }
+    }
+
+    /// The details pane of `session`'s host is on screen (the host list,
+    /// nothing over it, that host selected): it shows the session's state.
+    fn details_show(&self, session: SessionId) -> bool {
+        let home = self.active.is_none()
+            && self.overlay.is_none()
+            && self.dialogs.is_empty()
+            && matches!(self.focus, Focus::Hosts | Focus::Search);
+        home && self.selected_host().is_some_and(|h| {
+            self.sessions
+                .get(&h.alias)
+                .is_some_and(|view| view.id == session)
+        })
     }
 
     fn host_key_changed(&mut self, event: SessionEvent) {
@@ -1125,8 +1182,18 @@ impl App {
         self.toast = Some(Toast {
             message: error.message,
             hint: error.hint,
-            is_error: true,
+            kind: ToastKind::Error,
             ttl: 80,
+        });
+    }
+
+    /// Something was ignored; Portico goes on (title, then the detail).
+    pub(crate) fn notify_warning(&mut self, message: String, detail: Option<String>) {
+        self.toast = Some(Toast {
+            message,
+            hint: detail,
+            kind: ToastKind::Warning,
+            ttl: 100,
         });
     }
 
@@ -1134,7 +1201,7 @@ impl App {
         self.toast = Some(Toast {
             message,
             hint: None,
-            is_error: false,
+            kind: ToastKind::Info,
             ttl: 40,
         });
     }
@@ -1310,12 +1377,18 @@ mod render_tests {
     #[test]
     fn every_help_label_fits_80x24() {
         let mut app = test_app();
-        app.overlay = Some(Overlay::Help);
-        let lines = screen(&mut app, 80, 24);
+        app.update(Action::ToggleHelp);
+        // Two pages at 80×24: `Tab` turns them, each label shown in full.
+        let first = screen(&mut app, 80, 24);
+        assert!(contains(&first, "Tab page 1/2"), "{}", first.join("\n"));
+        app.update(Action::HelpPage);
+        let second = screen(&mut app, 80, 24);
+        assert!(contains(&second, "Tab page 2/2"), "{}", second.join("\n"));
         for section in help(&Keymap::defaults()) {
+            let lines = if section.page == 0 { &first } else { &second };
             let (title, rows) = (section.title, section.rows);
             assert!(
-                contains(&lines, title),
+                contains(lines, title),
                 "section {title}\n{}",
                 lines.join("\n")
             );
@@ -1329,8 +1402,16 @@ mod render_tests {
             }
         }
         // The only ellipsis is the one in "Ctrl-Space, then…": nothing cut.
-        let ellipses = lines.iter().map(|l| l.matches('…').count()).sum::<usize>();
-        assert_eq!(ellipses, 1, "{}", lines.join("\n"));
+        for (lines, expected) in [(&first, 1), (&second, 0)] {
+            let ellipses = lines.iter().map(|l| l.matches('…').count()).sum::<usize>();
+            assert_eq!(ellipses, expected, "{}", lines.join("\n"));
+        }
+        // Tall enough: everything at once, no pages.
+        let tall = screen(&mut app, 110, 60);
+        assert!(contains(&tall, "Session logs") && contains(&tall, "Snippets"));
+        assert!(!contains(&tall, "Tab page"));
+        app.update(Action::CloseHelp);
+        assert_eq!(app.overlay, None);
     }
 
     fn files_on(app: &mut App, phase: SessionPhase) -> SessionId {
@@ -1391,7 +1472,8 @@ mod render_tests {
         );
         let lines = screen(&mut app, 80, 24);
         let text = lines.join("\n");
-        assert!(contains(&lines, "connection refused"), "{text}");
+        // Core messages start with a capital on screen.
+        assert!(contains(&lines, "Connection refused"), "{text}");
         assert!(contains(&lines, "Is sshd running?"), "{text}");
         assert!(contains(&lines, "↵  reconnect"), "{text}");
         assert!(!contains(&lines, "Ctrl-R"), "{text}");

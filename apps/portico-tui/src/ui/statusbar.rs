@@ -12,7 +12,7 @@ use crate::ui::{fmt, status};
 
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
-    let (mode, hints) = mode_and_hints(app);
+    let (mode, hints) = mode_and_hints(app, frame.area());
     let pill = if app.prefix && app.dialogs.is_empty() {
         s.prefix_pill()
     } else {
@@ -20,13 +20,26 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     };
     let mut spans = vec![Span::styled(mode, pill), Span::raw(" ")];
     // Hints are listed by importance: drop the tail rather than overflow.
-    let mut used: usize = spans.iter().map(Span::width).sum();
-    for (key, label) in hints {
-        let need = key.chars().count() + label.chars().count() + 4;
-        if used + need > usize::from(area.width) {
+    // `quit` is the exception: always last, and its room is kept.
+    let mut hints = hints;
+    let pinned = if hints.last().is_some_and(|(_, label)| *label == "quit") {
+        hints.pop()
+    } else {
+        None
+    };
+    let need = |(key, label): &(String, &str)| key.chars().count() + label.chars().count() + 4;
+    let mut used: usize =
+        spans.iter().map(Span::width).sum::<usize>() + pinned.as_ref().map_or(0, need);
+    let mut shown: Vec<&(String, &str)> = Vec::new();
+    for hint in &hints {
+        if used + need(hint) > usize::from(area.width) {
             break;
         }
-        used += need;
+        used += need(hint);
+        shown.push(hint);
+    }
+    shown.extend(pinned.iter());
+    for (key, label) in shown {
         spans.push(Span::styled(format!(" {key} "), s.key_hint()));
         spans.push(Span::styled(format!(" {label} "), s.muted()));
     }
@@ -82,7 +95,7 @@ fn keyed(app: &App, ids: &[&str]) -> Hints {
 /// in `?`). Only keys that work right now are listed.
 // A flat table of modes; splitting it would hide which one wins.
 #[allow(clippy::too_many_lines)]
-fn mode_and_hints(app: &App) -> (&'static str, Hints) {
+fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
     let (mode, hints): (&'static str, &[(&'static str, &'static str)]) = match app.focus {
         // At launch, Esc is not a cancel: Portico goes on without the vault.
         _ if matches!(
@@ -92,10 +105,17 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
         {
             (" DIALOG ", &[("↵", "unlock"), ("Esc", "continue without")])
         }
-        _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => (
-            " CONFIRM ",
-            &[("y", "confirm"), ("n", "keep"), ("Esc", "keep")],
-        ),
+        // The same words as the dialog's own footer (`n / Esc keep`, `y clear`).
+        _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => {
+            let confirm = match app.dialogs.front() {
+                Some(Dialog::Confirm(c)) => c.confirm,
+                _ => "confirm",
+            };
+            return (
+                " CONFIRM ",
+                owned(vec![("n / Esc", "keep"), ("y", confirm)]),
+            );
+        }
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
         _ if app.prefix => {
             let mut hints = keyed(app, &["prefix.home"]);
@@ -144,12 +164,20 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
                 ("Esc", "cancel"),
             ],
         ),
+        _ if app.help.over_panel || app.overlay == Some(crate::app::Overlay::Help) => {
+            if super::overlays::help_paged(app, screen.height) {
+                (" HELP ", &[("Tab", "page"), ("Esc", "close")])
+            } else {
+                (" HELP ", &[("Esc", "close")])
+            }
+        }
         _ if app.overlay == Some(crate::app::Overlay::Debug) => {
+            let narrow = screen.width < crate::debug::NARROW;
             let hints = app
                 .debug_panel
                 .as_ref()
-                .map_or_else(|| vec![("Esc", "close")], crate::debug::DebugPanel::hints);
-            return (" DEBUG ", owned(hints));
+                .map_or_else(|| vec![("Esc", "close")], |p| p.hints(narrow));
+            return (" LOGS ", owned(hints));
         }
         Focus::Files
             if app.files_refused()
@@ -206,10 +234,11 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
                 "hosts.favorite",
                 "hosts.debug",
                 "hosts.help",
-                "hosts.quit",
                 "hosts.keys",
                 "hosts.snippets",
                 "hosts.theme",
+                // Always last, and always shown (see `render`).
+                "hosts.quit",
             ]);
             return (" HOSTS ", keyed(app, &ids));
         }

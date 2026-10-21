@@ -2,11 +2,14 @@
 //! reminder of where they live, inline errors with their hint.
 
 use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::app::App;
-use crate::edit_host::{EditField, EditHostPanel};
+use crate::edit_host::{EditField, EditHostPanel, split_tags};
+use crate::form::display_safe;
 use crate::theme::Styles;
 use crate::ui::{fmt, form, spinner};
 
@@ -39,7 +42,17 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, band: u16) {
         .title_bottom(Line::from(Span::styled(" Esc cancel ", s.muted())).right_aligned())
         .padding(Padding::new(2, 2, 1, 0))
         .style(s.overlay());
-    frame.render_widget(Clear, area);
+    // One clear column on each side: the panel's corners never touch the
+    // sidebar's border behind it (80×24).
+    let left = area.x.saturating_sub(1).max(screen.x);
+    let right = area.right().saturating_add(1).min(screen.right());
+    let margin = Rect {
+        x: left,
+        width: right.saturating_sub(left),
+        ..area
+    };
+    frame.render_widget(Clear, margin);
+    frame.render_widget(Block::new().style(s.base()), margin);
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -65,6 +78,24 @@ fn problem(panel: &EditHostPanel, field: EditField, s: Styles, w: usize) -> Vec<
     }
 }
 
+/// One row of chips under the tags field, `…` when the rest does not fit.
+fn chips(tags: Vec<(String, Style)>, s: Styles, w: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ".repeat(LABEL))];
+    let mut used = LABEL;
+    for (tag, style) in tags {
+        let chip = format!(" {tag} ");
+        let need = chip.chars().count() + 1;
+        if used + need > w {
+            spans.push(Span::styled("…", s.muted()));
+            break;
+        }
+        used += need;
+        spans.push(Span::styled(chip, style));
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
 fn lines(panel: &EditHostPanel, s: Styles, tick: u64, w: usize) -> Vec<Line<'static>> {
     let field_w = w.saturating_sub(LABEL).min(60);
     let mut lines = vec![form::input(
@@ -81,26 +112,34 @@ fn lines(panel: &EditHostPanel, s: Styles, tick: u64, w: usize) -> Vec<Line<'sta
             Span::raw(" ".repeat(LABEL)),
             Span::styled("space or comma between tags, # optional", s.muted()),
         ])),
-        Ok(tags) => {
-            let mut spans = vec![Span::raw(" ".repeat(LABEL))];
-            let mut used = LABEL;
-            for tag in tags {
-                let chip = format!(" #{tag} ");
-                let need = chip.chars().count() + 1;
-                if used + need > w {
-                    spans.push(Span::styled("…", s.muted()));
-                    break;
-                }
-                used += need;
-                spans.push(Span::styled(chip, s.key_hint()));
-                spans.push(Span::raw(" "));
+        Ok(tags) => lines.push(chips(
+            tags.into_iter()
+                .map(|tag| (format!("#{tag}"), s.key_hint()))
+                .collect(),
+            s,
+            w,
+        )),
+        // The typed tags, the refused one marked, then why.
+        Err(e) => {
+            if let Some(bad) = panel.bad_tag() {
+                let typed = split_tags(&panel.tags)
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tag)| {
+                        let style = if i == bad {
+                            s.key_hint().patch(s.status(s.theme.status.error))
+                        } else {
+                            s.muted()
+                        };
+                        (fmt::truncate(&display_safe(tag), 24), style)
+                    })
+                    .collect();
+                lines.push(chips(typed, s, w));
             }
-            lines.push(Line::from(spans));
+            if panel.error.is_none() {
+                lines.extend(form::problem(s, LABEL + 1, &e.message, w));
+            }
         }
-        Err(e) if panel.error.is_none() => {
-            lines.extend(form::problem(s, LABEL + 1, &e.message, w));
-        }
-        Err(_) => {}
     }
     lines.extend(problem(panel, EditField::Tags, s, w));
     lines.push(Line::from(""));
@@ -142,9 +181,10 @@ fn lines(panel: &EditHostPanel, s: Styles, tick: u64, w: usize) -> Vec<Line<'sta
             Span::styled("Saving…", s.secondary()),
         ]));
     } else {
+        // `Esc cancel` is in the border: said once.
         lines.extend(form::hints(
             s,
-            &[("Ctrl-S", "save"), ("Tab", "next field"), ("Esc", "cancel")],
+            &[("Ctrl-S", "save"), ("Tab", "next field")],
             true,
             w,
         ));

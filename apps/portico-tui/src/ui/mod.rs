@@ -105,7 +105,6 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         details::render(app, frame, main);
         toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
     }
-    statusbar::render(app, frame, status);
     // Over a panel, the toast sits between the panel and the status bar,
     // never on the panel's frame or hints: the panel gives way if needed.
     let panel_open = matches!(
@@ -114,8 +113,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     );
     let band = match &app.toast {
         Some(t) if panel_open => {
-            overlays::ToastBox::new(s, t.is_error, &t.message, t.hint.as_deref(), status.width)
-                .height
+            overlays::ToastBox::new(s, t.kind, &t.message, t.hint.as_deref(), status.width).height
         }
         _ => 0,
     };
@@ -140,6 +138,9 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         Some(Overlay::Debug) => debug::render(app, frame, band),
         _ => {}
     }
+    // After the panels: their scroll is clamped to what they show, so the
+    // bar's keys (`G follow`) match the screen.
+    statusbar::render(app, frame, status);
     // Help, then toasts: above the panels, so a result is never hidden.
     overlays::render(app, frame, toast_zone);
     if let Some(d) = app.dialogs.front() {

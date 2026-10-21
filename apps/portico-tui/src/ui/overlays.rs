@@ -5,14 +5,14 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
-use crate::app::{App, Overlay};
+use crate::app::{App, Overlay, ToastKind};
 use crate::keymap::{self, HelpSection};
 use crate::ui::fmt;
 
 /// `toast_zone`: the inside of the right-hand panel, so a toast never
 /// covers a border.
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, toast_zone: Rect) {
-    if let Some(Overlay::Help) = app.overlay {
+    if app.overlay == Some(Overlay::Help) || app.help.over_panel {
         render_help(app, frame);
     }
     render_toast(app, frame, toast_zone);
@@ -88,13 +88,36 @@ fn help_split(help: &[HelpSection], room: usize) -> (usize, usize) {
     }
 }
 
+/// The help shows one page at a time on a screen `height` rows tall.
+pub(crate) fn help_paged(app: &App, height: u16) -> bool {
+    !fits_two_columns(
+        &keymap::help(&app.keymap),
+        usize::from(height.saturating_sub(2)),
+    )
+}
+
+/// The two-column layout of `sections` fits `room` rows.
+fn fits_two_columns(sections: &[HelpSection], room: usize) -> bool {
+    let (cut, gap) = help_split(sections, room);
+    let (left, right) = sections.split_at(cut.min(sections.len()));
+    stacked(left, gap).max(stacked(right, gap)) <= room
+}
+
 /// One column when it fits the screen height, else sections flow into two
-/// balanced columns (80×24 stays readable). Keys are the effective ones.
+/// balanced columns (80×24 stays readable); when even that does not fit,
+/// one page at a time (`Tab` turns it). Keys are the effective ones.
 fn render_help(app: &App, frame: &mut Frame<'_>) {
     let s = app.styles();
-    let help = keymap::help(&app.keymap);
+    let all = keymap::help(&app.keymap);
     let screen = frame.area();
     let room = usize::from(screen.height.saturating_sub(2));
+    let paged = !fits_two_columns(&all, room);
+    let page = if paged { app.help.page.min(1) } else { 0 };
+    let help: Vec<HelpSection> = if paged {
+        all.into_iter().filter(|h| h.page == page).collect()
+    } else {
+        all
+    };
     let one_column = stacked(&help, 1) <= room;
     let key_width = help_key_width(&help);
     let width = if one_column { 60 } else { 84 };
@@ -130,11 +153,16 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
         .min(screen.height);
     let area = centered(screen, width, height);
     frame.render_widget(Clear, area);
+    let footer = if paged {
+        format!(" Tab page {}/2 · Esc close ", page + 1)
+    } else {
+        " Esc close ".to_owned()
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(s.border_focus())
         .title(Line::from(Span::styled(" Keyboard shortcuts ", s.title())))
-        .title_bottom(Line::from(Span::styled(" Esc close ", s.muted())).right_aligned())
+        .title_bottom(Line::from(Span::styled(footer, s.muted())).right_aligned())
         .padding(Padding::new(2, 2, 0, 0))
         .style(s.overlay());
     let inner = block.inner(area);
@@ -146,21 +174,13 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
     }
 }
 
-/// Bottom-right toast: neutral for information, error-coloured for
-/// failures (message, then hint on its own line).
+/// Bottom-right toast: neutral for information, warning- or error-coloured
+/// otherwise (message, then hint on its own line).
 fn render_toast(app: &App, frame: &mut Frame<'_>, zone: Rect) {
     let Some(toast) = &app.toast else { return };
     let s = app.styles();
     let screen = frame.area();
-    let make = |width| {
-        ToastBox::new(
-            s,
-            toast.is_error,
-            &toast.message,
-            toast.hint.as_deref(),
-            width,
-        )
-    };
+    let make = |width| ToastBox::new(s, toast.kind, &toast.message, toast.hint.as_deref(), width);
     let in_zone = make(zone.width);
     if zone.width >= 24 && in_zone.fits(zone) {
         in_zone.draw(s, frame, zone);
@@ -177,7 +197,7 @@ fn render_toast(app: &App, frame: &mut Frame<'_>, zone: Rect) {
 /// A toast, laid out: wrapped lines and the box size they need.
 pub(crate) struct ToastBox {
     lines: Vec<Line<'static>>,
-    is_error: bool,
+    kind: ToastKind,
     pub(crate) height: u16,
     width: u16,
 }
@@ -186,22 +206,25 @@ impl ToastBox {
     /// At most 72 columns (and the screen width), at most 6 text rows.
     pub(crate) fn new(
         s: crate::theme::Styles,
-        is_error: bool,
+        kind: ToastKind,
         message: &str,
         hint: Option<&str>,
         screen_width: u16,
     ) -> Self {
-        let (icon, icon_style) = if is_error {
-            ("✕", s.status(s.theme.status.error))
-        } else {
-            ("·", s.accent())
+        let (icon, icon_style) = match kind {
+            ToastKind::Error => ("✕", s.status(s.theme.status.error)),
+            ToastKind::Warning => ("▲", s.status(s.theme.status.warning)),
+            ToastKind::Info => ("·", s.accent()),
         };
         // Borders + one column of padding on each side, then the icon column.
         let max_width = screen_width.saturating_sub(2).min(72);
         let text_room = usize::from(max_width.saturating_sub(4 + 3)).max(1);
         // Wrapped, not truncated; continuation lines align under the text.
         let mut lines: Vec<Line<'static>> = Vec::new();
-        for (i, part) in fmt::wrap(message, text_room).into_iter().enumerate() {
+        for (i, part) in fmt::wrap(&fmt::sentence(message), text_room)
+            .into_iter()
+            .enumerate()
+        {
             let lead = if i == 0 {
                 Span::styled(format!("{icon}  "), icon_style)
             } else {
@@ -228,7 +251,7 @@ impl ToastBox {
             .saturating_add(2);
         Self {
             lines,
-            is_error,
+            kind,
             height,
             width,
         }
@@ -249,10 +272,10 @@ impl ToastBox {
             width,
             height,
         };
-        let border = if self.is_error {
-            s.status(s.theme.status.error)
-        } else {
-            s.border_strong()
+        let border = match self.kind {
+            ToastKind::Error => s.status(s.theme.status.error),
+            ToastKind::Warning => s.status(s.theme.status.warning),
+            ToastKind::Info => s.border_strong(),
         };
         frame.render_widget(Clear, rect);
         frame.render_widget(

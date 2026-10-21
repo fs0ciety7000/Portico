@@ -76,7 +76,7 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Snippets de l'hôte | `s` | `hosts.snippets` |
 | Éditer tags, groupe et notes de l'hôte (`hosts.toml`) | `e` | `hosts.edit` |
 | Favori on/off | `*` | `hosts.favorite` |
-| Panneau debug : logs des sessions et config effective | `l` | `hosts.debug` |
+| Journaux de session (panneau debug) et config effective | `l` | `hosts.debug` |
 | Retirer l'hôte des récents (ligne de la section Recent) | `x` | `hosts.forget_recent` |
 | Vider les récents (confirmation `y`) | `X` | `hosts.clear_recent` |
 | Onglet suivant | `]`, `Tab` | `hosts.next_tab` |
@@ -88,6 +88,7 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Aller à l'onglet n | `1`-`9` | (fixe) |
 | Vider la recherche | `Esc` | (fixe) |
 | Quitter | `Ctrl-C` | (fixe) |
+| Aide : page suivante, quand elle ne tient pas à l'écran (80×24 : hôtes, préfixe, journaux et édition, puis fichiers et panneaux) | `Tab`, `←` / `→` (aide ouverte) | (fixe) |
 | Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | (fixe) |
 
 ### TUI : recherche
@@ -136,7 +137,7 @@ Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` 
 
 ### TUI : édition d'un hôte
 
-« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; une erreur s'affiche sous le champ, avec son hint.
+« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.
 
 | Action | Touches |
 |---|---|
@@ -148,21 +149,24 @@ Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` 
 
 Les notes s'affichent dans le panneau de détails de l'hôte.
 
-### TUI : panneau debug
+### TUI : journaux de session (panneau debug)
 
-`l` depuis la liste, `Ctrl-Space l` partout (depuis un onglet terminal, sa session est présélectionnée). À gauche, les sessions récentes (vivantes, puis les 20 dernières terminées), issue colorée, sondes de copy-id marquées « probe ». À droite, deux onglets : **Logs** (niveau, cible, message ; suivi en direct) et **Config** (config effective de l'alias, comme `ssh -G` : route ProxyJump, chaque option avec son origine `fichier:ligne` ou « default », avertissements).
+« Session logs » : `l` depuis la liste, `Ctrl-Space l` partout (depuis un onglet terminal, sa session est présélectionnée). À gauche, les sessions récentes (vivantes, puis les 20 dernières terminées), issue colorée, sondes de copy-id marquées « probe » ; sous 100 colonnes, cette colonne devient un sélecteur d'une ligne (« ◂ lab · 22:23 (1/3) ▸ »). À droite, deux onglets : **Logs** (enregistrements : niveau, cible, message ; suivi en direct ; la vue commence toujours sur un début d'enregistrement) et **Effective config** (« Config » si la largeur manque ; config effective de l'alias, comme `ssh -G` : route « You → bastion → hôte », chaque option avec son origine `fichier:ligne`, « default » ou « at connect », avertissements). Couleurs : WARN et ERROR en couleur de statut, INFO secondaire, DEBUG / TRACE atténués.
 
 | Action | Touches |
 |---|---|
-| Session précédente / suivante | `↑` / `↓`, `k` / `j` |
-| Onglet Logs / Config | `Tab` |
-| Filtrer les logs (texte) | `/`, saisie, `↵` ; `Esc` vide le filtre |
+| Session précédente / suivante | `↑` / `↓`, `k` / `j`, `[` / `]`, `←` / `→` |
+| Onglet Logs / Effective config | `Tab` |
+| Filtrer les enregistrements (texte) | `/`, saisie, `↵` ; `Esc` vide le filtre |
 | Niveau minimal (debug → info → warn → error) | `v` |
-| Copier (OSC 52, texte `to_line` ; l'onglet Config ne copie jamais les options sensibles) | `y` |
-| Afficher / masquer les options sensibles (`ProxyCommand`…) | `s` (onglet Config) |
-| Défiler / haut / bas (reprend le suivi) | `PgUp` / `PgDn`, `g` / `G` |
+| Copier (OSC 52, texte `to_line` ; l'onglet Effective config ne copie jamais les options sensibles) | `y` |
+| Révéler / masquer les options sensibles (`ProxyCommand`, `LocalCommand`, `RemoteCommand`, `KnownHostsCommand` : « ••• hidden · s reveals · never copied », révélées sur cet écran seulement, jamais copiées) | `s` (onglet Effective config) |
+| Défiler / plus ancien / plus récent (`G` reprend le suivi) | `PgUp` / `PgDn`, `g` / `G` |
 | Rafraîchir | `Ctrl-R` |
+| Aide (par-dessus le panneau) | `?` |
 | Fermer | `Esc`, `q`, `Ctrl-C` |
+
+Le panneau de détails d'un hôte masque aussi ces options (« ••• hidden · l reveals in logs »). Quand une connexion échoue, ses détails proposent `↵ retry` et `l logs`.
 
 ### TUI : explorateur de fichiers
 

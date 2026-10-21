@@ -269,7 +269,7 @@ fn render_pane(
 
 /// Message (error colour) and hint (secondary) on their own wrapped lines.
 fn error_lines(err: &ErrorSummary, s: Styles, width: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = fmt::wrap(&err.message, width)
+    let mut lines: Vec<Line<'static>> = fmt::wrap(&fmt::sentence(&err.message), width)
         .into_iter()
         .map(|l| Line::from(Span::styled(l, s.status(s.theme.status.error))))
         .collect();
@@ -588,7 +588,7 @@ fn render_footer(view: &FilesView, s: Styles, frame: &mut Frame<'_>, area: Rect)
             Some(err) => {
                 let mut spans = vec![
                     Span::styled(" ✕ ", s.status(s.theme.status.error)),
-                    Span::styled(err.message.clone(), s.status(s.theme.status.error)),
+                    Span::styled(fmt::sentence(&err.message), s.status(s.theme.status.error)),
                 ];
                 if let Some(hint) = &err.hint {
                     spans.push(Span::styled(format!("  {hint}"), s.secondary()));
