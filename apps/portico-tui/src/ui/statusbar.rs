@@ -67,7 +67,16 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
 }
 
-type Hints = Vec<(&'static str, &'static str)>;
+type Hints = Vec<(String, &'static str)>;
+
+fn owned(hints: Vec<(&'static str, &'static str)>) -> Hints {
+    hints.into_iter().map(|(k, l)| (k.to_owned(), l)).collect()
+}
+
+/// Effective keys of `ids`, in order (unbound actions are left out).
+fn keyed(app: &App, ids: &[&str]) -> Hints {
+    ids.iter().filter_map(|id| app.keymap.hint(id)).collect()
+}
 
 /// Mode pill and the key hints, most important first (what does not fit is
 /// in `?`). Only keys that work right now are listed.
@@ -83,40 +92,64 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
         {
             (" DIALOG ", &[("↵", "unlock"), ("Esc", "continue without")])
         }
-        _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
-        _ if app.prefix => (
-            " PREFIX ",
-            &[
-                ("h", "hosts"),
-                ("1-9", "tab"),
-                ("f", "files"),
-                ("p", "tunnels"),
-                ("n", "new"),
-                ("w", "close"),
-                ("d", "disconnect"),
-                ("Esc", "cancel"),
-            ],
+        _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => (
+            " CONFIRM ",
+            &[("y", "confirm"), ("n", "keep"), ("Esc", "keep")],
         ),
+        _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
+        _ if app.prefix => {
+            let mut hints = keyed(app, &["prefix.home"]);
+            hints.push(("1-9".into(), "tab"));
+            hints.extend(keyed(
+                app,
+                &[
+                    "prefix.files",
+                    "prefix.tunnels",
+                    "prefix.debug",
+                    "prefix.new_tab",
+                    "prefix.close_tab",
+                    "prefix.disconnect",
+                ],
+            ));
+            hints.push(("Esc".into(), "cancel"));
+            return (" PREFIX ", hints);
+        }
         _ if app.overlay == Some(crate::app::Overlay::Keys) => {
             let hints = app.keys_panel.as_ref().map_or_else(
                 || vec![("Esc", "close")],
                 |p| p.hints(app.vault, app.copy_state()),
             );
-            return (" KEYS ", hints);
+            return (" KEYS ", owned(hints));
         }
         _ if app.overlay == Some(crate::app::Overlay::Snippets) => {
             let hints = app.snippets_panel.as_ref().map_or_else(
                 || vec![("Esc", "close")],
                 crate::snippets::SnippetsPanel::hints,
             );
-            return (" SNIPPETS ", hints);
+            return (" SNIPPETS ", owned(hints));
         }
         _ if app.overlay == Some(crate::app::Overlay::Tunnels) => {
             let hints = app
                 .tunnels_panel
                 .as_ref()
                 .map_or_else(|| vec![("Esc", "close")], |p| p.hints(&app.tunnels));
-            return (" TUNNELS ", hints);
+            return (" TUNNELS ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Edit) => (
+            " EDIT ",
+            &[
+                ("Tab", "next field"),
+                ("Ctrl-S", "save"),
+                ("Ctrl-U", "clear"),
+                ("Esc", "cancel"),
+            ],
+        ),
+        _ if app.overlay == Some(crate::app::Overlay::Debug) => {
+            let hints = app
+                .debug_panel
+                .as_ref()
+                .map_or_else(|| vec![("Esc", "close")], crate::debug::DebugPanel::hints);
+            return (" DEBUG ", owned(hints));
         }
         Focus::Files
             if app.files_refused()
@@ -157,22 +190,29 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
                 ("Esc", "back"),
             ],
         ),
-        Focus::Terminal => (
-            " TERMINAL ",
-            &[("Ctrl-Space", "commands"), ("Shift-PgUp", "scroll")],
-        ),
-        Focus::Hosts => (
-            " HOSTS ",
-            &[
-                ("↵", "connect"),
-                ("/", "search"),
-                ("i", "keys"),
-                ("s", "snippets"),
-                ("t", "theme"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
-        ),
+        Focus::Terminal => {
+            let mut hints = vec![("Ctrl-Space".to_owned(), "commands")];
+            hints.extend(keyed(app, &["terminal.scroll_up"]));
+            return (" TERMINAL ", hints);
+        }
+        Focus::Hosts => {
+            let mut ids = vec!["hosts.connect"];
+            if app.selected_is_recent() {
+                ids.push("hosts.forget_recent");
+            }
+            ids.extend([
+                "hosts.search",
+                "hosts.edit",
+                "hosts.favorite",
+                "hosts.debug",
+                "hosts.help",
+                "hosts.quit",
+                "hosts.keys",
+                "hosts.snippets",
+                "hosts.theme",
+            ]);
+            return (" HOSTS ", keyed(app, &ids));
+        }
         Focus::Search => (
             " SEARCH ",
             &[
@@ -183,5 +223,5 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
             ],
         ),
     };
-    (mode, hints.to_vec())
+    (mode, owned(hints.to_vec()))
 }

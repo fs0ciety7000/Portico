@@ -21,9 +21,12 @@ use tokio::sync::mpsc;
 
 use crate::action::Action;
 use crate::copy_job::CopyJob;
+use crate::debug::DebugPanel;
 use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
+use crate::edit_host::EditHostPanel;
 use crate::files::{FilesView, KeyOutcome};
-use crate::keymap::map_key;
+use crate::host_list::Entry;
+use crate::keymap::{KeyContext, Keymap, map_key};
 use crate::keys::KeysPanel;
 use crate::snippets::SnippetsPanel;
 use crate::terminal::{Ended, GridSize, TerminalView, encode_key};
@@ -47,6 +50,10 @@ pub(crate) enum Overlay {
     Tunnels,
     Keys,
     Snippets,
+    /// "Edit <alias>": tags, group, notes.
+    Edit,
+    /// Session logs and effective config.
+    Debug,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -92,7 +99,18 @@ pub(crate) struct App {
     pub(crate) load_error: Option<String>,
     pub(crate) query: String,
     pub(crate) hits: Vec<Hit>,
+    /// Rows of the host list (section headers and hosts); `list` selects
+    /// among them (never a header).
+    pub(crate) entries: Vec<Entry>,
     pub(crate) list: ListState,
+    /// Most recent hosts first (may name hosts gone from the config).
+    pub(crate) recent: Vec<portico_core::recent::RecentHost>,
+    /// Effective keys (defaults + `settings.toml`).
+    pub(crate) keymap: Keymap,
+    /// The edit form, while `overlay == Some(Overlay::Edit)`.
+    pub(crate) edit_panel: Option<EditHostPanel>,
+    /// The debug panel, while `overlay == Some(Overlay::Debug)`.
+    pub(crate) debug_panel: Option<DebugPanel>,
     pub(crate) toast: Option<Toast>,
     /// Latest session per host alias.
     pub(crate) sessions: HashMap<String, SessionView>,
@@ -158,7 +176,12 @@ impl App {
             load_error: None,
             query: String::new(),
             hits: Vec::new(),
+            entries: Vec::new(),
             list: ListState::default(),
+            recent: Vec::new(),
+            keymap: Keymap::defaults(),
+            edit_panel: None,
+            debug_panel: None,
             toast: None,
             sessions: HashMap::new(),
             terminals: Vec::new(),
@@ -214,7 +237,11 @@ impl App {
         // vanish at once).
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut engine_events = self.engine.subscribe();
+        // Before the first frame: the saved theme, no flash of the default.
+        let settings = self.engine.settings().await.map_err(|e| e.summary());
+        self.update(Action::SettingsLoaded(settings));
         self.spawn_load_hosts();
+        self.spawn_load_recent();
         self.refresh_vault(true);
         self.spawn_machine_name();
 
@@ -248,10 +275,13 @@ impl App {
             Event::Key(key) => {
                 let action = map_key(
                     key,
-                    self.focus,
-                    self.overlay,
-                    !self.dialogs.is_empty(),
-                    self.prefix,
+                    KeyContext {
+                        focus: self.focus,
+                        overlay: self.overlay,
+                        dialog_open: !self.dialogs.is_empty(),
+                        prefix: self.prefix,
+                        keymap: &self.keymap,
+                    },
                 );
                 // The prefix applies to exactly one key.
                 if action.is_some() && !matches!(action, Some(Action::Prefix)) {
@@ -311,11 +341,11 @@ impl App {
             }
             Action::SelectNext => self.move_selection(1),
             Action::SelectPrev => self.move_selection(-1),
-            Action::SelectFirst => {
-                self.list
-                    .select(if self.hits.is_empty() { None } else { Some(0) });
+            Action::SelectFirst => self.select_first_host(),
+            Action::SelectLast => {
+                let last = self.entries.iter().rposition(|e| e.host().is_some());
+                self.select_entry(last);
             }
-            Action::SelectLast => self.list.select(self.hits.len().checked_sub(1)),
             Action::FocusSearch => {
                 self.go_home();
                 self.focus = Focus::Search;
@@ -335,9 +365,7 @@ impl App {
             }
             Action::ToggleHelp => {
                 self.prefix = false;
-                self.tunnels_panel = None;
-                self.keys_panel = None;
-                self.snippets_panel = None;
+                self.close_panels();
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     _ => Some(Overlay::Help),
@@ -345,15 +373,9 @@ impl App {
             }
             Action::CloseOverlay => {
                 self.overlay = None;
-                self.tunnels_panel = None;
-                self.keys_panel = None;
-                self.snippets_panel = None;
+                self.close_panels();
             }
-            Action::CycleTheme => {
-                self.theme_index = (self.theme_index + 1) % THEMES.len();
-                let name = self.styles().theme.name;
-                self.notify(format!("Theme · {name}"));
-            }
+            Action::CycleTheme => self.cycle_theme(),
             Action::Reload => {
                 self.inventory = None;
                 self.load_error = None;
@@ -477,8 +499,24 @@ impl App {
     }
 
     pub(crate) fn selected_host(&self) -> Option<&portico_core::hosts::HostEntry> {
-        let hit = self.hits.get(self.list.selected()?)?;
-        self.inventory.as_ref()?.hosts.get(hit.index)
+        let index = self.entries.get(self.list.selected()?)?.host()?;
+        self.inventory.as_ref()?.hosts.get(index)
+    }
+
+    /// The selected row is in the Recent section.
+    pub(crate) fn selected_is_recent(&self) -> bool {
+        matches!(
+            self.list.selected().and_then(|i| self.entries.get(i)),
+            Some(Entry::Host { recent: true, .. })
+        )
+    }
+
+    pub(crate) fn close_panels(&mut self) {
+        self.tunnels_panel = None;
+        self.keys_panel = None;
+        self.snippets_panel = None;
+        self.edit_panel = None;
+        self.debug_panel = None;
     }
 
     pub(crate) fn session_for(&self, alias: &str) -> Option<&SessionView> {
@@ -551,7 +589,7 @@ impl App {
         match self.dialogs.front_mut() {
             Some(Dialog::Prompt(prompt)) => prompt.paste(text),
             Some(Dialog::Secret(secret)) => secret.paste(text),
-            Some(Dialog::ChangedKey(_)) => {}
+            Some(Dialog::ChangedKey(_) | Dialog::Confirm(_)) => {}
             None if self.overlay == Some(Overlay::Keys) => {
                 if let Some(panel) = &mut self.keys_panel {
                     panel.paste(text);
@@ -559,6 +597,11 @@ impl App {
             }
             None if self.overlay == Some(Overlay::Snippets) => {
                 if let Some(panel) = &mut self.snippets_panel {
+                    panel.paste(text);
+                }
+            }
+            None if self.overlay == Some(Overlay::Edit) => {
+                if let Some(panel) = &mut self.edit_panel {
                     panel.paste(text);
                 }
             }
@@ -934,11 +977,14 @@ impl App {
                     self.rebuild_tunnels_panel();
                 }
             }
-            _ => {}
+            other => self.on_meta_event(other),
         }
     }
 
     fn on_session_event(&mut self, id: SessionId, event: SessionEvent) {
+        if matches!(event, SessionEvent::Started { .. } | SessionEvent::Phase(_)) {
+            self.refresh_debug_sessions();
+        }
         match &event {
             SessionEvent::Started { alias, probe: true } => {
                 self.probes.insert(id, alias.clone());
@@ -1071,6 +1117,7 @@ impl App {
                 }
             }
             Dialog::Secret(_) => self.secret_key(key),
+            Dialog::Confirm(_) => self.confirm_key(key),
         }
     }
 
@@ -1092,21 +1139,75 @@ impl App {
         });
     }
 
+    /// New search results: the first host is selected.
     fn refilter(&mut self) {
         let Some(inv) = &self.inventory else { return };
         self.hits = self.search.search(&inv.hosts, &self.query);
-        self.list
-            .select(if self.hits.is_empty() { None } else { Some(0) });
+        self.entries = crate::host_list::build(&inv.hosts, &self.hits, &self.query, &self.recent);
+        *self.list.offset_mut() = 0;
+        let first = self.entries.iter().position(|e| e.host().is_some());
+        self.select_entry(first);
+    }
+
+    /// Same search, new sections (metadata or recent hosts changed): the
+    /// selection stays on its host (in the same section when possible).
+    pub(crate) fn rebuild_entries(&mut self) {
+        let Some(inv) = &self.inventory else { return };
+        let before = self
+            .list
+            .selected()
+            .and_then(|i| self.entries.get(i))
+            .cloned();
+        self.hits = self.search.search(&inv.hosts, &self.query);
+        self.entries = crate::host_list::build(&inv.hosts, &self.hits, &self.query, &self.recent);
+        let same = before
+            .as_ref()
+            .and_then(|b| self.entries.iter().position(|e| e == b));
+        let host = before
+            .and_then(|b| b.host())
+            .and_then(|h| self.entries.iter().position(|e| e.host() == Some(h)));
+        let first = self.entries.iter().position(|e| e.host().is_some());
+        self.select_entry(same.or(host).or(first));
+    }
+
+    pub(crate) fn select_first_host(&mut self) {
+        let first = self.entries.iter().position(|e| e.host().is_some());
+        self.select_entry(first);
+    }
+
+    /// Selects a row; a section's first host brings its title into view.
+    fn select_entry(&mut self, index: Option<usize>) {
+        self.list.select(index);
+        if let Some(i) = index
+            && let Some(header) = i.checked_sub(1)
+            && matches!(self.entries.get(header), Some(Entry::Header(_)))
+            && self.list.offset() > header
+        {
+            *self.list.offset_mut() = header;
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let len = self.hits.len();
+        let len = self.entries.len();
         if len == 0 {
             return;
         }
-        let current = self.list.selected().unwrap_or(0);
-        let next = current.saturating_add_signed(delta).min(len - 1);
-        self.list.select(Some(next));
+        let mut current = self.list.selected().unwrap_or(0);
+        // Step over section titles; stay put at either end.
+        loop {
+            let Some(next) = current.checked_add_signed(delta).filter(|n| *n < len) else {
+                return;
+            };
+            current = next;
+            if self
+                .entries
+                .get(current)
+                .is_some_and(|e| e.host().is_some())
+            {
+                break;
+            }
+        }
+        self.select_entry(Some(current));
     }
 }
 
@@ -1187,7 +1288,7 @@ mod render_tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::keymap::HELP;
+    use crate::keymap::{Keymap, help};
 
     fn screen(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
@@ -1211,13 +1312,14 @@ mod render_tests {
         let mut app = test_app();
         app.overlay = Some(Overlay::Help);
         let lines = screen(&mut app, 80, 24);
-        for (title, rows) in HELP {
+        for section in help(&Keymap::defaults()) {
+            let (title, rows) = (section.title, section.rows);
             assert!(
                 contains(&lines, title),
                 "section {title}\n{}",
                 lines.join("\n")
             );
-            for (key, label) in *rows {
+            for (key, label) in &rows {
                 let row = format!("{key}  ");
                 assert!(
                     lines.iter().any(|l| l.contains(&row) && l.contains(label)),

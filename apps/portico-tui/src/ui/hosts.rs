@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Padding, Paragraph};
 
 use crate::app::{App, Focus};
+use crate::host_list::{Entry, spaced_caps};
 
 #[allow(clippy::too_many_lines)] // will split into SearchField + HostList widgets
 pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
@@ -79,14 +80,28 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         );
         return;
     }
-    if app.hits.is_empty() {
-        let msg = if app.query.is_empty() {
-            "No hosts in ~/.ssh/config yet."
+    if app.entries.is_empty() {
+        let lines = if app.query.is_empty() {
+            vec![
+                Line::from(Span::styled(
+                    "No hosts in ~/.ssh/config yet.",
+                    s.secondary(),
+                )),
+                Line::from(Span::styled("Add a Host block, then r reloads.", s.muted())),
+            ]
         } else {
-            "No host matches this search."
+            vec![
+                Line::from(Span::styled("No host matches this search.", s.secondary())),
+                Line::from(Span::styled(
+                    "Esc clears it · #tag * @group filter",
+                    s.muted(),
+                )),
+            ]
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, s.muted()))).block(block),
+            Paragraph::new(lines)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(block),
             list,
         );
         return;
@@ -95,11 +110,24 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     let Some(inv) = &app.inventory else { return };
     // Leave room for the dot, a favourite star and some of the target.
     let alias_max = usize::from(area.width).saturating_sub(10).max(8);
+    let title_max = usize::from(list.width).saturating_sub(5);
     let items: Vec<ListItem<'_>> = app
-        .hits
+        .entries
         .iter()
-        .filter_map(|hit| inv.hosts.get(hit.index))
-        .map(|h| {
+        .filter_map(|entry| match entry {
+            Entry::Header(title) => Some(Err(title)),
+            Entry::Host { index, .. } => inv.hosts.get(*index).map(Ok),
+        })
+        .map(|row| {
+            let h = match row {
+                Ok(h) => h,
+                Err(title) => {
+                    return ListItem::new(Line::from(Span::styled(
+                        format!(" {}", spaced_caps(title, title_max)),
+                        s.muted(),
+                    )));
+                }
+            };
             let st = super::status::status(app.session_for(&h.alias), s);
             let dot = if st.busy {
                 super::spinner(app.tick)

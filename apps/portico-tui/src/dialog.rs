@@ -235,11 +235,28 @@ pub(crate) struct ChangedKeyAlert {
     pub(crate) line: usize,
 }
 
+/// What a confirmation dialog confirms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmAction {
+    ClearRecent,
+}
+
+/// A yes / no question: `y` confirms, `n` or `Esc` keeps things as they are.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfirmDialog {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    /// Label of the confirming action (`y`).
+    pub(crate) confirm: &'static str,
+    pub(crate) action: ConfirmAction,
+}
+
 #[derive(Debug)]
 pub(crate) enum Dialog {
     Prompt(PromptDialog),
     ChangedKey(ChangedKeyAlert),
     Secret(SecretDialog),
+    Confirm(ConfirmDialog),
 }
 
 /// Why Portico itself asks for a secret.

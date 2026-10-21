@@ -1,7 +1,10 @@
 # Raccourcis clavier : Portico
 
-> Source de vérité : `apps/portico-tui/src/keymap.rs` (TUI, aide `?` générée depuis `HELP`) et la palette
-> de `apps/portico-gui/src/App.svelte` (GUI). Toute modification de raccourci met à jour ce fichier.
+> Source de vérité : `apps/portico-tui/src/keymap.rs` (TUI : aide `?`, barre de statut et tables TUI de ce
+> fichier, générées entre les marqueurs `BEGIN/END GENERATED: tui`) et la palette de
+> `apps/portico-gui/src/App.svelte` (GUI). Toute modification de raccourci met à jour ce fichier ; côté TUI,
+> `cargo run -p portico-tui -- --write-keybindings docs/KEYBINDINGS.md` régénère le bloc, et un test échoue
+> s'il est périmé.
 > `⌘` désigne `Cmd` sur macOS. Sur Linux, le modificateur de l'app est `Ctrl` dans la liste des hôtes et
 > **`Ctrl-Shift`** dès qu'un terminal a le focus (`Ctrl-T`, `Ctrl-W`, `Ctrl-K`… appartiennent au shell, à vim, à tmux),
 > comme GNOME Terminal. `Ctrl-Shift` fonctionne partout, c'est ce que l'UI affiche. Les onglets numérotés passent par
@@ -9,6 +12,9 @@
 > Les lettres sont reconnues par le caractère produit (AZERTY, Dvorak, Bépo) ; les chiffres par la touche physique.
 
 ## Liste des hôtes
+
+> Colonne TUI : touches par défaut les plus courantes ; la table TUI complète (favoris, édition, récents,
+> panneau debug, identifiants configurables) est générée plus bas.
 
 | Action | TUI | GUI |
 |---|---|---|
@@ -29,34 +35,154 @@
 | Aide | `?` | (palette) |
 | Quitter | `q`, `Ctrl-C` | `⌘Q` (système) |
 
-## Terminal (TUI)
+## Configurer les raccourcis et le thème (`settings.toml`)
 
-Toutes les touches partent vers l'hôte distant, y compris `Ctrl-C`. Les commandes Portico passent par le
-préfixe **`Ctrl-Space`** (la barre de statut affiche `PREFIX`). Le préfixe fonctionne aussi depuis la liste
-des hôtes, avec la même table : une seule grammaire à retenir. Il s'applique à une seule touche, et `Esc`
-l'annule.
+`settings.toml` vit dans le dossier de configuration de Portico (`~/.config/portico/` sous Linux,
+`~/Library/Application Support/dev.Portico.portico/` sous macOS). Portico le lit au démarrage ; `t` (TUI) y enregistre le
+thème choisi en gardant le reste du fichier (clés inconnues et commentaires compris).
+
+```toml
+theme = "basalt"             # obsidian (défaut), basalt, travertine
+
+[keymap.tui]
+"hosts.files" = "F"          # une touche…
+"prefix.debug" = "L"
+"hosts.down" = "n down"      # …ou plusieurs, séparées par des espaces (4 au plus)
+"terminal.scroll_up" = "alt-pgup"
+```
+
+- **Identifiants** : colonne « Identifiant » des tables TUI ci-dessous (`hosts.*` : liste des hôtes,
+  `prefix.*` : après `Ctrl-Space`, `terminal.*` : onglet terminal). Une entrée remplace toutes les touches
+  par défaut de l'action.
+- **Syntaxe des touches** : un caractère tel quel (`f`, `F` pour Shift-f, `*`, `?`) ; des noms sans casse
+  (`enter`, `esc`, `tab`, `shift-tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`, `pgup`,
+  `pgdn`, `up`, `down`, `left`, `right`, `f1`…`f12`) ; des modificateurs `ctrl-`, `alt-`, `shift-` (ou `+` :
+  `ctrl+k`). `shift-` ne s'applique qu'aux touches nommées (écrire `G`, pas `shift-g`).
+- **Refusées** (ignorées au démarrage, avec un toast qui les liste) : action inconnue, touche illisible, plus
+  de 4 touches, touche réservée (`Ctrl-C`, `Esc`, `Ctrl-Space`, les chiffres `1`-`9` des onglets), touche
+  d'un terminal sans `Ctrl`, `Alt` ni `Shift`, et conflit avec une autre action du même contexte (deux
+  entrées sur la même touche sont ignorées toutes les deux ; échanger deux touches fonctionne).
+- Un thème inconnu revient au thème par défaut, avec un toast. Un fichier invalide est ignoré en entier
+  (toast avec l'erreur) ; il n'est jamais réécrit tant qu'il ne se relit pas.
+- L'aide `?` et la barre de statut affichent toujours les touches effectives.
+- Ligne de commande : `portico --help`, `portico --version`, `portico --print-keybindings` (tables TUI en
+  Markdown). Sans terminal (stdin ou stdout redirigé), Portico le dit et sort avec le code 1.
+
+<!-- BEGIN GENERATED: tui -->
+<!-- Généré depuis apps/portico-tui/src/keymap.rs et keydoc.rs : ne pas éditer à la main.
+     cargo run -p portico-tui -- --write-keybindings docs/KEYBINDINGS.md -->
+
+### TUI : liste des hôtes
+
+Sans recherche, la liste est organisée en sections : « Recent » (5 derniers hôtes encore présents dans la config), puis les groupes (ordre alphabétique), puis « Other » ; sans groupe ni récent, elle reste plate. Les touches de cette table sont configurables (voir « Configurer les raccourcis »).
+
+| Action | Touches | Identifiant |
+|---|---|---|
+| Descendre | `j`, `↓` | `hosts.down` |
+| Monter | `k`, `↑` | `hosts.up` |
+| Premier hôte | `g`, `Home` | `hosts.first` |
+| Dernier hôte | `G`, `End` | `hosts.last` |
+| Rechercher (flou ; `#tag`, `*` favoris, `@groupe`) | `/`, `Ctrl-K` | `hosts.search` |
+| Vider la recherche (aussi `Esc`) | `Ctrl-U` | `hosts.clear_search` |
+| Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `hosts.connect` |
+| Se déconnecter (hôte sélectionné) | `d` | `hosts.disconnect` |
+| Explorateur de fichiers (SFTP) de l'hôte (se connecte au besoin) | `f` | `hosts.files` |
+| Tunnels | `p` | `hosts.tunnels` |
+| Clés (locales, agent, vault) | `i` | `hosts.keys` |
+| Snippets de l'hôte | `s` | `hosts.snippets` |
+| Éditer tags, groupe et notes de l'hôte (`hosts.toml`) | `e` | `hosts.edit` |
+| Favori on/off | `*` | `hosts.favorite` |
+| Panneau debug : logs des sessions et config effective | `l` | `hosts.debug` |
+| Retirer l'hôte des récents (ligne de la section Recent) | `x` | `hosts.forget_recent` |
+| Vider les récents (confirmation `y`) | `X` | `hosts.clear_recent` |
+| Onglet suivant | `]`, `Tab` | `hosts.next_tab` |
+| Onglet précédent | `[`, `Shift-Tab` | `hosts.prev_tab` |
+| Recharger `~/.ssh/config` | `r` | `hosts.reload` |
+| Changer de thème (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
+| Aide | `?` | `hosts.help` |
+| Quitter (aussi `Ctrl-C`) | `q` | `hosts.quit` |
+| Aller à l'onglet n | `1`-`9` | (fixe) |
+| Vider la recherche | `Esc` | (fixe) |
+| Quitter | `Ctrl-C` | (fixe) |
+| Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | (fixe) |
+
+### TUI : recherche
+
+Le champ de recherche (`/`) prend la saisie : ses touches sont fixes. `#tag`, `*` (favoris) et `@groupe` filtrent ; la liste devient plate et classée.
 
 | Action | Touches |
 |---|---|
-| Retour à la liste des hôtes | `Ctrl-Space` puis `h` (ou `0`) |
-| Onglet n / suivant / précédent | `Ctrl-Space` puis `1`-`9`, `]` / `[` |
-| Nouvel onglet sur le même hôte | `Ctrl-Space` puis `n` |
-| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte) | `Ctrl-Space` puis `w` |
-| Déconnecter cet hôte | `Ctrl-Space` puis `d` |
-| Explorateur de fichiers (SFTP) | `Ctrl-Space` puis `f` |
-| Tunnels | `Ctrl-Space` puis `p` |
-| Clés (locales, agent, vault) | `Ctrl-Space` puis `i` (depuis la liste : `i`) |
-| Snippets de l'hôte de l'onglet | `Ctrl-Space` puis `s` (depuis la liste : `s`) |
-| Rechercher un hôte | `Ctrl-Space` puis `/` |
-| Aide | `Ctrl-Space` puis `?` |
-| Envoyer `Ctrl-Space` au programme distant | `Ctrl-Space` deux fois |
-| Remonter / descendre dans l'historique | `Shift-PgUp` / `Shift-PgDn` (toute frappe revient en bas) |
-| Coller | collage du terminal hôte (bracketed paste si le programme distant l'active) |
+| Naviguer pendant la recherche | `↑` `↓`, `Ctrl-N` / `Ctrl-P` |
+| Se connecter à l'hôte sélectionné | `↵` |
+| Effacer un caractère / tout | `Backspace` / `Ctrl-U` |
+| Quitter le champ (le filtre reste) | `Esc` |
 
-## Explorateur de fichiers (TUI)
+### TUI : préfixe `Ctrl-Space`
 
-Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet actif (ou de l'hôte sélectionné).
-Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas tant qu'elle n'est pas vide.
+Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ctrl-C`. Les commandes Portico passent par le préfixe **`Ctrl-Space`** (la barre de statut affiche `PREFIX`). Le préfixe fonctionne aussi depuis la liste des hôtes et les panneaux, avec la même table. Il s'applique à une seule touche.
+
+| Action | Touches | Identifiant |
+|---|---|---|
+| Retour à la liste des hôtes | `h`, `0` | `prefix.home` |
+| Onglet suivant | `]`, `Tab` | `prefix.next_tab` |
+| Onglet précédent | `[`, `Shift-Tab` | `prefix.prev_tab` |
+| Nouvel onglet sur le même hôte | `n` | `prefix.new_tab` |
+| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte) | `w` | `prefix.close_tab` |
+| Déconnecter cet hôte | `d` | `prefix.disconnect` |
+| Explorateur de fichiers (SFTP) | `f` | `prefix.files` |
+| Tunnels | `p` | `prefix.tunnels` |
+| Clés (locales, agent, vault) | `i` | `prefix.keys` |
+| Snippets de l'hôte de l'onglet | `s` | `prefix.snippets` |
+| Panneau debug (présélectionne la session de l'onglet) | `l` | `prefix.debug` |
+| Rechercher un hôte | `/` | `prefix.search` |
+| Aide | `?` | `prefix.help` |
+| Onglet n | `1`-`9` | (fixe) |
+| Envoyer `Ctrl-Space` au programme distant | `Ctrl-Space` deux fois | (fixe) |
+| Annuler le préfixe | `Esc` (ou toute touche non liée) | (fixe) |
+
+### TUI : terminal
+
+Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.
+
+| Action | Touches | Identifiant |
+|---|---|---|
+| Remonter dans l'historique | `Shift-PgUp` | `terminal.scroll_up` |
+| Redescendre dans l'historique (toute frappe revient en bas) | `Shift-PgDn` | `terminal.scroll_down` |
+| Coller | collage du terminal hôte (bracketed paste si le programme distant l'active) | (fixe) |
+
+### TUI : édition d'un hôte
+
+« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; une erreur s'affiche sous le champ, avec son hint.
+
+| Action | Touches |
+|---|---|
+| Champ suivant / précédent | `Tab` / `Shift-Tab` (`↓` / `↑` hors notes) |
+| Nouvelle ligne dans les notes | `↵` |
+| Enregistrer | `Ctrl-S` (ou `↵` hors notes) |
+| Vider le champ | `Ctrl-U` |
+| Annuler | `Esc`, `Ctrl-C` |
+
+Les notes s'affichent dans le panneau de détails de l'hôte.
+
+### TUI : panneau debug
+
+`l` depuis la liste, `Ctrl-Space l` partout (depuis un onglet terminal, sa session est présélectionnée). À gauche, les sessions récentes (vivantes, puis les 20 dernières terminées), issue colorée, sondes de copy-id marquées « probe ». À droite, deux onglets : **Logs** (niveau, cible, message ; suivi en direct) et **Config** (config effective de l'alias, comme `ssh -G` : route ProxyJump, chaque option avec son origine `fichier:ligne` ou « default », avertissements).
+
+| Action | Touches |
+|---|---|
+| Session précédente / suivante | `↑` / `↓`, `k` / `j` |
+| Onglet Logs / Config | `Tab` |
+| Filtrer les logs (texte) | `/`, saisie, `↵` ; `Esc` vide le filtre |
+| Niveau minimal (debug → info → warn → error) | `v` |
+| Copier (OSC 52, texte `to_line` ; l'onglet Config ne copie jamais les options sensibles) | `y` |
+| Afficher / masquer les options sensibles (`ProxyCommand`…) | `s` (onglet Config) |
+| Défiler / haut / bas (reprend le suivi) | `PgUp` / `PgDn`, `g` / `G` |
+| Rafraîchir | `Ctrl-R` |
+| Fermer | `Esc`, `q`, `Ctrl-C` |
+
+### TUI : explorateur de fichiers
+
+Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet actif (ou de l'hôte sélectionné). Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas tant qu'elle n'est pas vide.
 
 | Action | Touches |
 |---|---|
@@ -75,10 +201,9 @@ Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas 
 | Aide | `?` |
 | Revenir (terminal ou liste des hôtes) | `Esc`, `q`, `Ctrl-C` |
 
-## Tunnels (TUI)
+### TUI : tunnels
 
-Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config`
-(`LocalForward`, `RemoteForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.
+Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config` (`LocalForward`, `RemoteForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.
 
 | Action | Touches |
 |---|---|
@@ -88,11 +213,9 @@ Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés
 | Confirmer une écoute exposée (adresse autre que loopback) | `y` (toute autre touche annule) |
 | Fermer | `Esc`, `q`, `Ctrl-C` |
 
-## Clés (TUI)
+### TUI : clés
 
-`i` depuis la liste des hôtes, `Ctrl-Space i` partout. Panneau en deux sections : clés locales
-(`~/.ssh`), puis identités de l'agent ; statut du vault en pied (seulement si le keyring système
-n'est pas disponible). Seules les touches utilisables sur la sélection sont proposées.
+Panneau en deux sections : clés locales (`~/.ssh`), puis identités de l'agent ; statut du vault en pied (seulement si le keyring système n'est pas disponible). Seules les touches utilisables sur la sélection sont proposées.
 
 | Action | Touches |
 |---|---|
@@ -108,23 +231,13 @@ n'est pas disponible). Seules les touches utilisables sur la sélection sont pro
 | Rafraîchir | `Ctrl-R` |
 | Fermer | `Esc`, `q`, `Ctrl-C` |
 
-Quand la liste dépasse la hauteur, elle défile avec la sélection (l'en-tête de section reste visible
-sur sa première ligne) et « ↑ n more / ↓ n more » compte les clés masquées. Pendant une question en
-ligne (durée, retrait), la ligne sélectionnée garde son fond. Une notice qui ne tient pas sous la liste
-s'affiche en toast sous le panneau.
+Quand la liste dépasse la hauteur, elle défile avec la sélection (l'en-tête de section reste visible sur sa première ligne) et « ↑ n more / ↓ n more » compte les clés masquées. Pendant une question en ligne (durée, retrait), la ligne sélectionnée garde son fond. Une notice qui ne tient pas sous la liste s'affiche en toast sous le panneau.
 
-Formulaire de génération : `Tab` / `Shift-Tab` (ou `↓` / `↑`) entre les champs, `←` `→` ou `Espace`
-sur le type, `Ctrl-U` vide le champ, `↵` génère (les erreurs s'affichent sous le champ), `Esc` annule.
-La passphrase fait au moins 8 caractères, ou est vide (compteur « n / 8 min »). Si le moteur refuse la
-génération alors qu'une passphrase avait été envoyée, les champs sont effacés : `↵` reste bloqué tant
-qu'elle n'est pas ressaisie, ou que `Ctrl-N` ne confirme « sans passphrase ».
+Formulaire de génération : `Tab` / `Shift-Tab` (ou `↓` / `↑`) entre les champs, `←` `→` ou `Espace` sur le type, `Ctrl-U` vide le champ, `↵` génère (les erreurs s'affichent sous le champ), `Esc` annule. La passphrase fait au moins 8 caractères, ou est vide (compteur « n / 8 min »). Si le moteur refuse la génération alors qu'une passphrase avait été envoyée, les champs sont effacés : `↵` reste bloqué tant qu'elle n'est pas ressaisie, ou que `Ctrl-N` ne confirme « sans passphrase ».
 
-## Snippets (TUI)
+### TUI : snippets
 
-`s` depuis la liste des hôtes, `Ctrl-Space s` partout. Liste des snippets qui s'appliquent à l'hôte
-de l'onglet actif (portée affichée : `global`, `host web`, `#tag`). La frappe filtre la liste, d'où
-les commandes en `Ctrl`. Sans onglet terminal ouvert sur l'hôte, l'exécution est désactivée (le
-panneau l'explique) ; la gestion reste possible.
+Liste des snippets qui s'appliquent à l'hôte de l'onglet actif (portée affichée : `global`, `host web`, `#tag`). La frappe filtre la liste, d'où les commandes en `Ctrl`. Sans onglet terminal ouvert sur l'hôte, l'exécution est désactivée (le panneau l'explique) ; la gestion reste possible.
 
 | Action | Touches |
 |---|---|
@@ -136,16 +249,10 @@ panneau l'explique) ; la gestion reste possible.
 | Recharger | `Ctrl-R` |
 | Fermer | `Esc`, `Ctrl-C` |
 
-Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante :
-`Esc`, puis `↵` pour se connecter.
+Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante : `Esc`, puis `↵` pour se connecter.
 
-Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera
-tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵`
-dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is
-sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet
-multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande
-confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien),
-`Esc` annule.
+Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien), `Esc` annule.
+<!-- END GENERATED: tui -->
 
 ## Dialogues
 
