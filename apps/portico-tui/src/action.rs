@@ -3,10 +3,14 @@
 use std::time::Duration;
 
 use crossterm::event::KeyEvent;
+use portico_core::effective::EffectiveConfig;
 use portico_core::engine::{HostInventory, TerminalHandle};
 use portico_core::forward::ForwardSpec;
+use portico_core::hosts::HostMeta;
 use portico_core::ids::{SessionId, TerminalId, TunnelId};
 use portico_core::keys::LocalKey;
+use portico_core::recent::RecentHost;
+use portico_core::settings::Settings;
 use portico_core::snippets::Snippet;
 use portico_core::vault::VaultStatus;
 use portico_core::{AgentKey, CopyIdOutcome, EngineEvent, ErrorSummary};
@@ -115,4 +119,33 @@ pub(crate) enum Action {
         name: String,
         result: Result<(), ErrorSummary>,
     },
+    // Host metadata (phase 4)
+    ToggleFavorite,
+    EditHost,
+    EditKey(KeyEvent),
+    /// A favorite toggle came back (the `HostMeta` event updates the list).
+    MetaSaved {
+        alias: String,
+        result: Result<HostMeta, ErrorSummary>,
+    },
+    /// The edit form was saved (or the field that failed, with why).
+    HostEdited {
+        alias: String,
+        result: Result<HostMeta, (crate::edit_host::EditField, ErrorSummary)>,
+    },
+    // Recent hosts
+    RecentLoaded(Result<Vec<RecentHost>, ErrorSummary>),
+    ForgetRecent,
+    AskClearRecent,
+    RecentEdited(Result<(), ErrorSummary>),
+    // Debug panel
+    OpenDebug,
+    DebugKey(KeyEvent),
+    EffectiveLoaded {
+        alias: String,
+        result: Result<EffectiveConfig, ErrorSummary>,
+    },
+    // Settings
+    SettingsLoaded(Result<Settings, ErrorSummary>),
+    ThemeSaved(Result<(), ErrorSummary>),
 }

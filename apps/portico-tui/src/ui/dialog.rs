@@ -11,7 +11,9 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
-use crate::dialog::{ChangedKeyAlert, Dialog, Field, PromptDialog, SecretDialog, SecretPurpose};
+use crate::dialog::{
+    ChangedKeyAlert, ConfirmDialog, Dialog, Field, PromptDialog, SecretDialog, SecretPurpose,
+};
 use crate::theme::Styles;
 use crate::ui::fmt::display_path;
 
@@ -28,7 +30,34 @@ pub(crate) fn render(dialog: &Dialog, s: Styles, tick: u64, frame: &mut Frame<'_
         Dialog::Prompt(p) => render_prompt(p, s, frame),
         Dialog::ChangedKey(a) => render_changed(a, s, frame),
         Dialog::Secret(d) => render_secret(d, s, tick, frame),
+        Dialog::Confirm(c) => render_confirm(c, s, frame),
     }
+}
+
+/// Width of a yes / no question.
+const CONFIRM_WIDTH: u16 = 56;
+
+fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
+    let lines = vec![
+        Line::from(Span::styled(c.body.clone(), s.secondary())),
+        Line::from(""),
+        footer(s, &[("n / Esc", "keep"), ("y", c.confirm)]),
+    ];
+    let area = modal(frame, CONFIRM_WIDTH, wrapped_height(&lines, CONFIRM_WIDTH));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(s.border_focus())
+                .title(Line::from(Span::styled(
+                    format!(" {} ", c.title),
+                    s.title(),
+                )))
+                .padding(Padding::new(2, 2, 1, 0))
+                .style(s.overlay()),
+        ),
+        area,
+    );
 }
 
 /// Rows needed by `lines` once wrapped inside a modal of `width` columns

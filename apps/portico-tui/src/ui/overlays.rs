@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::app::{App, Overlay};
-use crate::keymap::HELP;
+use crate::keymap::{self, HelpSection};
 use crate::ui::fmt;
 
 /// `toast_zone`: the inside of the right-hand panel, so a toast never
@@ -27,29 +27,32 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         .areas(v);
     h
 }
+/// Widest key cell shown (longer rebound keys are cut).
+const MAX_KEY_WIDTH: usize = 14;
 
-/// Width of the widest key cell in [`HELP`].
-fn help_key_width() -> usize {
-    HELP.iter()
-        .flat_map(|(_, rows)| rows.iter())
+/// Width of the widest key cell.
+fn help_key_width(help: &[HelpSection]) -> usize {
+    help.iter()
+        .flat_map(|s| s.rows.iter())
         .map(|(k, _)| k.chars().count())
         .max()
         .unwrap_or(0)
+        .min(MAX_KEY_WIDTH)
 }
 
 /// Lines of one help section; a description that still does not fit its
 /// column ends with `…` rather than being cut mid-word.
-fn help_section<'a>(
+fn help_section(
     s: crate::theme::Styles,
-    title: &'a str,
-    rows: &'a [(&'a str, &'a str)],
+    section: &HelpSection,
     key_width: usize,
     column_width: usize,
-) -> Vec<Line<'a>> {
-    let mut lines = vec![Line::from(Span::styled(title, s.title()))];
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(section.title, s.title()))];
     // Indent (2) + key + gap (2).
     let room = column_width.saturating_sub(key_width + 4);
-    for (k, d) in rows {
+    for (k, d) in &section.rows {
+        let k = fmt::truncate(k, key_width);
         lines.push(Line::from(vec![
             Span::styled(format!("  {k:<key_width$}  "), s.accent()),
             Span::styled(fmt::truncate(d, room), s.secondary()),
@@ -59,23 +62,23 @@ fn help_section<'a>(
 }
 
 /// Height of `sections` stacked in one column, `gap` blank rows apart.
-fn stacked(sections: &[(&str, &[(&str, &str)])], gap: usize) -> usize {
-    let rows: usize = sections.iter().map(|(_, r)| r.len() + 1).sum();
+fn stacked(sections: &[HelpSection], gap: usize) -> usize {
+    let rows: usize = sections.iter().map(|s| s.rows.len() + 1).sum();
     rows + gap * sections.len().saturating_sub(1)
 }
 
-/// Where to cut [`HELP`] into two columns (sections stay in order) and the
-/// gap between sections: the most balanced cut, with a blank row between
+/// Where to cut the sections into two columns (in order) and the gap
+/// between sections: the most balanced cut, with a blank row between
 /// sections when that still fits `room` rows.
-fn help_split(room: usize) -> (usize, usize) {
+fn help_split(help: &[HelpSection], room: usize) -> (usize, usize) {
     let best = |gap: usize| {
-        (1..HELP.len())
+        (1..help.len())
             .map(|cut| {
-                let (left, right) = HELP.split_at(cut);
+                let (left, right) = help.split_at(cut);
                 (stacked(left, gap).max(stacked(right, gap)), cut)
             })
             .min()
-            .unwrap_or((stacked(HELP, gap), HELP.len()))
+            .unwrap_or((stacked(help, gap), help.len()))
     };
     let (tallest, cut) = best(1);
     if tallest <= room {
@@ -86,13 +89,14 @@ fn help_split(room: usize) -> (usize, usize) {
 }
 
 /// One column when it fits the screen height, else sections flow into two
-/// balanced columns (80×24 stays readable).
+/// balanced columns (80×24 stays readable). Keys are the effective ones.
 fn render_help(app: &App, frame: &mut Frame<'_>) {
     let s = app.styles();
+    let help = keymap::help(&app.keymap);
     let screen = frame.area();
     let room = usize::from(screen.height.saturating_sub(2));
-    let one_column = stacked(HELP, 1) <= room;
-    let key_width = help_key_width();
+    let one_column = stacked(&help, 1) <= room;
+    let key_width = help_key_width(&help);
     let width = if one_column { 60 } else { 84 };
     let width = width.min(screen.width.saturating_sub(2));
     // Borders (2) + padding (4), then two columns 2 apart.
@@ -103,12 +107,12 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
         inner.saturating_sub(2) / 2
     };
     let (cut, gap) = if one_column {
-        (HELP.len(), 1)
+        (help.len(), 1)
     } else {
-        help_split(room)
+        help_split(&help, room)
     };
     let mut columns: Vec<Vec<Line<'_>>> = vec![Vec::new()];
-    for (i, (title, section)) in HELP.iter().enumerate() {
+    for (i, section) in help.iter().enumerate() {
         if i == cut {
             columns.push(Vec::new());
         }
@@ -116,7 +120,7 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
             if !current.is_empty() && gap > 0 {
                 current.push(Line::from(""));
             }
-            current.extend(help_section(s, title, section, key_width, column_width));
+            current.extend(help_section(s, section, key_width, column_width));
         }
     }
     let tallest = columns.iter().map(Vec::len).max().unwrap_or(0);

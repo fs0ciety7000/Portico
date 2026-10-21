@@ -82,6 +82,9 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 .join(" "),
         );
     }
+    if let Some(group) = &host.meta.group {
+        row("Group", crate::form::display_safe(group));
+    }
     row(
         "Defined in",
         format!(
@@ -90,6 +93,16 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             host.source.line
         ),
     );
+    if let Some(notes) = &host.meta.notes {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Notes", s.muted())));
+        for line in notes.lines() {
+            lines.push(Line::from(Span::styled(
+                crate::form::display_safe(line),
+                s.secondary(),
+            )));
+        }
+    }
     for w in &r.warnings {
         lines.push(Line::from(Span::styled(
             format!("⚠ {}", w.message),

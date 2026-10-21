@@ -249,9 +249,9 @@ impl App {
                     Err(e) => panel.notice = Some(Notice::error(e)),
                 }
             }
-            // Everything else is handled by `App::update`; an unknown vault
-            // status leaves the keys panel saying "checking…".
-            _ => {}
+            // Phase 4 actions; an unknown vault status leaves the keys
+            // panel saying "checking…".
+            other => self.update_meta(other),
         }
     }
 

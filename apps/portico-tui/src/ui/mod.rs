@@ -1,7 +1,9 @@
 //! Pure rendering: `render(&App) -> Frame`. No I/O here.
 
+mod debug;
 mod details;
 mod dialog;
+mod edit_host;
 mod files;
 pub(crate) mod fmt;
 mod form;
@@ -108,7 +110,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     // never on the panel's frame or hints: the panel gives way if needed.
     let panel_open = matches!(
         app.overlay,
-        Some(Overlay::Keys | Overlay::Snippets | Overlay::Tunnels)
+        Some(Overlay::Keys | Overlay::Snippets | Overlay::Tunnels | Overlay::Edit | Overlay::Debug)
     );
     let band = match &app.toast {
         Some(t) if panel_open => {
@@ -134,6 +136,8 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     match app.overlay {
         Some(Overlay::Keys) => keys::render(app, frame, band),
         Some(Overlay::Snippets) => snippets::render(app, frame, band),
+        Some(Overlay::Edit) => edit_host::render(app, frame, band),
+        Some(Overlay::Debug) => debug::render(app, frame, band),
         _ => {}
     }
     // Help, then toasts: above the panels, so a result is never hidden.
