@@ -46,7 +46,7 @@ pub enum Error {
     #[error("the engine has shut down")]
     EngineClosed,
 
-    #[error("not supported yet: {0}")]
+    #[error("{0} is not supported yet")]
     Unsupported(&'static str),
 
     #[error("cannot resolve {host}: {source}")]
@@ -205,7 +205,9 @@ impl Error {
             Self::EngineClosed => ("engine_closed", None),
             Self::Unsupported(_) => (
                 "unsupported",
-                Some("Portico refuses rather than connecting differently from ssh."),
+                Some(
+                    "Portico refuses rather than connect differently from ssh. Use ProxyJump for this host if you can.",
+                ),
             ),
             Self::Resolve { .. } => ("dns", Some("Check the HostName and your network/DNS.")),
             Self::Connect { source, .. } => (

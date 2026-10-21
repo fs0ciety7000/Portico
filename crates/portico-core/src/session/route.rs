@@ -27,9 +27,7 @@ pub(crate) struct Hop {
 /// Refuses hops Portico cannot reach faithfully (never silently go direct).
 fn reachable(resolved: &ResolvedHost) -> Result<()> {
     if resolved.proxy_command.is_some() {
-        return Err(Error::Unsupported(
-            "ProxyCommand (not supported yet; use ProxyJump for this host)",
-        ));
+        return Err(Error::Unsupported("ProxyCommand"));
     }
     Ok(())
 }

@@ -298,7 +298,7 @@ pub fn normalize_tags(tags: &[String]) -> std::result::Result<Vec<String>, HostM
         {
             return Err(HostMetaError::Tag {
                 position,
-                reason: "only letters, digits, `_`, `.` and `-` are allowed",
+                reason: "use only letters, digits, underscore, dot and dash",
             });
         }
         if tag.len() > MAX_TAG_CHARS {
