@@ -157,6 +157,163 @@ fn assert_connected(out: &support::Outcome, sshd: &Sshd) {
     );
 }
 
+/// Collects the progress of `t` until it ends; `cancel_at` cancels it once
+/// that many bytes moved. Returns the progress values and how it ended.
+async fn follow(
+    env: &mut Env,
+    t: portico_core::ids::TransferId,
+    cancel_at: Option<u64>,
+) -> (Vec<u64>, &'static str) {
+    let mut seen = Vec::new();
+    loop {
+        let event = match env.events.recv().await {
+            Ok(EngineEvent::Sftp { event, .. }) => event,
+            // Progress bursts may overflow the test's receiver: keep going.
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(e) => panic!("{e}"),
+        };
+        match event {
+            SftpEvent::TransferProgress { transfer, done, .. } if transfer == t => {
+                seen.push(done);
+                if cancel_at.is_some_and(|at| done >= at) {
+                    env.engine.cancel_transfer(t).unwrap();
+                }
+            }
+            SftpEvent::TransferFinished { transfer, .. } if transfer == t => {
+                return (seen, "finished");
+            }
+            SftpEvent::TransferCancelled { transfer } if transfer == t => {
+                return (seen, "cancelled");
+            }
+            SftpEvent::TransferFailed { transfer, error } if transfer == t => panic!("{error:?}"),
+            _ => {}
+        }
+    }
+}
+
+fn same_content(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (mut a, mut b) = (
+        std::fs::File::open(a).unwrap(),
+        std::fs::File::open(b).unwrap(),
+    );
+    let (mut x, mut y) = (vec![0_u8; 1 << 20], vec![0_u8; 1 << 20]);
+    loop {
+        let n = a.read(&mut x).unwrap();
+        if n == 0 {
+            return b.read(&mut y).unwrap() == 0;
+        }
+        b.read_exact(&mut y[..n]).unwrap();
+        if x[..n] != y[..n] {
+            return false;
+        }
+    }
+}
+
+async fn big_transfers(
+    env: &mut Env,
+    id: portico_core::ids::SessionId,
+    local: &Path,
+    remote: &str,
+) {
+    use std::io::Write;
+    const GIB: u64 = 1 << 30;
+    let src = local.join("big.bin");
+    {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&src).unwrap());
+        let block: Vec<u8> = (0..(1_u32 << 20)).map(|i| (i % 253) as u8).collect();
+        for i in 0..(GIB >> 20) {
+            let mut b = block.clone();
+            b[..8].copy_from_slice(&i.to_le_bytes());
+            f.write_all(&b).unwrap();
+        }
+    }
+    for (direction, from, to) in [
+        (Direction::Upload, src.clone(), format!("{remote}/big.bin")),
+        (
+            Direction::Download,
+            local.join("big-back.bin"),
+            format!("{remote}/big.bin"),
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let t = env
+            .engine
+            .transfer(
+                id,
+                TransferRequest {
+                    direction,
+                    local: from,
+                    remote: to,
+                    on_conflict: OnConflict::Ask,
+                },
+            )
+            .await
+            .unwrap();
+        let (seen, end) = follow(env, t, None).await;
+        assert_eq!(end, "finished");
+        assert!(
+            seen.windows(2).all(|w| w[0] <= w[1]),
+            "progress goes forward"
+        );
+        assert!(seen.len() > 10, "progress reported along the way");
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!(
+            "1 GiB {direction:?}: {secs:.1} s ({:.0} MiB/s), {} progress events",
+            1024.0 / secs,
+            seen.len()
+        );
+    }
+    assert!(same_content(&src, &local.join("big-back.bin")));
+    // Cancel midway: no destination and no partial file left behind.
+    let t = env
+        .engine
+        .transfer(
+            id,
+            TransferRequest {
+                direction: Direction::Download,
+                local: local.join("cancelled.bin"),
+                remote: format!("{remote}/big.bin"),
+                on_conflict: OnConflict::Ask,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, end) = follow(env, t, Some(GIB / 4)).await;
+    assert_eq!(end, "cancelled");
+    let leftovers: Vec<_> = std::fs::read_dir(local)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("cancelled"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let t = env
+        .engine
+        .transfer(
+            id,
+            TransferRequest {
+                direction: Direction::Upload,
+                local: src.clone(),
+                remote: format!("{remote}/cancelled.bin"),
+                on_conflict: OnConflict::Ask,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, end) = follow(env, t, Some(GIB / 4)).await;
+    assert_eq!(end, "cancelled");
+    let remote_left: Vec<_> = std::fs::read_dir(remote)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("cancelled"))
+        .collect();
+    assert!(remote_left.is_empty(), "{remote_left:?}");
+    for f in ["big.bin", "big-back.bin"] {
+        let _ = std::fs::remove_file(local.join(f));
+    }
+    let _ = std::fs::remove_file(format!("{remote}/big.bin"));
+}
+
 #[tokio::test]
 #[ignore = "needs OpenSSH (sshd, ssh-keygen, ssh-agent); run with --ignored"]
 async fn openssh_interop() {
@@ -374,6 +531,11 @@ async fn openssh_interop() {
         }
     }
     assert_eq!(std::fs::read(local.path().join("down.bin")).unwrap(), data);
+    // Phase 2 exit criterion, opt-in (disk and time): PORTICO_INTEROP_BIG=1
+    // moves 1 GiB each way with progress, then cancels a transfer midway.
+    if std::env::var_os("PORTICO_INTEROP_BIG").is_some() {
+        big_transfers(&mut env, id, local.path(), &remote_dir_s).await;
+    }
     env.engine
         .sftp_rename(
             id,
