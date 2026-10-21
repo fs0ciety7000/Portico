@@ -15,7 +15,7 @@ et comment un utilisateur vérifie ce qu'il télécharge. Le workflow est
 | `SHA256SUMS` et un `<fichier>.sha256` par artefact | toutes | job `publish` | — |
 
 Chaque tarball TUI contient un dossier `portico-<v>-<target>/` avec le binaire `portico` et `README.md`
-(et les fichiers `LICENSE*` dès qu'ils existent à la racine du dépôt).
+(et les fichiers `LICENSE-MIT` et `LICENSE-APACHE` de la racine du dépôt).
 
 **Quelle archive TUI choisir sous Linux ?** La variante `gnu` est recommandée sur un poste de travail :
 elle résout les noms via la glibc, donc via NSS (`/etc/nsswitch.conf`), ce qui couvre mDNS (`hote.local`
@@ -142,9 +142,6 @@ KeePassXC, KWallet ≥ 5.97…) doit tourner dans la session ; à défaut, Porti
   Plus ancien que glibc 2.35 : non supporté.
 - **TUI `musl`** : pas de NSS (voir plus haut) ; allocateur de musl plus lent que celui de la glibc (sans effet
   mesurable pour un client SSH interactif).
-- **Fichiers de licence** : le dépôt déclare `MIT OR Apache-2.0` mais ne contient pas encore
-  `LICENSE-MIT` / `LICENSE-APACHE`. Le workflow les embarquera dans les tarballs dès qu'ils existent ;
-  à ajouter avant la première release publique.
 - **Builds aarch64 Linux** (runners `ubuntu-22.04-arm`) et **dmg** : configurés mais vérifiés seulement en CI,
   pas dans l'environnement de développement (Linux x86_64).
 - **Outillage AppImage non épinglé** : le Tauri bundler télécharge `linuxdeploy` (version figée par Tauri) et

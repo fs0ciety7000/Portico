@@ -47,4 +47,6 @@ cargo run -p portico-theme --bin export-tokens   # après modification des token
 
 ## Licence
 
-MIT OR Apache-2.0
+Au choix, sous licence [MIT](LICENSE-MIT) ou [Apache 2.0](LICENSE-APACHE) (`MIT OR Apache-2.0`).
+Sauf mention contraire, toute contribution soumise à ce dépôt est proposée sous ces deux licences, sans
+conditions supplémentaires.
