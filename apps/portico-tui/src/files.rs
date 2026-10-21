@@ -780,6 +780,12 @@ pub(crate) fn human_size(bytes: u64) -> String {
     }
 }
 
+/// A changed host key blocks the host: the explorer never offers to
+/// connect again (the terminal tab carries the alert and its remedy).
+pub(crate) fn refuses_reconnect(err: &portico_core::ErrorSummary) -> bool {
+    err.code == "host_key_changed"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

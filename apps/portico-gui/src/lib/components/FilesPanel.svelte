@@ -28,8 +28,11 @@
   const ended = $derived.by(() => {
     if (!info || isLive(info)) return null;
     if (info.phase.phase === "failed") return info.phase.error;
-    return { code: "session_ended", message: `The session with ${alias} has ended`, hint: "Reconnect to browse its files again." };
+    return { code: "session_closed", message: "The connection to this host is closed", hint: "Reconnect to browse its files again." };
   });
+
+  /** A changed host key is a hard refusal: never offer to connect again. */
+  const refused = $derived(ended?.code === "host_key_changed");
 
   // Opening mutates state: never inside a $derived. Only a connected
   // session is asked for its files.
@@ -147,7 +150,7 @@
     if (e.ctrlKey && !e.metaKey && !e.altKey && key.toLowerCase() === "r") return (handled(), files.refresh(session));
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (!connected) {
-      if (key === "Enter" && ended) (handled(), onreconnect());
+      if (key === "Enter" && ended && !refused) (handled(), onreconnect());
       else if (key === "Escape") (handled(), onclose());
       return;
     }
@@ -258,9 +261,11 @@
       <div class="state error" role="alert">
         <strong>{err?.message}</strong>
         {#if err?.hint}<span>{err.hint}</span>{/if}
-        <div class="actions">
-          <button class="secondary" onclick={onreconnect}>Reconnect <kbd>↵</kbd></button>
-        </div>
+        {#if !refused}
+          <div class="actions">
+            <button class="secondary" onclick={onreconnect}>Reconnect <kbd>↵</kbd></button>
+          </div>
+        {/if}
       </div>
     {:else if !connected}
       <div class="state connecting" data-status={status.status} aria-live="polite">

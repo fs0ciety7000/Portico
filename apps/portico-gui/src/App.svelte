@@ -145,7 +145,7 @@
           { id: "mkdir", title: "New folder", shortcut: "n", run: () => filesPanel?.run("mkdir") },
           { id: "rename", title: "Rename selected file", shortcut: "r", run: () => filesPanel?.run("rename") },
           { id: "delete", title: "Delete selected file", shortcut: "d", run: () => filesPanel?.run("delete") },
-          { id: "refresh", title: "Refresh files", shortcut: "Ctrl-R", run: () => filesPanel?.run("refresh") },
+          { id: "refresh", title: "Refresh files (in the files panel)", shortcut: "Ctrl-R", run: () => filesPanel?.run("refresh") },
           { id: "hidden", title: files.showHidden ? "Hide hidden files" : "Show hidden files", shortcut: ".", run: () => filesPanel?.run("hidden") },
           { id: "cancel-transfer", title: "Cancel the latest transfer", shortcut: "x", run: () => filesPanel?.run("cancel") },
         ]

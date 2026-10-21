@@ -94,6 +94,18 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
             return (" TUNNELS ", hints);
         }
         Focus::Files
+            if app.files_refused()
+                && app
+                    .files
+                    .as_ref()
+                    .is_some_and(|f| f.side == crate::files::Side::Remote) =>
+        {
+            (
+                " FILES ",
+                &[("Tab", "local pane"), ("?", "help"), ("Esc", "back")],
+            )
+        }
+        Focus::Files
             if app.files.as_ref().is_some_and(|f| {
                 f.side == crate::files::Side::Remote && !app.session_alive(f.session)
             }) =>

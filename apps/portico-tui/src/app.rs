@@ -595,7 +595,22 @@ impl App {
 
     /// `↵ reconnect` in a remote pane whose session is down: reuse a live
     /// session of the host if one exists, else connect, then reopen SFTP.
+    /// The explorer's host failed with an error that forbids reconnecting
+    /// (changed host key).
+    pub(crate) fn files_refused(&self) -> bool {
+        let Some(alias) = self.files.as_ref().map(|f| f.alias.as_str()) else {
+            return false;
+        };
+        matches!(
+            self.session_for(alias).map(|s| &s.phase),
+            Some(SessionPhase::Failed { error }) if crate::files::refuses_reconnect(error)
+        )
+    }
+
     fn reconnect_files(&mut self) {
+        if self.files_refused() {
+            return;
+        }
         let Some(alias) = self.files.as_ref().map(|f| f.alias.clone()) else {
             return;
         };

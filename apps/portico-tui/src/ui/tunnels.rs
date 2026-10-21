@@ -141,7 +141,15 @@ fn item_line(item: &Item, rows: &[TunnelRow], s: Styles, tick: u64, width: usize
             };
             let spec = row.spec.to_string();
             let alias = fmt::truncate(&row.alias, 14);
-            let room = width.saturating_sub(spec.chars().count() + alias.chars().count() + 7);
+            // Listening beyond loopback: said in the warning colour.
+            let exposed = if row.spec.is_exposed() {
+                "  exposed"
+            } else {
+                ""
+            };
+            let room = width.saturating_sub(
+                spec.chars().count() + alias.chars().count() + exposed.chars().count() + 7,
+            );
             let detail_style = if matches!(row.status, TunnelStatus::Failed(_)) {
                 s.status(status.error)
             } else {
@@ -150,6 +158,7 @@ fn item_line(item: &Item, rows: &[TunnelRow], s: Styles, tick: u64, width: usize
             Line::from(vec![
                 Span::styled(format!("{dot} "), s.status(color)),
                 Span::styled(spec, s.title()),
+                Span::styled(exposed, s.status(status.warning)),
                 Span::styled(format!("  {alias}  "), s.secondary()),
                 Span::styled(fmt::truncate(&detail, room), detail_style),
             ])

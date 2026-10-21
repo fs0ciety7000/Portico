@@ -28,6 +28,7 @@
   let confirm: { spec: string; display: string } | null = $state(null);
   let input: HTMLInputElement | undefined = $state();
   let cancelButton: HTMLButtonElement | undefined = $state();
+  let exposeButton: HTMLButtonElement | undefined = $state();
 
   // The dialog armed when it opened; the exposure confirmation arms again on
   // its own, after a pause without keystroke or click, so a double click or a
@@ -38,7 +39,10 @@
     if (!confirm) return;
     confirmArmed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const restart = () => {
+    const restart = (e?: Event) => {
+      // Acting on the button itself must not disarm it: a keystroke or a
+      // click elsewhere does. A click that lands on it unarmed does nothing.
+      if (e && e.target === exposeButton) return;
       confirmArmed = false;
       clearTimeout(timer);
       timer = setTimeout(() => (confirmArmed = true), CONFIRM_ARM_DELAY);
@@ -118,6 +122,7 @@
       const step = e.key === "ArrowDown" ? 1 : -1;
       const next = cursor === null ? (step > 0 ? 0 : rows - 1) : cursor + step;
       cursor = next < 0 || next >= rows ? null : next;
+      error = null;
       return;
     }
     if (e.key === "Enter") {
@@ -218,7 +223,9 @@
       <!-- Re-armed on appearance and after every click: a double click on
            "Start" lands on a disabled button. -->
       <button class="secondary" bind:this={cancelButton} onclick={cancelConfirm}>Cancel <kbd>Esc</kbd></button>
-      <button class="warning" disabled={!armed || !confirmArmed} onclick={expose}>Expose tunnel</button>
+      <!-- aria-disabled, not disabled: an unarmed button stays in the focus
+           trap so Tab can reach it; expose() checks the arming. -->
+      <button class="warning" bind:this={exposeButton} aria-disabled={!armed || !confirmArmed} onclick={expose}>Expose tunnel</button>
     {:else}
       <button class="secondary" onclick={onclose}>Close <kbd>Esc</kbd></button>
       {#if session !== null}
@@ -299,6 +306,7 @@
   }
   .confirm strong { color: var(--text-primary); font-weight: 550; }
   :global(.modal button.small) { height: 26px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+  :global(.modal button.warning[aria-disabled="true"]) { opacity: 0.45; cursor: default; }
   :global(.modal button.warning) {
     border: 0;
     background: var(--status-warning);

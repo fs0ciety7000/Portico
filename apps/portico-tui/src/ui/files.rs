@@ -308,6 +308,10 @@ fn placeholder(
             let mut lines = vec![Line::from("")];
             lines.extend(error_lines(err, s, width));
             lines.push(Line::from(""));
+            if crate::files::refuses_reconnect(err) {
+                // A changed host key is a hard refusal: nothing to retry here.
+                return Some(lines);
+            }
             let key = if look.focused {
                 s.key_primary()
             } else {
