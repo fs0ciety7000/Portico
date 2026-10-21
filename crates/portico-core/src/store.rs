@@ -82,6 +82,21 @@ impl Paths {
         self.data_dir.join("vault.toml")
     }
 
+    /// `hosts.toml` (config dir): tags, group, favorite, notes per alias.
+    pub fn hosts_meta(&self) -> PathBuf {
+        self.config_dir.join("hosts.toml")
+    }
+
+    /// `settings.toml` (config dir), see [`crate::settings`].
+    pub fn settings(&self) -> PathBuf {
+        self.config_dir.join("settings.toml")
+    }
+
+    /// `state/recent.toml` (data dir), see [`crate::recent`].
+    pub fn recent(&self) -> PathBuf {
+        self.data_dir.join("state").join("recent.toml")
+    }
+
     /// OpenSSH default identities, in OpenSSH's order.
     pub fn default_identities(&self) -> Vec<PathBuf> {
         ["id_rsa", "id_ecdsa", "id_ed25519"]
@@ -101,6 +116,92 @@ pub fn load_toml<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(Error::io(path, e)),
     }
+}
+
+/// Reads a UTF-8 file of at most `max` bytes; `None` when it is missing.
+/// The size is checked before reading and again on what was read (the
+/// file may grow in between).
+pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Option<String>> {
+    use std::io::Read;
+
+    let too_large = || Error::FileTooLarge {
+        path: path.to_path_buf(),
+        max,
+    };
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(path, e)),
+    };
+    if file.metadata().is_ok_and(|m| m.len() > max) {
+        return Err(too_large());
+    }
+    let mut text = String::new();
+    file.take(max.saturating_add(1))
+        .read_to_string(&mut text)
+        .map_err(|e| Error::io(path, e))?;
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > max {
+        return Err(too_large());
+    }
+    Ok(Some(text))
+}
+
+/// Parses TOML text read from `path` (errors name the file).
+pub(crate) fn parse_toml<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
+    toml::from_str(text).map_err(|e| Error::Serde {
+        what: "toml",
+        message: format!("{}: {e}", path.display()),
+    })
+}
+
+/// [`read_capped`] + [`parse_toml`]; a missing file yields `T::default()`.
+pub(crate) fn load_toml_capped<T: DeserializeOwned + Default>(path: &Path, max: u64) -> Result<T> {
+    match read_capped(path, max)? {
+        Some(text) => parse_toml(path, &text),
+        None => Ok(T::default()),
+    }
+}
+
+/// Parses TOML text as an editable document (comments and layout kept).
+pub(crate) fn parse_document(path: &Path, text: &str) -> Result<toml_edit::DocumentMut> {
+    text.parse()
+        .map_err(|e: toml_edit::TomlError| Error::Serde {
+            what: "toml",
+            message: format!("{}: {}", path.display(), e.message()),
+        })
+}
+
+/// The table under `key` in `parent`, created (implicit, so no empty
+/// header is written) when missing; an inline table is converted. Any
+/// other value there is an error: it is never silently replaced.
+pub(crate) fn child_table<'a>(
+    parent: &'a mut toml_edit::Table,
+    key: &str,
+    path: &Path,
+) -> Result<&'a mut toml_edit::Table> {
+    let item = parent.entry(key).or_insert_with(|| {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        toml_edit::Item::Table(table)
+    });
+    if !item.is_table() {
+        match std::mem::take(item).into_table() {
+            Ok(table) => *item = toml_edit::Item::Table(table),
+            Err(other) => *item = other,
+        }
+    }
+    item.as_table_mut().ok_or_else(|| Error::Serde {
+        what: "toml",
+        message: format!("{}: `{key}` is not a table", path.display()),
+    })
+}
+
+/// The lock file guarding read-modify-write cycles of `path`
+/// (`<name>.lock`, next to it, left in place).
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
 }
 
 /// Writes a TOML file atomically (temp file in the same dir + rename), with

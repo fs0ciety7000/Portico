@@ -46,6 +46,15 @@ pub enum EngineEvent {
         id: PromptId,
     },
     Log(LogRecord),
+    /// The metadata of `alias` changed in `hosts.toml` (Phase 4): UIs update
+    /// the host in place, without reloading the inventory.
+    HostMeta {
+        alias: String,
+        meta: crate::hosts::HostMeta,
+    },
+    /// The recent-sessions list changed (recorded, forgotten, cleared): UIs
+    /// that show it call [`crate::Engine::recent`] again.
+    RecentChanged,
 }
 
 /// Lifecycle of an SSH connection. UIs render this as the status badge.

@@ -13,7 +13,7 @@
 
 mod auth;
 mod handler;
-mod route;
+pub(crate) mod route;
 mod signer;
 mod stream;
 mod terminal;
@@ -33,7 +33,7 @@ use crate::engine::{ConnectRequest, DEFAULT_KEEPALIVE_MAX, Engine, PromptRespons
 use crate::error::{Error, Result};
 use crate::events::{CloseReason, EngineEvent, PromptKind, SessionEvent, SessionPhase};
 use crate::ids::SessionId;
-use crate::logs::{LogLevel, LogRecord, LogRing};
+use crate::logs::{LogLevel, LogRecord, LogRing, SessionOutcome};
 use crate::ssh_config::SshConfig;
 
 use handler::ClientHandler;
@@ -198,12 +198,13 @@ impl SessionCtx {
     }
 }
 
-/// Session actor entry point (spawned by [`Engine::connect`]).
+/// Session actor entry point (spawned by [`Engine::connect`]). Returns how
+/// the session ended (kept with its logs for the debug panel).
 pub(crate) async fn run(
     ctx: SessionCtx,
     request: ConnectRequest,
     mut commands: mpsc::Receiver<SessionCommand>,
-) {
+) -> SessionOutcome {
     ctx.event(SessionEvent::Started {
         alias: request.alias.clone(),
         probe: request.only_identity.is_some(),
@@ -223,21 +224,32 @@ pub(crate) async fn run(
                 ctx.phase(SessionPhase::Closed {
                     reason: CloseReason::UserRequested,
                 });
-            } else {
-                ctx.log(LogLevel::Error, "session", e.to_string());
-                ctx.phase(SessionPhase::Failed { error: e.summary() });
+                return SessionOutcome::Closed {
+                    reason: CloseReason::UserRequested,
+                };
             }
-            return;
+            ctx.log(LogLevel::Error, "session", e.to_string());
+            let error = e.summary();
+            ctx.phase(SessionPhase::Failed {
+                error: error.clone(),
+            });
+            return SessionOutcome::Failed { error };
         }
     };
 
     ctx.phase(SessionPhase::Connected);
+    if request.only_identity.is_none() {
+        ctx.engine.note_recent(&ctx, &request.alias);
+    }
     let reason = conn.supervise(&ctx, &mut commands).await;
     ctx.phase(SessionPhase::Disconnecting);
     conn.close().await;
     ctx.abort.cancel();
     ctx.log(LogLevel::Info, "session", format!("closed ({reason:?})"));
-    ctx.phase(SessionPhase::Closed { reason });
+    ctx.phase(SessionPhase::Closed {
+        reason: reason.clone(),
+    });
+    SessionOutcome::Closed { reason }
 }
 
 /// One authenticated transport and its "closed by peer" signal.

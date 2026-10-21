@@ -25,8 +25,11 @@ use portico_core::{Engine, EngineConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // First, before any secret can be in memory: no core dumps, no ptrace.
+    let hardening = portico_core::hardening::harden_process();
     color_eyre::install()?;
     init_tracing();
+    hardening.log();
 
     let engine = Engine::new(EngineConfig::discover()?);
     let terminal = ratatui::init();

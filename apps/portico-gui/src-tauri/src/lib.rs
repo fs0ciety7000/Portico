@@ -34,13 +34,24 @@ const EXIT_GRACE: Duration = Duration::from_millis(500);
 
 #[allow(clippy::missing_panics_doc)] // Tauri's builder reports fatal startup errors itself
 pub fn run() {
+    // First, before any secret can be in memory: no core dumps, no ptrace
+    // (logged once tracing is up).
+    let hardening = portico_core::hardening::harden_process();
+    init_tracing();
+    hardening.log();
+    run_app();
+}
+
+fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("PORTICO_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+}
 
+fn run_app() {
     let app = tauri::Builder::default()
         // Rust-side dialogs only: no `dialog:` permission is granted to the
         // webview (see capabilities/default.json).

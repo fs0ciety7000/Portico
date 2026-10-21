@@ -31,7 +31,7 @@ use tokio_util::task::TaskTracker;
 use crate::error::{Error, Result};
 use crate::events::{EngineEvent, Prompt, PromptKind};
 use crate::forward::{ForwardSpec, TunnelInfo};
-use crate::hosts::{HostEntry, HostMetaFile, inventory};
+use crate::hosts::{HostEntry, inventory};
 use crate::ids::{PromptId, SessionId, TerminalId, TransferId, TunnelId};
 use crate::logs::LogLevel;
 use crate::logs::{LogRecord, LogRing};
@@ -39,7 +39,7 @@ use crate::secrets::SecretStore;
 use crate::session::{self, Attached, SessionCommand, SessionCtx};
 use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
 use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
-use crate::store::{Paths, load_toml};
+use crate::store::Paths;
 
 /// Capacity of the control-plane broadcast channel. Slow subscribers get
 /// `RecvError::Lagged` and must resync from [`Engine`] queries.
@@ -57,6 +57,8 @@ pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(15);
 pub const DEFAULT_KEEPALIVE_MAX: u32 = 3;
 /// Log lines kept per session for the debug panel.
 pub const SESSION_LOG_CAPACITY: usize = 500;
+/// Ended sessions whose logs stay readable (oldest forgotten first).
+pub const ENDED_SESSIONS_KEPT: usize = 20;
 
 /// Engine construction parameters.
 #[derive(Debug, Clone)]
@@ -258,6 +260,10 @@ struct SessionEntry {
     commands: mpsc::Sender<SessionCommand>,
     cancel: CancellationToken,
     logs: Arc<Mutex<LogRing>>,
+    probe: bool,
+    started: time::OffsetDateTime,
+    /// Set when the actor returned; the entry then only serves its logs.
+    ended: Option<(time::OffsetDateTime, crate::logs::SessionOutcome)>,
 }
 
 impl Engine {
@@ -296,7 +302,7 @@ impl Engine {
         let config = self.inner.config.clone();
         tokio::task::spawn_blocking(move || {
             let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
-            let meta: HostMetaFile = load_toml(&config.paths.config_dir.join("hosts.toml"))?;
+            let meta = crate::hosts::load_meta(&config.paths.hosts_meta())?;
             let hosts = inventory(&ssh, &meta, &config.resolve_context(None));
             let mut warnings = ssh.warnings().to_vec();
             warnings.extend(
@@ -332,10 +338,17 @@ impl Engine {
                     commands: tx,
                     cancel: cancel.clone(),
                     logs: Arc::clone(&logs),
+                    probe: request.only_identity.is_some(),
+                    started: time::OffsetDateTime::now_utc(),
+                    ended: None,
                 },
             );
         let ctx = SessionCtx::new(self.clone(), id, cancel, logs);
-        self.inner.tasks.spawn(session::run(ctx, request, rx));
+        let engine = self.clone();
+        self.inner.tasks.spawn(async move {
+            let outcome = session::run(ctx, request, rx).await;
+            engine.session_finished(id, outcome);
+        });
         Ok(id)
     }
 
@@ -637,7 +650,8 @@ impl Engine {
             .remove(&id);
     }
 
-    /// Log lines recorded for a session (debug panel).
+    /// Log lines recorded for a session (debug panel), live or among the
+    /// last [`ENDED_SESSIONS_KEPT`] ended ones.
     pub fn session_logs(&self, id: SessionId) -> Result<Vec<LogRecord>> {
         let sessions = self
             .inner
@@ -874,6 +888,222 @@ impl Engine {
 }
 
 // ════ end Phase 3 ════════════════════════════════════════════════════════
+
+// ════ Phase 4: metadata, recent sessions, effective config, debug logs,
+// settings (additive block) ══════════════════════════════════════════════
+//
+// File operations run on `spawn_blocking` under an inter-process lock (see
+// `hosts`, `recent`, `settings`); none of them can block a session.
+
+impl Engine {
+    /// Marks `alias` as a favorite (or not) in `hosts.toml`.
+    pub async fn set_favorite(
+        &self,
+        alias: &str,
+        favorite: bool,
+    ) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Favorite(favorite))
+            .await
+    }
+
+    /// Replaces the tags of `alias` (normalized: see [`crate::hosts`]).
+    pub async fn set_tags(&self, alias: &str, tags: Vec<String>) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Tags(tags))
+            .await
+    }
+
+    /// Sets or clears (`None` or blank) the group of `alias`.
+    pub async fn set_group(
+        &self,
+        alias: &str,
+        group: Option<String>,
+    ) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Group(group))
+            .await
+    }
+
+    /// Sets or clears (`None` or blank) the notes of `alias`.
+    pub async fn set_notes(
+        &self,
+        alias: &str,
+        notes: Option<String>,
+    ) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Notes(notes))
+            .await
+    }
+
+    /// One `hosts.toml` edit, then [`EngineEvent::HostMeta`].
+    async fn edit_meta(
+        &self,
+        alias: &str,
+        change: crate::hosts::MetaChange,
+    ) -> Result<crate::hosts::HostMeta> {
+        let path = self.inner.config.paths.hosts_meta();
+        let key = alias.to_owned();
+        let meta =
+            tokio::task::spawn_blocking(move || crate::hosts::update_meta(&path, &key, change))
+                .await
+                .map_err(|_| Error::EngineClosed)??;
+        self.emit(EngineEvent::HostMeta {
+            alias: alias.to_owned(),
+            meta: meta.clone(),
+        });
+        Ok(meta)
+    }
+
+    /// The `limit` most recently connected hosts, most recent first.
+    pub async fn recent(&self, limit: usize) -> Result<Vec<crate::recent::RecentHost>> {
+        let path = self.inner.config.paths.recent();
+        tokio::task::spawn_blocking(move || crate::recent::list(&path, limit))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Empties the recent-sessions list.
+    pub async fn clear_recent(&self) -> Result<()> {
+        let path = self.inner.config.paths.recent();
+        tokio::task::spawn_blocking(move || crate::recent::clear(&path))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        self.emit(EngineEvent::RecentChanged);
+        Ok(())
+    }
+
+    /// Removes `alias` from the recent sessions; `false` if it was absent.
+    pub async fn forget_recent(&self, alias: &str) -> Result<bool> {
+        let path = self.inner.config.paths.recent();
+        let alias = alias.to_owned();
+        let removed = tokio::task::spawn_blocking(move || crate::recent::forget(&path, &alias))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        if removed {
+            self.emit(EngineEvent::RecentChanged);
+        }
+        Ok(removed)
+    }
+
+    /// Records a connected session in the background: a failure is only
+    /// logged (session log + tracing), the session never waits for it.
+    pub(crate) fn note_recent(&self, ctx: &SessionCtx, alias: &str) {
+        let path = self.inner.config.paths.recent();
+        let alias = alias.to_owned();
+        let ctx = ctx.clone();
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let at = time::OffsetDateTime::now_utc();
+            let written =
+                tokio::task::spawn_blocking(move || crate::recent::record(&path, &alias, at))
+                    .await
+                    .map_err(|_| Error::EngineClosed)
+                    .and_then(|r| r);
+            match written {
+                Ok(()) => engine.emit(EngineEvent::RecentChanged),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot record the recent session");
+                    ctx.log(
+                        LogLevel::Warn,
+                        "recent",
+                        format!("not added to recent sessions: {}", e.summary().message),
+                    );
+                }
+            }
+        });
+    }
+
+    /// The `ssh -G` equivalent for `alias`: every effective option with
+    /// its origin, Portico's defaults, and the resolved `ProxyJump` route.
+    pub async fn effective_config(&self, alias: &str) -> Result<crate::effective::EffectiveConfig> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+            Ok(crate::effective::compute(&ssh, &config, &alias, None))
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Sessions whose logs [`Engine::session_logs`] can return: live ones
+    /// and the last [`ENDED_SESSIONS_KEPT`] ended ones, oldest first.
+    pub fn sessions_with_logs(&self) -> Vec<crate::logs::SessionLogInfo> {
+        let mut list: Vec<crate::logs::SessionLogInfo> = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(id, entry)| crate::logs::SessionLogInfo {
+                id: *id,
+                alias: entry.alias.clone(),
+                probe: entry.probe,
+                started: entry.started,
+                ended: entry.ended.as_ref().map(|(at, _)| *at),
+                outcome: entry.ended.as_ref().map(|(_, outcome)| outcome.clone()),
+            })
+            .collect();
+        list.sort_by_key(|info| info.id);
+        list
+    }
+
+    /// Called when a session actor returns: keeps its logs and forgets
+    /// the oldest ended sessions beyond [`ENDED_SESSIONS_KEPT`].
+    fn session_finished(&self, id: SessionId, outcome: crate::logs::SessionOutcome) {
+        let now = time::OffsetDateTime::now_utc();
+        let forgotten: Vec<SessionId> = {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = sessions.get_mut(&id) {
+                entry.ended = Some((now, outcome));
+            }
+            let mut ended: Vec<(time::OffsetDateTime, SessionId)> = sessions
+                .iter()
+                .filter_map(|(id, e)| e.ended.as_ref().map(|(at, _)| (*at, *id)))
+                .collect();
+            ended.sort();
+            let excess = ended.len().saturating_sub(ENDED_SESSIONS_KEPT);
+            let forgotten: Vec<SessionId> =
+                ended.into_iter().take(excess).map(|(_, id)| id).collect();
+            for id in &forgotten {
+                sessions.remove(id);
+            }
+            forgotten
+        };
+        let mut sftp = self
+            .inner
+            .sftp
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for id in &forgotten {
+            sftp.remove(id);
+        }
+    }
+
+    /// `settings.toml` (defaults when missing; an invalid file is an error
+    /// and the UIs fall back to their defaults).
+    pub async fn settings(&self) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::load(&path))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Validates and saves `settings` (other keys of the file are kept);
+    /// returns them as stored.
+    pub async fn save_settings(
+        &self,
+        settings: crate::settings::Settings,
+    ) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::save(&path, &settings))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+}
+
+// ════ end Phase 4 ════════════════════════════════════════════════════════
 
 /// Removes a pending prompt and tells the UIs, when the asking side stops
 /// waiting for any reason.
@@ -1129,5 +1359,92 @@ mod tests {
         assert_eq!(engine.snippets().await.expect("list").len(), 2);
         let e = engine.delete_snippet("up-2").await.expect_err("gone");
         assert_eq!(e.summary().code, "snippet_not_found");
+    }
+
+    // ── Phase 4 ──
+
+    #[tokio::test]
+    async fn metadata_edits_emit_events_and_show_in_the_inventory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+        std::fs::write(root.join(".ssh/config"), "Host prod\n  HostName 10.0.0.1\n").expect("w");
+        let engine = engine(root);
+        let mut events = engine.subscribe();
+
+        let meta = engine.set_favorite("prod", true).await.expect("favorite");
+        assert!(meta.favorite);
+        match events.recv().await.expect("event") {
+            EngineEvent::HostMeta { alias, meta } => {
+                assert_eq!(alias, "prod");
+                assert!(meta.favorite);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        engine
+            .set_tags("prod", vec!["#DB".into(), "db".into()])
+            .await
+            .expect("tags");
+        engine
+            .set_group("prod", Some("Data".into()))
+            .await
+            .expect("group");
+        let meta = engine
+            .set_notes("prod", Some("on call: ops".into()))
+            .await
+            .expect("notes");
+        assert_eq!(meta.tags, ["DB"]);
+        let e = engine
+            .set_group("prod", Some("x".repeat(65)))
+            .await
+            .expect_err("long");
+        assert_eq!(e.summary().code, "host_group");
+
+        let inv = engine.load_hosts().await.expect("load");
+        let host = inv.hosts.first().expect("prod");
+        assert_eq!(host.meta.group.as_deref(), Some("Data"));
+        assert_eq!(host.meta.notes.as_deref(), Some("on call: ops"));
+        assert!(root.join("config/hosts.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".ssh/config")).expect("read"),
+            "Host prod\n  HostName 10.0.0.1\n",
+            "the ssh config is never written"
+        );
+        let json = serde_json::to_string(&EngineEvent::HostMeta {
+            alias: "prod".into(),
+            meta: host.meta.clone(),
+        })
+        .expect("json");
+        assert!(
+            json.starts_with(r#"{"type":"host_meta","alias":"prod","meta":{"#),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_and_effective_config_through_the_engine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+        std::fs::write(root.join(".ssh/config"), "Host p\n  Port 2200\n").expect("w");
+        let engine = engine(root);
+
+        assert_eq!(
+            engine.settings().await.expect("defaults"),
+            crate::settings::Settings::default()
+        );
+        let mut settings = crate::settings::Settings {
+            theme: Some("basalt".into()),
+            ..crate::settings::Settings::default()
+        };
+        settings.keymap.tui.insert("quit".into(), "q".into());
+        let stored = engine.save_settings(settings.clone()).await.expect("save");
+        assert_eq!(stored, settings);
+        assert_eq!(engine.settings().await.expect("load"), settings);
+
+        let view = engine.effective_config("p").await.expect("view");
+        let port = view.options.iter().find(|o| o.key == "port").expect("port");
+        assert_eq!(port.values, ["2200"]);
+        assert_eq!(view.route.len(), 1);
     }
 }

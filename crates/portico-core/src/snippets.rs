@@ -562,7 +562,7 @@ fn is_invisible_format(c: char) -> bool {
 
 /// Bidi controls, invisible format characters and line/paragraph
 /// separators: never allowed in single-line fields.
-fn is_hidden_format(c: char) -> bool {
+pub(crate) fn is_hidden_format(c: char) -> bool {
     is_bidi_control(c) || is_invisible_format(c) || matches!(c, '\u{2028}' | '\u{2029}')
 }
 

@@ -113,7 +113,19 @@ export type EngineEvent =
   | { type: "prompt_resolved"; id: number }
   | { type: "sftp"; id: number; session: number; event: SftpEvent }
   | { type: "tunnel"; id: number; session: number; event: TunnelEvent }
-  | { type: "log" };
+  | { type: "log" }
+  /** `hosts.toml` changed for `alias`: update the host in place. */
+  | { type: "host_meta"; alias: string; meta: HostMeta }
+  /** The recent-sessions list changed: fetch it again if shown. */
+  | { type: "recent_changed" };
+
+/** Mirrors `portico_core::hosts::HostMeta` (as serialized in events). */
+export interface HostMeta {
+  tags: string[];
+  group: string | null;
+  favorite: boolean;
+  notes: string | null;
+}
 
 export type EntryKind = "file" | "dir" | "symlink" | "other";
 

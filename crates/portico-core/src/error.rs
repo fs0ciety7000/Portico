@@ -116,6 +116,16 @@ pub enum Error {
     #[error(transparent)]
     Snippet(#[from] crate::snippets::SnippetError),
     // ── end Phase 3 ─────────────────────────────────────────────────────
+
+    // ── Phase 4: metadata, settings, recent sessions ────────────────────
+    #[error("{} is larger than {max} bytes", path.display())]
+    FileTooLarge { path: PathBuf, max: u64 },
+
+    #[error(transparent)]
+    HostMeta(#[from] crate::hosts::HostMetaError),
+
+    #[error(transparent)]
+    Settings(#[from] crate::settings::SettingsError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -266,6 +276,14 @@ impl Error {
             // ── Phase 3: vault and snippets ──
             Self::Vault(e) => e.code_and_hint(),
             Self::Snippet(e) => e.code_and_hint(),
+
+            // ── Phase 4 ──
+            Self::FileTooLarge { .. } => (
+                "file_too_large",
+                Some("This Portico file was edited by hand and is too large: trim it."),
+            ),
+            Self::HostMeta(e) => e.code_and_hint(),
+            Self::Settings(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),

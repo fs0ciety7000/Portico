@@ -20,18 +20,22 @@
 
 mod agent;
 mod copy_id;
+pub mod effective;
 pub mod engine;
 pub mod error;
 pub mod events;
 pub mod forward;
+pub mod hardening;
 pub mod hosts;
 pub mod ids;
 pub mod keys;
 pub mod known_hosts;
 pub mod logs;
+pub mod recent;
 pub mod search;
 pub mod secrets;
 pub mod session;
+pub mod settings;
 pub mod sftp;
 pub mod snippets;
 pub mod ssh_config;

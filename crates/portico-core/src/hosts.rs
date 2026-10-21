@@ -1,15 +1,52 @@
 //! Host inventory: `~/.ssh/config` aliases enriched with Portico metadata.
 //!
 //! The ssh config stays the single source of truth for *how* to connect.
-//! Portico only adds presentation metadata (tags, group, favorite, notes,
-//! last used) in `hosts.toml`, keyed by alias.
+//! Portico only adds presentation metadata (tags, group, favorite, notes)
+//! in `hosts.toml` (config dir), keyed by alias. `~/.ssh/config` is never
+//! written.
+//!
+//! ## Editing `hosts.toml` (Phase 4)
+//!
+//! [`update_meta`] is a read-modify-write cycle under an exclusive
+//! inter-process lock (`hosts.toml.lock`, see [`crate::store::lock_exclusive`]),
+//! done on the TOML *document* (`toml_edit`): only the edited key of the
+//! edited alias changes. Other aliases, unknown keys (at any level),
+//! comments and layout of a hand-edited file are kept. A field set back to
+//! its default is removed, and an alias left with no key at all is removed
+//! from the file. The write is atomic (`0600` temp file + rename).
+//!
+//! Every value is validated and normalized first ([`MetaChange::normalized`]):
+//! tags are `[A-Za-z0-9_.-]{1,32}` (a leading `#` is dropped, duplicates are
+//! removed ignoring case, at most [`MAX_TAGS`]); a group is one line of at
+//! most [`MAX_GROUP_CHARS`] characters; notes are at most
+//! [`MAX_NOTES_CHARS`] characters where `\n` is the only control character.
+//! Bidi controls and invisible format characters are refused everywhere.
+//!
+//! `last_used` is **deprecated** (replaced by `state/recent.toml`, see
+//! [`crate::recent`]): still read (leniently), never written by Portico.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
 
+use crate::error::Result;
 use crate::ssh_config::{HostAlias, ResolveContext, ResolvedHost, Source, SshConfig};
+use crate::store;
+
+/// Most tags on one host.
+pub const MAX_TAGS: usize = 16;
+/// Longest tag, in characters (ASCII only).
+pub const MAX_TAG_CHARS: usize = 32;
+/// Longest group name, in characters.
+pub const MAX_GROUP_CHARS: usize = 64;
+/// Longest notes, in characters.
+pub const MAX_NOTES_CHARS: usize = 2000;
+/// Longest alias accepted as a metadata key, in bytes.
+pub const MAX_ALIAS_LEN: usize = 255;
+/// Largest `hosts.toml` read, in bytes.
+pub const MAX_HOSTS_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Portico-side metadata for one alias.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,11 +56,29 @@ pub struct HostMeta {
     pub group: Option<String>,
     pub favorite: bool,
     pub notes: Option<String>,
-    #[serde(with = "time::serde::rfc3339::option")]
+    /// **Deprecated**: recent sessions live in `state/recent.toml`
+    /// ([`crate::Engine::recent`]). Read for compatibility (an unparsable
+    /// value is ignored), never serialized nor written.
+    #[serde(skip_serializing, deserialize_with = "lenient_rfc3339")]
     pub last_used: Option<OffsetDateTime>,
 }
 
-/// Content of `hosts.toml`.
+/// Accepts an RFC 3339 string; anything else (or nothing) is `None`, so a
+/// stale hand-edited `last_used` never makes `hosts.toml` unreadable.
+fn lenient_rfc3339<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<OffsetDateTime>, D::Error> {
+    let value = Option::<toml::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| match v {
+        toml::Value::String(s) => {
+            OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339).ok()
+        }
+        _ => None,
+    }))
+}
+
+/// Content of `hosts.toml` (read side; unknown keys are ignored here and
+/// preserved by [`update_meta`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HostMetaFile {
@@ -71,4 +126,496 @@ pub fn inventory(config: &SshConfig, meta: &HostMetaFile, ctx: &ResolveContext) 
             source,
         })
         .collect()
+}
+
+/// Reads `hosts.toml` (missing file: no metadata).
+pub(crate) fn load_meta(path: &Path) -> Result<HostMetaFile> {
+    store::load_toml_capped(path, MAX_HOSTS_FILE_BYTES)
+}
+
+// ── Editing ─────────────────────────────────────────────────────────────
+
+/// Invalid metadata. Messages name the field and position, never echo the
+/// rejected text (it may hold invisible or bidi characters).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum HostMetaError {
+    #[error("invalid tag {position}: {reason}")]
+    Tag {
+        /// 1-based position in the submitted list.
+        position: usize,
+        reason: &'static str,
+    },
+    #[error("too many tags (at most {max})")]
+    TooManyTags { max: usize },
+    #[error("invalid group: {reason}")]
+    Group { reason: &'static str },
+    #[error("invalid notes: {reason}")]
+    Notes { reason: &'static str },
+    #[error("invalid host alias: {reason}")]
+    Alias { reason: &'static str },
+}
+
+impl HostMetaError {
+    pub(crate) fn code_and_hint(&self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Self::Tag { .. } => (
+                "host_tag",
+                Some("Tags use letters, digits, `_`, `.` and `-`, up to 32 characters."),
+            ),
+            Self::TooManyTags { .. } => ("host_tags", Some("Keep at most 16 tags per host.")),
+            Self::Group { .. } => (
+                "host_group",
+                Some("A group is one line of at most 64 visible characters."),
+            ),
+            Self::Notes { .. } => (
+                "host_notes",
+                Some("Notes hold at most 2000 characters of plain text."),
+            ),
+            Self::Alias { .. } => ("host_alias", None),
+        }
+    }
+}
+
+/// One edit of an alias' metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaChange {
+    Favorite(bool),
+    Tags(Vec<String>),
+    Group(Option<String>),
+    Notes(Option<String>),
+}
+
+impl MetaChange {
+    /// Validates and normalizes the value (see the module doc). Blank
+    /// group or notes become `None`.
+    pub fn normalized(self) -> std::result::Result<Self, HostMetaError> {
+        Ok(match self {
+            Self::Favorite(on) => Self::Favorite(on),
+            Self::Tags(tags) => Self::Tags(normalize_tags(&tags)?),
+            Self::Group(group) => Self::Group(normalize_group(group.as_deref())?),
+            Self::Notes(notes) => Self::Notes(normalize_notes(notes.as_deref())?),
+        })
+    }
+
+    fn apply(&self, meta: &mut HostMeta) {
+        match self {
+            Self::Favorite(on) => meta.favorite = *on,
+            Self::Tags(tags) => meta.tags.clone_from(tags),
+            Self::Group(group) => meta.group.clone_from(group),
+            Self::Notes(notes) => meta.notes.clone_from(notes),
+        }
+    }
+}
+
+/// Trims, drops one leading `#`, skips blanks, removes duplicates ignoring
+/// case (the first spelling wins) and checks each tag.
+pub fn normalize_tags(tags: &[String]) -> std::result::Result<Vec<String>, HostMetaError> {
+    let mut out: Vec<String> = Vec::new();
+    for (index, raw) in tags.iter().enumerate() {
+        let position = index.saturating_add(1);
+        let trimmed = raw.trim();
+        let tag = trimmed.strip_prefix('#').unwrap_or(trimmed).trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
+            return Err(HostMetaError::Tag {
+                position,
+                reason: "only letters, digits, `_`, `.` and `-` are allowed",
+            });
+        }
+        if tag.len() > MAX_TAG_CHARS {
+            return Err(HostMetaError::Tag {
+                position,
+                reason: "longer than 32 characters",
+            });
+        }
+        if !out.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            out.push(tag.to_owned());
+        }
+    }
+    if out.len() > MAX_TAGS {
+        return Err(HostMetaError::TooManyTags { max: MAX_TAGS });
+    }
+    Ok(out)
+}
+
+fn normalize_group(group: Option<&str>) -> std::result::Result<Option<String>, HostMetaError> {
+    let Some(group) = group.map(str::trim).filter(|g| !g.is_empty()) else {
+        return Ok(None);
+    };
+    if group.chars().count() > MAX_GROUP_CHARS {
+        return Err(HostMetaError::Group {
+            reason: "longer than 64 characters",
+        });
+    }
+    if group
+        .chars()
+        .any(|c| c.is_control() || crate::snippets::is_hidden_format(c))
+    {
+        return Err(HostMetaError::Group {
+            reason: "contains a control, bidi or invisible character",
+        });
+    }
+    Ok(Some(group.to_owned()))
+}
+
+fn normalize_notes(notes: Option<&str>) -> std::result::Result<Option<String>, HostMetaError> {
+    let Some(notes) = notes else { return Ok(None) };
+    let notes = notes.replace("\r\n", "\n");
+    let notes = notes.trim();
+    if notes.is_empty() {
+        return Ok(None);
+    }
+    if notes.chars().count() > MAX_NOTES_CHARS {
+        return Err(HostMetaError::Notes {
+            reason: "longer than 2000 characters",
+        });
+    }
+    if notes
+        .chars()
+        .any(|c| (c.is_control() && c != '\n') || crate::snippets::is_hidden_format(c))
+    {
+        return Err(HostMetaError::Notes {
+            reason: "contains a control, bidi or invisible character",
+        });
+    }
+    Ok(Some(notes.to_owned()))
+}
+
+/// Checks an alias used as a metadata (or recent-sessions) key.
+pub(crate) fn check_alias(alias: &str) -> std::result::Result<(), HostMetaError> {
+    if alias.is_empty() {
+        return Err(HostMetaError::Alias { reason: "empty" });
+    }
+    if alias.len() > MAX_ALIAS_LEN {
+        return Err(HostMetaError::Alias {
+            reason: "longer than 255 bytes",
+        });
+    }
+    if alias
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || crate::snippets::is_hidden_format(c))
+    {
+        return Err(HostMetaError::Alias {
+            reason: "contains a space, control, bidi or invisible character",
+        });
+    }
+    Ok(())
+}
+
+/// Applies `change` to `alias` in `hosts.toml` (see the module doc) and
+/// returns the alias' metadata as the next load will read it. Blocking.
+pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Result<HostMeta> {
+    check_alias(alias)?;
+    let change = change.normalized()?;
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let text = store::read_capped(path, MAX_HOSTS_FILE_BYTES)?.unwrap_or_default();
+    // The typed view must parse too: never write a file `load_hosts` rejects.
+    let current: HostMetaFile = store::parse_toml(path, &text)?;
+    let mut doc = store::parse_document(path, &text)?;
+
+    let hosts = store::child_table(doc.as_table_mut(), "hosts", path)?;
+    let entry = store::child_table(hosts, alias, path)?;
+    entry.set_implicit(false);
+    match &change {
+        MetaChange::Favorite(true) => {
+            entry.insert("favorite", toml_edit::value(true));
+        }
+        MetaChange::Favorite(false) => {
+            entry.remove("favorite");
+        }
+        MetaChange::Tags(tags) if tags.is_empty() => {
+            entry.remove("tags");
+        }
+        MetaChange::Tags(tags) => {
+            let array: toml_edit::Array = tags.iter().map(String::as_str).collect();
+            entry.insert("tags", toml_edit::value(array));
+        }
+        MetaChange::Group(value) | MetaChange::Notes(value) => {
+            let key = if matches!(change, MetaChange::Group(_)) {
+                "group"
+            } else {
+                "notes"
+            };
+            match value {
+                Some(v) => {
+                    entry.insert(key, toml_edit::value(v.as_str()));
+                }
+                None => {
+                    entry.remove(key);
+                }
+            }
+        }
+    }
+    if entry.is_empty() {
+        hosts.remove(alias);
+    }
+    if hosts.is_empty() {
+        doc.as_table_mut().remove("hosts");
+    }
+
+    let mut meta = current.hosts.get(alias).cloned().unwrap_or_default();
+    change.apply(&mut meta);
+    store::write_atomic(path, doc.to_string().as_bytes())?;
+    Ok(meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    fn tags(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn tags_are_normalized() {
+        assert_eq!(
+            normalize_tags(&tags(&[
+                " #Prod ",
+                "eu-west.1",
+                "prod",
+                "",
+                "#",
+                "PROD",
+                "db_1"
+            ]))
+            .expect("valid"),
+            ["Prod", "eu-west.1", "db_1"]
+        );
+    }
+
+    #[test]
+    fn invalid_tags_are_refused_with_their_position() {
+        let long = "z".repeat(33);
+        for (bad, position) in [
+            (vec!["ok", "has space"], 2),
+            (vec!["été"], 1),
+            (vec!["a\u{202e}b"], 1),
+            (vec!["x", "y", long.as_str()], 3),
+        ] {
+            let bad: Vec<String> = bad.iter().map(|s| (*s).to_owned()).collect();
+            let err = normalize_tags(&bad).expect_err("invalid");
+            assert!(
+                matches!(err, HostMetaError::Tag { position: p, .. } if p == position),
+                "{err:?}"
+            );
+        }
+        assert!(normalize_tags(&tags(&[&"z".repeat(32)])).is_ok());
+        let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
+        assert_eq!(
+            normalize_tags(&many),
+            Err(HostMetaError::TooManyTags { max: MAX_TAGS })
+        );
+        // Duplicates do not count towards the limit.
+        let mut sixteen: Vec<String> = (0..16).map(|i| format!("t{i}")).collect();
+        sixteen.push("T0".into());
+        assert_eq!(normalize_tags(&sixteen).expect("valid").len(), 16);
+    }
+
+    #[test]
+    fn group_and_notes_are_checked() {
+        assert_eq!(
+            normalize_group(Some("  Prod EU ")),
+            Ok(Some("Prod EU".into()))
+        );
+        assert_eq!(normalize_group(Some("   ")), Ok(None));
+        assert!(normalize_group(Some(&"g".repeat(65))).is_err());
+        assert!(normalize_group(Some(&"é".repeat(64))).is_ok());
+        assert!(normalize_group(Some("a\nb")).is_err());
+        assert!(normalize_group(Some("a\u{2067}b")).is_err());
+
+        assert_eq!(
+            normalize_notes(Some("\r\nline 1\r\nline 2\n")),
+            Ok(Some("line 1\nline 2".into()))
+        );
+        assert_eq!(normalize_notes(Some(" \n ")), Ok(None));
+        assert!(normalize_notes(Some(&"n".repeat(2001))).is_err());
+        assert!(normalize_notes(Some(&"n".repeat(2000))).is_ok());
+        assert!(normalize_notes(Some("bell\u{7}")).is_err());
+        assert!(normalize_notes(Some("tab\there")).is_err());
+        assert!(normalize_notes(Some("zero\u{200b}width")).is_err());
+    }
+
+    #[test]
+    fn aliases_are_checked() {
+        assert!(check_alias("web-01.example.com").is_ok());
+        assert!(check_alias("").is_err());
+        assert!(check_alias("a b").is_err());
+        assert!(check_alias(&"a".repeat(256)).is_err());
+    }
+
+    const HAND_EDITED: &str = r#"# My hosts, edited by hand.
+version = 7
+
+[hosts.prod]
+tags = ["prod"] # keep me
+color = "red"
+last_used = "2026-01-02T03:04:05Z"
+
+[hosts."web.example.com"]
+favorite = true
+
+[hosts.dev]
+favorite = true
+when = 2026-05-04T10:00:00Z
+"#;
+
+    #[test]
+    fn edits_keep_unknown_keys_comments_and_other_aliases() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, HAND_EDITED).expect("write");
+
+        let meta = update_meta(&path, "prod", MetaChange::Favorite(true)).expect("edit");
+        assert!(meta.favorite);
+        assert_eq!(meta.tags, ["prod"]);
+        let meta = update_meta(
+            &path,
+            "prod",
+            MetaChange::Tags(tags(&["#Prod", "eu", "PROD"])),
+        )
+        .expect("edit");
+        assert_eq!(meta.tags, ["Prod", "eu"]);
+        update_meta(&path, "dev", MetaChange::Favorite(false)).expect("edit");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        for kept in [
+            "# My hosts, edited by hand.",
+            "version = 7",
+            "color = \"red\"",
+            "last_used = \"2026-01-02T03:04:05Z\"",
+            "when = 2026-05-04T10:00:00Z",
+            "[hosts.\"web.example.com\"]",
+        ] {
+            assert!(text.contains(kept), "lost {kept:?} in:\n{text}");
+        }
+        let file: HostMetaFile = toml::from_str(&text).expect("parse");
+        let prod = file.hosts.get("prod").expect("prod");
+        assert!(prod.favorite);
+        assert_eq!(prod.tags, ["Prod", "eu"]);
+        assert!(prod.last_used.is_some(), "deprecated field still read");
+        assert!(file.hosts.get("web.example.com").expect("web").favorite);
+        // `dev` keeps its unknown key, so it stays (without `favorite`).
+        assert!(!file.hosts.get("dev").expect("dev").favorite);
+        assert!(!text.contains("[hosts.dev]\nfavorite"), "{text}");
+    }
+
+    #[test]
+    fn emptied_entries_are_removed_and_files_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config/hosts.toml");
+        let meta = update_meta(&path, "db", MetaChange::Group(Some(" Data ".into()))).expect("new");
+        assert_eq!(meta.group.as_deref(), Some("Data"));
+        update_meta(
+            &path,
+            "db",
+            MetaChange::Notes(Some("line 1\nline 2".into())),
+        )
+        .expect("notes");
+        update_meta(&path, "api", MetaChange::Favorite(true)).expect("api");
+        let file = load_meta(&path).expect("load");
+        assert_eq!(
+            file.hosts.get("db").expect("db").notes.as_deref(),
+            Some("line 1\nline 2")
+        );
+
+        update_meta(&path, "db", MetaChange::Group(None)).expect("clear");
+        update_meta(&path, "db", MetaChange::Notes(Some("   ".into()))).expect("clear");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("db"), "{text}");
+        update_meta(&path, "api", MetaChange::Tags(Vec::new())).expect("noop");
+        update_meta(&path, "api", MetaChange::Favorite(false)).expect("clear");
+        assert_eq!(std::fs::read_to_string(&path).expect("read").trim(), "");
+        assert!(store::lock_path(&path).exists(), "lock file left in place");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn invalid_edits_leave_the_file_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, HAND_EDITED).expect("write");
+        let err =
+            update_meta(&path, "prod", MetaChange::Tags(tags(&["bad tag"]))).expect_err("bad");
+        assert_eq!(err.summary().code, "host_tag");
+        let err = update_meta(&path, "", MetaChange::Favorite(true)).expect_err("bad");
+        assert_eq!(err.summary().code, "host_alias");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), HAND_EDITED);
+
+        // A file the reader rejects is never rewritten.
+        std::fs::write(&path, "[hosts.prod]\ntags = \"not a list\"\n").expect("write");
+        let err = update_meta(&path, "prod", MetaChange::Favorite(true)).expect_err("bad");
+        assert_eq!(err.summary().code, "serde");
+        std::fs::write(&path, "hosts = 3\n").expect("write");
+        assert!(update_meta(&path, "prod", MetaChange::Favorite(true)).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "hosts = 3\n");
+    }
+
+    #[test]
+    fn inline_tables_are_edited_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, "hosts = { prod = { tags = [\"a\"], x = 1 } }\n").expect("write");
+        update_meta(&path, "prod", MetaChange::Favorite(true)).expect("edit");
+        let file = load_meta(&path).expect("load");
+        let prod = file.hosts.get("prod").expect("prod");
+        assert!(prod.favorite);
+        assert_eq!(prod.tags, ["a"]);
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("x = 1")
+        );
+    }
+
+    #[test]
+    fn concurrent_edits_are_all_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    update_meta(&path, &format!("h{i}"), MetaChange::Favorite(true)).expect("edit");
+                    update_meta(&path, "shared", MetaChange::Tags(vec![format!("t{i}")]))
+                        .expect("edit");
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("thread");
+        }
+        let file = load_meta(&path).expect("load");
+        for i in 0..8 {
+            assert!(file.hosts.get(&format!("h{i}")).expect("alias").favorite);
+        }
+        assert_eq!(file.hosts.get("shared").expect("shared").tags.len(), 1);
+    }
+
+    #[test]
+    fn last_used_is_read_leniently_and_never_serialized() {
+        let file: HostMetaFile =
+            toml::from_str("[hosts.a]\nlast_used = 12\n[hosts.b]\nlast_used = \"garbage\"\n")
+                .expect("lenient");
+        assert!(file.hosts.values().all(|m| m.last_used.is_none()));
+        let meta = HostMeta {
+            last_used: Some(OffsetDateTime::UNIX_EPOCH),
+            ..HostMeta::default()
+        };
+        let json = serde_json::to_string(&meta).expect("json");
+        assert!(!json.contains("last_used"), "{json}");
+    }
 }
