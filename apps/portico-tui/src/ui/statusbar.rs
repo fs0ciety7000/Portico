@@ -70,6 +70,8 @@ type Hints = Vec<(&'static str, &'static str)>;
 
 /// Mode pill and the key hints, most important first (what does not fit is
 /// in `?`). Only keys that work right now are listed.
+// A flat table of modes; splitting it would hide which one wins.
+#[allow(clippy::too_many_lines)]
 fn mode_and_hints(app: &App) -> (&'static str, Hints) {
     let (mode, hints): (&'static str, &[(&'static str, &'static str)]) = match app.focus {
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
@@ -86,6 +88,20 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
                 ("Esc", "cancel"),
             ],
         ),
+        _ if app.overlay == Some(crate::app::Overlay::Keys) => {
+            let hints = app.keys_panel.as_ref().map_or_else(
+                || vec![("Esc", "close")],
+                |p| p.hints(app.vault, app.copy_state()),
+            );
+            return (" KEYS ", hints);
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Snippets) => {
+            let hints = app.snippets_panel.as_ref().map_or_else(
+                || vec![("Esc", "close")],
+                crate::snippets::SnippetsPanel::hints,
+            );
+            return (" SNIPPETS ", hints);
+        }
         _ if app.overlay == Some(crate::app::Overlay::Tunnels) => {
             let hints = app
                 .tunnels_panel
@@ -141,6 +157,8 @@ fn mode_and_hints(app: &App) -> (&'static str, Hints) {
             &[
                 ("↵", "connect"),
                 ("/", "search"),
+                ("i", "keys"),
+                ("s", "snippets"),
                 ("t", "theme"),
                 ("?", "help"),
                 ("q", "quit"),

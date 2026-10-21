@@ -10,7 +10,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
-use crate::dialog::{ChangedKeyAlert, Dialog, PromptDialog};
+use crate::dialog::{ChangedKeyAlert, Dialog, Field, PromptDialog, SecretDialog, SecretPurpose};
 use crate::theme::Styles;
 use crate::ui::fmt::display_path;
 
@@ -22,10 +22,11 @@ const FIELD_WIDTH: usize = 34;
 const PROMPT_WIDTH: u16 = 74;
 const ALERT_WIDTH: u16 = 80;
 
-pub(crate) fn render(dialog: &Dialog, s: Styles, frame: &mut Frame<'_>) {
+pub(crate) fn render(dialog: &Dialog, s: Styles, tick: u64, frame: &mut Frame<'_>) {
     match dialog {
         Dialog::Prompt(p) => render_prompt(p, s, frame),
         Dialog::ChangedKey(a) => render_changed(a, s, frame),
+        Dialog::Secret(d) => render_secret(d, s, tick, frame),
     }
 }
 
@@ -200,16 +201,32 @@ fn retry_line(s: Styles, lines: &mut Vec<Line<'static>>, what: &str, attempt: u3
 /// Input fields on a raised surface (masked when secret), then the
 /// "remember" toggle.
 fn field_lines(p: &PromptDialog, s: Styles, lines: &mut Vec<Line<'static>>) {
-    let label_width = p
-        .fields
+    input_lines(&p.fields, p.focus, s, lines);
+    if p.can_remember() {
+        lines.push(Line::from(""));
+        let mark = if p.remember { "■" } else { "□" };
+        let style = if p.focus == p.fields.len() {
+            s.accent()
+        } else {
+            s.secondary()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{mark} Remember in {}", p.remember_in),
+            style,
+        )));
+    }
+}
+
+fn input_lines(fields: &[Field], focus: usize, s: Styles, lines: &mut Vec<Line<'static>>) {
+    let label_width = fields
         .iter()
         .map(|f| f.label.chars().count())
         .max()
         .unwrap_or(0)
         + 2;
     let surface = s.key_hint();
-    for (i, field) in p.fields.iter().enumerate() {
-        let focused = p.focus == i;
+    for (i, field) in fields.iter().enumerate() {
+        let focused = focus == i;
         let shown = if field.masked {
             if field.value.is_empty() {
                 String::new()
@@ -228,19 +245,164 @@ fn field_lines(p: &PromptDialog, s: Styles, lines: &mut Vec<Line<'static>>) {
             Span::styled(" ".repeat(pad), surface),
         ]));
     }
-    if p.can_remember() {
+}
+
+/// Vault unlock / create / change, and a key passphrase for the agent.
+/// Explanation lines, then (title, primary action, cancel action).
+fn secret_intro(
+    d: &SecretDialog,
+    s: Styles,
+    lines: &mut Vec<Line<'static>>,
+) -> (&'static str, &'static str, &'static str) {
+    let text = |lines: &mut Vec<Line<'static>>, t: &str, style| {
+        lines.push(Line::from(Span::styled(t.to_owned(), style)));
+    };
+    match &d.purpose {
+        SecretPurpose::VaultUnlock { startup } => {
+            text(
+                lines,
+                "Your remembered passwords and passphrases are in the Portico vault.",
+                s.secondary(),
+            );
+            if *startup {
+                text(
+                    lines,
+                    "Esc continues without it: secrets will not be remembered or filled in.",
+                    s.muted(),
+                );
+            }
+            (
+                " Unlock the vault ",
+                "unlock",
+                if *startup {
+                    "continue without"
+                } else {
+                    "cancel"
+                },
+            )
+        }
+        SecretPurpose::VaultCreate { offered } => {
+            if *offered {
+                text(
+                    lines,
+                    "This system has no keyring, so that secret could not be remembered.",
+                    s.secondary(),
+                );
+                text(
+                    lines,
+                    "Create a Portico vault to remember secrets from now on, encrypted under a master passphrase.",
+                    s.secondary(),
+                );
+            } else {
+                text(
+                    lines,
+                    "Secrets you choose to remember are encrypted under this master passphrase.",
+                    s.secondary(),
+                );
+            }
+            text(
+                lines,
+                "It cannot be recovered if forgotten.",
+                s.status(s.theme.status.warning),
+            );
+            (
+                " Create the vault ",
+                "create",
+                if *offered { "not now" } else { "cancel" },
+            )
+        }
+        SecretPurpose::VaultChange => {
+            text(
+                lines,
+                "Re-encrypts the vault under a new master passphrase.",
+                s.secondary(),
+            );
+            (" Vault passphrase ", "change", "cancel")
+        }
+        SecretPurpose::AgentPassphrase {
+            key_name, lifetime, ..
+        } => {
+            text(
+                lines,
+                &format!("{key_name} is encrypted. Its passphrase unlocks it for ssh-agent."),
+                s.secondary(),
+            );
+            if let Some(l) = lifetime {
+                text(
+                    lines,
+                    &format!(
+                        "The agent forgets it after {}.",
+                        crate::keys::duration_words(l.as_secs())
+                    ),
+                    s.muted(),
+                );
+            }
+            (" Key passphrase · ssh-agent ", "add", "cancel")
+        }
+    }
+}
+
+/// Vault unlock / create / change, and a key passphrase for the agent.
+fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let (title, primary, cancel) = secret_intro(d, s, &mut lines);
+    let text = |lines: &mut Vec<Line<'static>>, t: &str, style| {
+        lines.push(Line::from(Span::styled(t.to_owned(), style)));
+    };
+    lines.push(Line::from(""));
+    input_lines(&d.fields, d.focus, s, &mut lines);
+    if d.busy {
         lines.push(Line::from(""));
-        let mark = if p.remember { "■" } else { "□" };
-        let style = if p.focus == p.fields.len() {
-            s.accent()
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", crate::ui::spinner(tick)),
+                s.status(s.theme.status.connecting),
+            ),
+            Span::styled("Checking…", s.secondary()),
+        ]));
+    } else if let Some(e) = &d.error {
+        lines.push(Line::from(""));
+        let count = match d.failures {
+            0 => String::new(),
+            1 => " · 1 failed attempt".to_owned(),
+            n => format!(" · {n} failed attempts"),
+        };
+        // The key path is already in the text above: keep it short.
+        let message = if e.code == "key_wrong_passphrase" {
+            "wrong passphrase"
         } else {
-            s.secondary()
+            e.message.as_str()
         };
         lines.push(Line::from(Span::styled(
-            format!("{mark} Remember in the system keyring"),
-            style,
+            format!("{message}{count}"),
+            s.status(s.theme.status.error),
         )));
+        if let Some(h) = &e.hint {
+            text(&mut lines, h, s.secondary());
+        }
     }
+    lines.push(Line::from(""));
+    let actions = if d.fields.len() > 1 {
+        vec![("Tab", "next"), ("Esc", cancel), ("↵", primary)]
+    } else {
+        vec![("Esc", cancel), ("↵", primary)]
+    };
+    lines.push(footer(s, &actions));
+    // Word wrapping can take a row more than the estimate: keep the
+    // actions visible.
+    let height = wrapped_height(&lines, PROMPT_WIDTH).saturating_add(1);
+    let area = modal(frame, PROMPT_WIDTH, height);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(s.border_focus())
+                .title(Line::from(Span::styled(title, s.title())))
+                .padding(Padding::new(2, 2, 1, 0))
+                .style(s.overlay()),
+        ),
+        area,
+    );
 }
 
 #[allow(clippy::too_many_arguments)] // the prompt's fields, destructured

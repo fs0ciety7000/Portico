@@ -7,9 +7,14 @@
 
 mod action;
 mod app;
+mod app_panels;
+mod copy_job;
 mod dialog;
 mod files;
+mod form;
 mod keymap;
+mod keys;
+mod snippets;
 mod terminal;
 mod theme;
 mod tunnels;

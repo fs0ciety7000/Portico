@@ -4,8 +4,11 @@ mod details;
 mod dialog;
 mod files;
 pub(crate) mod fmt;
+mod form;
 mod hosts;
+mod keys;
 mod overlays;
+mod snippets;
 mod status;
 mod statusbar;
 mod terminal;
@@ -78,14 +81,20 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
     }
     statusbar::render(app, frame, status);
-    overlays::render(app, frame, toast_zone);
     if app.overlay == Some(crate::app::Overlay::Tunnels)
         && let Some(panel) = &mut app.tunnels_panel
     {
         tunnels::render(panel, &app.tunnels, s, tick, frame);
     }
+    match app.overlay {
+        Some(crate::app::Overlay::Keys) => keys::render(app, frame),
+        Some(crate::app::Overlay::Snippets) => snippets::render(app, frame),
+        _ => {}
+    }
+    // Help, then toasts: above the panels, so a result is never hidden.
+    overlays::render(app, frame, toast_zone);
     if let Some(d) = app.dialogs.front() {
-        dialog::render(d, s, frame);
+        dialog::render(d, s, tick, frame);
     }
 }
 

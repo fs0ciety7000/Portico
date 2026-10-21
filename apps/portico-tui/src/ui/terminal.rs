@@ -135,10 +135,10 @@ impl Widget for TermWidget<'_> {
                 continue;
             };
             let mut symbol = String::new();
-            symbol.push(if cell.c == '\0' { ' ' } else { cell.c });
+            symbol.push(cell_char(cell.c));
             if let Some(extra) = cell.zerowidth() {
                 // A hostile stream can stack unbounded combining marks.
-                symbol.extend(extra.iter().take(4));
+                symbol.extend(extra.iter().take(4).filter(|c| !c.is_control()));
             }
             target.set_symbol(&symbol);
             target.set_style(Style::new().fg(fg).bg(bg).add_modifier(modifier));
@@ -260,5 +260,25 @@ fn dim(color: Color) -> Color {
             Color::Rgb(f(r), f(g), f(b))
         }
         other => other,
+    }
+}
+
+/// What a grid cell draws. alacritty keeps a `\t` in the cell a tab
+/// started from (for copy), and an empty cell is `\0`: both draw as a
+/// space, as does any other control character (ratatui refuses them).
+fn cell_char(c: char) -> char {
+    if c.is_control() { ' ' } else { c }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cell_char;
+
+    #[test]
+    fn tabs_and_controls_draw_as_spaces() {
+        assert_eq!(cell_char('\t'), ' ');
+        assert_eq!(cell_char('\0'), ' ');
+        assert_eq!(cell_char('\u{9b}'), ' ');
+        assert_eq!(cell_char('é'), 'é');
     }
 }

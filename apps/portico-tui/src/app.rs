@@ -10,8 +10,9 @@ use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
 use portico_core::engine::{ConnectRequest, HostInventory};
 use portico_core::events::{SessionEvent, SessionPhase, TerminalEvent};
-use portico_core::ids::SessionId;
+use portico_core::ids::{SessionId, TerminalId};
 use portico_core::search::{Hit, HostSearch};
+use portico_core::vault::VaultStatus;
 use portico_core::{Engine, EngineEvent, ErrorSummary};
 use portico_theme::{THEMES, Theme};
 use ratatui::DefaultTerminal;
@@ -19,9 +20,12 @@ use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
 
 use crate::action::Action;
+use crate::copy_job::CopyJob;
 use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
 use crate::files::{FilesView, KeyOutcome};
 use crate::keymap::map_key;
+use crate::keys::KeysPanel;
+use crate::snippets::SnippetsPanel;
 use crate::terminal::{Ended, GridSize, TerminalView, encode_key};
 use crate::theme::Styles;
 use crate::tunnels::{PanelOutcome, TunnelRow, TunnelStatus, TunnelsPanel};
@@ -41,6 +45,8 @@ pub(crate) enum Focus {
 pub(crate) enum Overlay {
     Help,
     Tunnels,
+    Keys,
+    Snippets,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -77,7 +83,7 @@ impl SessionView {
 
 #[derive(Debug)]
 pub(crate) struct App {
-    engine: Engine,
+    pub(crate) engine: Engine,
     pub(crate) running: bool,
     pub(crate) focus: Focus,
     pub(crate) overlay: Option<Overlay>,
@@ -108,8 +114,28 @@ pub(crate) struct App {
     pub(crate) tunnels: Vec<TunnelRow>,
     /// The tunnels panel, while `overlay == Some(Overlay::Tunnels)`.
     pub(crate) tunnels_panel: Option<TunnelsPanel>,
+    /// The keys panel, while `overlay == Some(Overlay::Keys)`.
+    pub(crate) keys_panel: Option<KeysPanel>,
+    /// The snippets panel, while `overlay == Some(Overlay::Snippets)`.
+    pub(crate) snippets_panel: Option<SnippetsPanel>,
+    /// Terminal tab the snippets panel types into.
+    pub(crate) snippet_target: Option<TerminalId>,
+    /// Last placeholder values (this run only, never written to disk).
+    pub(crate) snippet_values: HashMap<String, String>,
+    /// Copy-id in progress or just finished (outlives the keys panel).
+    pub(crate) copy_job: Option<CopyJob>,
+    pub(crate) copy_generation: u64,
+    /// Vault state (`None` until known).
+    pub(crate) vault: Option<VaultStatus>,
+    /// Verification sessions of copy-id (`probe: true`) and their alias:
+    /// not listed as the host's session, but their prompts and alerts show.
+    pub(crate) probes: HashMap<SessionId, String>,
+    /// This machine's host name, for the suggested key comment.
+    pub(crate) machine: Option<String>,
+    /// OSC 52 goes to the real terminal (off in tests).
+    pub(crate) clipboard: bool,
     search: HostSearch,
-    tx: mpsc::UnboundedSender<Action>,
+    pub(crate) tx: mpsc::UnboundedSender<Action>,
     rx: mpsc::UnboundedReceiver<Action>,
 }
 
@@ -147,6 +173,16 @@ impl App {
             files: None,
             tunnels: Vec::new(),
             tunnels_panel: None,
+            keys_panel: None,
+            snippets_panel: None,
+            snippet_target: None,
+            snippet_values: HashMap::new(),
+            copy_job: None,
+            copy_generation: 0,
+            vault: None,
+            probes: HashMap::new(),
+            machine: None,
+            clipboard: true,
             search: HostSearch::default(),
             tx,
             rx,
@@ -179,6 +215,8 @@ impl App {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut engine_events = self.engine.subscribe();
         self.spawn_load_hosts();
+        self.refresh_vault(true);
+        self.spawn_machine_name();
 
         terminal.draw(|f| ui::render(&mut self, f))?;
         while self.running {
@@ -237,6 +275,16 @@ impl App {
                 .tunnels
                 .iter()
                 .any(|t| t.status == TunnelStatus::Starting)
+            || self.copy_job.as_ref().is_some_and(CopyJob::running)
+            || self.keys_panel.as_ref().is_some_and(KeysPanel::busy)
+            || self
+                .snippets_panel
+                .as_ref()
+                .is_some_and(SnippetsPanel::busy)
+            || self
+                .dialogs
+                .front()
+                .is_some_and(|d| matches!(d, Dialog::Secret(s) if s.busy))
     }
 
     fn spawn_load_hosts(&self) {
@@ -288,6 +336,8 @@ impl App {
             Action::ToggleHelp => {
                 self.prefix = false;
                 self.tunnels_panel = None;
+                self.keys_panel = None;
+                self.snippets_panel = None;
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     _ => Some(Overlay::Help),
@@ -296,6 +346,8 @@ impl App {
             Action::CloseOverlay => {
                 self.overlay = None;
                 self.tunnels_panel = None;
+                self.keys_panel = None;
+                self.snippets_panel = None;
             }
             Action::CycleTheme => {
                 self.theme_index = (self.theme_index + 1) % THEMES.len();
@@ -420,6 +472,7 @@ impl App {
                 Err(error) if error.code == "session_ended" => {}
                 Err(error) => self.notify_error(error),
             },
+            other => self.update_panels(other),
         }
     }
 
@@ -497,7 +550,19 @@ impl App {
     fn paste(&mut self, text: &str) {
         match self.dialogs.front_mut() {
             Some(Dialog::Prompt(prompt)) => prompt.paste(text),
+            Some(Dialog::Secret(secret)) => secret.paste(text),
             Some(Dialog::ChangedKey(_)) => {}
+            None if self.overlay == Some(Overlay::Keys) => {
+                if let Some(panel) = &mut self.keys_panel {
+                    panel.paste(text);
+                }
+            }
+            None if self.overlay == Some(Overlay::Snippets) => {
+                if let Some(panel) = &mut self.snippets_panel {
+                    panel.paste(text);
+                }
+            }
+            None if self.overlay.is_some() => {}
             None => match (self.focus, self.active_terminal()) {
                 (Focus::Terminal, Some(view)) => view.paste(text),
                 (Focus::Search, _) => {
@@ -836,12 +901,22 @@ impl App {
                 }
             }
             EngineEvent::Prompt(prompt) => {
-                let alias = prompt
-                    .session
-                    .and_then(|id| self.sessions.iter().find(|(_, v)| v.id == id))
-                    .map(|(a, _)| a.clone());
-                self.dialogs
-                    .push_back(Dialog::Prompt(PromptDialog::new(prompt, alias)));
+                // A copy-id probe's prompts show like any other, with its alias.
+                let alias = prompt.session.and_then(|id| {
+                    self.sessions
+                        .iter()
+                        .find(|(_, v)| v.id == id)
+                        .map(|(a, _)| a.clone())
+                        .or_else(|| self.probes.get(&id).cloned())
+                });
+                let mut dialog = PromptDialog::new(prompt, alias);
+                if matches!(
+                    self.vault,
+                    Some(VaultStatus::Absent | VaultStatus::Locked | VaultStatus::Unlocked)
+                ) {
+                    dialog.remember_in = "the Portico vault";
+                }
+                self.dialogs.push_back(Dialog::Prompt(dialog));
             }
             EngineEvent::PromptResolved { id } => {
                 self.dialogs
@@ -864,6 +939,27 @@ impl App {
     }
 
     fn on_session_event(&mut self, id: SessionId, event: SessionEvent) {
+        match &event {
+            SessionEvent::Started { alias, probe: true } => {
+                self.probes.insert(id, alias.clone());
+                return;
+            }
+            // Never filtered, whichever session (probe included) saw it.
+            SessionEvent::HostKeyChanged { .. } => {
+                self.host_key_changed(event);
+                return;
+            }
+            SessionEvent::Phase(phase) => {
+                if matches!(
+                    phase,
+                    SessionPhase::Failed { .. } | SessionPhase::Closed { .. }
+                ) {
+                    self.probes.remove(&id);
+                }
+                self.copy_job_phase(id, phase);
+            }
+            _ => {}
+        }
         let Some(view) = self.sessions.values_mut().find(|v| v.id == id) else {
             return;
         };
@@ -881,9 +977,11 @@ impl App {
                     }
                     SessionPhase::Failed { error } => {
                         // The open explorer already shows it, with its hint
-                        // and `↵ reconnect`: no duplicate toast on top.
-                        let shown = self.focus == Focus::Files
-                            && self.files.as_ref().is_some_and(|f| f.session == id);
+                        // and `↵ reconnect`: no duplicate toast on top. Same
+                        // for the copy-id view.
+                        let shown = (self.focus == Focus::Files
+                            && self.files.as_ref().is_some_and(|f| f.session == id))
+                            || self.copy_view_shows(id);
                         if !shown {
                             self.notify_error(error);
                         }
@@ -897,26 +995,30 @@ impl App {
                 }
             }
             SessionEvent::Latency { rtt } => view.latency = Some(rtt),
-            SessionEvent::HostKeyChanged {
+            _ => {}
+        }
+    }
+
+    fn host_key_changed(&mut self, event: SessionEvent) {
+        if let SessionEvent::HostKeyChanged {
+            host,
+            port,
+            algorithm,
+            fingerprint,
+            expected_fingerprint,
+            known_hosts_file,
+            known_hosts_line,
+        } = event
+        {
+            self.dialogs.push_back(Dialog::ChangedKey(ChangedKeyAlert {
                 host,
                 port,
                 algorithm,
                 fingerprint,
-                expected_fingerprint,
-                known_hosts_file,
-                known_hosts_line,
-            } => {
-                self.dialogs.push_back(Dialog::ChangedKey(ChangedKeyAlert {
-                    host,
-                    port,
-                    algorithm,
-                    fingerprint,
-                    expected: expected_fingerprint,
-                    file: known_hosts_file,
-                    line: known_hosts_line,
-                }));
-            }
-            _ => {}
+                expected: expected_fingerprint,
+                file: known_hosts_file,
+                line: known_hosts_line,
+            }));
         }
     }
 
@@ -956,15 +1058,23 @@ impl App {
             Dialog::Prompt(prompt) => {
                 if let Outcome::Answer(response) = prompt.handle_key(key) {
                     let id = prompt.id;
+                    let remember = matches!(
+                        response,
+                        portico_core::engine::PromptResponse::Secret { remember: true, .. }
+                    );
                     self.dialogs.pop_front();
                     // Already resolved elsewhere (cancelled session): nothing to do.
                     let _ = self.engine.respond(id, response);
+                    if remember {
+                        self.offer_vault();
+                    }
                 }
             }
+            Dialog::Secret(_) => self.secret_key(key),
         }
     }
 
-    fn notify_error(&mut self, error: ErrorSummary) {
+    pub(crate) fn notify_error(&mut self, error: ErrorSummary) {
         self.toast = Some(Toast {
             message: error.message,
             hint: error.hint,
@@ -973,7 +1083,7 @@ impl App {
         });
     }
 
-    fn notify(&mut self, message: String) {
+    pub(crate) fn notify(&mut self, message: String) {
         self.toast = Some(Toast {
             message,
             hint: None,
@@ -1018,7 +1128,9 @@ pub(crate) fn test_app() -> App {
         connect_timeout: Duration::from_secs(1),
         keepalive: Duration::from_secs(1),
     });
-    App::new(engine)
+    let mut app = App::new(engine);
+    app.clipboard = false;
+    app
 }
 
 #[cfg(test)]
