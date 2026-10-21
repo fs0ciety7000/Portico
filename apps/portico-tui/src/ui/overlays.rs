@@ -58,13 +58,40 @@ fn help_section<'a>(
     lines
 }
 
+/// Height of `sections` stacked in one column, `gap` blank rows apart.
+fn stacked(sections: &[(&str, &[(&str, &str)])], gap: usize) -> usize {
+    let rows: usize = sections.iter().map(|(_, r)| r.len() + 1).sum();
+    rows + gap * sections.len().saturating_sub(1)
+}
+
+/// Where to cut [`HELP`] into two columns (sections stay in order) and the
+/// gap between sections: the most balanced cut, with a blank row between
+/// sections when that still fits `room` rows.
+fn help_split(room: usize) -> (usize, usize) {
+    let best = |gap: usize| {
+        (1..HELP.len())
+            .map(|cut| {
+                let (left, right) = HELP.split_at(cut);
+                (stacked(left, gap).max(stacked(right, gap)), cut)
+            })
+            .min()
+            .unwrap_or((stacked(HELP, gap), HELP.len()))
+    };
+    let (tallest, cut) = best(1);
+    if tallest <= room {
+        (cut, 1)
+    } else {
+        (best(0).1, 0)
+    }
+}
+
 /// One column when it fits the screen height, else sections flow into two
-/// columns (80×24 stays readable).
+/// balanced columns (80×24 stays readable).
 fn render_help(app: &App, frame: &mut Frame<'_>) {
     let s = app.styles();
     let screen = frame.area();
-    let rows: usize = HELP.iter().map(|(_, r)| r.len() + 2).sum();
-    let one_column = rows + 2 <= usize::from(screen.height);
+    let room = usize::from(screen.height.saturating_sub(2));
+    let one_column = stacked(HELP, 1) <= room;
     let key_width = help_key_width();
     let width = if one_column { 60 } else { 84 };
     let width = width.min(screen.width.saturating_sub(2));
@@ -75,16 +102,18 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
     } else {
         inner.saturating_sub(2) / 2
     };
+    let (cut, gap) = if one_column {
+        (HELP.len(), 1)
+    } else {
+        help_split(room)
+    };
     let mut columns: Vec<Vec<Line<'_>>> = vec![Vec::new()];
-    let half = rows.div_ceil(2);
-    for (title, section) in HELP {
-        let count = columns.len();
-        let used = columns.last().map_or(0, Vec::len);
-        if !one_column && used > 0 && used + section.len() > half && count < 2 {
+    for (i, (title, section)) in HELP.iter().enumerate() {
+        if i == cut {
             columns.push(Vec::new());
         }
         if let Some(current) = columns.last_mut() {
-            if !current.is_empty() {
+            if !current.is_empty() && gap > 0 {
                 current.push(Line::from(""));
             }
             current.extend(help_section(s, title, section, key_width, column_width));

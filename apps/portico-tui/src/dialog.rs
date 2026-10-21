@@ -1,15 +1,19 @@
-//! Modal dialogs: engine prompts (host key, secrets, keyboard-interactive)
-//! and the blocking "host key changed" alert.
+//! Modal dialogs: engine prompts (host key, secrets, keyboard-interactive),
+//! the blocking "host key changed" alert, and Portico's own secret dialogs
+//! (vault unlock / create / change, key passphrase for `ssh-agent`).
 //!
 //! Secrets are typed into `Zeroizing` buffers, never displayed (not even
 //! their length) and handed to the engine as `SecretString`.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use portico_core::ErrorSummary;
 use portico_core::engine::PromptResponse;
 use portico_core::events::{Prompt, PromptKind};
 use portico_core::ids::PromptId;
+use portico_core::vault::MIN_PASSPHRASE_CHARS;
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
@@ -29,7 +33,7 @@ pub(crate) struct Field {
 }
 
 impl Field {
-    fn new(label: impl Into<String>, masked: bool) -> Self {
+    pub(crate) fn new(label: impl Into<String>, masked: bool) -> Self {
         Self {
             label: label.into(),
             masked,
@@ -50,6 +54,8 @@ pub(crate) struct PromptDialog {
     /// Index of the focused field; `fields.len()` is the "remember" toggle.
     pub(crate) focus: usize,
     pub(crate) remember: bool,
+    /// Where "remember" stores the secret (system keyring or vault).
+    pub(crate) remember_in: &'static str,
     /// Typed confirmation for risky host keys (`yes`).
     pub(crate) confirm: String,
     pub(crate) opened_at: Instant,
@@ -80,6 +86,7 @@ impl PromptDialog {
             fields,
             focus: 0,
             remember: false,
+            remember_in: "the system keyring",
             confirm: String::new(),
             opened_at: Instant::now(),
         }
@@ -218,6 +225,182 @@ pub(crate) struct ChangedKeyAlert {
 pub(crate) enum Dialog {
     Prompt(PromptDialog),
     ChangedKey(ChangedKeyAlert),
+    Secret(SecretDialog),
+}
+
+/// Why Portico itself asks for a secret.
+#[derive(Debug, Clone)]
+pub(crate) enum SecretPurpose {
+    /// Unlock the vault; `startup` when asked at launch (Esc continues
+    /// without remembered secrets), else after "remember" was ticked.
+    VaultUnlock {
+        startup: bool,
+    },
+    /// Create the vault; `offered` after "remember" was ticked without one.
+    VaultCreate {
+        offered: bool,
+    },
+    VaultChange,
+    /// Decrypt a private key to hand it to `ssh-agent`.
+    AgentPassphrase {
+        key_name: String,
+        private_path: PathBuf,
+        lifetime: Option<Duration>,
+    },
+}
+
+/// A Portico secret dialog. Same rules as engine prompts: fixed mask,
+/// buffers wiped once handed over, 400 ms arming, pastes land here.
+#[derive(Debug)]
+pub(crate) struct SecretDialog {
+    pub(crate) purpose: SecretPurpose,
+    pub(crate) fields: Vec<Field>,
+    pub(crate) focus: usize,
+    /// Last refusal (wrong passphrase, too short…), shown inline.
+    pub(crate) error: Option<ErrorSummary>,
+    /// Wrong answers so far (shown as a counter).
+    pub(crate) failures: u32,
+    /// Waiting for the engine (Argon2 takes a moment).
+    pub(crate) busy: bool,
+    pub(crate) opened_at: Instant,
+}
+
+pub(crate) enum SecretOutcome {
+    Pending,
+    Cancel,
+    /// The answers, in field order (create: the passphrase; change: the
+    /// current one, then the new one).
+    Submit(Vec<SecretString>),
+}
+
+impl SecretDialog {
+    pub(crate) fn new(purpose: SecretPurpose) -> Self {
+        let labels: &[&str] = match purpose {
+            SecretPurpose::VaultUnlock { .. } | SecretPurpose::AgentPassphrase { .. } => {
+                &["Passphrase"]
+            }
+            SecretPurpose::VaultCreate { .. } => &["Passphrase", "Confirm"],
+            SecretPurpose::VaultChange => &["Current", "New", "Confirm"],
+        };
+        Self {
+            purpose,
+            fields: labels.iter().map(|l| Field::new(*l, true)).collect(),
+            focus: 0,
+            error: None,
+            failures: 0,
+            busy: false,
+            opened_at: Instant::now(),
+        }
+    }
+
+    /// The new passphrase and its confirmation must agree and be long
+    /// enough (create, change); a single passphrase must not be empty.
+    fn local_problem(&self) -> Option<ErrorSummary> {
+        let problem = |message: &str, hint: Option<&str>| ErrorSummary {
+            code: "vault_form".into(),
+            message: message.to_owned(),
+            hint: hint.map(str::to_owned),
+        };
+        let values: Vec<&str> = self.fields.iter().map(|f| f.value.as_str()).collect();
+        let (new, confirm) = match (&self.purpose, values.as_slice()) {
+            (SecretPurpose::VaultCreate { .. }, [new, confirm])
+            | (SecretPurpose::VaultChange, [_, new, confirm]) => (*new, *confirm),
+            (_, ["", ..]) => {
+                return Some(problem("type the passphrase", None));
+            }
+            _ => return None,
+        };
+        if new.chars().count() < MIN_PASSPHRASE_CHARS {
+            return Some(problem(
+                &format!("the vault passphrase needs at least {MIN_PASSPHRASE_CHARS} characters"),
+                Some("Several words are long and easy to remember."),
+            ));
+        }
+        (new != confirm).then(|| problem("the passphrases do not match", None))
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> SecretOutcome {
+        if self.busy || self.opened_at.elapsed() < ARM_DELAY {
+            return SecretOutcome::Pending;
+        }
+        let stops = self.fields.len().max(1);
+        match key.code {
+            KeyCode::Esc => return SecretOutcome::Cancel,
+            KeyCode::Enter => {
+                if let Some(problem) = self.local_problem() {
+                    self.error = Some(problem);
+                    return SecretOutcome::Pending;
+                }
+                return SecretOutcome::Submit(self.take());
+            }
+            KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % stops,
+            KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + stops - 1) % stops,
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(f) = self.fields.get_mut(self.focus) {
+                    zeroize::Zeroize::zeroize(&mut *f.value);
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(f) = self.fields.get_mut(self.focus)
+                    && f.value.chars().count() < MAX_INPUT
+                {
+                    f.value.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = self.fields.get_mut(self.focus) {
+                    f.value.pop();
+                }
+            }
+            _ => {}
+        }
+        SecretOutcome::Pending
+    }
+
+    pub(crate) fn paste(&mut self, text: &str) {
+        if self.busy || self.opened_at.elapsed() < ARM_DELAY {
+            return;
+        }
+        if let Some(field) = self.fields.get_mut(self.focus) {
+            let line = text.lines().next().unwrap_or_default();
+            for c in line.chars().filter(|c| !c.is_control()) {
+                if field.value.chars().count() >= MAX_INPUT {
+                    break;
+                }
+                field.value.push(c);
+            }
+        }
+    }
+
+    /// Hands the answers over and wipes every buffer.
+    fn take(&mut self) -> Vec<SecretString> {
+        let count = match self.purpose {
+            SecretPurpose::VaultChange => 2,
+            _ => 1,
+        };
+        let answers = self
+            .fields
+            .iter()
+            .take(count)
+            .map(|f| SecretString::from(f.value.as_str()))
+            .collect();
+        for f in &mut self.fields {
+            zeroize::Zeroize::zeroize(&mut *f.value);
+        }
+        self.busy = true;
+        self.error = None;
+        answers
+    }
+
+    /// The engine refused the answer: say why and ask again (re-armed, so
+    /// a held `Enter` does not resubmit an empty field).
+    pub(crate) fn fail(&mut self, error: ErrorSummary) {
+        self.busy = false;
+        self.failures = self.failures.saturating_add(1);
+        self.error = Some(error);
+        self.focus = 0;
+        self.opened_at = Instant::now();
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +541,83 @@ mod tests {
         assert!(matches!(
             risky.handle_key(key(KeyCode::Enter)),
             Outcome::Answer(PromptResponse::Cancel)
+        ));
+    }
+
+    fn armed(purpose: SecretPurpose) -> SecretDialog {
+        let mut d = SecretDialog::new(purpose);
+        d.opened_at = Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .unwrap_or_else(Instant::now);
+        d
+    }
+
+    fn typed(d: &mut SecretDialog, text: &str) {
+        for c in text.chars() {
+            d.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn vault_create_checks_length_and_confirmation() {
+        let mut d = armed(SecretPurpose::VaultCreate { offered: false });
+        typed(&mut d, "short");
+        d.handle_key(key(KeyCode::Tab));
+        typed(&mut d, "short");
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Enter)),
+            SecretOutcome::Pending
+        ));
+        assert!(
+            d.error
+                .as_ref()
+                .is_some_and(|e| e.message.contains("at least 8"))
+        );
+        d.handle_key(key(KeyCode::Tab));
+        typed(&mut d, "correct horse");
+        d.handle_key(key(KeyCode::Tab));
+        typed(&mut d, " battery");
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Enter)),
+            SecretOutcome::Pending
+        ));
+        assert!(
+            d.error
+                .as_ref()
+                .is_some_and(|e| e.message.contains("do not match"))
+        );
+    }
+
+    #[test]
+    fn vault_change_hands_over_old_and_new_then_wipes() {
+        let mut d = armed(SecretPurpose::VaultChange);
+        typed(&mut d, "old passphrase");
+        d.handle_key(key(KeyCode::Tab));
+        typed(&mut d, "new passphrase");
+        d.handle_key(key(KeyCode::Tab));
+        typed(&mut d, "new passphrase");
+        let SecretOutcome::Submit(answers) = d.handle_key(key(KeyCode::Enter)) else {
+            panic!("submit");
+        };
+        let got: Vec<&str> = answers.iter().map(ExposeSecret::expose_secret).collect();
+        assert_eq!(got, ["old passphrase", "new passphrase"]);
+        assert!(d.fields.iter().all(|f| f.value.is_empty()));
+        assert!(d.busy);
+        // Busy: keys are ignored until the engine answers.
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Esc)),
+            SecretOutcome::Pending
+        ));
+        d.fail(ErrorSummary {
+            code: "vault_wrong_passphrase".into(),
+            message: "wrong vault passphrase".into(),
+            hint: None,
+        });
+        assert_eq!(d.failures, 1);
+        // Re-armed: an immediate key is ignored.
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Esc)),
+            SecretOutcome::Pending
         ));
     }
 

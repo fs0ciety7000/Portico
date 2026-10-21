@@ -23,15 +23,11 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("↵", "Connect"),
             ("d", "Disconnect"),
             ("f · p", "Files · tunnels"),
+            ("i · s", "Keys · snippets"),
             ("1-9 · ] · [", "Tab · next · prev"),
             ("r · t", "Reload · theme"),
             ("q", "Quit"),
         ],
-    ),
-    ("Terminal", &[("Shift-PgUp", "Scroll back")]),
-    (
-        "Tunnels",
-        &[("a", "Add -L / -R"), ("↵ · x", "Start · stop")],
     ),
     (
         "Ctrl-Space, then…",
@@ -41,9 +37,11 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n · w", "New tab · close tab"),
             ("d", "Disconnect host"),
             ("f · p", "Files · tunnels"),
+            ("i · s", "Keys · snippets"),
             ("Ctrl-Space", "Send it to remote"),
         ],
     ),
+    ("Terminal", &[("Shift-PgUp", "Scroll back")]),
     (
         "Files",
         &[
@@ -53,9 +51,28 @@ pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n F7", "New folder"),
             ("r F2", "Rename"),
             ("d Del F8", "Delete (asks)"),
-            ("x", "Cancel transfer"),
-            (".", "Hidden files"),
+            ("x · .", "Cancel · hidden"),
             ("Ctrl-R · Esc", "Refresh · back"),
+        ],
+    ),
+    (
+        "Tunnels",
+        &[("a", "Add -L / -R"), ("↵ · x", "Start · stop")],
+    ),
+    (
+        "Keys",
+        &[
+            ("n · c", "New · copy to host"),
+            ("a · x", "Agent add · remove"),
+            ("y · v V", "Copy pub · vault"),
+        ],
+    ),
+    (
+        "Snippets (type to filter)",
+        &[
+            ("↵ · Ctrl-N", "Run · new"),
+            ("Ctrl-E", "Edit"),
+            ("Ctrl-D", "Delete (asks)"),
         ],
     ),
 ];
@@ -87,12 +104,8 @@ pub(crate) fn map_key(
         return None;
     }
     let is_prefix_key = ctrl && matches!(key.code, KeyCode::Char(' ' | '@'));
-    // The tunnels panel takes every key (Ctrl-C closes it).
-    if overlay == Some(Overlay::Tunnels) {
-        if ctrl && key.code == KeyCode::Char('c') {
-            return Some(Action::CloseOverlay);
-        }
-        return Some(Action::TunnelsKey(key));
+    if let Some(action) = panel_key(key, overlay, ctrl) {
+        return Some(action);
     }
     // The prefix works from every view, so tab commands are the same everywhere.
     if prefix {
@@ -157,6 +170,8 @@ pub(crate) fn map_key(
             KeyCode::Char('d') => Some(Action::Disconnect),
             KeyCode::Char('f') => Some(Action::OpenFiles),
             KeyCode::Char('p') => Some(Action::OpenTunnels),
+            KeyCode::Char('i') => Some(Action::OpenKeys),
+            KeyCode::Char('s') => Some(Action::OpenSnippets),
             KeyCode::Char(']') | KeyCode::Tab => Some(Action::NextTab),
             KeyCode::Char('[') | KeyCode::BackTab => Some(Action::PrevTab),
             KeyCode::Char(c @ '1'..='9') => Some(Action::GoTab(usize::from(c as u8 - b'1'))),
@@ -166,6 +181,21 @@ pub(crate) fn map_key(
             _ => None,
         },
     }
+}
+
+/// The tunnels, keys and snippets panels take every key (they hold forms);
+/// `Ctrl-C` closes them.
+fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Action> {
+    let wrap: fn(KeyEvent) -> Action = match overlay? {
+        Overlay::Tunnels => Action::TunnelsKey,
+        Overlay::Keys => Action::KeysKey,
+        Overlay::Snippets => Action::SnippetsKey,
+        Overlay::Help => return None,
+    };
+    if ctrl && key.code == KeyCode::Char('c') {
+        return Some(Action::CloseOverlay);
+    }
+    Some(wrap(key))
 }
 
 fn prefix_command(key: KeyEvent, is_prefix_key: bool, focus: Focus) -> Action {
@@ -187,6 +217,8 @@ fn prefix_command(key: KeyEvent, is_prefix_key: bool, focus: Focus) -> Action {
         KeyCode::Char('d') => Action::Disconnect,
         KeyCode::Char('f') => Action::OpenFiles,
         KeyCode::Char('p') => Action::OpenTunnels,
+        KeyCode::Char('i') => Action::OpenKeys,
+        KeyCode::Char('s') => Action::OpenSnippets,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('/') => Action::FocusSearch,
         _ => Action::CancelPrefix,

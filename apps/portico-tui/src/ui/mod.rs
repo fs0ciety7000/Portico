@@ -4,8 +4,11 @@ mod details;
 mod dialog;
 mod files;
 pub(crate) mod fmt;
+mod form;
 mod hosts;
+mod keys;
 mod overlays;
+mod snippets;
 mod status;
 mod statusbar;
 mod terminal;
@@ -84,8 +87,13 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     {
         tunnels::render(panel, &app.tunnels, s, tick, frame);
     }
+    match app.overlay {
+        Some(crate::app::Overlay::Keys) => keys::render(app, frame),
+        Some(crate::app::Overlay::Snippets) => snippets::render(app, frame),
+        _ => {}
+    }
     if let Some(d) = app.dialogs.front() {
-        dialog::render(d, s, frame);
+        dialog::render(d, s, tick, frame);
     }
 }
 
