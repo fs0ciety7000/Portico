@@ -16,6 +16,9 @@
     armedAt = $bindable(0),
     onescape,
     onkey,
+    onshortcut,
+    scroll = true,
+    footerWrap = true,
     children,
     footer,
   }: {
@@ -30,6 +33,14 @@
     onescape: () => void;
     /** Single-key answers (`y`, `k`…), once armed; true when handled. */
     onkey?: (key: string) => boolean;
+    /** Modified shortcuts (`Ctrl-N`…), once armed, from any element of the
+     * dialog (fields included); true when handled. */
+    onshortcut?: (e: KeyboardEvent) => boolean;
+    /** `false`: the body does not scroll as a whole; the content lays out
+     * its own scrolling part (a flex column: give it `min-height: 0`). */
+    scroll?: boolean;
+    /** `false`: the footer stays on one line (short labels, small buttons). */
+    footerWrap?: boolean;
     children: Snippet;
     footer: Snippet;
   } = $props();
@@ -38,6 +49,9 @@
   let dialog: HTMLDivElement;
 
   onMount(() => {
+    // A remounted dialog (new error, new question) arms again from scratch,
+    // even when the parent's bound flag is still set from the last one.
+    armed = false;
     const previous = document.activeElement as HTMLElement | null;
     const focusField = () => (dialog.querySelector<HTMLElement>("[data-autofocus]") ?? dialog).focus();
     // Nothing reaches the views behind the dialog, even if the webview left
@@ -61,6 +75,9 @@
       e.stopPropagation();
       if (armed) {
         if (e.key === "Escape") onescape();
+        // The focused control went away (a footer that changed with the
+        // dialog's state): the key still means what it means in the dialog.
+        else if (onkey && !e.metaKey && !e.ctrlKey && !e.altKey && onkey(e.key)) return;
         else focusField();
       }
     };
@@ -86,6 +103,10 @@
     if (e.key === "Escape") {
       e.preventDefault();
       if (armed) onescape();
+      return;
+    }
+    if (armed && onshortcut && (e.ctrlKey || e.metaKey) && onshortcut(e)) {
+      e.preventDefault();
       return;
     }
     if (armed && onkey && !e.metaKey && !e.ctrlKey && !e.altKey && !isField(e.target) && !(e.key === "Enter" && e.target instanceof HTMLButtonElement) && onkey(e.key)) {
@@ -124,8 +145,8 @@
     transition:scale={{ start: 0.97, duration: dur("base") }}
   >
     <header id={labelledBy}>{@render title()}</header>
-    <div class="body">{@render children()}</div>
-    <footer>{@render footer()}</footer>
+    <div class="body" class:fixed={!scroll}>{@render children()}</div>
+    <footer class:nowrap={!footerWrap}>{@render footer()}</footer>
   </div>
 </div>
 
@@ -159,6 +180,12 @@
     max-height: min(720px, calc(100vh - 2 * var(--space-6)));
   }
   .modal.wide .body { overflow-y: auto; }
+  .modal.wide .body.fixed {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
   .modal.danger {
     border-color: color-mix(in srgb, var(--status-error) 55%, var(--border-strong));
     border-top: 3px solid var(--status-error);
@@ -184,6 +211,8 @@
     padding: var(--space-3) var(--space-5);
     border-top: 1px solid var(--border-subtle);
   }
+  footer.nowrap { flex-wrap: nowrap; }
+  footer.nowrap :global(button) { white-space: nowrap; }
   /* Shared by dialog contents. */
   .modal :global(button) {
     display: inline-flex;

@@ -1,9 +1,13 @@
 <script lang="ts">
   // Snippets: filterable list (scope shown), run in the active terminal
   // (placeholders form, errors inline), editor, delete confirmation.
-  // List keys: j/k ↑↓ move · / filter · ↵ run · n new · e edit · d delete.
+  // List keys: j/k ↑↓ move · / filter · ↵ run · n new · e edit · d delete
+  // (Ctrl-N / Ctrl-E / Ctrl-D everywhere, the filter included).
+  // A paste-only multi-line snippet the core refused (`snippet_needs_paste_mode`)
+  // runs only with `r`, after the dialog re-arms: never with the Enter that
+  // caused the refusal (same grammar as the TUI).
   import { fly } from "svelte/transition";
-  import type { ErrorSummary, Snippet, SnippetDraft } from "../api";
+  import { sentence, type ErrorSummary, type Snippet, type SnippetDraft } from "../api";
   import { dur } from "../motion";
   import { isMac } from "../keys";
   import { emptyDraft, NEEDS_PASTE_MODE, scopeLabel, snippets, type SnippetTarget } from "../state/snippets.svelte";
@@ -78,9 +82,17 @@
     e.preventDefault();
   }
 
+  /** `Ctrl-N` / `Ctrl-E` / `Ctrl-D`: aliases of n / e / d, from anywhere in
+   * the list view (the filter field included). */
+  function onListShortcut(e: KeyboardEvent): boolean {
+    if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
+    const k = e.key.toLowerCase();
+    return k === "n" || k === "e" || k === "d" ? act(k) : false;
+  }
+
   function onFilterKey(e: KeyboardEvent) {
-    if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) snippets.selected = Math.min(snippets.selected + 1, Math.max(shown.length - 1, 0));
-    else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) snippets.selected = Math.max(snippets.selected - 1, 0);
+    if (e.key === "ArrowDown") snippets.selected = Math.min(snippets.selected + 1, Math.max(shown.length - 1, 0));
+    else if (e.key === "ArrowUp") snippets.selected = Math.max(snippets.selected - 1, 0);
     else if (e.key === "Enter") startRun(current);
     else if (e.key === "Escape" && snippets.filter) {
       snippets.filter = "";
@@ -100,6 +112,8 @@
   // ── Run ──
   let values: Record<string, string> = $state({});
   let running = $state(false);
+  /** The run dialog is armed (re-armed after each error). */
+  let runArmed = $state(false);
 
   async function runNow(s: Snippet, vals: Record<string, string>, run: boolean | null) {
     if (running) return;
@@ -114,11 +128,24 @@
     }
   }
 
-  function onRunKey(e: KeyboardEvent, s: Snippet) {
+  function onRunKey(e: KeyboardEvent, s: Snippet, pasteMode: boolean) {
     if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) {
       e.preventDefault();
-      void runNow(s, $state.snapshot(values), null);
+      // After a paste-mode refusal, Enter (what was refused) does nothing.
+      if (!pasteMode) void runNow(s, $state.snapshot(values), null);
     }
+  }
+
+  /** The placeholder field an error is about, when it can be told from the
+   * values themselves (empty, or holding a line break / control character);
+   * null when it cannot. Never read from the message text. */
+  function invalidField(s: Snippet, error: ErrorSummary | null): string | null {
+    if (!error) return null;
+    const bad = (v: string | undefined) =>
+      // eslint-disable-next-line no-control-regex
+      error.code === "snippet_missing_value" ? !v : error.code === "snippet_value" && /[\u0000-\u001f\u007f]/.test(v ?? "");
+    const fields = s.placeholders.filter((name) => bad(values[name]));
+    return fields.length === 1 ? (fields[0] ?? null) : null;
   }
 
   // ── Edit ──
@@ -150,7 +177,9 @@
   }
 
   function onEditKey(e: KeyboardEvent) {
-    const submit = e.key === "Enter" && ((isMac ? e.metaKey : e.ctrlKey) || !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLButtonElement));
+    const saveKey = e.key.toLowerCase() === "s" && (e.ctrlKey || (isMac && e.metaKey)) && !e.altKey && !e.shiftKey;
+    const submit =
+      saveKey || (e.key === "Enter" && ((isMac ? e.metaKey : e.ctrlKey) || !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLButtonElement)));
     if (submit) {
       e.preventDefault();
       void save();
@@ -171,40 +200,58 @@
   {@const s = snippets.view.snippet}
   {@const error = snippets.view.error}
   {@const pasteMode = error?.code === NEEDS_PASTE_MODE}
-  <Modal
-    onescape={back}
-    onkey={(k) => (k === "Enter" && !pasteMode && canRun ? (void runNow(s, $state.snapshot(values), null), true) : false)}
-    labelledBy="snippet-run-title"
-  >
-    {#snippet title()}Run {s.name}{#if target}<span class="title-host">· {target.alias}</span>{/if}{/snippet}
-    <div class="form" role="presentation" onkeydown={(e) => onRunKey(e, s)}>
-      <pre class="command mono">{s.command}</pre>
-      {#if !pasteMode}
-        {#each s.placeholders as name, i (name)}
-          <label class="field">
-            <span class="mono">{`{{${name}}}`}</span>
-            <!-- svelte-ignore a11y_autofocus -->
-            <input class="mono" data-autofocus={i === 0 ? "" : undefined} bind:value={values[name]} spellcheck="false" autocomplete="off" aria-invalid={!!error} />
-          </label>
-        {/each}
-      {/if}
-      {#if error}
-        <div class="inline-error" role="alert" in:fly={{ y: 6, duration: dur("base") }}>
-          <span>{error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}
-        </div>
-      {/if}
-      {#if !s.placeholders.length && !pasteMode}<div class="focus-sink" data-autofocus tabindex="-1" role="presentation"></div>{/if}
-    </div>
-    {#snippet footer()}
-      <span class="footer-note">{s.run ? "Runs it (Enter is sent)" : "Pastes it, without Enter"}</span>
-      <button class="secondary" onclick={back}>Cancel <kbd>Esc</kbd></button>
-      {#if pasteMode}
-        <button class="primary" data-autofocus disabled={running} onclick={() => runNow(s, $state.snapshot(values), true)}>Run it <kbd>↵</kbd></button>
-      {:else}
-        <button class="primary" disabled={running || !canRun} onclick={() => runNow(s, $state.snapshot(values), null)}>{s.run ? "Run" : "Paste"} <kbd>↵</kbd></button>
-      {/if}
-    {/snippet}
-  </Modal>
+  {@const invalid = invalidField(s, error)}
+  <!-- A new error remounts the dialog: it re-arms (400 ms without a key)
+       before `r` can run the refused snippet. -->
+  {#key error}
+    <Modal
+      bind:armed={runArmed}
+      onescape={back}
+      onkey={(k) =>
+        pasteMode
+          ? k === "r" && !running
+            ? (void runNow(s, $state.snapshot(values), true), true)
+            : false
+          : k === "Enter" && canRun
+            ? (void runNow(s, $state.snapshot(values), null), true)
+            : false}
+      labelledBy="snippet-run-title"
+    >
+      {#snippet title()}{pasteMode || s.run ? "Run" : "Paste"} {s.name}{#if target}<span class="title-host">· {target.alias}</span>{/if}{/snippet}
+      <div class="form" role="presentation" onkeydown={(e) => onRunKey(e, s, pasteMode)}>
+        <pre class="command mono">{s.command}</pre>
+        {#if !pasteMode}
+          {#each s.placeholders as name, i (name)}
+            <label class="field">
+              <span class="mono">{`{{${name}}}`}</span>
+              <!-- svelte-ignore a11y_autofocus -->
+              <input class="mono" data-autofocus={i === 0 ? "" : undefined} bind:value={values[name]} spellcheck="false" autocomplete="off" aria-invalid={invalid === name} />
+            </label>
+          {/each}
+        {/if}
+        {#if pasteMode && error}
+          <!-- A safeguard, not a failure. -->
+          <div class="guard" role="status" in:fly={{ y: 6, duration: dur("base") }}>
+            <strong>{sentence(error.message)}</strong>{#if error.hint}<span>{error.hint}</span>{/if}
+          </div>
+        {:else if error}
+          <div class="inline-error" role="alert" in:fly={{ y: 6, duration: dur("base") }}>
+            <span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}
+          </div>
+        {/if}
+        {#if pasteMode || !s.placeholders.length}<div class="focus-sink" data-autofocus tabindex="-1" role="presentation"></div>{/if}
+      </div>
+      {#snippet footer()}
+        <span class="footer-note">{pasteMode || s.run ? "Runs every line (Enter is sent)" : "Pastes it, without Enter"}</span>
+        <button class="secondary" onclick={back}>Cancel <kbd>Esc</kbd></button>
+        {#if pasteMode}
+          <button class="secondary" disabled={running || !runArmed} onclick={() => runNow(s, $state.snapshot(values), true)}>Run it <kbd>r</kbd></button>
+        {:else}
+          <button class="primary" disabled={running || !canRun} onclick={() => runNow(s, $state.snapshot(values), null)}>{s.run ? "Run" : "Paste"} <kbd>↵</kbd></button>
+        {/if}
+      {/snippet}
+    </Modal>
+  {/key}
 {:else if snippets.view.kind === "edit"}
   <Modal size="wide" onescape={back} labelledBy="snippet-edit-title">
     {#snippet title()}{draft.id ? "Edit snippet" : "New snippet"}{/snippet}
@@ -240,12 +287,12 @@
         <span>Run it (send Enter). Unchecked, the command is pasted for you to review.</span>
       </label>
       {#if saveError}
-        <div class="inline-error" role="alert"><span>{saveError.message}</span>{#if saveError.hint}<span class="hint">{saveError.hint}</span>{/if}</div>
+        <div class="inline-error" role="alert"><span>{sentence(saveError.message)}</span>{#if saveError.hint}<span class="hint">{saveError.hint}</span>{/if}</div>
       {/if}
     </div>
     {#snippet footer()}
       <button class="secondary" onclick={back}>Cancel <kbd>Esc</kbd></button>
-      <button class="primary" disabled={saving || !draft.name.trim() || !draft.command.trim()} onclick={save}>Save <kbd>{isMac ? "⌘↵" : "Ctrl-↵"}</kbd></button>
+      <button class="primary" disabled={saving || !draft.name.trim() || !draft.command.trim()} onclick={save}>Save <kbd>{isMac ? "⌘S" : "Ctrl-S"}</kbd></button>
     {/snippet}
   </Modal>
 {:else if snippets.view.kind === "delete"}
@@ -255,7 +302,7 @@
     <p>It is removed from <span class="mono">snippets.toml</span>. This cannot be undone.</p>
     <pre class="command mono">{s.command}</pre>
     {#if deleteError}
-      <div class="inline-error" role="alert"><span>{deleteError.message}</span>{#if deleteError.hint}<span class="hint">{deleteError.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span>{sentence(deleteError.message)}</span>{#if deleteError.hint}<span class="hint">{deleteError.hint}</span>{/if}</div>
     {/if}
     {#snippet footer()}
       <button class="secondary" data-autofocus onclick={back}>Keep <kbd>n</kbd></button>
@@ -263,7 +310,7 @@
     {/snippet}
   </Modal>
 {:else}
-  <Modal size="wide" onescape={() => snippets.close()} onkey={act} labelledBy="snippets-title">
+  <Modal size="wide" onescape={() => snippets.close()} onkey={act} onshortcut={onListShortcut} labelledBy="snippets-title">
     {#snippet title()}Snippets{#if snippets.alias}<span class="title-host">· {snippets.alias}</span>{/if}{/snippet}
 
     <label class="filter">
@@ -275,15 +322,19 @@
     {#if !canRun}
       <div class="banner" role="status">
         <strong>No open terminal</strong>
-        <span>{snippets.alias ? `Open a terminal on ${snippets.alias} to run a snippet there.` : "Open a terminal tab to run a snippet."} You can still create and edit them.</span>
+        <span>
+          {#if snippets.alias}<kbd>Esc</kbd>, then <kbd>↵</kbd> to {target ? "reconnect" : "connect"} <span class="mono">{snippets.alias}</span>.
+          {:else}Open a terminal tab to run a snippet.{/if}
+          You can still create and edit snippets.
+        </span>
       </div>
     {/if}
 
     <div class="list" bind:this={listEl} tabindex="0" role="listbox" aria-label="Snippets" data-autofocus onkeydown={onListKey}>
       {#if snippets.state === "loading"}
-        {#each [0, 1, 2] as i (i)}<div class="skeleton" style:animation-delay="{i * 80}ms"></div>{/each}
+        {#each [0, 1, 2] as i (i)}<div class="skeleton" style:animation-delay="calc({i} * var(--motion-fast))"></div>{/each}
       {:else if snippets.state === "error" && snippets.error}
-        <div class="state error"><strong>{snippets.error.message}</strong>{#if snippets.error.hint}<span>{snippets.error.hint}</span>{/if}</div>
+        <div class="state error"><strong>{sentence(snippets.error.message)}</strong>{#if snippets.error.hint}<span>{snippets.error.hint}</span>{/if}</div>
       {:else if !snippets.all.length}
         <div class="state"><strong>No snippets yet</strong><span>Save the commands you type often with <kbd>n</kbd>; <span class="mono">{"{{placeholders}}"}</span> are asked for at run time.</span></div>
       {:else if !shown.length}
@@ -349,7 +400,7 @@
   .list { display: grid; gap: 2px; outline: none; border-radius: var(--radius-md); }
   /* Focus shows on the selected row, not around the whole list. */
   .list:focus-visible { outline: none; }
-  .list:focus-visible .row.selected { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+  .list:focus-visible .row.selected { box-shadow: inset 0 0 0 2px var(--accent); }
   .row {
     position: relative;
     display: grid;
@@ -381,7 +432,7 @@
   .badge {
     display: inline-flex;
     align-items: center;
-    height: 20px;
+    height: var(--space-5);
     padding: 0 var(--space-2);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-pill);
@@ -413,6 +464,18 @@
     overflow-y: auto;
     user-select: text;
   }
+  .guard {
+    display: grid;
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid color-mix(in srgb, var(--status-warning) 45%, transparent);
+    border-left: 2px solid var(--status-warning);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--status-warning) 6%, var(--bg-elevated));
+    font-size: var(--text-sm);
+  }
+  .guard strong { color: var(--status-warning); font-weight: 550; }
+  .guard span { color: var(--text-secondary); }
   .scope { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
   .scope input { flex: 1; min-width: 180px; }
   .optional { color: var(--text-muted); font-weight: 450; }

@@ -2,8 +2,9 @@
   // Keys view: local key pairs, then ssh-agent identities, then the vault.
   // Keys: j/k ↑↓ move · n new · a add to agent · x remove from agent ·
   // c copy to a host · y copy the public key · v / V vault · Ctrl-R refresh.
+  // Only the lists scroll: the vault strip stays visible at any height.
   import { fly } from "svelte/transition";
-  import type { AgentKey, Certificate, ErrorSummary, LocalKey } from "../api";
+  import { sentence, type AgentKey, type Certificate, type ErrorSummary, type LocalKey } from "../api";
   import { dur } from "../motion";
   import { algorithmLabel, keys, relative, shortDate } from "../state/keys.svelte";
   import { vault } from "../state/vault.svelte";
@@ -116,7 +117,7 @@
       <dt>Fingerprint</dt><dd class="fingerprint">{key.fingerprint}</dd>
     </dl>
     {#if removeError}
-      <div class="inline-error" role="alert"><span>{removeError.message}</span>{#if removeError.hint}<span class="hint">{removeError.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span>{sentence(removeError.message)}</span>{#if removeError.hint}<span class="hint">{removeError.hint}</span>{/if}</div>
     {/if}
     {#snippet footer()}
       <button class="secondary" data-autofocus onclick={() => (keys.view = { kind: "list" })}>Keep <kbd>n</kbd></button>
@@ -124,16 +125,16 @@
     {/snippet}
   </Modal>
 {:else}
-  <Modal size="wide" onescape={() => keys.close()} onkey={act} labelledBy="keys-title">
-    {#snippet title()}Keys<span class="title-host">· ~/.ssh and ssh-agent</span>{/snippet}
+  <Modal size="wide" scroll={false} footerWrap={false} onescape={() => keys.close()} onkey={act} labelledBy="keys-title">
+    {#snippet title()}Keys<span class="title-host">· ~/.ssh and ssh-agent</span><span class="title-hint"><kbd>Ctrl-R</kbd> refresh</span>{/snippet}
 
     <div class="lists" bind:this={listEl} tabindex="0" role="listbox" aria-label="Keys" data-autofocus onkeydown={onListKey}>
       <section>
         <h3>Local keys {#if keys.localState === "ready"}<span class="count">{keys.local.length}</span>{/if}</h3>
         {#if keys.localState === "loading"}
-          {#each [0, 1, 2] as i (i)}<div class="skeleton" style:animation-delay="{i * 80}ms"></div>{/each}
+          {#each [0, 1, 2] as i (i)}<div class="skeleton" style:animation-delay="calc({i} * var(--motion-fast))"></div>{/each}
         {:else if keys.localState === "error" && keys.localError}
-          <div class="state error"><strong>{keys.localError.message}</strong>{#if keys.localError.hint}<span>{keys.localError.hint}</span>{/if}</div>
+          <div class="state error"><strong>{sentence(keys.localError.message)}</strong>{#if keys.localError.hint}<span>{keys.localError.hint}</span>{/if}</div>
         {:else if !keys.local.length}
           <div class="state"><strong>No keys in ~/.ssh yet</strong><span>Create one with <kbd>n</kbd>: Ed25519 is a good default.</span></div>
         {:else}
@@ -170,7 +171,7 @@
         {#if keys.agentState === "loading"}
           <div class="skeleton"></div>
         {:else if keys.agentState === "error" && keys.agentError}
-          <div class="state warning"><strong>{keys.agentError.message}</strong>{#if keys.agentError.hint}<span>{keys.agentError.hint}</span>{/if}</div>
+          <div class="state warning"><strong>{sentence(keys.agentError.message)}</strong>{#if keys.agentError.hint}<span>{keys.agentError.hint}</span>{/if}</div>
         {:else if !keys.agent.length}
           <div class="state"><strong>The agent holds no identity</strong><span>Select a local key and press <kbd>a</kbd> to add it.</span></div>
         {:else}
@@ -189,6 +190,13 @@
         {/if}
       </section>
     </div>
+
+    {#if keys.publicLine && current?.kind === "local" && current.key.id === keys.publicLine.id}
+      <div class="public-line">
+        <span class="note">Public key of <span class="mono">{keys.publicLine.id}</span>: select the line and copy it.</span>
+        <pre class="mono" tabindex="-1">{keys.publicLine.text}</pre>
+      </div>
+    {/if}
 
     {#if vault.inUse}
       <div class="vault" data-status={vault.status}>
@@ -210,17 +218,16 @@
     {/if}
 
     {#snippet footer()}
-      <span class="footer-note"><kbd>Ctrl-R</kbd> refresh</span>
       {#if current?.kind === "local"}
-        <button class="secondary" onclick={() => act("y")}>Copy public key <kbd>y</kbd></button>
-        <button class="secondary" onclick={() => act("c")}>Copy to host <kbd>c</kbd></button>
+        <button class="secondary small" onclick={() => act("y")}>Copy key <kbd>y</kbd></button>
+        <button class="secondary small" onclick={() => act("c")}>Copy to host… <kbd>c</kbd></button>
         {#if keys.inAgent(current.key.fingerprint)}
-          <button class="secondary" onclick={() => act("x")}>Remove from agent <kbd>x</kbd></button>
+          <button class="secondary small" onclick={() => act("x")}>Remove from agent <kbd>x</kbd></button>
         {:else if current.key.hasPrivate}
-          <button class="secondary" disabled={keys.agentState === "error"} onclick={() => act("a")}>Add to agent <kbd>a</kbd></button>
+          <button class="secondary small" disabled={keys.agentState === "error"} onclick={() => act("a")}>Add to agent <kbd>a</kbd></button>
         {/if}
       {:else if current?.kind === "agent"}
-        <button class="secondary" onclick={() => act("x")}>Remove from agent <kbd>x</kbd></button>
+        <button class="secondary small" onclick={() => act("x")}>Remove from agent <kbd>x</kbd></button>
       {/if}
       <button class="primary" onclick={() => act("n")}>New key <kbd>n</kbd></button>
     {/snippet}
@@ -228,10 +235,44 @@
 {/if}
 
 <style>
-  .lists { display: grid; gap: var(--space-4); outline: none; border-radius: var(--radius-md); }
+  /* The lists scroll; the public key line and the vault stay in view. */
+  .lists {
+    display: grid;
+    align-content: start;
+    gap: var(--space-4);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    outline: none;
+    border-radius: var(--radius-md);
+  }
   /* Focus shows on the selected row, not around the whole list. */
   .lists:focus-visible { outline: none; }
-  .lists:focus-visible .row.selected { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+  .lists:focus-visible .row.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+  .title-hint {
+    float: right;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 450;
+    line-height: normal;
+    margin-top: var(--space-1);
+  }
+  .public-line { flex: none; display: grid; gap: var(--space-1); }
+  .public-line pre {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    overflow-x: auto;
+    user-select: all;
+    scrollbar-width: thin;
+  }
   section { display: grid; gap: var(--space-1); }
   h3 {
     margin: 0 0 var(--space-1);
@@ -275,7 +316,7 @@
     --c: var(--text-muted);
     display: inline-flex;
     align-items: center;
-    height: 20px;
+    height: var(--space-5);
     padding: 0 var(--space-2);
     border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
     border-radius: var(--radius-pill);
@@ -301,7 +342,8 @@
   .vault {
     --c: var(--status-idle);
     display: grid;
-    grid-template-columns: 8px auto minmax(0, 1fr) auto;
+    flex: none;
+    grid-template-columns: var(--space-2) auto minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--space-2) var(--space-3);
     margin-top: var(--space-2);
@@ -311,12 +353,12 @@
   }
   .vault[data-status="unlocked"] { --c: var(--status-connected); }
   .vault[data-status="locked"] { --c: var(--status-warning); }
-  .vault .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+  .vault .dot { width: var(--space-2); height: var(--space-2); border-radius: 50%; background: var(--c); }
   .vault-label { color: var(--text-primary); font-weight: 550; }
   .vault-sub { color: var(--text-muted); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vault-actions { display: flex; gap: var(--space-2); }
   @media (max-width: 900px) {
-    .vault { grid-template-columns: 8px minmax(0, 1fr) auto; }
+    .vault { grid-template-columns: var(--space-2) minmax(0, 1fr) auto; }
     .vault-sub { display: none; }
   }
 </style>

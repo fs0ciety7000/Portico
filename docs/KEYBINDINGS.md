@@ -220,26 +220,31 @@ le dossier affiché en bas du panneau (« Change » ou la palette pour en choisi
 
 ## Clés (GUI)
 
-Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent, puis le vault (masqué quand le trousseau
-système est utilisé). Le premier focus est sur la liste ; chaque action a aussi son bouton et son entrée de palette.
+Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent (seules les listes défilent), puis le bandeau du
+vault, toujours visible (masqué quand le trousseau système est utilisé). Le premier focus est sur la liste ; chaque
+action a aussi son bouton (« Copy key », « Copy to host… », « Add to agent » / « Remove from agent », « New key ») et
+son entrée de palette, qui affiche la touche (« New key » : `⌘⇧I, n` / `Ctrl-Shift-I, n` ; vault : `…, v` / `…, V`).
 
 | Action | Touches |
 |---|---|
 | Ouvrir (depuis la liste des hôtes / partout ; aussi « Keys » dans la palette) | `i` / `⌘⇧I` (Linux : `Ctrl-Shift-I`) |
 | Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
-| Nouvelle clé (Ed25519 par défaut, RSA 3072/4096, ECDSA P-256/384/521 ; `↵` crée) | `n` |
-| Ajouter à l'agent (durée : jusqu'au retrait, 1 h, 8 h ; passphrase demandée si la clé est chiffrée) | `a` |
+| Nouvelle clé (Ed25519 par défaut, RSA 3072/4096, ECDSA P-256/384/521 ; `↵` crée ; passphrase vide ou d’au moins 8 caractères, compteur plafonné « n / 8 min » ; après un refus, la passphrase effacée doit être ressaisie, ou son absence cochée, avant de recréer) | `n` |
+| Ajouter à l'agent (durée : « Until removed », 1 h, 8 h ; passphrase demandée si la clé est chiffrée) | `a` |
 | Retirer de l'agent (confirmation, focus sur `Keep` : `y` retire, `n` / `Esc` garde) | `x` |
 | Copier sur un hôte (recherche d'hôte, `↑` `↓`, `↵`) | `c` |
-| Copier la clé publique (presse-papiers) | `y` |
+| Copier la clé publique (presse-papiers ; s'il est indisponible, la ligne s'affiche, prête à sélectionner) | `y` |
 | Vault : déverrouiller / verrouiller (ou créer s'il n'existe pas) | `v` |
 | Vault : changer la passphrase (ou créer) | `V` |
-| Rafraîchir | `Ctrl-R` |
+| Rafraîchir (rappelé dans le titre du dialogue) | `Ctrl-R` |
 | Fermer (depuis un sous-dialogue : revenir à la liste) | `Esc` |
 
-**Copy-id** : étapes « Connecting · Installing · Verifying ». Réutilise la session vivante de l'hôte, sinon en ouvre
-une (prompts habituels) et la ferme ensuite. Résultat : `↵` termine, `c` copie les lignes `Host` / `IdentityFile`
-à ajouter soi-même (Portico n'écrit jamais `~/.ssh/config`). Échec : message et hint, `↵` réessaie, `Esc` ferme.
+**Copy-id** (« Copy to host ») : étapes « Connecting · Installing · Verifying ». Réutilise la session vivante de l'hôte,
+sinon en ouvre une (prompts habituels) et la ferme ensuite. Un prompt lié à la copie (clé hôte, mot de passe,
+passphrase de la vérification) porte le sous-titre « Copy <clé> to <hôte> · <étape> ». Pendant la copie, `Esc`
+(« Hide ») masque le dialogue sans l'interrompre : une notification dit comment elle s'est terminée. Résultat : `↵`
+termine, `c` copie les lignes `Host` / `IdentityFile` à ajouter soi-même (Portico n'écrit jamais `~/.ssh/config`).
+Échec : message et hint, `r` ou `↵` réessaie, `Esc` ferme.
 
 **Vault au démarrage** : verrouillé, Portico demande la passphrase maître une fois ; `Esc` (« Continue without ») laisse
 les secrets non mémorisés jusqu'au déverrouillage (`v` dans Clés). Cocher « Remember » sans vault (ou vault verrouillé)
@@ -253,13 +258,15 @@ propose ensuite de le créer (ou de le déverrouiller).
 | Exécuter depuis la palette (une entrée « Run: <nom> » par snippet de l'hôte de l'onglet actif) | `⌘K` (Linux : `Ctrl-Shift-K`) |
 | Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
 | Filtrer (dans le filtre : `↑` `↓`, `↵` exécute, `Esc` vide puis rend la liste) | `/` |
-| Exécuter dans l'onglet actif (formulaire des placeholders si besoin, `↵` envoie) | `↵`, double-clic |
-| Nouveau / éditer (`⌘↵` ou `Ctrl-↵` enregistre ; `↵` dans un champ d'une ligne aussi) | `n` / `e` |
-| Supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde) | `d` |
-| Snippet multi-ligne « paste only » refusé sans bracketed paste | `↵` « Run it » (l'exécute), `Esc` annule |
+| Exécuter (« Run ») ou coller (« Paste ») dans l'onglet actif (formulaire des placeholders si besoin, `↵` envoie) | `↵`, double-clic |
+| Nouveau / éditer / supprimer (aussi depuis le filtre) | `n` / `e` / `d`, ou `Ctrl-N` / `Ctrl-E` / `Ctrl-D` |
+| Enregistrer dans l'éditeur (`↵` dans un champ d'une ligne aussi) | `Ctrl-S` (macOS : `⌘S`), `Ctrl-↵` (`⌘↵`) |
+| Confirmer la suppression (focus sur `Keep` : `y` supprime, `n` / `Esc` garde) | `y` |
+| Snippet multi-ligne « paste only » refusé sans bracketed paste (garde-fou, encadré d'avertissement) | `r` « Run it » (exécute chaque ligne, Entrée envoyée), après réarmement (400 ms sans frappe) ; `↵` ne fait rien ; `Esc` annule |
 | Fermer | `Esc` |
 
-Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée (bannière explicative).
+Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée ; la bannière « No open terminal » donne
+l'action suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé).
 Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.
 
 ## Prévus

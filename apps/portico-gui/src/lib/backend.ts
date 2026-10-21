@@ -23,7 +23,6 @@ import {
   type TunnelInfo,
   type Upload,
 } from "./api";
-import { demoBackend } from "./demo";
 
 export interface Backend {
   listHosts(): Promise<Host[]>;
@@ -90,7 +89,32 @@ const tauriBackend: Backend = {
 /** Outside Tauri: the simulation in development, nothing in a production
  * build (a release page served elsewhere must never pretend to connect). */
 const unavailable = new Proxy({} as Backend, {
-  get: () => () => Promise.reject({ code: "no_engine", message: "Portico's engine is not available here", hint: null }),
+  get: (_target, name) =>
+    name === "then" || typeof name === "symbol"
+      ? undefined
+      : () => Promise.reject({ code: "no_engine", message: "Portico's engine is not available here", hint: null }),
 });
 
-export const backend: Backend = isTauri() ? tauriBackend : import.meta.env.DEV || import.meta.env.MODE === "demo" ? demoBackend : unavailable;
+/** Every method of `Backend` returns a promise: the implementation can load
+ * on first use. */
+function lazy(load: () => Promise<Backend>): Backend {
+  let loaded: Promise<Backend> | null = null;
+  return new Proxy({} as Backend, {
+    get: (_target, name) =>
+      name === "then" || typeof name === "symbol"
+        ? undefined
+        : (...args: unknown[]) =>
+            (loaded ??= load()).then((b) => (b[name as keyof Backend] as (...a: unknown[]) => Promise<unknown>)(...args)),
+  });
+}
+
+// The demo is a separate chunk, imported only in development or a
+// `--mode demo` build: a production bundle neither contains it nor runs its
+// side effects (drop listeners). Vite folds this condition at build time.
+const demoEnabled = import.meta.env.DEV || import.meta.env.MODE === "demo";
+
+export const backend: Backend = isTauri()
+  ? tauriBackend
+  : demoEnabled
+    ? lazy(() => import("./demo").then((m) => m.installDemo()))
+    : unavailable;

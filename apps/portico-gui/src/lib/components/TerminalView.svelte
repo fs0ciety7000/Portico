@@ -11,7 +11,7 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { WebglAddon } from "@xterm/addon-webgl";
   import "@xterm/xterm/css/xterm.css";
-  import { asError, describe } from "../api";
+  import { asError, describe, sentence } from "../api";
   import { backend } from "../backend";
   import { appShortcut, chunks, kbd, sanitizePaste, sanitizeTitle } from "../keys";
   import { dur } from "../motion";
@@ -384,7 +384,7 @@
             Portico refused to connect. Fix <code>known_hosts</code> only once the administrator confirms the new key.
           </p>
         {:else}
-          <p class="message">{error.message}</p>
+          <p class="message">{sentence(error.message)}</p>
           {#if error.hint}<p class="hint">{error.hint}</p>{/if}
         {/if}
         <div class="actions">

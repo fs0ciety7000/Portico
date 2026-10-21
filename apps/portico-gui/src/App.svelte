@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
-  import { describe, formatRtt, isTauri, setHome, type Host, type ThemeInfo } from "./lib/api";
+  import { describe, formatRtt, isTauri, sentence, setHome, type Host, type ThemeInfo } from "./lib/api";
   import { backend } from "./lib/backend";
   import { appShortcut, isMac, kbd, kbdShift, tabKbd } from "./lib/keys";
   import { dur } from "./lib/motion";
@@ -96,16 +96,18 @@
     tab && snippetTarget?.terminal != null && snippets.palette?.alias === tab.alias ? snippets.palette.list : [],
   );
 
+  /** "Open Keys, then …": the key that does it from the keys view. */
+  const inKeys = (k: string) => `${kbdShift("I")}, ${k}`;
   const vaultCommands: Command[] = $derived(
     vault.status === "locked"
-      ? [{ id: "vault-unlock", title: "Unlock the vault", run: () => vault.open("unlock", "keys") }]
+      ? [{ id: "vault-unlock", title: "Unlock the vault", shortcut: inKeys("v"), run: () => vault.open("unlock", "keys") }]
       : vault.status === "unlocked"
         ? [
-            { id: "vault-lock", title: "Lock the vault", run: () => void vault.lock() },
-            { id: "vault-change", title: "Change the vault passphrase", run: () => vault.open("change", "keys") },
+            { id: "vault-lock", title: "Lock the vault", shortcut: inKeys("v"), run: () => void vault.lock() },
+            { id: "vault-change", title: "Change the vault passphrase", shortcut: inKeys("V"), run: () => vault.open("change", "keys") },
           ]
         : vault.status === "absent"
-          ? [{ id: "vault-create", title: "Create a vault for remembered secrets", run: () => vault.open("create", "keys") }]
+          ? [{ id: "vault-create", title: "Create a vault for remembered secrets", shortcut: inKeys("V"), run: () => vault.open("create", "keys") }]
           : [],
   );
   const showFiles = $derived(filesOpen && !!tab);
@@ -211,10 +213,10 @@
         ]
       : []),
     { id: "keys", title: "Keys", hint: "~/.ssh and ssh-agent", shortcut: kbdShift("I"), run: () => keys.show() },
-    { id: "new-key", title: "New key", run: () => keys.show({ kind: "new" }) },
+    { id: "new-key", title: "New key", shortcut: inKeys("n"), run: () => keys.show({ kind: "new" }) },
     ...vaultCommands,
     { id: "snippets", title: "Snippets", shortcut: kbdShift("S"), run: openSnippets },
-    { id: "new-snippet", title: "New snippet", run: () => snippets.show(tab?.alias ?? null, { kind: "edit", draft: emptyDraft(tab?.alias ?? null) }) },
+    { id: "new-snippet", title: "New snippet", shortcut: `${kbdShift("S")}, n`, run: () => snippets.show(tab?.alias ?? null, { kind: "edit", draft: emptyDraft(tab?.alias ?? null) }) },
     ...paletteSnippets.map((s) => ({ id: `snippet-${s.id}`, title: `Run: ${s.name}`, hint: scopeLabel(s), run: () => void runFromPalette(s) })),
     { id: "tunnels", title: "Tunnels", hint: tunnels.list.length ? `${tunnels.list.length} running` : undefined, shortcut: kbdShift("P"), run: () => (tunnelsOpen = true) },
     { id: "download-dir", title: "Change download folder", hint: files.downloadDir || undefined, run: () => void files.chooseDownloadDir() },
@@ -412,7 +414,12 @@
   {/key}
 {:else if prompt}
   {#key prompt.id}
-    <PromptDialog {prompt} alias={workspace.aliasOf(prompt.session)} onanswer={(a) => workspace.answer(prompt, a)} />
+    <PromptDialog
+      {prompt}
+      alias={workspace.aliasOf(prompt.session)}
+      context={keys.copyContext(prompt.session, workspace.aliasOf(prompt.session))}
+      onanswer={(a) => workspace.answer(prompt, a)}
+    />
   {/key}
 {:else if conflict}
   {#key conflict}
@@ -439,7 +446,7 @@
   {/key}
 {:else if vault.dialog}
   {#key vault.dialog}
-    <VaultDialog mode={vault.dialog.mode} reason={vault.dialog.reason} />
+    <VaultDialog dialog={vault.dialog} />
   {/key}
 {:else if keys.open}
   {#key keys.view}
@@ -470,13 +477,20 @@
 
 {#if workspace.toast}
   {@const toast = workspace.toast}
-  <div class="toast" data-tone={toast.tone} role={toast.tone === "error" ? "alert" : "status"} transition:fly={{ y: 12, duration: dur("base") }}>
+  <!-- Above an open dialog, the notice goes to the top right, clear of its buttons. -->
+  <div
+    class="toast"
+    class:top={modalOpen}
+    data-tone={toast.tone}
+    role={toast.tone === "error" ? "alert" : "status"}
+    transition:fly={{ y: modalOpen ? -12 : 12, duration: dur("base") }}
+  >
     <svg viewBox="0 0 16 16" aria-hidden="true">
       {#if toast.tone === "error"}<circle cx="8" cy="8" r="6.25" /><path d="M8 4.75v3.75M8 11.1v.1" />
       {:else}<circle cx="8" cy="8" r="6.25" /><path d="M8 7.25v4M8 4.9v.1" />{/if}
     </svg>
     <div class="toast-text">
-      <strong>{toast.message}</strong>
+      <strong>{sentence(toast.message)}</strong>
       {#if toast.hint}<span>{toast.hint}</span>{/if}
     </div>
   </div>
@@ -601,6 +615,7 @@
     box-shadow: var(--shadow-raised);
     z-index: 30;
   }
+  .toast.top { top: calc(44px + var(--space-4)); bottom: auto; }
   .toast[data-tone="info"] { --c: var(--border-strong); }
   .toast svg {
     flex: 0 0 auto;

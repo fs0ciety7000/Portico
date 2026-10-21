@@ -19,7 +19,16 @@ export interface CopyRun {
   outcome: CopyIdOutcome | null;
   verified: boolean;
   error: ErrorSummary | null;
+  /** Session the key is installed through (prompts on it name the copy). */
+  session: number | null;
 }
+
+/** `Connecting`, `Installing`, `Verifying` (progress list, prompt context). */
+export const COPY_STEP_LABEL: Record<CopyStep, string> = {
+  connecting: "Connecting",
+  installing: "Installing",
+  verifying: "Verifying",
+};
 
 export type KeysView =
   | { kind: "list" }
@@ -43,6 +52,9 @@ class Keys {
   /** Row index: local keys first, then agent identities. */
   selected = $state(0);
   copy: CopyRun | null = $state(null);
+  /** The public key line shown for manual selection when the clipboard
+   * refused it. */
+  publicLine: { id: string; text: string } | null = $state(null);
   #copyGen = 0;
   #loadGen = 0;
 
@@ -61,9 +73,10 @@ class Keys {
   }
 
   close() {
-    if (this.view.kind === "copy") this.cancelCopy();
+    if (this.view.kind === "copy") this.hideCopy();
     this.open = false;
     this.view = { kind: "list" };
+    this.publicLine = null;
   }
 
   async refresh() {
@@ -109,12 +122,25 @@ class Keys {
   }
 
   async copyPublic(key: LocalKey) {
+    let text: string;
     try {
-      const text = await backend.publicKeyText(key.id);
-      await navigator.clipboard.writeText(text);
-      workspace.notify({ code: "copied", message: `Copied the public key of ${key.id}`, hint: null }, "info");
+      text = await backend.publicKeyText(key.id);
     } catch (e) {
       workspace.notify(e);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      this.publicLine = null;
+      workspace.notify({ code: "copied", message: `Copied the public key of ${key.id}`, hint: null }, "info");
+    } catch {
+      // Same fallback as the TUI: the line, ready to select by hand.
+      this.publicLine = { id: key.id, text };
+      workspace.notify({
+        code: "clipboard",
+        message: `Could not copy the public key of ${key.id}`,
+        hint: "Clipboard unavailable: select the key line instead.",
+      });
     }
   }
 
@@ -135,7 +161,7 @@ class Keys {
   async startCopy(key: LocalKey, alias: string) {
     const gen = ++this.#copyGen;
     const stale = () => gen !== this.#copyGen;
-    this.copy = { key, alias, step: "connecting", failedAt: null, outcome: null, verified: false, error: null };
+    this.copy = { key, alias, step: "connecting", failedAt: null, outcome: null, verified: false, error: null, session: null };
     this.view = { kind: "copy" };
     const run = this.copy;
     let session: number | null = null;
@@ -149,6 +175,7 @@ class Keys {
         opened = session !== null;
         if (session === null) throw { code: "connect", message: `could not connect to ${alias}`, hint: null };
       }
+      run.session = session;
       const failed = await workspace.settled(session);
       if (stale()) return;
       if (failed) throw failed;
@@ -169,6 +196,25 @@ class Keys {
       run.step = "failed";
     } finally {
       if (opened && session !== null) this.#release(session);
+      if (!stale()) this.#reportIfHidden(run);
+    }
+  }
+
+  /** The copy dialog is not on screen: say how the copy ended. */
+  #reportIfHidden(run: CopyRun) {
+    if (this.open && this.view.kind === "copy") return;
+    if (run.step === "done") {
+      const what = run.outcome === "already_present" ? "was already on" : "is installed on";
+      workspace.notify(
+        {
+          code: "copy_id",
+          message: `${run.key.id} ${what} ${run.alias}`,
+          hint: run.verified ? "Logging in with it works." : null,
+        },
+        "info",
+      );
+    } else if (run.step === "failed" && run.error) {
+      workspace.notify(run.error);
     }
   }
 
@@ -177,10 +223,31 @@ class Keys {
     if (run) void this.startCopy(run.key, run.alias);
   }
 
-  cancelCopy() {
+  /** Leaves the progress dialog: the copy goes on (it cannot be
+   * interrupted halfway safely), and a toast reports how it ended. */
+  hideCopy() {
+    const run = this.copy;
+    if (run && (run.step === "done" || run.step === "failed")) {
+      this.dismissCopy();
+      return;
+    }
+    this.view = { kind: "list" };
+  }
+
+  /** Forgets a finished copy (Done / Close). */
+  dismissCopy() {
     this.#copyGen++;
     this.copy = null;
     this.view = { kind: "list" };
+  }
+
+  /** The prompt belongs to the running copy (its session, or the
+   * verification login on the same host). */
+  copyContext(session: number | null, alias: string | undefined): string | null {
+    const run = this.copy;
+    if (!run || run.step === "done" || run.step === "failed") return null;
+    const ours = (session !== null && session === run.session) || (run.step !== "installing" && alias === run.alias);
+    return ours ? `Copy ${run.key.id} to ${run.alias} · ${COPY_STEP_LABEL[run.step]}` : null;
   }
 
   /** Closes a session opened for copy-id, unless a tab now uses it. */

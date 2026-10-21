@@ -327,8 +327,23 @@ export function durationMs(d: Duration): number {
 }
 
 export function asError(e: unknown): ErrorSummary {
-  if (e && typeof e === "object" && "message" in e) return e as ErrorSummary;
+  // A native `Error` / `DOMException` (clipboard, IPC) keeps `name` and
+  // `message` on its prototype chain: a spread would lose them.
+  if (e instanceof Error || (typeof DOMException !== "undefined" && e instanceof DOMException)) {
+    return { code: e.name || "error", message: e.message || String(e), hint: null };
+  }
+  if (e && typeof e === "object" && "message" in e) {
+    const { code, message, hint } = e as Partial<ErrorSummary>;
+    return { code: typeof code === "string" ? code : "unknown", message: String(message ?? ""), hint: typeof hint === "string" ? hint : null };
+  }
   return { code: "unknown", message: String(e), hint: null };
+}
+
+/** Core messages are lowercase sentences (`wrong vault passphrase`): the UI
+ * capitalizes the first word for display, unless it is a name, a path or an
+ * identifier (`id_ed25519 …`, `~/.ssh/…`, `ssh-agent …`), left as written. */
+export function sentence(text: string): string {
+  return /^[a-z]+(?:\s|$)/.test(text) ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
 
 export type Status = "idle" | "connecting" | "authenticating" | "connected" | "warning" | "error";
