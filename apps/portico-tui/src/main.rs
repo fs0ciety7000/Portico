@@ -8,9 +8,11 @@
 mod action;
 mod app;
 mod dialog;
+mod files;
 mod keymap;
 mod terminal;
 mod theme;
+mod tunnels;
 mod ui;
 
 use color_eyre::Result;

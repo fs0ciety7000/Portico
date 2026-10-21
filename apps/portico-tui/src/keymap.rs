@@ -4,44 +4,61 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::Action;
-use crate::app::Focus;
+use crate::app::{Focus, Overlay};
 
 /// (keys, description) rows shown in the `?` overlay, by section.
 pub(crate) const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Hosts",
         &[
-            ("j / k  ↓ / ↑", "Move selection"),
-            ("g / G", "First / last host"),
-            ("/  or  Ctrl-K", "Search hosts (fuzzy, #tag, * favorites)"),
-            ("Enter", "Connect (opens a terminal tab)"),
-            ("d", "Disconnect the selected host"),
-            ("1-9  ] [", "Go to tab / next / previous"),
-            ("r · t · q", "Reload config · theme · quit"),
+            ("j k  ↓ ↑", "Move"),
+            ("g · G", "First · last"),
+            ("/ · Ctrl-K", "Search (#tag, *fav)"),
+            ("Enter", "Connect"),
+            ("d", "Disconnect"),
+            ("f · p", "Files · tunnels"),
+            ("1-9  ] [", "Tab · next · prev"),
+            ("r · t · q", "Reload, theme, quit"),
         ],
     ),
-    ("Terminal", &[("Shift-PgUp / PgDn", "Scroll back")]),
+    ("Terminal", &[("Shift-PgUp/Dn", "Scroll back")]),
     (
-        "Anywhere  (Ctrl-Space, then…)",
+        "Ctrl-Space, then…",
         &[
-            ("h  or  0", "Back to hosts"),
-            ("1-9  ] [", "Go to tab / next / previous"),
-            ("n", "New tab on the same host"),
-            ("w", "Close tab (last tab disconnects)"),
-            ("d", "Disconnect this host"),
-            ("Ctrl-Space", "Send Ctrl-Space to the remote"),
+            ("h · 0", "Back to hosts"),
+            ("1-9  ] [", "Tab · next · prev"),
+            ("n · w", "New tab · close tab"),
+            ("d", "Disconnect host"),
+            ("f · p", "Files · tunnels"),
+            ("Ctrl-Space", "Send it to remote"),
         ],
+    ),
+    (
+        "Files",
+        &[
+            ("Tab", "Switch pane"),
+            ("↵ · Bksp", "Open · parent"),
+            ("c  F5", "Copy across"),
+            ("n F7 · r F2", "New folder · rename"),
+            ("d  F8", "Delete (asks)"),
+            ("x · .", "Cancel · hidden"),
+            ("Ctrl-R · Esc", "Refresh · back"),
+        ],
+    ),
+    (
+        "Tunnels",
+        &[("a", "Add -L / -R"), ("↵ · x", "Start · stop")],
     ),
 ];
 
-#[allow(clippy::fn_params_excessive_bools)] // flat input context, clearer than a struct here
 pub(crate) fn map_key(
     key: KeyEvent,
     focus: Focus,
-    overlay_open: bool,
+    overlay: Option<Overlay>,
     dialog_open: bool,
     prefix: bool,
 ) -> Option<Action> {
+    let overlay_open = overlay.is_some();
     if key.kind == KeyEventKind::Release {
         return None;
     }
@@ -61,9 +78,27 @@ pub(crate) fn map_key(
         return None;
     }
     let is_prefix_key = ctrl && matches!(key.code, KeyCode::Char(' ' | '@'));
+    // The tunnels panel takes every key (Ctrl-C closes it).
+    if overlay == Some(Overlay::Tunnels) {
+        if ctrl && key.code == KeyCode::Char('c') {
+            return Some(Action::CloseOverlay);
+        }
+        return Some(Action::TunnelsKey(key));
+    }
     // The prefix works from every view, so tab commands are the same everywhere.
     if prefix {
         return Some(prefix_command(key, is_prefix_key, focus));
+    }
+    if focus == Focus::Files && !overlay_open {
+        return Some(match key.code {
+            _ if is_prefix_key => Action::Prefix,
+            // Ctrl-C leaves the explorer rather than quitting Portico.
+            KeyCode::Char('c') if ctrl => {
+                Action::FilesKey(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            }
+            KeyCode::Char('?') => Action::ToggleHelp,
+            _ => Action::FilesKey(key),
+        });
     }
     if focus == Focus::Terminal {
         if overlay_open {
@@ -98,7 +133,7 @@ pub(crate) fn map_key(
             KeyCode::Char(c) if !ctrl => Some(Action::SearchInput(c)),
             _ => None,
         },
-        Focus::Hosts | Focus::Terminal => match key.code {
+        Focus::Hosts | Focus::Terminal | Focus::Files => match key.code {
             KeyCode::Char('k') if ctrl => Some(Action::FocusSearch),
             KeyCode::Char('u') if ctrl => Some(Action::SearchClear),
             KeyCode::Char('q') => Some(Action::Quit),
@@ -111,6 +146,8 @@ pub(crate) fn map_key(
             KeyCode::Char('t') => Some(Action::CycleTheme),
             KeyCode::Char('r') => Some(Action::Reload),
             KeyCode::Char('d') => Some(Action::Disconnect),
+            KeyCode::Char('f') => Some(Action::OpenFiles),
+            KeyCode::Char('p') => Some(Action::OpenTunnels),
             KeyCode::Char(']') | KeyCode::Tab => Some(Action::NextTab),
             KeyCode::Char('[') | KeyCode::BackTab => Some(Action::PrevTab),
             KeyCode::Char(c @ '1'..='9') => Some(Action::GoTab(usize::from(c as u8 - b'1'))),
@@ -139,6 +176,8 @@ fn prefix_command(key: KeyEvent, is_prefix_key: bool, focus: Focus) -> Action {
         KeyCode::Char('n') => Action::NewTab,
         KeyCode::Char('w') => Action::CloseTab,
         KeyCode::Char('d') => Action::Disconnect,
+        KeyCode::Char('f') => Action::OpenFiles,
+        KeyCode::Char('p') => Action::OpenTunnels,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('/') => Action::FocusSearch,
         _ => Action::CancelPrefix,
@@ -157,26 +196,26 @@ mod tests {
     fn terminal_focus_sends_everything_but_the_prefix() {
         let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
-            map_key(ctrl_c, Focus::Terminal, false, false, false),
+            map_key(ctrl_c, Focus::Terminal, None, false, false),
             Some(Action::TerminalKey(_))
         ));
         let prefix = key(KeyCode::Char(' '), KeyModifiers::CONTROL);
         assert!(matches!(
-            map_key(prefix, Focus::Terminal, false, false, false),
+            map_key(prefix, Focus::Terminal, None, false, false),
             Some(Action::Prefix)
         ));
         assert!(matches!(
             map_key(
                 key(KeyCode::Char('w'), KeyModifiers::NONE),
                 Focus::Terminal,
-                false,
+                None,
                 false,
                 true
             ),
             Some(Action::CloseTab)
         ));
         assert!(matches!(
-            map_key(prefix, Focus::Terminal, false, false, true),
+            map_key(prefix, Focus::Terminal, None, false, true),
             Some(Action::TerminalKey(_))
         ));
     }
@@ -185,14 +224,14 @@ mod tests {
     fn prefix_works_from_the_host_list() {
         let prefix = key(KeyCode::Char(' '), KeyModifiers::CONTROL);
         assert!(matches!(
-            map_key(prefix, Focus::Hosts, false, false, false),
+            map_key(prefix, Focus::Hosts, None, false, false),
             Some(Action::Prefix)
         ));
         assert!(matches!(
             map_key(
                 key(KeyCode::Char('2'), KeyModifiers::NONE),
                 Focus::Hosts,
-                false,
+                None,
                 false,
                 true
             ),
@@ -200,15 +239,44 @@ mod tests {
         ));
         // Twice from the host list: nothing to forward it to.
         assert!(matches!(
-            map_key(prefix, Focus::Hosts, false, false, true),
+            map_key(prefix, Focus::Hosts, None, false, true),
             Some(Action::CancelPrefix)
+        ));
+    }
+
+    #[test]
+    fn files_and_tunnels_capture_their_keys() {
+        let d = key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(matches!(
+            map_key(d, Focus::Files, None, false, false),
+            Some(Action::FilesKey(_))
+        ));
+        let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let Some(Action::FilesKey(k)) = map_key(ctrl_c, Focus::Files, None, false, false) else {
+            panic!("ctrl-c should leave the explorer");
+        };
+        assert_eq!(k.code, KeyCode::Esc);
+        let q = key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(
+            map_key(q, Focus::Hosts, Some(Overlay::Tunnels), false, false),
+            Some(Action::TunnelsKey(_))
+        ));
+        assert!(matches!(
+            map_key(
+                key(KeyCode::Char('f'), KeyModifiers::NONE),
+                Focus::Terminal,
+                None,
+                false,
+                true
+            ),
+            Some(Action::OpenFiles)
         ));
     }
 
     #[test]
     fn dialogs_capture_keys_and_ctrl_c_cancels() {
         let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let Some(Action::DialogKey(k)) = map_key(ctrl_c, Focus::Hosts, false, true, false) else {
+        let Some(Action::DialogKey(k)) = map_key(ctrl_c, Focus::Hosts, None, true, false) else {
             panic!("dialog should capture");
         };
         assert_eq!(k.code, KeyCode::Esc);

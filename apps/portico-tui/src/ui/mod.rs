@@ -2,12 +2,14 @@
 
 mod details;
 mod dialog;
+mod files;
 pub(crate) mod fmt;
 mod hosts;
 mod overlays;
 mod status;
 mod statusbar;
 mod terminal;
+mod tunnels;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -43,7 +45,18 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         cols: body.width.max(1),
         rows: body.height.max(1),
     };
-    if let Some(view) = app.active_terminal() {
+    let tick = app.tick;
+    if app.focus == crate::app::Focus::Files
+        && let Some(view) = &mut app.files
+    {
+        files::render(
+            view,
+            s,
+            tick,
+            frame,
+            body.inner(ratatui::layout::Margin::new(1, 0)),
+        );
+    } else if let Some(view) = app.active_terminal() {
         let focused = app.dialogs.is_empty() && app.overlay.is_none();
         terminal::render(view, focused, s, frame, body);
     } else {
@@ -56,6 +69,11 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     }
     statusbar::render(app, frame, status);
     overlays::render(app, frame);
+    if app.overlay == Some(crate::app::Overlay::Tunnels)
+        && let Some(panel) = &mut app.tunnels_panel
+    {
+        tunnels::render(panel, &app.tunnels, s, tick, frame);
+    }
     if let Some(d) = app.dialogs.front() {
         dialog::render(d, s, frame);
     }

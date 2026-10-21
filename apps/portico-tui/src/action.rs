@@ -3,7 +3,10 @@
 use crossterm::event::KeyEvent;
 use portico_core::EngineEvent;
 use portico_core::engine::{HostInventory, TerminalHandle};
-use portico_core::ids::TerminalId;
+use portico_core::forward::ForwardSpec;
+use portico_core::ids::{SessionId, TerminalId, TunnelId};
+
+use crate::files::FilesEvent;
 
 #[derive(Debug)]
 pub(crate) enum Action {
@@ -50,5 +53,18 @@ pub(crate) enum Action {
     TerminalOpened {
         alias: String,
         result: Result<Box<TerminalHandle>, portico_core::ErrorSummary>,
+    },
+    // SFTP explorer
+    OpenFiles,
+    FilesKey(KeyEvent),
+    Files(FilesEvent),
+    // Tunnels panel
+    OpenTunnels,
+    TunnelsKey(KeyEvent),
+    TunnelStarted {
+        session: SessionId,
+        alias: String,
+        spec: ForwardSpec,
+        result: Result<TunnelId, portico_core::ErrorSummary>,
     },
 }

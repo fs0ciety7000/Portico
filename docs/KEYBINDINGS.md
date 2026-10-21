@@ -19,6 +19,8 @@
 | Vider la recherche | `Ctrl-U` (ou `Esc` hors recherche) | `Esc` |
 | Se connecter (ouvre un onglet terminal, ou y revient) | `↵` | `↵`, double-clic |
 | Se déconnecter (hôte sélectionné) | `d` | `d` |
+| Explorateur de fichiers (SFTP) de l'hôte (se connecte au besoin) | `f` | (phase 2, GUI) |
+| Tunnels | `p` | (phase 2, GUI) |
 | Aller à l'onglet n / suivant / précédent | `1`-`9`, `]` / `Tab`, `[` / `Shift-Tab` | `⌘1`…`⌘9` (Linux : `Alt-1`…`9`), `Ctrl-Tab` / `Ctrl-Shift-Tab` |
 | Préfixe des commandes d'onglet (comme dans un terminal) | `Ctrl-Space` | — |
 | Palette de commandes | — | `⌘K` |
@@ -41,11 +43,47 @@ l'annule.
 | Nouvel onglet sur le même hôte | `Ctrl-Space` puis `n` |
 | Fermer l'onglet (le dernier onglet d'un hôte le déconnecte) | `Ctrl-Space` puis `w` |
 | Déconnecter cet hôte | `Ctrl-Space` puis `d` |
+| Explorateur de fichiers (SFTP) | `Ctrl-Space` puis `f` |
+| Tunnels | `Ctrl-Space` puis `p` |
 | Rechercher un hôte | `Ctrl-Space` puis `/` |
 | Aide | `Ctrl-Space` puis `?` |
 | Envoyer `Ctrl-Space` au programme distant | `Ctrl-Space` deux fois |
 | Remonter / descendre dans l'historique | `Shift-PgUp` / `Shift-PgDn` (toute frappe revient en bas) |
 | Coller | collage du terminal hôte (bracketed paste si le programme distant l'active) |
+
+## Explorateur de fichiers (TUI)
+
+Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet actif (ou de l'hôte sélectionné).
+Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas tant qu'elle n'est pas vide.
+
+| Action | Touches |
+|---|---|
+| Changer de panneau | `Tab` / `Shift-Tab` |
+| Se déplacer | `j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G` |
+| Ouvrir le dossier / remonter | `↵`, `→`, `l` / `Backspace`, `←`, `h` |
+| Copier la sélection vers l'autre panneau (download ou upload) | `c` ou `F5` |
+| Nouveau dossier | `n` ou `F7` |
+| Renommer | `r` ou `F2` |
+| Supprimer (confirmation `y` / `n`) | `d`, `F8` ou `Suppr` |
+| Annuler le dernier transfert en cours | `x` |
+| Afficher / masquer les fichiers cachés | `.` |
+| Rafraîchir les deux panneaux | `Ctrl-R` |
+| Destination existante | `k` garder les deux (`nom (1).ext`) · `o` écraser · `s` ignorer · `Esc` annuler |
+| Aide | `?` |
+| Revenir (terminal ou liste des hôtes) | `Esc`, `q`, `Ctrl-C` |
+
+## Tunnels (TUI)
+
+Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config`
+(`LocalForward`, `RemoteForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.
+
+| Action | Touches |
+|---|---|
+| Ajouter (`-L 8080:db:5432`, `-R 9000:localhost:3000`) | `a` (ou `n`), saisie, `↵` |
+| Démarrer un tunnel proposé | `↵` |
+| Arrêter le tunnel sélectionné | `x`, `d` ou `Suppr` |
+| Confirmer une écoute exposée (adresse autre que loopback) | `y` (toute autre touche annule) |
+| Fermer | `Esc`, `q`, `Ctrl-C` |
 
 ## Dialogues
 
@@ -81,7 +119,7 @@ Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le te
 | Action | TUI | GUI | Phase |
 |---|---|---|---|
 | Snippets | `Ctrl-Space s` | `⌘K` puis « Snippet » | 3 |
-| Explorateur SFTP | `Ctrl-Space f` | `⌘⇧F` | 2 |
-| Tunnels | `Ctrl-Space p` | `⌘⇧P` | 2 |
+| Explorateur SFTP | livré | `⌘⇧F` | 2 |
+| Tunnels | livré | `⌘⇧P` | 2 |
 | Logs / debug de la session | `Ctrl-Space l` | `⌘⇧L` | 4 |
-| Favori on/off | `f` | `⌘D` | 4 |
+| Favori on/off | `*` (`f` ouvre l'explorateur) | `⌘D` | 4 |

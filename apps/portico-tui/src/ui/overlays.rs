@@ -25,39 +25,68 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     h
 }
 
+/// Lines of one help section.
+fn help_section<'a>(
+    s: crate::theme::Styles,
+    title: &'a str,
+    rows: &'a [(&'a str, &'a str)],
+    key_width: usize,
+) -> Vec<Line<'a>> {
+    let mut lines = vec![Line::from(Span::styled(title, s.title()))];
+    for (k, d) in rows {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {k:<key_width$}"), s.accent()),
+            Span::styled(*d, s.secondary()),
+        ]));
+    }
+    lines
+}
+
+/// One column when it fits the screen height, else sections flow into two
+/// columns (80×24 stays readable).
 fn render_help(app: &App, frame: &mut Frame<'_>) {
     let s = app.styles();
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, (section, rows)) in HELP.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::from(""));
+    let screen = frame.area();
+    let rows: usize = HELP.iter().map(|(_, r)| r.len() + 2).sum();
+    let one_column = rows + 2 <= usize::from(screen.height);
+    let (key_width, width) = if one_column { (16, 60) } else { (15, 84) };
+    let width = width.min(screen.width.saturating_sub(2));
+    let mut columns: Vec<Vec<Line<'_>>> = vec![Vec::new()];
+    let half = rows.div_ceil(2);
+    for (title, section) in HELP {
+        let count = columns.len();
+        let used = columns.last().map_or(0, Vec::len);
+        if !one_column && used > 0 && used + section.len() > half && count < 2 {
+            columns.push(Vec::new());
         }
-        lines.push(Line::from(Span::styled(*section, s.title())));
-        for (k, d) in *rows {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<20}"), s.accent()),
-                Span::styled(*d, s.secondary()),
-            ]));
+        if let Some(current) = columns.last_mut() {
+            if !current.is_empty() {
+                current.push(Line::from(""));
+            }
+            current.extend(help_section(s, title, section, key_width));
         }
     }
-    let height = u16::try_from(lines.len())
+    let tallest = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let height = u16::try_from(tallest)
         .unwrap_or(u16::MAX)
-        .saturating_add(3)
-        .min(frame.area().height);
-    let area = centered(frame.area(), 72, height);
+        .saturating_add(2)
+        .min(screen.height);
+    let area = centered(screen, width, height);
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(s.border_focus())
-                .title(Line::from(Span::styled(" Keyboard shortcuts ", s.title())))
-                .title_bottom(Line::from(Span::styled(" Esc close ", s.muted())).right_aligned())
-                .padding(Padding::new(2, 2, 0, 0))
-                .style(s.overlay()),
-        ),
-        area,
-    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(s.border_focus())
+        .title(Line::from(Span::styled(" Keyboard shortcuts ", s.title())))
+        .title_bottom(Line::from(Span::styled(" Esc close ", s.muted())).right_aligned())
+        .padding(Padding::new(2, 2, 0, 0))
+        .style(s.overlay());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let constraints = vec![Constraint::Fill(1); columns.len()];
+    let areas = Layout::horizontal(constraints).spacing(2).split(inner);
+    for (lines, rect) in columns.into_iter().zip(areas.iter()) {
+        frame.render_widget(Paragraph::new(lines), *rect);
+    }
 }
 
 /// Bottom-right toast: neutral for information, error-coloured for

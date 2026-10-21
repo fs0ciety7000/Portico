@@ -20,9 +20,11 @@ use tokio::sync::mpsc;
 
 use crate::action::Action;
 use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
+use crate::files::{FilesView, KeyOutcome};
 use crate::keymap::map_key;
 use crate::terminal::{Ended, GridSize, TerminalView, encode_key};
 use crate::theme::Styles;
+use crate::tunnels::{PanelOutcome, TunnelRow, TunnelStatus, TunnelsPanel};
 use crate::ui;
 
 /// Which widget receives keys.
@@ -31,11 +33,14 @@ pub(crate) enum Focus {
     Hosts,
     Search,
     Terminal,
+    /// SFTP explorer of `App::files`.
+    Files,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Overlay {
     Help,
+    Tunnels,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -96,6 +101,12 @@ pub(crate) struct App {
     pub(crate) term_size: GridSize,
     /// Monotonic frame counter for spinners.
     pub(crate) tick: u64,
+    /// SFTP explorer (kept while hidden, one session at a time).
+    pub(crate) files: Option<FilesView>,
+    /// Tunnels started from this UI (all sessions).
+    pub(crate) tunnels: Vec<TunnelRow>,
+    /// The tunnels panel, while `overlay == Some(Overlay::Tunnels)`.
+    pub(crate) tunnels_panel: Option<TunnelsPanel>,
     search: HostSearch,
     tx: mpsc::UnboundedSender<Action>,
     rx: mpsc::UnboundedReceiver<Action>,
@@ -132,6 +143,9 @@ impl App {
                 rows: rows.saturating_sub(CHROME_ROWS).max(1),
             },
             tick: 0,
+            files: None,
+            tunnels: Vec::new(),
+            tunnels_panel: None,
             search: HostSearch::default(),
             tx,
             rx,
@@ -192,7 +206,7 @@ impl App {
                 let action = map_key(
                     key,
                     self.focus,
-                    self.overlay.is_some(),
+                    self.overlay,
                     !self.dialogs.is_empty(),
                     self.prefix,
                 );
@@ -213,6 +227,11 @@ impl App {
             || self.toast.is_some()
             || self.sessions.values().any(SessionView::in_flight)
             || (self.focus == Focus::Search)
+            || self.files.as_ref().is_some_and(FilesView::running)
+            || self
+                .tunnels
+                .iter()
+                .any(|t| t.status == TunnelStatus::Starting)
     }
 
     fn spawn_load_hosts(&self) {
@@ -263,12 +282,16 @@ impl App {
             }
             Action::ToggleHelp => {
                 self.prefix = false;
+                self.tunnels_panel = None;
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
-                    None => Some(Overlay::Help),
+                    _ => Some(Overlay::Help),
                 };
             }
-            Action::CloseOverlay => self.overlay = None,
+            Action::CloseOverlay => {
+                self.overlay = None;
+                self.tunnels_panel = None;
+            }
             Action::CycleTheme => {
                 self.theme_index = (self.theme_index + 1) % THEMES.len();
                 let name = self.styles().theme.name;
@@ -328,6 +351,55 @@ impl App {
                     view.dirty.store(false, Ordering::Release);
                 }
             }
+            Action::OpenFiles => {
+                self.prefix = false;
+                self.open_files();
+            }
+            Action::FilesKey(key) => {
+                if let Some(files) = &mut self.files
+                    && let KeyOutcome::Leave = files.handle_key(key)
+                {
+                    self.leave_files();
+                }
+            }
+            Action::Files(event) => {
+                if let Some(files) = &mut self.files {
+                    files.on_event(event);
+                }
+            }
+            Action::OpenTunnels => {
+                self.prefix = false;
+                self.open_tunnels();
+            }
+            Action::TunnelsKey(key) => self.tunnels_key(key),
+            Action::TunnelStarted {
+                session,
+                alias,
+                spec,
+                result,
+            } => match result {
+                Ok(id) => {
+                    // The engine may already have reported a failure.
+                    if !self.tunnels.iter().any(|t| t.id == id) {
+                        self.tunnels.push(TunnelRow {
+                            id,
+                            session,
+                            alias,
+                            spec,
+                            status: TunnelStatus::Starting,
+                            connections: 0,
+                        });
+                    }
+                    self.rebuild_tunnels_panel();
+                }
+                Err(e) => {
+                    if let Some(panel) = &mut self.tunnels_panel {
+                        panel.error = Some(e.message);
+                    } else {
+                        self.notify_error(e);
+                    }
+                }
+            },
             Action::TerminalOpened { alias, result } => match result {
                 Ok(handle) => {
                     let view = TerminalView::spawn(*handle, alias, self.term_size, self.tx.clone());
@@ -448,6 +520,161 @@ impl App {
         }
     }
 
+    // ── SFTP explorer & tunnels ────────────────────────────────────────────
+
+    /// The session the user is looking at: the active terminal's, else the
+    /// selected host's live one. `connect` starts a session if there is none.
+    fn current_session(&mut self, connect: bool) -> Option<(SessionId, String)> {
+        if let Some(view) = self
+            .active_terminal()
+            .filter(|_| self.focus != Focus::Hosts)
+        {
+            return Some((view.session, view.alias.clone()));
+        }
+        if self.focus == Focus::Files
+            && let Some(files) = &self.files
+        {
+            return Some((files.session, files.alias.clone()));
+        }
+        let alias = self.selected_host()?.alias.clone();
+        if let Some(s) = self.session_for(&alias).filter(|s| s.usable()) {
+            return Some((s.id, alias));
+        }
+        if !connect {
+            return None;
+        }
+        match self.engine.connect(ConnectRequest::new(alias.clone())) {
+            Ok(id) => {
+                self.sessions.insert(
+                    alias.clone(),
+                    SessionView {
+                        id,
+                        phase: SessionPhase::Resolving,
+                        latency: None,
+                    },
+                );
+                Some((id, alias))
+            }
+            Err(e) => {
+                self.notify_error(e.summary());
+                None
+            }
+        }
+    }
+
+    fn open_files(&mut self) {
+        let Some((session, alias)) = self.current_session(true) else {
+            return;
+        };
+        if self.files.as_ref().is_none_or(|f| f.session != session) {
+            self.files = Some(FilesView::open(
+                self.engine.clone(),
+                self.tx.clone(),
+                session,
+                alias,
+            ));
+        }
+        self.focus = Focus::Files;
+    }
+
+    fn leave_files(&mut self) {
+        self.focus = if self.active_terminal().is_some() {
+            Focus::Terminal
+        } else {
+            Focus::Hosts
+        };
+    }
+
+    fn open_tunnels(&mut self) {
+        let session = self.current_session(false);
+        let alias_of = |id: SessionId| -> String {
+            self.sessions
+                .iter()
+                .find(|(_, v)| v.id == id)
+                .map(|(a, _)| a.clone())
+                .unwrap_or_default()
+        };
+        let known = self.engine.tunnels();
+        let mut rows = std::mem::take(&mut self.tunnels);
+        crate::tunnels::sync(&mut rows, &known, alias_of);
+        self.tunnels = rows;
+        self.tunnels_panel = Some(TunnelsPanel::new(session));
+        self.overlay = Some(Overlay::Tunnels);
+        self.rebuild_tunnels_panel();
+    }
+
+    /// Forwards declared in `ssh_config` for the panel's host.
+    fn declared_forwards(&self, alias: &str) -> Vec<portico_core::forward::ForwardSpec> {
+        let Some(host) = self
+            .inventory
+            .as_ref()
+            .and_then(|i| i.hosts.iter().find(|h| h.alias == alias))
+        else {
+            return Vec::new();
+        };
+        let local = host
+            .resolved
+            .local_forwards
+            .iter()
+            .filter_map(|f| portico_core::forward::ForwardSpec::parse_local(f).ok());
+        let remote = host
+            .resolved
+            .remote_forwards
+            .iter()
+            .filter_map(|f| portico_core::forward::ForwardSpec::parse_remote(f).ok());
+        local.chain(remote).collect()
+    }
+
+    fn rebuild_tunnels_panel(&mut self) {
+        let declared = self
+            .tunnels_panel
+            .as_ref()
+            .and_then(|p| p.session.as_ref())
+            .map(|(_, alias)| self.declared_forwards(alias))
+            .unwrap_or_default();
+        if let Some(panel) = &mut self.tunnels_panel {
+            panel.rebuild(&self.tunnels, &declared);
+        }
+    }
+
+    fn tunnels_key(&mut self, key: KeyEvent) {
+        let Some(panel) = &mut self.tunnels_panel else {
+            return;
+        };
+        match panel.handle_key(key) {
+            PanelOutcome::None => {}
+            PanelOutcome::Close => {
+                self.overlay = None;
+                self.tunnels_panel = None;
+            }
+            PanelOutcome::Start(spec, allow_exposed) => {
+                let Some((session, alias)) = panel.session.clone() else {
+                    return;
+                };
+                let (engine, tx) = (self.engine.clone(), self.tx.clone());
+                tokio::spawn(async move {
+                    let result = engine
+                        .start_tunnel(session, spec.clone(), allow_exposed)
+                        .await
+                        .map_err(|e| e.summary());
+                    let _ = tx.send(Action::TunnelStarted {
+                        session,
+                        alias,
+                        spec,
+                        result,
+                    });
+                });
+            }
+            PanelOutcome::Stop(id) => {
+                if self.engine.stop_tunnel(id).is_err() {
+                    // Already gone (failed): just forget it.
+                    self.tunnels.retain(|t| t.id != id);
+                    self.rebuild_tunnels_panel();
+                }
+            }
+        }
+    }
+
     // ── sessions ───────────────────────────────────────────────────────────
 
     fn connect_selected(&mut self) {
@@ -553,6 +780,18 @@ impl App {
             EngineEvent::PromptResolved { id } => {
                 self.dialogs
                     .retain(|d| !matches!(d, Dialog::Prompt(p) if p.id == id));
+            }
+            EngineEvent::Sftp { session, event, .. } => {
+                if let Some(files) = self.files.as_mut().filter(|f| f.session == session) {
+                    files.on_sftp(&event);
+                }
+            }
+            // A guard would hide the mutation in `apply`.
+            #[allow(clippy::collapsible_match)]
+            EngineEvent::Tunnel { id, event, .. } => {
+                if crate::tunnels::apply(&mut self.tunnels, id, &event) {
+                    self.rebuild_tunnels_panel();
+                }
             }
             _ => {}
         }

@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 bytes.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true
