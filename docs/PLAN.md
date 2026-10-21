@@ -20,7 +20,7 @@
 
 **Sortie** : `cargo test` vert (35 tests), clippy propre, les deux UIs affichent les hôtes réels.
 
-## Phase 1 : connexion interactive (cœur du produit) 🔜
+## Phase 1 : connexion interactive (cœur du produit) ✅
 
 ### 1a. Transport et authentification ✅ *(Opus ; revues `agent-ssh-protocols` et `agent-security`)*
 - [x] `session/` : un acteur par session, machine d'états `SessionPhase` émise à chaque transition, registre de sessions dans l'`Engine`
@@ -62,15 +62,22 @@
 
 **Sortie** : connexion réelle à `localhost` et via un bastion, depuis les deux UIs. `vim` et `htop` sont utilisables. Statut et latence sont visibles.
 
-## Phase 2 : SFTP et forwarding ⏳ *(Opus pour le core, Sonnet pour l'UI)*
-- `sftp/` : ouverture du sous-système sur la session, `list`, `stat`, `mkdir`, `rename`, `remove`, et transferts streamés
-  (chunks de 256 Kio, progression, annulation, `OnConflict`)
-- Explorateur TUI (deux panneaux local/distant, style Midnight Commander) et GUI (liste, fil d'Ariane, glisser-déposer)
-- `forward/` : `-L` (listener tokio, puis `direct-tcpip` par connexion) et `-R` (`tcpip-forward` + `server_channel_open_forwarded_tcpip`).
-  Bind par défaut sur `localhost`. Les forwards de `ssh_config` sont proposés et non démarrés automatiquement (opt-in par hôte).
-- Panneau « Tunnels » : état, connexions actives, arrêt
+## Phase 2 : SFTP et forwarding ✅ *(Opus)*
+- [x] `sftp/` : un client par session, `list`, `stat`, `mkdir`, `rename`, `remove`, transferts streamés
+  (progression, annulation, `OnConflict`), fichier partiel exclusif puis finalisation atomique, noms hostiles neutralisés
+- [x] Explorateur TUI (deux panneaux local/distant, style Midnight Commander) et GUI (liste, fil d'Ariane, glisser-déposer,
+  jetons d'upload émis par Rust, dossier de téléchargement tenu par Rust)
+- [x] `forward/` : `-L` (toutes les adresses du bind) et `-R`, bind par défaut sur `localhost`, écoute exposée sur confirmation armée.
+  Les forwards de `ssh_config` sont proposés, jamais démarrés d'office
+- [x] Panneau « Tunnels » dans les deux UIs : état, connexions actives, arrêt, erreurs avec hint
+- [x] Les deux UIs suivent la session (phase pendant la connexion, erreur + hint + reconnexion, jamais après une clé changée)
+  et partagent la même grammaire clavier
+- Reporté : transferts récursifs (dossiers), restauration du dossier distant après reconnexion, `posix-rename@openssh.com`
 
-**Sortie** : upload et download d'un fichier de 1 Gio avec progression et annulation, et un tunnel `-L` vers une base distante fonctionnel.
+**Sortie** ✅ : 1 Gio envoyé en 4,1 s et rapatrié en 4,8 s contre OpenSSH réel (contenu identique, progression continue),
+annulation à 25 % sans fichier résiduel des deux côtés (`PORTICO_INTEROP_BIG=1`) ; tunnels `-L`/`-R` vérifiés contre OpenSSH
+(service écho, scénarios 10 et 11) et en TUI réelle (`nc` sur une écoute exposée). Le tunnel vers une vraie base de données
+reste à démontrer manuellement.
 
 ## Phase 3 : clés, secrets et snippets ⏳ *(Opus ; revue `agent-security` obligatoire)*
 - Génération : ed25519 (défaut), RSA ≥ 3072, ECDSA P-256/384/521, passphrase (bcrypt-pbkdf, OpenSSH),
@@ -116,9 +123,39 @@
 | 1a Transport et auth | ✅ | 82 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
 | 1b Terminal TUI | ✅ | 103 + interop (shell réel) | ✅ (voir ci-dessous) | ✅ (tmux 80×24 et 110×28) |
 | 1c Terminal GUI | ✅ | 106 + 3 GUI + interop | ✅ (voir ci-dessous) | ✅ (captures démo 3 thèmes + app réelle WebKitGTK) |
-| 2 SFTP / tunnels | ⏳ | | | |
+| 2 SFTP / tunnels | ✅ | 146 + 12 GUI + interop (11 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, tmux 80×24 et 110×28, re-vérifiée) |
 | 3 Clés / secrets / snippets | ⏳ | | | |
 | 4 Finition | ⏳ | | | |
+
+## Revues de la phase 2 (2026-10-21)
+
+Core revu par `agent-security` et `agent-ssh-protocols` (corrigé au commit `8385021` : fichiers partiels exclusifs,
+noms hostiles, binds exposés, canaux non sollicités refusés, pair local lent coupé avant de geler la session).
+Les UIs ont ensuite été revues séparément.
+
+### `agent-security` (UIs) : 0 CRITIQUE/ÉLEVÉ, 2 MOYEN, 3 FAIBLE, tous traités
+| Gravité | Constat | Suite donnée |
+|---|---|---|
+| MOYEN | GUI : la confirmation d'un bind exposé, déjà armée, se validait par un double-clic sur « Start » | Réarmement à l'apparition et après chaque frappe ou clic ailleurs, focus sur Cancel, liste inerte ; vérifié (double-clic, clic, clavier) |
+| MOYEN | Dossier de téléchargement replié sur `$HOME` : un `.bashrc` du serveur pouvait remplacer le vrai | Jamais le home (`~/Downloads` créé en `0700`), aucun download n'écrase un fichier caché |
+| FAIBLE | Jetons d'upload réutilisables vers n'importe quelle session | Liés au premier envoi, consommés par la réponse finale, expirés après 10 min |
+| FAIBLE | Tauri annonce au webview les chemins déposés | Fuite de noms seulement ; test qui interdit `protocol-asset` et `tauri-plugin-fs`, ADR |
+| FAIBLE | Chemins distants affichés bruts (bidi) dans le fil d'Ariane et la cible de dépôt | Assainis et isolés, renommage sans pré-remplissage d'un nom nettoyé |
+
+### `agent-design-review` : 2 BLOQUANT, 7 IMPORTANT, tous traités (re-vérification : 1 régression, corrigée)
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : confirmation d'exposition GUI non réarmée, Tab menant à « Stop » | Voir la ligne sécurité ; la re-vérification a trouvé que le réarmement bloquait la validation elle-même : corrigé (`aria-disabled`, garde dans `expose()`) |
+| **BLOQUANT** : session morte = erreur interne sans hint, « retry » inutile | Phase pendant la connexion, erreur + hint + `↵` reconnexion (deux UIs), message `session_ended` sans id, tunnels ciblant une session vivante |
+| Suppression GUI : focus sur le bouton destructif | Focus sur « Keep », `y` / `n` |
+| Actions de ligne focusables mais invisibles | Hors tabulation, visibles au focus |
+| Clavier GUI incomplet, parité TUI/GUI | `r` `d` `x` `Ctrl-R` `k/o/s` « Overwrite » partout, palette complète, tunnels `↑↓` `↵` `Suppr` |
+| Hints d'erreur des tunnels perdus ou tronqués | Message et hint séparés et repliés, effacés à la frappe suivante (deux UIs) |
+| Aide `?` TUI tronquée à 80×24 | Notation unique, libellés courts, test de rendu 80×24 |
+| Colonnes taille/date GUI désalignées | Grille en chiffres tabulaires |
+| Re-vérification : reconnexion proposée après « clé changée » | Retirée dans les deux UIs (refus bloquant) |
+| MINEUR traités | Accent réservé, cible de dépôt opaque, sélection du panneau inactif, dates compactes, PREFIX `f`/`p`, toasts dans le panneau, marqueur « exposed » TUI |
+| MINEUR ouverts | Tailles en px dans FilesPanel/TunnelsDialog (tokens `--size-*` à créer), pulse en `box-shadow`, accent Travertine proche de l'erreur, message de parse pour `-L` vide, dossier distant non restauré après reconnexion |
 
 ## Revues de la phase 1c (2026-10-20)
 
