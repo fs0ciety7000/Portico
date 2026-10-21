@@ -34,6 +34,7 @@ pub mod sftp;
 pub mod snippets;
 pub mod ssh_config;
 pub mod store;
+pub mod vault;
 
 pub use engine::{Engine, EngineConfig};
 pub use error::{Error, ErrorSummary, Result};

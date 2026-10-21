@@ -79,9 +79,10 @@ Solid serait équivalent en performance, mais ses primitives d'animation sont mo
 
 - **`keyring` 4** (feature `v1`) : Keychain macOS et Secret Service Linux (GNOME Keyring, KWallet) via `zbus`, en pur Rust.
   Les entrées sont stockées sous le service `dev.portico` avec des comptes stables (`password:user@host:port`, `passphrase:SHA256:…`).
-- **Vault de repli** (phase 3) : `~/.local/share/portico/vault.bin`, chiffré en **XChaCha20-Poly1305** (`chacha20poly1305` 0.11),
-  avec une clé dérivée par **Argon2id** (`argon2` 0.6 ; m=64 Mio, t=3, p=1, sel aléatoire 16 octets) depuis une passphrase maître.
-  Le format est versionné et l'en-tête authentifié (AAD).
+- **Vault de repli** (phase 3, `vault.rs`) : `~/.local/share/portico/vault.toml` (TOML lisible, champs binaires en base64, `0600`),
+  chiffré en **XChaCha20-Poly1305** (`chacha20poly1305` 0.11), avec une clé dérivée par **Argon2id** (`argon2` 0.6 ; m=64 Mio, t=3, p=1,
+  sel aléatoire 16 octets) depuis une passphrase maître. Le format est versionné et l'en-tête authentifié (AAD).
+  Choisi par `secrets::default_store` quand `KeyringStore::is_available()` est faux ; verrouillé au démarrage.
 - **En mémoire** : `secrecy::SecretString` (Debug caviardé) et `zeroize` sur les buffers.
 - *Évolution prévue* : migrer vers `keyring-core` avec des stores explicites (`apple-native-keyring-store`,
   `zbus-secret-service-keyring-store`, `linux-keyutils-keyring-store`) pour contrôler finement le backend choisi.
@@ -162,3 +163,5 @@ le volume est faible, et un format lisible et versionnable sert le principe « z
 | 2026-10-21 | GUI, jetons d'upload : liés à la session et au chemin distant du premier envoi, consommés par la réponse finale (`overwrite`, `skip`, `rename`), expirés après 10 min. Dossier de téléchargement par défaut jamais égal au home (créé en `0700` si absent) ; un download ne remplace jamais un fichier caché (`hidden_overwrite`) | Accepté |
 | 2026-10-21 | Tauri annonce au webview les chemins des fichiers déposés (`tauri://drag-drop`) et les ajoute au scope d'assets : fuite de noms seulement, tant que **ni la feature `protocol-asset` ni `tauri-plugin-fs` ne sont activées** (test `tauri_never_gets_the_asset_protocol_or_the_fs_plugin`) | Accepté |
 | 2026-10-21 | Confirmation d'un tunnel exposé : réarmée à son apparition et après chaque frappe ou clic (400 ms), focus sur Annuler, liste des tunnels inerte pendant la question | Accepté |
+| 2026-10-21 | Vault de repli `vault.toml` v1 (plutôt qu'un binaire : lisible, diffable, versionné) : Argon2id → 64 octets (clé de chiffrement + clé de contrôle), paramètres et sel dans le fichier, bornés **avant** toute dérivation (plancher OWASP 19 Mio/t=2, plafond 1 Gio/t=10/p=8) ; toute la table compte → secret en un bloc JSON rembourré à 256 octets, XChaCha20-Poly1305 avec nonce aléatoire de 24 octets à chaque écriture ; AAD = rendu canonique de l'en-tête. Un tag de contrôle (message vide, clé de contrôle) distingue `vault_wrong_passphrase` de `vault_corrupt`. Création sans écrasement (`hard_link`), écritures atomiques qui relisent le fichier (pas de verrou inter-processus ; re-clé détecté : `vault_changed`). Verrouillé : la connexion continue, sans mémorisation (journal de session) | Accepté |
+| 2026-10-21 | Snippets : rendu sûr `render_checked` (substitution en une passe, toute valeur requise, valeurs sur une ligne sans contrôle, corps sans ESC, C0 hors `\t`/`\n`, DEL, C1 ni bidi, vérifié à l'enregistrement **et** au rendu) ; envoi par `snippet_input` (sauts de ligne en `\r`, bracketed paste si l'application distante l'a activé, `\r` final si `run`), jamais d'exécution locale. Ids slug `[a-z0-9-]` dérivés du nom (accents repliés), uniques | Accepté |

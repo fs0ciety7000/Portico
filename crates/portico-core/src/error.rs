@@ -105,6 +105,14 @@ pub enum Error {
 
     #[error(transparent)]
     Tunnel(#[from] crate::forward::TunnelError),
+
+    // ── Phase 3: vault and snippets ─────────────────────────────────────
+    #[error(transparent)]
+    Vault(#[from] crate::vault::VaultError),
+
+    #[error(transparent)]
+    Snippet(#[from] crate::snippets::SnippetError),
+    // ── end Phase 3 ─────────────────────────────────────────────────────
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -151,6 +159,8 @@ impl Error {
     }
 
     /// Stable, serializable view of the error for UIs and event streams.
+    // One arm per error variant: splitting the table would scatter the codes.
+    #[allow(clippy::too_many_lines)]
     pub fn summary(&self) -> ErrorSummary {
         let (code, hint) = match self {
             Self::Config(_) => (
@@ -245,6 +255,9 @@ impl Error {
             ),
             Self::Sftp(e) => e.code_and_hint(),
             Self::Tunnel(e) => e.code_and_hint(),
+            // ── Phase 3: vault and snippets ──
+            Self::Vault(e) => e.code_and_hint(),
+            Self::Snippet(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),
