@@ -4,7 +4,7 @@
 // its certificate expires in 3 days; `id_rsa_legacy` has an expired
 // certificate and is refused by db-prod at verification; `deploy_ci` is a
 // public key only. web-01 already has the keys. The vault starts locked
-// (passphrase "correct horse"). Never used inside the desktop app.
+// (passphrase "correct horse"), or absent with `?vault=absent`. Never used inside the desktop app.
 import type { AgentKey, CopyIdOutcome, EngineEvent, ErrorSummary, KeyGenRequest, LocalKey, PromptAnswer, PromptKind, Snippet, SnippetDraft, VaultStatus } from "./api";
 
 export interface DemoHooks {
@@ -23,6 +23,22 @@ const DAY = 86_400;
 const PASS = "correct horse";
 
 const fail = (code: string, message: string, hint: string | null = null): ErrorSummary => ({ code, message, hint });
+
+// Messages and hints as portico-core and src-tauri word them (lowercase
+// messages, absolute paths), so the demo shows what the app shows.
+const SSH_DIR = "/home/demo/.ssh";
+const VAULT_FILE = "/home/demo/.local/share/portico/vault.toml";
+const unknownKey = (id: string) => fail("key_unknown", `no key named ${id} in ~/.ssh`, "Refresh the list: the key may have been moved or deleted.");
+const snippetNotFound = (id: string) => fail("snippet_not_found", `unknown snippet ${id}`, "It may have been deleted from another window: reload the snippets.");
+const wrongVaultPassphrase = () => fail("vault_wrong_passphrase", "wrong vault passphrase", "Check the master passphrase (keyboard layout, Caps Lock).");
+const vaultTooShort = () =>
+  fail("vault_passphrase_too_short", "the vault passphrase must have at least 8 characters", "Choose a longer master passphrase (several words are easy to remember).");
+const notAccepted = (alias: string) =>
+  fail(
+    "copy_id_not_accepted",
+    `the key was installed on ${alias} but logging in with it failed`,
+    "If you dismissed the passphrase, verify again. Otherwise the server may ignore ~/.ssh/authorized_keys (AuthorizedKeysFile, StrictModes or ownership).",
+  );
 
 const local: LocalKey[] = [
   {
@@ -95,7 +111,8 @@ const agent: AgentKey[] = [
   },
 ];
 
-let vaultStatus: VaultStatus = "locked";
+// `?vault=absent` starts without a vault (to see the create flow).
+let vaultStatus: VaultStatus = new URLSearchParams(window.location.search).get("vault") === "absent" ? "absent" : "locked";
 
 const snippets: Snippet[] = [];
 function addSnippet(d: SnippetDraft) {
@@ -134,9 +151,9 @@ export function demoKeys(h: DemoHooks) {
     keyDefaults: async () => ({ comment: "demo@workstation" }),
     async generateKey(r: KeyGenRequest): Promise<LocalKey> {
       if (!/^[A-Za-z0-9._-]{1,64}$/.test(r.name) || r.name.startsWith(".")) {
-        throw fail("key_name", `invalid key file name "${r.name}": use a plain file name`, "Use letters, digits, dot, dash or underscore, like id_ed25519_work.");
+        throw fail("key_name", `invalid key file name "${r.name}": only letters, digits, dot, dash and underscore`, "Use letters, digits, dot, dash or underscore, like id_ed25519_work.");
       }
-      if (local.some((k) => k.id === r.name)) throw fail("key_exists", `~/.ssh/${r.name} already exists`, "Pick another name: Portico never overwrites a key.");
+      if (local.some((k) => k.id === r.name)) throw fail("key_exists", `${SSH_DIR}/${r.name} already exists`, "Pick another name: Portico never overwrites a key.");
       await h.sleep(r.algorithm.kind === "rsa" ? 1800 : 500);
       const algorithm = r.algorithm.kind === "ed25519" ? "ssh-ed25519" : r.algorithm.kind === "rsa" ? "rsa-sha2-512" : `ecdsa-sha2-nist${r.algorithm.curve}`;
       const key: LocalKey = {
@@ -155,20 +172,23 @@ export function demoKeys(h: DemoHooks) {
     },
     publicKeyText: async (id: string) => {
       const k = local.find((x) => x.id === id);
-      if (!k) throw fail("key_unknown", `no key named ${id} in ~/.ssh`);
+      if (!k) throw unknownKey(id);
       return `${k.algorithm} AAAAC3NzaC1lZDI1NTE5AAAAIDemoDemoDemoDemoDemoDemoDemoDemoDemo ${k.comment}`;
     },
     listAgentKeys: async (): Promise<AgentKey[]> => {
       await h.sleep(160);
       return agent.map((k) => ({ ...k }));
     },
-    async agentAdd(id: string, passphrase: string | null, _lifetime: number | null): Promise<AgentKey> {
+    async agentAdd(id: string, passphrase: string | null, lifetime: number | null): Promise<AgentKey> {
       const k = local.find((x) => x.id === id);
-      if (!k) throw fail("key_unknown", `no key named ${id} in ~/.ssh`);
+      if (!k) throw unknownKey(id);
+      if (lifetime !== null && (lifetime < 1 || lifetime > 7 * DAY)) {
+        throw fail("agent_lifetime", `an agent lifetime of ${lifetime} s is outside 1..=${7 * DAY} s`, "Pick one of the offered durations, or until removed.");
+      }
       await h.sleep(300);
       if (k.id === "id_ed25519_work") {
-        if (!passphrase) throw fail("key_needs_passphrase", `${k.privateDisplay} is encrypted`);
-        if (passphrase !== PASS) throw fail("key_wrong_passphrase", `wrong passphrase for ${k.privateDisplay}`, "Try again.");
+        if (!passphrase) throw fail("key_needs_passphrase", `${SSH_DIR}/${k.id} is encrypted`);
+        if (passphrase !== PASS) throw fail("key_wrong_passphrase", `wrong passphrase for ${SSH_DIR}/${k.id}`, "Try again.");
       }
       const added: AgentKey = { algorithm: k.algorithm, fingerprint: k.fingerprint, comment: "", certificate: null };
       if (!agent.some((a) => a.fingerprint === k.fingerprint)) agent.push(added);
@@ -182,7 +202,7 @@ export function demoKeys(h: DemoHooks) {
     async copyId(session: number, id: string): Promise<CopyIdOutcome> {
       const alias = h.aliasOf(session) ?? "";
       await h.sleep(900);
-      if (!local.some((k) => k.id === id)) throw fail("key_unknown", `no key named ${id} in ~/.ssh`);
+      if (!local.some((k) => k.id === id)) throw unknownKey(id);
       return alias === "web-01" ? "already_present" : "added";
     },
     async verifyKeyLogin(session: number, id: string) {
@@ -196,39 +216,31 @@ export function demoKeys(h: DemoHooks) {
       if (id === "id_ed25519_work") {
         h.emit({ type: "session", id: probe, event: { kind: "phase", phase: "authenticating", method: "public_key" } });
         for (let attempt = 1; ; attempt++) {
-          const a = await h.ask(probe, { kind: "key_passphrase", key_path: "/home/demo/.ssh/id_ed25519_work", attempt, attempts: 3 });
+          const a = await h.ask(probe, { kind: "key_passphrase", key_path: `${SSH_DIR}/id_ed25519_work`, attempt, attempts: 3 });
           if (a.kind === "secret" && a.value === PASS) break;
           if (a.kind !== "secret" || attempt === 3) {
             end(false);
-            throw fail(
-              "copy_id_not_accepted",
-              `the key was installed on ${alias} but logging in with it failed`,
-              "If you dismissed the passphrase, verify again. Otherwise the server may ignore ~/.ssh/authorized_keys (AuthorizedKeysFile, StrictModes or ownership).",
-            );
+            throw notAccepted(alias);
           }
         }
       }
       await h.sleep(600);
       if (alias === "db-prod" && id === "id_rsa_legacy") {
         end(false);
-        throw fail(
-          "copy_id_not_accepted",
-          `the key was installed on ${alias} but logging in with it failed`,
-          "If you dismissed the passphrase, verify again. Otherwise the server may ignore ~/.ssh/authorized_keys (AuthorizedKeysFile, StrictModes or ownership).",
-        );
+        throw notAccepted(alias);
       }
       end(true);
     },
     vaultStatus: async () => vaultStatus,
     async vaultCreate(passphrase: string) {
       await h.sleep(500);
-      if (vaultStatus !== "absent") throw fail("vault_exists", "a vault already exists", "A vault already exists: unlock it instead of creating a new one.");
-      if ([...passphrase].length < 8) throw fail("vault_passphrase_too_short", "the vault passphrase must have at least 8 characters");
+      if (vaultStatus !== "absent") throw fail("vault_exists", `a vault already exists at ${VAULT_FILE}`, "A vault already exists: unlock it instead of creating a new one.");
+      if ([...passphrase].length < 8) throw vaultTooShort();
       vaultStatus = "unlocked";
     },
     async vaultUnlock(passphrase: string) {
       await h.sleep(500);
-      if (passphrase !== PASS) throw fail("vault_wrong_passphrase", "wrong vault passphrase", "Check the master passphrase (keyboard layout, Caps Lock).");
+      if (passphrase !== PASS) throw wrongVaultPassphrase();
       vaultStatus = "unlocked";
     },
     async vaultLock() {
@@ -236,8 +248,8 @@ export function demoKeys(h: DemoHooks) {
     },
     async vaultChangePassphrase(old: string, next: string) {
       await h.sleep(700);
-      if (old !== PASS) throw fail("vault_wrong_passphrase", "wrong vault passphrase", "Check the master passphrase (keyboard layout, Caps Lock).");
-      if ([...next].length < 8) throw fail("vault_passphrase_too_short", "the vault passphrase must have at least 8 characters");
+      if (old !== PASS) throw wrongVaultPassphrase();
+      if ([...next].length < 8) throw vaultTooShort();
     },
     listSnippets: async (): Promise<Snippet[]> => {
       await h.sleep(120);
@@ -260,12 +272,12 @@ export function demoKeys(h: DemoHooks) {
     },
     async deleteSnippet(id: string) {
       const i = snippets.findIndex((s) => s.id === id);
-      if (i < 0) throw fail("snippet_not_found", `unknown snippet ${id}`);
+      if (i < 0) throw snippetNotFound(id);
       snippets.splice(i, 1);
     },
     async runSnippet(terminal: number, id: string, values: Record<string, string>, bracketed: boolean, run: boolean | null) {
       const s = snippets.find((x) => x.id === id);
-      if (!s) throw fail("snippet_not_found", `unknown snippet ${id}`);
+      if (!s) throw snippetNotFound(id);
       let text = s.command;
       for (const name of s.placeholders) {
         const value = values[name];
@@ -277,8 +289,8 @@ export function demoKeys(h: DemoHooks) {
       if (text.includes("\n") && !execute && !bracketed) {
         throw fail(
           "snippet_needs_paste_mode",
-          "this multi-line snippet cannot be pasted without running it here",
-          "The program in this terminal does not accept pasted blocks: each line would run on its own. Run it instead, or paste it from a shell that supports bracketed paste.",
+          "a multi-line snippet cannot be pasted without bracketed paste",
+          "The remote shell does not accept multi-line pastes: run the snippet, or paste it from a shell with bracketed paste.",
         );
       }
       // The demo shell has no bracketed paste: one line, Enter if run.

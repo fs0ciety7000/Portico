@@ -262,24 +262,33 @@ let downloadDir = "/home/demo/Downloads";
 const tunnels = new Map<number, TunnelInfo>();
 let dropListener: ((files: Upload[]) => void) | null = null;
 let dragListener: ((dragging: boolean) => void) | null = null;
-// Browser preview: an HTML5 drop stands in for the native one.
-window.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dragListener?.(true);
-});
-window.addEventListener("dragleave", (e) => {
-  if (!e.relatedTarget) dragListener?.(false);
-});
-window.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dragListener?.(false);
-  const files = [...(e.dataTransfer?.files ?? [])].map((f) => {
-    const token = nextId++;
-    uploads.set(token, { name: f.name, size: f.size });
-    return { token, display: f.name, size: f.size };
+let installed = false;
+
+/** Starts the simulation (once): the only side effects of this module.
+ * Called by `backend.ts` in development or a `--mode demo` build only. */
+export function installDemo(): Backend {
+  if (installed) return demoBackend;
+  installed = true;
+  // Browser preview: an HTML5 drop stands in for the native one.
+  window.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dragListener?.(true);
   });
-  if (files.length) dropListener?.(files);
-});
+  window.addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget) dragListener?.(false);
+  });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragListener?.(false);
+    const files = [...(e.dataTransfer?.files ?? [])].map((f) => {
+      const token = nextId++;
+      uploads.set(token, { name: f.name, size: f.size });
+      return { token, display: f.name, size: f.size };
+    });
+    if (files.length) dropListener?.(files);
+  });
+  return demoBackend;
+}
 
 const keyDemo = demoKeys({
   emit,
