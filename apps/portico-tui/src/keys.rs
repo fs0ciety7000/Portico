@@ -16,7 +16,7 @@ use portico_core::ErrorSummary;
 use portico_core::hosts::HostEntry;
 use portico_core::keys::{CertValidity, Curve, KeyAlgorithm, KeyGenRequest, LocalKey};
 use portico_core::search::{Hit, HostSearch};
-use portico_core::vault::VaultStatus;
+use portico_core::vault::{MIN_PASSPHRASE_CHARS, VaultStatus};
 use ratatui::widgets::ListState;
 use secrecy::SecretString;
 use zeroize::{Zeroize, Zeroizing};
@@ -48,7 +48,7 @@ pub(crate) enum Section {
 
 /// Agent lifetimes offered by `a` (`ssh-add -t`).
 pub(crate) const LIFETIMES: [(&str, Option<Duration>); 3] = [
-    ("No limit", None),
+    ("Until removed", None),
     ("1 hour", Some(Duration::from_secs(3600))),
     ("8 hours", Some(Duration::from_secs(8 * 3600))),
 ];
@@ -198,8 +198,7 @@ const GEN_FIELDS: [GenField; 5] = [
     GenField::Confirm,
 ];
 
-/// The key generation form.
-#[derive(Debug)]
+/// The key generation form. `Debug` never shows the passphrases.
 pub(crate) struct GenForm {
     pub(crate) name: String,
     /// The user typed in the name: changing the algorithm keeps it.
@@ -217,6 +216,38 @@ pub(crate) struct GenForm {
     pub(crate) busy: Option<String>,
     /// `↵` was pressed: problems are shown even on untouched fields.
     pub(crate) submitted: bool,
+    /// What became of the last passphrase handed to the engine.
+    handed: Handed,
+}
+
+/// The passphrase of the last request, once handed over (and wiped here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handed {
+    /// No request yet, or one without a passphrase.
+    Nothing,
+    Passphrase,
+    /// The engine refused a request that had a passphrase: generating
+    /// again needs it typed again, or an explicit "no passphrase"
+    /// (`Ctrl-N`), never a silent unencrypted key.
+    Refused,
+}
+
+impl std::fmt::Debug for GenForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |typed: bool| if typed { "[redacted]" } else { "" };
+        f.debug_struct("GenForm")
+            .field("name", &self.name)
+            .field("algorithm", &self.algorithm)
+            .field("comment", &self.comment)
+            .field("passphrase", &redacted(!self.passphrase.is_empty()))
+            .field("confirm", &redacted(!self.confirm.is_empty()))
+            .field("focus", &self.focus)
+            .field("error", &self.error)
+            .field("busy", &self.busy)
+            .field("submitted", &self.submitted)
+            .field("handed", &self.handed)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) enum GenOutcome {
@@ -240,6 +271,7 @@ impl GenForm {
             error: None,
             busy: None,
             submitted: false,
+            handed: Handed::Nothing,
         };
         form.suggest_name();
         form
@@ -272,11 +304,47 @@ impl GenForm {
         (self.comment.chars().count() > MAX_LINE).then_some("Keep the comment short.")
     }
 
+    /// A refused request had a passphrase: it must be typed again (or
+    /// "no passphrase" said with `Ctrl-N`).
+    pub(crate) fn retype(&self) -> bool {
+        self.handed == Handed::Refused
+    }
+
+    /// Characters of the passphrase, capped at the minimum (the counter
+    /// never tells more than "long enough").
+    pub(crate) fn passphrase_progress(&self) -> usize {
+        self.passphrase.chars().count().min(MIN_PASSPHRASE_CHARS)
+    }
+
+    pub(crate) fn passphrase_problem(&self) -> Option<&'static str> {
+        if self.retype() && self.passphrase.is_empty() {
+            return Some("Type the passphrase again.");
+        }
+        let short =
+            !self.passphrase.is_empty() && self.passphrase.chars().count() < MIN_PASSPHRASE_CHARS;
+        (short && self.submitted).then_some("Use at least 8 characters, or none.")
+    }
+
     /// Ready to generate (the primary action is enabled).
     pub(crate) fn valid(&self) -> bool {
+        let short =
+            !self.passphrase.is_empty() && self.passphrase.chars().count() < MIN_PASSPHRASE_CHARS;
         self.name_problem().is_none()
+            && !short
+            && !(self.retype() && self.passphrase.is_empty())
             && *self.passphrase == *self.confirm
             && self.comment_problem().is_none()
+    }
+
+    /// The engine refused the request (name taken, unsafe directory…).
+    /// The passphrase it carried was wiped: ask for it again.
+    pub(crate) fn refused(&mut self, error: ErrorSummary) {
+        self.busy = None;
+        self.error = Some(error);
+        if self.handed == Handed::Passphrase {
+            self.handed = Handed::Refused;
+            self.focus = GenField::Passphrase;
+        }
     }
 
     fn move_focus(&mut self, forward: bool) {
@@ -326,6 +394,12 @@ impl GenForm {
             KeyCode::Left if self.focus == GenField::Algorithm => self.cycle_algorithm(false),
             KeyCode::Right | KeyCode::Char(' ') if self.focus == GenField::Algorithm => {
                 self.cycle_algorithm(true);
+            }
+            // After a refusal: generate without a passphrase, explicitly.
+            KeyCode::Char('n') if ctrl && self.retype() => {
+                self.handed = Handed::Nothing;
+                self.passphrase.zeroize();
+                self.confirm.zeroize();
             }
             KeyCode::Char('u') if ctrl => {
                 if self.focus == GenField::Name {
@@ -378,6 +452,8 @@ impl GenForm {
                 GenField::Name
             } else if self.comment_problem().is_some() {
                 GenField::Comment
+            } else if self.passphrase_problem().is_some() {
+                GenField::Passphrase
             } else {
                 GenField::Confirm
             };
@@ -385,6 +461,11 @@ impl GenForm {
         }
         let passphrase =
             (!self.passphrase.is_empty()).then(|| SecretString::from(self.passphrase.as_str()));
+        self.handed = if passphrase.is_some() {
+            Handed::Passphrase
+        } else {
+            Handed::Nothing
+        };
         // Handed over: wipe the typed copies.
         self.passphrase.zeroize();
         self.confirm.zeroize();
@@ -685,6 +766,9 @@ impl KeysPanel {
                 if form.focus == GenField::Algorithm {
                     hints.push(("← →", "algorithm"));
                 }
+                if form.retype() && form.passphrase.is_empty() {
+                    hints.push(("Ctrl-N", "no passphrase"));
+                }
                 hints.push(("Esc", "cancel"));
                 return hints;
             }
@@ -700,7 +784,7 @@ impl KeysPanel {
             }
             Mode::Copy => {
                 return match copy {
-                    CopyState::Failed => vec![("r", "retry"), ("Esc", "back")],
+                    CopyState::Failed => vec![("↵ / r", "retry"), ("Esc", "back")],
                     CopyState::Running => vec![("Esc", "hide")],
                     _ => vec![("Esc", "back")],
                 };
@@ -841,7 +925,9 @@ impl KeysPanel {
             }
             Mode::Copy => {
                 return match key.code {
-                    KeyCode::Char('r' | 'R') if copy == CopyState::Failed => KeysOutcome::CopyRetry,
+                    KeyCode::Char('r' | 'R') | KeyCode::Enter if copy == CopyState::Failed => {
+                        KeysOutcome::CopyRetry
+                    }
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.mode = Mode::Browse;
                         KeysOutcome::CopyLeave
@@ -1105,6 +1191,83 @@ mod tests {
         assert!(request.passphrase.is_some());
         assert!(form.passphrase.is_empty() && form.confirm.is_empty());
         assert!(form.busy.is_some());
+    }
+
+    fn refusal() -> ErrorSummary {
+        ErrorSummary {
+            code: "key_exists".into(),
+            message: "~/.ssh/id_ed25519_web already exists".into(),
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn a_refused_generation_requires_the_passphrase_again() {
+        let mut form = GenForm::new("web".into(), "me@laptop".into(), Vec::new());
+        form.focus = GenField::Passphrase;
+        typed(&mut form, "correct horse");
+        form.focus = GenField::Confirm;
+        typed(&mut form, "correct horse");
+        assert!(matches!(
+            press(&mut form, KeyCode::Enter),
+            GenOutcome::Submit(_)
+        ));
+        form.refused(refusal());
+        assert!(form.busy.is_none() && form.error.is_some());
+        // The fields were wiped: Enter must not generate an unencrypted key.
+        assert!(form.passphrase.is_empty() && form.confirm.is_empty());
+        assert!(matches!(
+            press(&mut form, KeyCode::Enter),
+            GenOutcome::Pending
+        ));
+        assert_eq!(
+            form.passphrase_problem(),
+            Some("Type the passphrase again.")
+        );
+        assert_eq!(form.focus, GenField::Passphrase);
+        // Typed again: generates, with the passphrase.
+        typed(&mut form, "correct horse");
+        form.focus = GenField::Confirm;
+        typed(&mut form, "correct horse");
+        let GenOutcome::Submit(request) = press(&mut form, KeyCode::Enter) else {
+            panic!("passphrase typed again");
+        };
+        assert!(request.passphrase.is_some());
+
+        // Or no passphrase, said explicitly (Ctrl-N).
+        form.refused(refusal());
+        assert!(form.retype());
+        form.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        let GenOutcome::Submit(request) = press(&mut form, KeyCode::Enter) else {
+            panic!("no passphrase, confirmed");
+        };
+        assert!(request.passphrase.is_none());
+
+        // A refusal of a request without a passphrase asks nothing more.
+        form.refused(refusal());
+        assert!(!form.retype());
+        assert!(matches!(
+            press(&mut form, KeyCode::Enter),
+            GenOutcome::Submit(_)
+        ));
+    }
+
+    #[test]
+    fn a_short_key_passphrase_is_refused() {
+        let mut form = GenForm::new("web".into(), "me@laptop".into(), Vec::new());
+        form.focus = GenField::Passphrase;
+        typed(&mut form, "short");
+        assert_eq!(form.passphrase_progress(), 5);
+        form.focus = GenField::Confirm;
+        typed(&mut form, "short");
+        assert!(matches!(
+            press(&mut form, KeyCode::Enter),
+            GenOutcome::Pending
+        ));
+        assert!(form.passphrase_problem().is_some());
+        form.focus = GenField::Passphrase;
+        typed(&mut form, " but longer now");
+        assert_eq!(form.passphrase_progress(), MIN_PASSPHRASE_CHARS);
     }
 
     #[test]

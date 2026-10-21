@@ -20,16 +20,30 @@ use zeroize::Zeroizing;
 /// Keys arriving this soon after a dialog opens were typed for something
 /// else (the shell in the active tab): they are ignored, so a stray `y`
 /// never trusts a host key and stray keystrokes never become a password.
-const ARM_DELAY: Duration = Duration::from_millis(400);
+pub(crate) const ARM_DELAY: Duration = Duration::from_millis(400);
 /// Maximum length of a typed or pasted answer.
 const MAX_INPUT: usize = 256;
 
-/// One input line in a dialog.
-#[derive(Debug)]
+/// One input line in a dialog. `Debug` never shows a masked value.
 pub(crate) struct Field {
     pub(crate) label: String,
     pub(crate) masked: bool,
     pub(crate) value: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value: &str = if self.masked {
+            "[redacted]"
+        } else {
+            &self.value
+        };
+        f.debug_struct("Field")
+            .field("label", &self.label)
+            .field("masked", &self.masked)
+            .field("value", &value)
+            .finish()
+    }
 }
 
 impl Field {
@@ -291,6 +305,19 @@ impl SecretDialog {
             busy: false,
             opened_at: Instant::now(),
         }
+    }
+
+    /// Characters of the new passphrase (create, change), capped at the
+    /// minimum: the counter says whether it is long enough, never more.
+    /// `(field index, characters)`.
+    pub(crate) fn new_passphrase_progress(&self) -> Option<(usize, usize)> {
+        let index = match self.purpose {
+            SecretPurpose::VaultCreate { .. } => 0,
+            SecretPurpose::VaultChange => 1,
+            _ => return None,
+        };
+        let typed = self.fields.get(index)?.value.chars().count();
+        Some((index, typed.min(MIN_PASSPHRASE_CHARS)))
     }
 
     /// The new passphrase and its confirmation must agree and be long
@@ -619,6 +646,27 @@ mod tests {
             d.handle_key(key(KeyCode::Esc)),
             SecretOutcome::Pending
         ));
+    }
+
+    #[test]
+    fn secret_fields_debug_is_redacted() {
+        let mut d = armed(SecretPurpose::VaultCreate { offered: false });
+        typed(&mut d, "hunter2hunter2");
+        let shown = format!("{d:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("[redacted]"));
+        // An echoed (not masked) field shows its value.
+        let mut code = Field::new("Code", false);
+        code.value.push_str("123456");
+        assert!(format!("{code:?}").contains("123456"));
+
+        let mut form = crate::keys::GenForm::new("web".into(), "me@laptop".into(), Vec::new());
+        form.passphrase.push_str("correct horse");
+        form.confirm.push_str("correct horse");
+        let shown = format!("{form:?}");
+        assert!(!shown.contains("correct horse"), "{shown}");
+        assert!(shown.contains("[redacted]"));
+        assert!(shown.contains("me@laptop"), "the rest stays readable");
     }
 
     #[test]

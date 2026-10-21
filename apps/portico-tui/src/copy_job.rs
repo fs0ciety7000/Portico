@@ -49,6 +49,9 @@ pub(crate) struct CopyJob {
     pub(crate) key_name: String,
     pub(crate) public_path: PathBuf,
     pub(crate) private_path: PathBuf,
+    /// The private key is here: the login can be verified with it (a
+    /// `.pub` alone is installed, not verified).
+    pub(crate) has_private: bool,
     pub(crate) alias: String,
     pub(crate) session: SessionId,
     /// The session was opened by this job (closed at the end).
@@ -67,6 +70,7 @@ impl CopyJob {
         key_name: String,
         public_path: PathBuf,
         private_path: PathBuf,
+        has_private: bool,
         alias: String,
         session: SessionId,
         opened: bool,
@@ -77,6 +81,7 @@ impl CopyJob {
             key_name,
             public_path,
             private_path,
+            has_private,
             alias,
             session,
             opened,
@@ -140,12 +145,27 @@ impl CopyJob {
             return Effect::None;
         }
         match result {
+            // Verifying logs in with the private key: without it, the job
+            // ends here and says so.
+            Ok(outcome) if !self.has_private => {
+                self.step = Step::Done(outcome);
+                if self.opened {
+                    Effect::Disconnect(self.session)
+                } else {
+                    Effect::None
+                }
+            }
             Ok(outcome) => {
                 self.step = Step::Verifying(outcome);
                 Effect::Verify(self.session)
             }
             Err(error) => self.fail(error),
         }
+    }
+
+    /// Verification was skipped (no private key here).
+    pub(crate) fn unverified(&self) -> bool {
+        !self.has_private
     }
 
     pub(crate) fn on_verified(
@@ -175,6 +195,12 @@ impl CopyJob {
     /// The success sentence.
     pub(crate) fn success_message(&self) -> Option<String> {
         match self.step {
+            Step::Done(CopyIdOutcome::Added) if !self.has_private => {
+                Some("Installed. Verification needs the private key.".to_owned())
+            }
+            Step::Done(CopyIdOutcome::AlreadyPresent) if !self.has_private => {
+                Some("Already installed. Verification needs the private key.".to_owned())
+            }
             Step::Done(CopyIdOutcome::Added) => Some(format!(
                 "Installed and verified: you can now log in to {} with {}",
                 self.alias, self.key_name
@@ -187,11 +213,15 @@ impl CopyJob {
         }
     }
 
-    /// Advice once installed (Portico never writes `~/.ssh/config`).
-    pub(crate) fn config_advice(&self) -> String {
-        format!(
-            "Add `IdentityFile ~/.ssh/{}` to Host {} in ~/.ssh/config",
-            self.key_name, self.alias
+    /// Advice once installed (Portico never writes `~/.ssh/config`): where
+    /// the line goes, then the line itself (shown as code).
+    pub(crate) fn config_advice(&self) -> (String, String) {
+        (
+            format!(
+                "To use it by default, add to Host {} in ~/.ssh/config:",
+                self.alias
+            ),
+            format!("IdentityFile ~/.ssh/{}", self.key_name),
         )
     }
 }
@@ -201,11 +231,20 @@ mod tests {
     use super::*;
 
     fn new_job(opened: bool, phase: &SessionPhase) -> (CopyJob, Effect, SessionId) {
+        job_with(true, opened, phase)
+    }
+
+    fn job_with(
+        has_private: bool,
+        opened: bool,
+        phase: &SessionPhase,
+    ) -> (CopyJob, Effect, SessionId) {
         let id = SessionId::next();
         let (job, effect) = CopyJob::start(
             "id_ed25519_web".into(),
             "/h/.ssh/id_ed25519_web.pub".into(),
             "/h/.ssh/id_ed25519_web".into(),
+            has_private,
             "web".into(),
             id,
             opened,
@@ -285,5 +324,27 @@ mod tests {
         // The session failed by itself: nothing to close.
         assert_eq!(job.on_phase(id, &failed), Effect::None);
         assert_eq!(job.failed_at, 0);
+    }
+
+    #[test]
+    fn a_public_key_alone_is_installed_without_verification() {
+        let (mut job, _, id) = job_with(false, true, &SessionPhase::Resolving);
+        assert_eq!(
+            job.on_phase(id, &SessionPhase::Connected),
+            Effect::Install(id)
+        );
+        // No Verify step: done, and the session opened for it is closed.
+        assert_eq!(
+            job.on_installed(7, Ok(CopyIdOutcome::Added)),
+            Effect::Disconnect(id)
+        );
+        assert_eq!(job.step, Step::Done(CopyIdOutcome::Added));
+        assert!(job.unverified());
+        assert_eq!(
+            job.success_message().as_deref(),
+            Some("Installed. Verification needs the private key.")
+        );
+        // A late verification answer changes nothing.
+        assert_eq!(job.on_verified(7, Ok(())), Effect::None);
     }
 }

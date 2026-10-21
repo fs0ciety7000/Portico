@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Focus};
+use crate::dialog::{Dialog, SecretPurpose};
 use crate::ui::{fmt, status};
 
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -74,6 +75,14 @@ type Hints = Vec<(&'static str, &'static str)>;
 #[allow(clippy::too_many_lines)]
 fn mode_and_hints(app: &App) -> (&'static str, Hints) {
     let (mode, hints): (&'static str, &[(&'static str, &'static str)]) = match app.focus {
+        // At launch, Esc is not a cancel: Portico goes on without the vault.
+        _ if matches!(
+            app.dialogs.front(),
+            Some(Dialog::Secret(d)) if matches!(d.purpose, SecretPurpose::VaultUnlock { startup: true })
+        ) =>
+        {
+            (" DIALOG ", &[("↵", "unlock"), ("Esc", "continue without")])
+        }
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
         _ if app.prefix => (
             " PREFIX ",

@@ -147,69 +147,119 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
 fn render_toast(app: &App, frame: &mut Frame<'_>, zone: Rect) {
     let Some(toast) = &app.toast else { return };
     let s = app.styles();
-    let (icon, icon_style, border) = if toast.is_error {
-        let error = s.status(s.theme.status.error);
-        ("✕", error, error)
-    } else {
-        ("·", s.accent(), s.border_strong())
+    let screen = frame.area();
+    let make = |width| {
+        ToastBox::new(
+            s,
+            toast.is_error,
+            &toast.message,
+            toast.hint.as_deref(),
+            width,
+        )
     };
-    // Too narrow a panel: fall back to the screen, above the status bar.
-    let area = if zone.width >= 24 && zone.height >= 4 {
-        zone
-    } else {
-        let screen = frame.area();
-        Rect {
-            height: screen.height.saturating_sub(1),
-            ..screen
-        }
+    let in_zone = make(zone.width);
+    if zone.width >= 24 && in_zone.fits(zone) {
+        in_zone.draw(s, frame, zone);
+        return;
+    }
+    // The zone is too small: the screen, above the status bar.
+    let area = Rect {
+        height: screen.height.saturating_sub(1),
+        ..screen
     };
-    // Borders + one column of padding on each side, then the icon column.
-    let max_width = area.width.saturating_sub(1).min(72);
-    let text_room = usize::from(max_width.saturating_sub(4 + 3)).max(1);
-    // Wrapped, not truncated; continuation lines align under the text.
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, part) in fmt::wrap(&toast.message, text_room).into_iter().enumerate() {
-        let lead = if i == 0 {
-            Span::styled(format!("{icon}  "), icon_style)
+    make(screen.width).draw(s, frame, area);
+}
+
+/// A toast, laid out: wrapped lines and the box size they need.
+pub(crate) struct ToastBox {
+    lines: Vec<Line<'static>>,
+    is_error: bool,
+    pub(crate) height: u16,
+    width: u16,
+}
+
+impl ToastBox {
+    /// At most 72 columns (and the screen width), at most 6 text rows.
+    pub(crate) fn new(
+        s: crate::theme::Styles,
+        is_error: bool,
+        message: &str,
+        hint: Option<&str>,
+        screen_width: u16,
+    ) -> Self {
+        let (icon, icon_style) = if is_error {
+            ("✕", s.status(s.theme.status.error))
         } else {
-            Span::raw("   ")
+            ("·", s.accent())
         };
-        lines.push(Line::from(vec![lead, Span::styled(part, s.title())]));
-    }
-    if let Some(hint) = &toast.hint {
-        for part in fmt::wrap(hint, text_room) {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(part, s.secondary()),
-            ]));
+        // Borders + one column of padding on each side, then the icon column.
+        let max_width = screen_width.saturating_sub(2).min(72);
+        let text_room = usize::from(max_width.saturating_sub(4 + 3)).max(1);
+        // Wrapped, not truncated; continuation lines align under the text.
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, part) in fmt::wrap(message, text_room).into_iter().enumerate() {
+            let lead = if i == 0 {
+                Span::styled(format!("{icon}  "), icon_style)
+            } else {
+                Span::raw("   ")
+            };
+            lines.push(Line::from(vec![lead, Span::styled(part, s.title())]));
+        }
+        if let Some(hint) = hint {
+            for part in fmt::wrap(hint, text_room) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(part, s.secondary()),
+                ]));
+            }
+        }
+        lines.truncate(6);
+        let longest = lines.iter().map(Line::width).max().unwrap_or(0);
+        let width = u16::try_from(longest)
+            .unwrap_or(u16::MAX)
+            .saturating_add(4)
+            .min(max_width);
+        let height = u16::try_from(lines.len().max(1))
+            .unwrap_or(6)
+            .saturating_add(2);
+        Self {
+            lines,
+            is_error,
+            height,
+            width,
         }
     }
-    let longest = lines.iter().map(Line::width).max().unwrap_or(0);
-    let width = u16::try_from(longest)
-        .unwrap_or(u16::MAX)
-        .saturating_add(4)
-        .min(max_width);
-    let height = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .clamp(1, 6)
-        .saturating_add(2)
-        .min(area.height);
-    // Bottom-right of the zone, one column from its edge.
-    let rect = Rect {
-        x: area.right().saturating_sub(width + 1).max(area.x),
-        y: area.bottom().saturating_sub(height).max(area.y),
-        width,
-        height,
-    };
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(border)
-                .padding(Padding::horizontal(1))
-                .style(s.overlay()),
-        ),
-        rect,
-    );
+
+    /// The box fits in `zone`, one column clear of its right edge.
+    pub(crate) fn fits(&self, zone: Rect) -> bool {
+        zone.width > self.width && zone.height >= self.height
+    }
+
+    /// Bottom-right of `zone`, one column from its edge.
+    pub(crate) fn draw(self, s: crate::theme::Styles, frame: &mut Frame<'_>, zone: Rect) {
+        let width = self.width.min(zone.width);
+        let height = self.height.min(zone.height);
+        let rect = Rect {
+            x: zone.right().saturating_sub(width + 1).max(zone.x),
+            y: zone.bottom().saturating_sub(height).max(zone.y),
+            width,
+            height,
+        };
+        let border = if self.is_error {
+            s.status(s.theme.status.error)
+        } else {
+            s.border_strong()
+        };
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
+            Paragraph::new(self.lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(border)
+                    .padding(Padding::horizontal(1))
+                    .style(s.overlay()),
+            ),
+            rect,
+        );
+    }
 }

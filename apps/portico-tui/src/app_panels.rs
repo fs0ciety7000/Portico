@@ -430,7 +430,8 @@ impl App {
                         algorithm: String::new(),
                         fingerprint: String::new(),
                         comment: String::new(),
-                        has_private: true,
+                        // A `.pub` alone is still not verified on retry.
+                        has_private: job.has_private,
                         certificate: None,
                     };
                     self.start_copy(&key, job.alias);
@@ -465,8 +466,7 @@ impl App {
             }
             Err(error) => {
                 if let Mode::Generate(form) = &mut panel.mode {
-                    form.busy = None;
-                    form.error = Some(error);
+                    form.refused(error);
                 } else {
                     panel.notice = Some(Notice::error(error));
                 }
@@ -527,6 +527,7 @@ impl App {
             file_name(&key.private_path),
             key.public_path.clone(),
             key.private_path.clone(),
+            key.has_private,
             alias,
             session,
             opened,
@@ -740,10 +741,8 @@ impl App {
         } else {
             let alias = self.current_alias();
             let why = match &alias {
-                Some(a) => {
-                    format!("No terminal is open on {a}: snippets are typed into a terminal tab.")
-                }
-                None => "No terminal tab is open: snippets are typed into one.".to_owned(),
+                Some(a) => format!("No open terminal on {a}"),
+                None => "No open terminal".to_owned(),
             };
             (alias, Some(why))
         };
@@ -838,6 +837,9 @@ impl App {
                         panel.mode = SnipMode::NeedsRun {
                             rendered: rendered.to_owned(),
                             error,
+                            // Armed later: a held or repeated key that sent
+                            // the snippet must not also run it.
+                            opened_at: std::time::Instant::now(),
                         };
                     } else {
                         panel.notice = Some(Notice::error(error));
@@ -1068,6 +1070,7 @@ mod render_tests {
             key_name: "id_ed25519_web".into(),
             public_path: "/home/me/.ssh/id_ed25519_web.pub".into(),
             private_path: "/home/me/.ssh/id_ed25519_web".into(),
+            has_private: true,
             alias: "web".into(),
             session: SessionId::next(),
             opened: true,
@@ -1113,7 +1116,7 @@ mod render_tests {
                 "✕ Verifying",
                 "logging in with it failed",
                 "may ignore",
-                "r  retry",
+                "↵ / r  retry",
             ],
         );
     }
@@ -1204,6 +1207,8 @@ mod render_tests {
                 "continue without",
             ],
         );
+        // The status bar says the same, not "cancel".
+        assert!(lines[23].contains("continue without"), "{}", lines[23]);
         // Typing is masked, never shown.
         if let Some(Dialog::Secret(d)) = app.dialogs.front_mut() {
             d.opened_at = std::time::Instant::now()
@@ -1267,7 +1272,7 @@ mod render_tests {
 
     #[test]
     fn snippets_list_scope_and_no_terminal() {
-        let mut app = snippets_app(Some("No terminal is open on web.".into()));
+        let mut app = snippets_app(Some("No open terminal on web".into()));
         let lines = screen(&mut app, 80, 24);
         check(
             &lines,
@@ -1279,7 +1284,8 @@ mod render_tests {
                 "global",
                 "paste only · #prod",
                 "+1 line",
-                "No terminal is open on web.",
+                "No open terminal on web",
+                "Esc, then ↵ to connect web.",
                 "Ctrl-N  new",
             ],
         );
@@ -1326,6 +1332,162 @@ mod render_tests {
         );
     }
 
+    /// `n` local keys, none in the agent.
+    fn many_keys_app(n: usize) -> App {
+        let mut app = keys_app();
+        if let Some(panel) = &mut app.keys_panel {
+            panel.set_local(Ok((0..n)
+                .map(|i| local(&format!("id_key_{i:02}"), &format!("k{i}")))
+                .collect()));
+        }
+        app
+    }
+
+    fn keys_press(app: &mut App, code: KeyCode) {
+        app.update(Action::KeysKey(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn row_of(lines: &[String], needle: &str) -> Option<usize> {
+        lines.iter().position(|l| l.contains(needle))
+    }
+
+    #[test]
+    fn keys_list_scrolls_keeping_headers_and_counting_hidden_keys() {
+        let mut app = many_keys_app(12);
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["LOCAL KEYS", "id_key_00", "more"]);
+        assert!(has(&lines, "↓ "), "hidden keys are counted");
+        // The last key: scrolled, the rest counted above.
+        keys_press(&mut app, KeyCode::End);
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["id_key_11", "↑ "]);
+        assert!(!has(&lines, "id_key_00"));
+        // Back to the first: its section header is in view again.
+        keys_press(&mut app, KeyCode::Home);
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["LOCAL KEYS", "id_key_00"]);
+        // The agent section's header shows with its first row.
+        keys_press(&mut app, KeyCode::Tab);
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["SSH AGENT"]);
+        // Everything fits again: back to the top, nothing counted.
+        if let Some(panel) = &mut app.keys_panel {
+            panel.set_local(Ok(vec![local("id_a", "a")]));
+        }
+        let lines = screen(&mut app, 110, 28);
+        check(&lines, &["LOCAL KEYS", "id_a", "SSH AGENT"]);
+        assert!(!has(&lines, "more"));
+        assert_eq!(app.keys_panel.as_ref().map(|p| p.list.offset()), Some(0));
+    }
+
+    #[test]
+    fn inline_questions_keep_the_selected_background() {
+        let mut app = keys_app();
+        // id_ed25519_work is in the agent: `x` asks inline.
+        keys_press(&mut app, KeyCode::Down);
+        keys_press(&mut app, KeyCode::Char('x'));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["Remove id_ed25519_work from the agent?"]);
+        let y = lines
+            .iter()
+            .position(|l| l.contains("▍") && l.contains("id_ed25519_work"))
+            .unwrap();
+        let x = lines[y].chars().position(|c| c == '▍').unwrap();
+        let s = app.styles();
+        let bar = buffer
+            .cell((u16::try_from(x).unwrap(), u16::try_from(y).unwrap()))
+            .unwrap();
+        assert_eq!(Some(bar.bg), s.selected().bg, "row keeps its background");
+        assert_eq!(Some(bar.fg), s.muted().fg, "the bar goes muted");
+    }
+
+    #[test]
+    fn a_notice_never_squeezes_the_list_and_toasts_sit_under_the_panel() {
+        let mut app = many_keys_app(12);
+        let before = screen(&mut app, 80, 24)
+            .iter()
+            .filter(|l| l.contains("id_key_"))
+            .count();
+        if let Some(panel) = &mut app.keys_panel {
+            panel.notice = Some(Notice {
+                ok: false,
+                message: "the agent refused the key".into(),
+                hint: Some("Check that ssh-agent is still running.".into()),
+            });
+        }
+        let lines = screen(&mut app, 80, 24);
+        let notice = row_of(&lines, "the agent refused the key").unwrap();
+        let border = lines.iter().rposition(|l| l.contains('╰')).unwrap();
+        // The toast box itself ends in ╰ too: the panel's border is above it.
+        let panel_bottom = lines
+            .iter()
+            .take(notice)
+            .rposition(|l| l.contains('╰'))
+            .unwrap();
+        assert!(panel_bottom < notice && notice < border);
+        assert!(notice < 23, "above the status bar");
+        let after = lines.iter().filter(|l| l.contains("id_key_")).count();
+        assert!(after + 3 >= before, "the list keeps most of its room");
+
+        // A toast over the panel: between it and the status bar.
+        let mut app = many_keys_app(12);
+        app.notify("Vault locked".into());
+        let lines = screen(&mut app, 80, 24);
+        let toast = row_of(&lines, "Vault locked").unwrap();
+        let panel_bottom = lines
+            .iter()
+            .take(toast)
+            .rposition(|l| l.contains('╰'))
+            .unwrap();
+        assert!(panel_bottom < toast && toast < 23);
+        check(&lines, &["a  add to agent"]);
+    }
+
+    #[test]
+    fn panel_hints_hide_behind_a_dialog_and_esc_close_only_when_browsing() {
+        let mut app = keys_app();
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["Esc close", "a  add to agent"]);
+        app.dialogs.push_back(Dialog::Secret(SecretDialog::new(
+            SecretPurpose::VaultUnlock { startup: false },
+        )));
+        let lines = screen(&mut app, 80, 24);
+        assert!(!has(&lines, "a  add to agent"));
+        app.dialogs.clear();
+        keys_press(&mut app, KeyCode::Char('n'));
+        let lines = screen(&mut app, 80, 24);
+        check(
+            &lines,
+            &["new key pair", "At least 8 characters", "0 / 8 min"],
+        );
+        assert!(!has(&lines, "Esc close"));
+    }
+
+    #[test]
+    fn copy_of_a_public_key_alone_skips_verification() {
+        let mut app = keys_app();
+        if let Some(panel) = &mut app.keys_panel {
+            panel.mode = Mode::Copy;
+        }
+        let mut j = job(Step::Done(CopyIdOutcome::Added));
+        j.has_private = false;
+        app.copy_job = Some(j);
+        let lines = screen(&mut app, 80, 24);
+        check(
+            &lines,
+            &[
+                "Copy id_ed25519_web to web",
+                "– Verifying",
+                "Installed. Verification needs the private key.",
+            ],
+        );
+        assert!(!has(&lines, "IdentityFile"));
+        assert!(!has(&lines, "`"), "no literal backticks");
+    }
+
     #[test]
     fn help_lists_the_new_panels() {
         let mut app = test_app();
@@ -1333,7 +1495,7 @@ mod render_tests {
         let lines = screen(&mut app, 80, 24);
         check(
             &lines,
-            &["Keys · snippets", "Copy pub · vault", "Run · new"],
+            &["Keys · snippets", "Copy pub · vault", "Run/paste · new"],
         );
     }
 }
