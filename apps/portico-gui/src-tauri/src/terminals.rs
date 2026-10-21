@@ -32,6 +32,8 @@ struct Entry {
     acked: watch::Sender<u64>,
     /// Total bytes sent to the view (acks can never exceed it).
     sent: Arc<AtomicU64>,
+    /// Raw [`portico_core::ids::SessionId`] of the terminal's session.
+    session: u64,
 }
 
 /// New acknowledged total: monotonic and capped at what was really sent, so
@@ -54,6 +56,11 @@ impl Terminals {
 
     pub(crate) fn inputs(&self, id: u64) -> Option<TerminalInputs> {
         self.lock().get(&id).map(|e| e.inputs.clone())
+    }
+
+    /// Inputs and session of a terminal the view opened (snippets).
+    pub(crate) fn entry(&self, id: u64) -> Option<(TerminalInputs, u64)> {
+        self.lock().get(&id).map(|e| (e.inputs.clone(), e.session))
     }
 
     pub(crate) fn ack(&self, id: u64, total: u64) {
@@ -98,6 +105,7 @@ impl Terminals {
                 inputs: handle.input.clone(),
                 acked: acked_tx,
                 sent: Arc::clone(&sent),
+                session: handle.session.get(),
             },
         );
         let this = Arc::clone(self);
