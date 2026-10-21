@@ -105,6 +105,9 @@ pub enum Error {
 
     #[error(transparent)]
     Tunnel(#[from] crate::forward::TunnelError),
+
+    #[error(transparent)]
+    Key(#[from] crate::keys::KeyError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -245,6 +248,7 @@ impl Error {
             ),
             Self::Sftp(e) => e.code_and_hint(),
             Self::Tunnel(e) => e.code_and_hint(),
+            Self::Key(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),

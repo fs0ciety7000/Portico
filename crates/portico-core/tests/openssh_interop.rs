@@ -94,6 +94,9 @@ impl Sshd {
             true,
         );
         std::fs::write(d.join("authorized_keys"), "").unwrap();
+        // Sessions get a throwaway HOME, so copy-id (scenario 12) writes
+        // there and never in the real ~/.ssh of whoever runs the tests.
+        std::fs::create_dir_all(d.join("home")).unwrap();
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -102,7 +105,8 @@ impl Sshd {
         let config = format!(
             "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/host_ed25519\n\
              HostCertificate {d}/host_ed25519-cert.pub\nPidFile {d}/sshd.pid\n\
-             AuthorizedKeysFile {d}/authorized_keys\nTrustedUserCAKeys {d}/user_ca.pub\n\
+             AuthorizedKeysFile {d}/authorized_keys {d}/home/.ssh/authorized_keys\nSetEnv HOME={d}/home\n\
+             TrustedUserCAKeys {d}/user_ca.pub\n\
              StrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
              PermitRootLogin yes\nAllowTcpForwarding yes\nSubsystem sftp internal-sftp\nLogLevel DEBUG\n",
             d = d.display()
@@ -680,4 +684,180 @@ async fn openssh_interop() {
         logs.iter().any(|l| l.message.contains("stopped reading")),
         "the stall guard should have fired"
     );
+
+    // 12. Phase 3: generate a key in Portico, install it with copy-id over
+    // an authenticated session, log in with it alone, manage it in a real
+    // ssh-agent.
+    copy_id_and_agent(&sshd, port, &user).await;
+}
+
+async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {
+    use portico_core::keys::{KeyAlgorithm, KeyGenRequest};
+    let mut env = Env::new(&host("t", port, user, "  IdentityFile ~/.ssh/id_ed25519\n"));
+    keygen(&env.ssh("id_ed25519"), "ed25519", "");
+    sshd.authorize(&env.ssh("id_ed25519.pub"));
+    let (id, out) = env.connect("t", accept_host).await;
+    assert_connected(&out, sshd);
+
+    let generated = env
+        .engine
+        .generate_key(KeyGenRequest {
+            name: "id_portico".into(),
+            algorithm: KeyAlgorithm::Ed25519,
+            comment: "portico@test".into(),
+            passphrase: Some(SecretString::from("pp-1234".to_owned())),
+        })
+        .await
+        .unwrap();
+    // OpenSSH reads what Portico wrote.
+    let derived = Command::new("ssh-keygen")
+        .args(["-y", "-P", "pp-1234", "-f"])
+        .arg(&generated.private_path)
+        .output()
+        .unwrap();
+    assert!(
+        derived.status.success(),
+        "{}",
+        String::from_utf8_lossy(&derived.stderr)
+    );
+    let pub_text = std::fs::read_to_string(&generated.public_path).unwrap();
+    let fields = |t: &str| t.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        fields(&pub_text),
+        fields(&String::from_utf8_lossy(&derived.stdout))
+    );
+
+    let installed = sshd.path("home/.ssh/authorized_keys");
+    assert_eq!(
+        env.engine
+            .copy_id(id, generated.public_path.clone())
+            .await
+            .unwrap(),
+        portico_core::CopyIdOutcome::Added
+    );
+    assert_eq!(
+        env.engine
+            .copy_id(id, generated.public_path.clone())
+            .await
+            .unwrap(),
+        portico_core::CopyIdOutcome::AlreadyPresent
+    );
+    let lines = std::fs::read_to_string(&installed).unwrap();
+    assert_eq!(lines.lines().count(), 1, "{lines}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&installed).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // Log in with the new key only; its passphrase is asked for.
+    let answers = tokio::spawn(answer_passphrases(env.engine.clone(), "pp-1234"));
+    env.engine
+        .verify_key_login("t", generated.private_path.clone())
+        .await
+        .unwrap();
+    answers.abort();
+    let log = sshd.log();
+    assert!(log.contains("Accepted publickey"), "{log}");
+
+    // A key that is not installed is reported as such.
+    let stranger = env
+        .engine
+        .generate_key(KeyGenRequest {
+            name: "id_stranger".into(),
+            algorithm: KeyAlgorithm::Ecdsa {
+                curve: portico_core::keys::Curve::P256,
+            },
+            comment: String::new(),
+            passphrase: None,
+        })
+        .await
+        .unwrap();
+    let err = env
+        .engine
+        .verify_key_login("t", stranger.private_path.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err.summary().code, "copy_id_not_accepted");
+
+    // ssh-agent: add (with passphrase and lifetime), list, remove.
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket = agent_dir.path().join("agent.sock");
+    let mut agent = Command::new("ssh-agent")
+        .arg("-D")
+        .arg("-a")
+        .arg(&socket)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let env = Env::with_agent(&host("t", port, user, ""), socket.clone());
+    assert!(env.engine.agent_keys().await.unwrap().is_empty());
+    let err = env
+        .engine
+        .agent_add(generated.private_path.clone(), None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.summary().code, "key_needs_passphrase");
+    let added = env
+        .engine
+        .agent_add(
+            generated.private_path.clone(),
+            Some(SecretString::from("pp-1234".to_owned())),
+            Some(Duration::from_secs(600)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(added.fingerprint, generated.fingerprint);
+    let listed = env.engine.agent_keys().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.first().unwrap().fingerprint, generated.fingerprint);
+    let ssh_add = Command::new("ssh-add")
+        .arg("-l")
+        .env("SSH_AUTH_SOCK", &socket)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&ssh_add.stdout).contains(&generated.fingerprint));
+    env.engine
+        .agent_remove(&generated.fingerprint)
+        .await
+        .unwrap();
+    assert!(env.engine.agent_keys().await.unwrap().is_empty());
+    assert_eq!(
+        env.engine
+            .agent_remove(&generated.fingerprint)
+            .await
+            .unwrap_err()
+            .summary()
+            .code,
+        "agent_no_identity"
+    );
+    let _ = agent.kill();
+}
+
+/// Answers every key passphrase prompt of `engine` with `passphrase`.
+async fn answer_passphrases(engine: portico_core::Engine, passphrase: &'static str) {
+    let mut events = engine.subscribe();
+    loop {
+        match events.recv().await {
+            Ok(EngineEvent::Prompt(prompt)) => {
+                if let PromptKind::KeyPassphrase { .. } = prompt.kind {
+                    let _ = engine.respond(
+                        prompt.id,
+                        PromptResponse::Secret {
+                            value: SecretString::from(passphrase.to_owned()),
+                            remember: false,
+                        },
+                    );
+                }
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(_) => return,
+        }
+    }
 }

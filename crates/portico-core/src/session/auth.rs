@@ -187,6 +187,12 @@ fn method_order(hop: &Hop) -> Vec<&'static str> {
             .collect(),
         None => DEFAULT_ORDER.to_vec(),
     };
+    if hop.pubkey_only {
+        return preferred
+            .into_iter()
+            .filter(|m| *m == "publickey")
+            .collect();
+    }
     let disabled = |key: &str| {
         hop.option_str(key)
             .is_some_and(|v| v.eq_ignore_ascii_case("no"))

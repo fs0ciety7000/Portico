@@ -111,6 +111,10 @@ pub enum SessionEvent {
     /// A session was created for `alias` (first event of every session).
     Started {
         alias: String,
+        /// A short-lived check (copy-id verification), not a session the
+        /// user opened: UIs do not list it as the host's session.
+        #[serde(default)]
+        probe: bool,
     },
     Phase(SessionPhase),
     /// Pre-authentication banner sent by the server.

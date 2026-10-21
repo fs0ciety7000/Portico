@@ -18,6 +18,8 @@
 //! outside tests, every fallible API returns [`Result`], secrets are wrapped in
 //! [`secrecy`] types and never logged.
 
+mod agent;
+mod copy_id;
 pub mod engine;
 pub mod error;
 pub mod events;
@@ -35,6 +37,8 @@ pub mod snippets;
 pub mod ssh_config;
 pub mod store;
 
+pub use agent::{AgentCertificate, AgentKey};
+pub use copy_id::CopyIdOutcome;
 pub use engine::{Engine, EngineConfig};
 pub use error::{Error, ErrorSummary, Result};
 pub use events::EngineEvent;

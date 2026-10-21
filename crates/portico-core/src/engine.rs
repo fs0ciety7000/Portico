@@ -116,6 +116,10 @@ pub struct ConnectRequest {
     /// Host alias (resolved through `ssh_config`) or raw host name.
     pub alias: String,
     pub user_override: Option<String>,
+    /// Log in to the target with this private key only (copy-id
+    /// verification): `publickey` alone, `IdentitiesOnly`, no certificate.
+    /// Jump hosts authenticate as usual.
+    pub only_identity: Option<std::path::PathBuf>,
 }
 
 impl ConnectRequest {
@@ -123,6 +127,7 @@ impl ConnectRequest {
         Self {
             alias: alias.into(),
             user_override: None,
+            only_identity: None,
         }
     }
 }
@@ -382,7 +387,7 @@ impl Engine {
     }
 
     /// The connected transport of `session` (waits while it connects).
-    async fn attach(&self, session: SessionId) -> Result<Attached> {
+    pub(crate) async fn attach(&self, session: SessionId) -> Result<Attached> {
         let tx = {
             let sessions = self
                 .inner

@@ -37,6 +37,8 @@ bytes = "1"
 # SSH / SFTP / keys
 russh = "0.64"
 russh-sftp = "3"
+# CSPRNG for key generation (same version russh and ssh-key use).
+rand = "0.10"
 
 # known_hosts hashing (HMAC-SHA1, OpenSSH format)
 hmac = "0.13"

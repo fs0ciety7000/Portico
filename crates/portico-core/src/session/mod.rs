@@ -206,6 +206,7 @@ pub(crate) async fn run(
 ) {
     ctx.event(SessionEvent::Started {
         alias: request.alias.clone(),
+        probe: request.only_identity.is_some(),
     });
     let established = tokio::select! {
         biased;
@@ -260,12 +261,20 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
     let config = ctx.engine.config().clone();
     let alias = request.alias.clone();
     let user = request.user_override.clone();
-    let hops = tokio::task::spawn_blocking(move || {
+    let mut hops = tokio::task::spawn_blocking(move || {
         let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
         route::plan(&ssh, &config, &alias, user)
     })
     .await
     .map_err(|_| Error::EngineClosed)??;
+    if let (Some(key), Some(target)) = (&request.only_identity, hops.last_mut()) {
+        target.only_identity(key.clone());
+        ctx.log(
+            LogLevel::Info,
+            "auth",
+            format!("logging in with {} only", key.display()),
+        );
+    }
 
     let route: Vec<String> = hops.iter().map(Hop::describe).collect();
     ctx.log(LogLevel::Info, "route", route.join(" → "));
