@@ -1,0 +1,25 @@
+{
+  "sessions": 0,
+  "seconds": 30.0,
+  "strace": false,
+  "mem_list": {
+    "rss_kib": 9788,
+    "pss_kib": 7896,
+    "uss_kib": 7524
+  },
+  "view": "host list",
+  "idle": {
+    "cpu_ticks": 0,
+    "cpu_ms": 0.0,
+    "cpu_pct": 0.0,
+    "pty_bytes": 0,
+    "pty_reads": 0,
+    "wall_s": 30.03
+  },
+  "mem_end": {
+    "rss_kib": 9916,
+    "pss_kib": 7928,
+    "uss_kib": 7524
+  },
+  "threads": 8
+}

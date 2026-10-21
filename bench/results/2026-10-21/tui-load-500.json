@@ -1,0 +1,34 @@
+{
+  "hosts": 502,
+  "includes": 8,
+  "first_frame_ms": {
+    "n": 5,
+    "median": 8.85,
+    "p95": 8.97,
+    "min": 6.99,
+    "max": 8.97,
+    "runs": [
+      9.0,
+      8.9,
+      8.9,
+      7.0,
+      7.4
+    ]
+  },
+  "list_ready_ms": {
+    "n": 5,
+    "median": 103.45,
+    "p95": 111.56,
+    "min": 99.69,
+    "max": 111.56,
+    "runs": [
+      111.6,
+      100.3,
+      99.7,
+      103.5,
+      104.6
+    ]
+  },
+  "loading_placeholder_seen": "5/5",
+  "input_during_load": null
+}
