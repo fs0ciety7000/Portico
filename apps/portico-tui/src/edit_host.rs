@@ -10,7 +10,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portico_core::ErrorSummary;
 use portico_core::hosts::{
-    HostMeta, MAX_GROUP_CHARS, MAX_NOTES_CHARS, MAX_TAG_CHARS, MAX_TAGS, normalize_tags,
+    HostMeta, HostMetaError, MAX_GROUP_CHARS, MAX_NOTES_CHARS, MAX_TAG_CHARS, MAX_TAGS,
+    normalize_tags,
 };
 
 use crate::form::{paste_line, push_char};
@@ -83,6 +84,15 @@ impl EditHostPanel {
     /// The tags as the engine will store them, or why it would refuse.
     pub(crate) fn chips(&self) -> Result<Vec<String>, ErrorSummary> {
         normalize_tags(&split_tags(&self.tags)).map_err(|e| portico_core::Error::from(e).summary())
+    }
+
+    /// Index (in [`split_tags`] order) of the tag the engine would refuse,
+    /// from the position its error carries.
+    pub(crate) fn bad_tag(&self) -> Option<usize> {
+        match normalize_tags(&split_tags(&self.tags)) {
+            Err(HostMetaError::Tag { position, .. }) => position.checked_sub(1),
+            _ => None,
+        }
     }
 
     fn request(&self) -> EditRequest {
@@ -234,9 +244,12 @@ mod tests {
             panel.chips().ok(),
             Some(vec!["prod".into(), "eu".into(), "WEB".into()])
         );
+        assert_eq!(panel.bad_tag(), None);
         typed(&mut panel, " bad!");
         let err = panel.chips().err().map(|e| e.code);
         assert_eq!(err.as_deref(), Some("host_tag"));
+        // The fifth typed tag is the culprit (duplicates count as typed).
+        assert_eq!(panel.bad_tag(), Some(4));
         // Saving with a bad tag stays on the field, with the reason.
         assert_eq!(panel.handle_key(k(KeyCode::Enter)), EditOutcome::None);
         assert!(matches!(&panel.error, Some((EditField::Tags, e)) if e.hint.is_some()));

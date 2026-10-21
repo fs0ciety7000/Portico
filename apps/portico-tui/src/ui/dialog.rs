@@ -435,7 +435,7 @@ fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) 
             e.message.as_str()
         };
         lines.push(Line::from(Span::styled(
-            format!("{message}{count}"),
+            format!("{}{count}", crate::ui::fmt::sentence(message)),
             s.status(s.theme.status.error),
         )));
         if let Some(h) = &e.hint {

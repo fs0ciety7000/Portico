@@ -133,7 +133,7 @@ fn item_line(item: &Item, rows: &[TunnelRow], s: Styles, tick: u64, width: usize
                 }
                 // The full message and its hint show under the list when
                 // the row is selected.
-                TunnelStatus::Failed(error) => ("●", status.error, error.message.clone()),
+                TunnelStatus::Failed(error) => ("●", status.error, fmt::sentence(&error.message)),
             };
             let spec = row.spec.to_string();
             let alias = fmt::truncate(&row.alias, 14);
@@ -169,7 +169,7 @@ fn item_line(item: &Item, rows: &[TunnelRow], s: Styles, tick: u64, width: usize
 
 /// Message (error colour) then hint (secondary), each wrapped to `width`.
 fn error_lines(error: &ErrorSummary, s: Styles, width: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = fmt::wrap(&error.message, width)
+    let mut lines: Vec<Line<'static>> = fmt::wrap(&fmt::sentence(&error.message), width)
         .into_iter()
         .map(|l| Line::from(Span::styled(l, s.status(s.theme.status.error))))
         .collect();

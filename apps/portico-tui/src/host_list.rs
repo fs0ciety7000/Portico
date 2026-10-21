@@ -96,6 +96,17 @@ pub(crate) fn build(
     entries
 }
 
+/// `Prod eu` → `P R O D   E U` in at most `max` columns; when the spaced
+/// version does not fit, plain capitals (`PROD EU`), cut if still too long.
+pub(crate) fn section_title(title: &str, max: usize) -> String {
+    let spaced = spaced_caps(title, usize::MAX);
+    if spaced.chars().count() <= max {
+        return spaced;
+    }
+    let plain: Vec<String> = title.split_whitespace().map(str::to_uppercase).collect();
+    crate::ui::fmt::truncate(&plain.join(" "), max)
+}
+
 /// `PROD EU` → `P R O D   E U`: a section title in spaced capitals, cut
 /// to `max` columns.
 pub(crate) fn spaced_caps(title: &str, max: usize) -> String {
@@ -238,5 +249,12 @@ mod tests {
     fn spaced_titles() {
         assert_eq!(spaced_caps("Prod eu", 40), "P R O D   E U");
         assert_eq!(spaced_caps("recent", 5), "R E …");
+        // Spaced when it fits, plain capitals otherwise, cut last.
+        assert_eq!(section_title("Prod eu", 13), "P R O D   E U");
+        assert_eq!(section_title("Prod eu", 12), "PROD EU");
+        assert_eq!(
+            section_title("Production Europe West", 20),
+            "PRODUCTION EUROPE W…"
+        );
     }
 }

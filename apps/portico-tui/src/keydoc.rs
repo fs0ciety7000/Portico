@@ -40,7 +40,7 @@ const SEARCH: Panel = Panel {
 
 const EDIT: Panel = Panel {
     title: "TUI : édition d'un hôte",
-    intro: "« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; une erreur s'affiche sous le champ, avec son hint.",
+    intro: "« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.",
     rows: &[
         (
             "Champ suivant / précédent",
@@ -55,32 +55,36 @@ const EDIT: Panel = Panel {
 };
 
 const DEBUG: Panel = Panel {
-    title: "TUI : panneau debug",
-    intro: "`l` depuis la liste, `Ctrl-Space l` partout (depuis un onglet terminal, sa session est présélectionnée). À gauche, les sessions récentes (vivantes, puis les 20 dernières terminées), issue colorée, sondes de copy-id marquées « probe ». À droite, deux onglets : **Logs** (niveau, cible, message ; suivi en direct) et **Config** (config effective de l'alias, comme `ssh -G` : route ProxyJump, chaque option avec son origine `fichier:ligne` ou « default », avertissements).",
+    title: "TUI : journaux de session (panneau debug)",
+    intro: "« Session logs » : `l` depuis la liste, `Ctrl-Space l` partout (depuis un onglet terminal, sa session est présélectionnée). À gauche, les sessions récentes (vivantes, puis les 20 dernières terminées), issue colorée, sondes de copy-id marquées « probe » ; sous 100 colonnes, cette colonne devient un sélecteur d'une ligne (« ◂ lab · 22:23 (1/3) ▸ »). À droite, deux onglets : **Logs** (enregistrements : niveau, cible, message ; suivi en direct ; la vue commence toujours sur un début d'enregistrement) et **Effective config** (« Config » si la largeur manque ; config effective de l'alias, comme `ssh -G` : route « You → bastion → hôte », chaque option avec son origine `fichier:ligne`, « default » ou « at connect », avertissements). Couleurs : WARN et ERROR en couleur de statut, INFO secondaire, DEBUG / TRACE atténués.",
     rows: &[
-        ("Session précédente / suivante", "`↑` / `↓`, `k` / `j`"),
-        ("Onglet Logs / Config", "`Tab`"),
         (
-            "Filtrer les logs (texte)",
+            "Session précédente / suivante",
+            "`↑` / `↓`, `k` / `j`, `[` / `]`, `←` / `→`",
+        ),
+        ("Onglet Logs / Effective config", "`Tab`"),
+        (
+            "Filtrer les enregistrements (texte)",
             "`/`, saisie, `↵` ; `Esc` vide le filtre",
         ),
         ("Niveau minimal (debug → info → warn → error)", "`v`"),
         (
-            "Copier (OSC 52, texte `to_line` ; l'onglet Config ne copie jamais les options sensibles)",
+            "Copier (OSC 52, texte `to_line` ; l'onglet Effective config ne copie jamais les options sensibles)",
             "`y`",
         ),
         (
-            "Afficher / masquer les options sensibles (`ProxyCommand`…)",
-            "`s` (onglet Config)",
+            "Révéler / masquer les options sensibles (`ProxyCommand`, `LocalCommand`, `RemoteCommand`, `KnownHostsCommand` : « ••• hidden · s reveals · never copied », révélées sur cet écran seulement, jamais copiées)",
+            "`s` (onglet Effective config)",
         ),
         (
-            "Défiler / haut / bas (reprend le suivi)",
+            "Défiler / plus ancien / plus récent (`G` reprend le suivi)",
             "`PgUp` / `PgDn`, `g` / `G`",
         ),
         ("Rafraîchir", "`Ctrl-R`"),
+        ("Aide (par-dessus le panneau)", "`?`"),
         ("Fermer", "`Esc`, `q`, `Ctrl-C`"),
     ],
-    outro: "",
+    outro: "Le panneau de détails d'un hôte masque aussi ces options (« ••• hidden · l reveals in logs »). Quand une connexion échoue, ses détails proposent `↵ retry` et `l logs`.",
 };
 
 const FILES: Panel = Panel {
@@ -208,6 +212,11 @@ const FIXED: &[(Context, &str, &str)] = &[
     (Context::Hosts, "Aller à l'onglet n", "`1`-`9`"),
     (Context::Hosts, "Vider la recherche", "`Esc`"),
     (Context::Hosts, "Quitter", "`Ctrl-C`"),
+    (
+        Context::Hosts,
+        "Aide : page suivante, quand elle ne tient pas à l'écran (80×24 : hôtes, préfixe, journaux et édition, puis fichiers et panneaux)",
+        "`Tab`, `←` / `→` (aide ouverte)",
+    ),
     (
         Context::Hosts,
         "Préfixe des commandes d'onglet (comme dans un terminal)",

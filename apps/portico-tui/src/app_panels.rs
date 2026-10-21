@@ -1027,7 +1027,7 @@ mod render_tests {
             &lines,
             &[
                 "No key pairs in ~/.ssh yet.",
-                "no ssh-agent is reachable",
+                "No ssh-agent is reachable",
                 "Start ssh-agent",
                 "system keyring",
             ],
@@ -1419,7 +1419,7 @@ mod render_tests {
             });
         }
         let lines = screen(&mut app, 80, 24);
-        let notice = row_of(&lines, "the agent refused the key").unwrap();
+        let notice = row_of(&lines, "The agent refused the key").unwrap();
         let border = lines.iter().rposition(|l| l.contains('╰')).unwrap();
         // The toast box itself ends in ╰ too: the panel's border is above it.
         let panel_bottom = lines
@@ -1493,9 +1493,10 @@ mod render_tests {
         let mut app = test_app();
         app.overlay = Some(Overlay::Help);
         let lines = screen(&mut app, 80, 24);
-        check(
-            &lines,
-            &["Keys · snippets", "Copy pub · vault", "Run/paste · new"],
-        );
+        check(&lines, &["Keys · snippets"]);
+        // The panels' own keys are on the second page at 80×24.
+        app.update(Action::HelpPage);
+        let lines = screen(&mut app, 80, 24);
+        check(&lines, &["Copy pub · vault", "Run/paste · new"]);
     }
 }

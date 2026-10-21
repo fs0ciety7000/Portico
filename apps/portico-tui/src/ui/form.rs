@@ -112,15 +112,18 @@ pub(crate) fn problem(
     text: &str,
     width: usize,
 ) -> Vec<Line<'static>> {
-    fmt::wrap(text, width.saturating_sub(label_width).max(10))
-        .into_iter()
-        .map(|l| {
-            Line::from(vec![
-                Span::raw(" ".repeat(label_width)),
-                Span::styled(l, s.status(s.theme.status.error)),
-            ])
-        })
-        .collect()
+    fmt::wrap(
+        &fmt::sentence(text),
+        width.saturating_sub(label_width).max(10),
+    )
+    .into_iter()
+    .map(|l| {
+        Line::from(vec![
+            Span::raw(" ".repeat(label_width)),
+            Span::styled(l, s.status(s.theme.status.error)),
+        ])
+    })
+    .collect()
 }
 
 /// Message (error colour, or success colour) then hint, wrapped.
@@ -136,7 +139,7 @@ pub(crate) fn notice(
     } else {
         ("✕ ", s.theme.status.error)
     };
-    let mut lines: Vec<Line<'static>> = fmt::wrap(message, width.saturating_sub(2))
+    let mut lines: Vec<Line<'static>> = fmt::wrap(&fmt::sentence(message), width.saturating_sub(2))
         .into_iter()
         .enumerate()
         .map(|(i, l)| {

@@ -34,6 +34,10 @@ pub(crate) enum Action {
     BlurSearch,
     // Overlays & preferences
     ToggleHelp,
+    /// Closes the help (only: a panel under it stays).
+    CloseHelp,
+    /// The other help page (when the help does not fit at once).
+    HelpPage,
     CloseOverlay,
     CycleTheme,
     // Data

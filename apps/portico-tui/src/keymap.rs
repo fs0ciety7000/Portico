@@ -189,7 +189,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Hosts,
         ["l"],
         "logs",
-        "Panneau debug : logs des sessions et config effective",
+        "Journaux de session (panneau debug) et config effective",
         Action::OpenDebug
     ),
     bind!(
@@ -696,13 +696,16 @@ use HelpKey::{Fixed, Id};
 
 type HelpRows = &'static [(&'static [HelpKey], &'static str)];
 
-/// `(title, rows)` of the `?` overlay. Keys of the *same* action are
+/// `(title, page, rows)` of the `?` overlay. Keys of the *same* action are
 /// separated by a space (`c F5`); keys of *different* actions by ` · `,
 /// matched in order by the description (`g · G` → `First · last`).
 /// Descriptions stay within 19 columns so two columns fit 80×24 (tested).
-const HELP: &[(&str, HelpRows)] = &[
+/// When everything does not fit at once, the overlay shows one page at a
+/// time (0: hosts, sessions, edit, logs; 1: the explorer and the panels).
+const HELP: &[(&str, usize, HelpRows)] = &[
     (
         "Hosts",
+        0,
         &[
             (&[Id("hosts.down", 2), Id("hosts.up", 2)], "Down · up"),
             (&[Id("hosts.first", 1), Id("hosts.last", 1)], "First · last"),
@@ -720,13 +723,10 @@ const HELP: &[(&str, HelpRows)] = &[
                 "Keys · snippets",
             ),
             (
-                &[
-                    Id("hosts.edit", 1),
-                    Id("hosts.favorite", 1),
-                    Id("hosts.debug", 1),
-                ],
-                "Edit · star · logs",
+                &[Id("hosts.edit", 1), Id("hosts.favorite", 1)],
+                "Edit · favorite",
             ),
+            (&[Id("hosts.debug", 1)], "Session logs"),
             (
                 &[Id("hosts.forget_recent", 1), Id("hosts.clear_recent", 1)],
                 "Forget recent · all",
@@ -748,6 +748,7 @@ const HELP: &[(&str, HelpRows)] = &[
     ),
     (
         "Ctrl-Space, then…",
+        0,
         &[
             (&[Id("prefix.home", 2)], "Back to hosts"),
             (
@@ -779,10 +780,33 @@ const HELP: &[(&str, HelpRows)] = &[
     ),
     (
         "Terminal",
+        0,
         &[(&[Id("terminal.scroll_up", 1)], "Scroll back")],
     ),
     (
+        "Session logs",
+        0,
+        &[
+            (&[Fixed("↑↓ [ ]")], "Session"),
+            (&[Fixed("Tab · s")], "Switch tab · reveal"),
+            (&[Fixed("/ · v")], "Filter · level"),
+            (&[Fixed("y · Ctrl-R")], "Copy · refresh"),
+            (&[Fixed("PgUp/Dn g G")], "Scroll · G follows"),
+        ],
+    ),
+    (
+        "Edit host",
+        0,
+        &[
+            (&[Fixed("Tab · S-Tab")], "Next · prev field"),
+            (&[Fixed("Ctrl-S")], "Save"),
+            (&[Fixed("Ctrl-U")], "Clear field"),
+            (&[Fixed("↵")], "New line in notes"),
+        ],
+    ),
+    (
         "Files",
+        1,
         &[
             (&[Fixed("Tab")], "Switch pane"),
             (&[Fixed("↵ · Bksp")], "Open · parent"),
@@ -796,6 +820,7 @@ const HELP: &[(&str, HelpRows)] = &[
     ),
     (
         "Tunnels",
+        1,
         &[
             (&[Fixed("a")], "Add -L / -R"),
             (&[Fixed("↵ · x")], "Start · stop"),
@@ -803,6 +828,7 @@ const HELP: &[(&str, HelpRows)] = &[
     ),
     (
         "Keys",
+        1,
         &[
             (&[Fixed("n · c")], "New · copy to host"),
             (&[Fixed("a · x")], "Agent add · remove"),
@@ -811,6 +837,7 @@ const HELP: &[(&str, HelpRows)] = &[
     ),
     (
         "Snippets (type to filter)",
+        1,
         &[
             (&[Fixed("↵ · Ctrl-N")], "Run/paste · new"),
             (&[Fixed("Ctrl-E")], "Edit"),
@@ -823,13 +850,16 @@ const HELP: &[(&str, HelpRows)] = &[
 #[derive(Debug, Clone)]
 pub(crate) struct HelpSection {
     pub(crate) title: &'static str,
+    /// Page shown when the whole help does not fit at once.
+    pub(crate) page: usize,
     pub(crate) rows: Vec<(String, &'static str)>,
 }
 
 pub(crate) fn help(keymap: &Keymap) -> Vec<HelpSection> {
     HELP.iter()
-        .map(|(title, rows)| HelpSection {
+        .map(|(title, page, rows)| HelpSection {
             title,
+            page: *page,
             rows: rows
                 .iter()
                 .map(|(keys, label)| {
@@ -887,6 +917,11 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         return None;
     }
     let is_prefix_key = ctrl && matches!(key.code, KeyCode::Char(' ' | '@'));
+    if overlay == Some(Overlay::Help)
+        && let Some(action) = help_key(key)
+    {
+        return Some(action);
+    }
     if let Some(action) = panel_key(key, overlay, ctrl) {
         return Some(action);
     }
@@ -949,6 +984,18 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
             }
             _ => keymap.lookup(Context::Hosts, &key),
         },
+    }
+}
+
+/// Keys of the help overlay: `Tab` / `←` `→` turn the page, `Esc` / `?` /
+/// `q` / `Ctrl-C` close it; the rest is ignored.
+pub(crate) fn help_key(key: KeyEvent) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') if ctrl => Some(Action::CloseHelp),
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => Some(Action::HelpPage),
+        KeyCode::Esc | KeyCode::Char('?' | 'q') => Some(Action::CloseHelp),
+        _ => None,
     }
 }
 
@@ -1332,10 +1379,24 @@ mod tests {
             "{hosts:?}"
         );
         assert!(
-            hosts.contains(&("e · * · L".to_owned(), "Edit · star · logs")),
+            hosts.contains(&("e · *".to_owned(), "Edit · favorite")),
+            "{hosts:?}"
+        );
+        assert!(
+            hosts.contains(&("L".to_owned(), "Session logs")),
             "{hosts:?}"
         );
         let defaults = help(&Keymap::defaults());
+        // The logs panel and the edit form have their own sections.
+        let titles: Vec<&str> = defaults.iter().map(|s| s.title).collect();
+        assert!(titles.contains(&"Session logs") && titles.contains(&"Edit host"));
+        // Never "star": the word is "favorite" everywhere.
+        assert!(
+            defaults
+                .iter()
+                .flat_map(|s| s.rows.iter())
+                .all(|(_, label)| !label.contains("star"))
+        );
         let hosts = defaults.first().map(|s| s.rows.clone()).unwrap_or_default();
         assert!(hosts.contains(&("/ Ctrl-K".to_owned(), "Search #tag * @grp")));
         assert!(hosts.contains(&("1-9 · ] · [".to_owned(), "Tab · next · prev")));

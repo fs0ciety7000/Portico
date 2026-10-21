@@ -21,6 +21,21 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// Core messages are lowercase sentences (`wrong vault passphrase`): the
+/// first word is capitalised for display, unless it is a name, a path or an
+/// identifier (`id_ed25519 …`, `~/.ssh/…`, `ssh-agent …`, `web: …`), left as
+/// written. Same rule as the GUI's `sentence()`; never used to decide
+/// anything (no string matching on errors).
+pub(crate) fn sentence(text: &str) -> String {
+    let first_word = text.split(char::is_whitespace).next().unwrap_or_default();
+    let plain = !first_word.is_empty() && first_word.chars().all(|c| c.is_ascii_lowercase());
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if plain => first.to_uppercase().chain(chars).collect(),
+        _ => text.to_owned(),
+    }
+}
+
 /// Greedy word wrap to `width` columns (character count); words longer
 /// than a line are cut. Always returns at least one line.
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -71,6 +86,25 @@ mod tests {
         assert_eq!(wrap("abcdefgh", 3), vec!["abc", "def", "gh"]);
         assert_eq!(wrap("", 10), vec![""]);
         assert_eq!(wrap("fits as is", 20), vec!["fits as is"]);
+    }
+
+    #[test]
+    fn sentences() {
+        assert_eq!(sentence("wrong vault passphrase"), "Wrong vault passphrase");
+        assert_eq!(sentence("cannot connect"), "Cannot connect");
+        assert_eq!(sentence("refused"), "Refused");
+        // Names, paths and identifiers stay as written.
+        for kept in [
+            "id_ed25519 is encrypted",
+            "~/.ssh/config:3: bad",
+            "ssh-agent is not running",
+            "web: closed",
+            "settings.toml ignored",
+            "Already capitalised",
+            "",
+        ] {
+            assert_eq!(sentence(kept), kept);
+        }
     }
 
     #[test]

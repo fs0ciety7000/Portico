@@ -208,7 +208,12 @@ fn browse(panel: &mut KeysPanel, ctx: &Context, frame: &mut Frame<'_>, band: u16
                 with
             } else {
                 // The list keeps its room: the notice goes under the panel.
-                let toast = ToastBox::new(s, !n.ok, &n.message, n.hint.as_deref(), screen.width);
+                let kind = if n.ok {
+                    crate::app::ToastKind::Info
+                } else {
+                    crate::app::ToastKind::Error
+                };
+                let toast = ToastBox::new(s, kind, &n.message, n.hint.as_deref(), screen.width);
                 band = band.max(toast.height);
                 overflow = Some(toast);
                 footer_with(panel, None)

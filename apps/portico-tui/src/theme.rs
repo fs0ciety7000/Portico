@@ -36,6 +36,10 @@ impl Styles {
     pub(crate) fn border_focus(self) -> Style {
         Style::new().fg(c(self.theme.palette.accent))
     }
+    /// Body text: the primary colour without weight (titles add bold).
+    pub(crate) fn primary(self) -> Style {
+        Style::new().fg(c(self.theme.palette.text_primary))
+    }
     pub(crate) fn secondary(self) -> Style {
         Style::new().fg(c(self.theme.palette.text_secondary))
     }
