@@ -8,6 +8,8 @@
 mod commands;
 mod dto;
 mod files;
+mod keys;
+mod snippets;
 mod terminals;
 
 use std::sync::Arc;
@@ -58,15 +60,7 @@ pub fn run() {
         // with no UI.
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
-                if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
-                    terminals.close_all();
-                }
-                if let Some(files) = webview.try_state::<Files>() {
-                    files.clear();
-                }
-                if let Some(engine) = webview.try_state::<Engine>() {
-                    engine.disconnect_all();
-                }
+                release_page(webview);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -97,6 +91,25 @@ pub fn run() {
             files::list_tunnels,
             files::start_tunnel,
             files::stop_tunnel,
+            keys::list_keys,
+            keys::key_defaults,
+            keys::generate_key,
+            keys::public_key_text,
+            keys::list_agent_keys,
+            keys::agent_add,
+            keys::agent_remove,
+            keys::copy_id,
+            keys::verify_key_login,
+            keys::vault_status,
+            keys::vault_create,
+            keys::vault_unlock,
+            keys::vault_lock,
+            keys::vault_change_passphrase,
+            snippets::list_snippets,
+            snippets::snippets_for,
+            snippets::save_snippet,
+            snippets::delete_snippet,
+            snippets::run_snippet,
         ])
         .build(tauri::generate_context!());
 
@@ -130,6 +143,19 @@ pub fn run() {
             });
         }
     });
+}
+
+/// Closes what a (re)loading page opened: terminals, upload tokens, sessions.
+fn release_page(webview: &tauri::Webview) {
+    if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
+        terminals.close_all();
+    }
+    if let Some(files) = webview.try_state::<Files>() {
+        files.clear();
+    }
+    if let Some(engine) = webview.try_state::<Engine>() {
+        engine.disconnect_all();
+    }
 }
 
 /// Dropped files become upload tokens. Tauri also tells the page their paths

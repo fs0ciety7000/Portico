@@ -4,6 +4,13 @@ import { Channel } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   api,
+  type AgentKey,
+  type CopyIdOutcome,
+  type KeyGenRequest,
+  type LocalKey,
+  type Snippet,
+  type SnippetDraft,
+  type VaultStatus,
   isTauri,
   type EngineEvent,
   type ForwardCheck,
@@ -49,6 +56,25 @@ export interface Backend {
   startTunnel(session: number, spec: string, allowExposed: boolean): Promise<number>;
   stopTunnel(id: number): Promise<void>;
   onDropped(cb: (files: Upload[]) => void): Promise<UnlistenFn>;
+  listKeys(): Promise<LocalKey[]>;
+  keyDefaults(): Promise<{ comment: string }>;
+  generateKey(request: KeyGenRequest): Promise<LocalKey>;
+  publicKeyText(key: string): Promise<string>;
+  listAgentKeys(): Promise<AgentKey[]>;
+  agentAdd(key: string, passphrase: string | null, lifetimeSecs: number | null): Promise<AgentKey>;
+  agentRemove(fingerprint: string): Promise<void>;
+  copyId(session: number, key: string): Promise<CopyIdOutcome>;
+  verifyKeyLogin(session: number, key: string): Promise<void>;
+  vaultStatus(): Promise<VaultStatus>;
+  vaultCreate(passphrase: string): Promise<void>;
+  vaultUnlock(passphrase: string): Promise<void>;
+  vaultLock(): Promise<void>;
+  vaultChangePassphrase(old: string, next: string): Promise<void>;
+  listSnippets(): Promise<Snippet[]>;
+  snippetsFor(alias: string): Promise<Snippet[]>;
+  saveSnippet(snippet: SnippetDraft): Promise<Snippet>;
+  deleteSnippet(id: string): Promise<void>;
+  runSnippet(terminal: number, id: string, values: Record<string, string>, bracketedPaste: boolean, run: boolean | null): Promise<void>;
   onDragging(cb: (dragging: boolean) => void): Promise<UnlistenFn>;
 }
 

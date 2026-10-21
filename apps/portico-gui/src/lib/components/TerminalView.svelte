@@ -336,6 +336,10 @@
   export function pasteText(text: string) {
     paste(text);
   }
+  /** DECSET 2004 as tracked by xterm.js (snippets are wrapped when on). */
+  export function bracketedPaste(): boolean {
+    return term?.modes.bracketedPasteMode ?? false;
+  }
   export function focus() {
     term?.focus();
   }

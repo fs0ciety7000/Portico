@@ -48,7 +48,7 @@ impl From<&HostEntry> for HostDto {
 
 /// `~/…` for paths under the home directory (shorter, and does not expose
 /// the account's home path in screenshots).
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|home| {

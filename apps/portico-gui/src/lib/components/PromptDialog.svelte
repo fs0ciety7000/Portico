@@ -4,6 +4,7 @@
   // sent, then the fields are cleared.
   import { displayPath, type Prompt, type PromptAnswer } from "../api";
   import { sanitizeRemote } from "../keys";
+  import { vault } from "../state/vault.svelte";
   import Modal from "./Modal.svelte";
 
   let { prompt, alias, onanswer }: { prompt: Prompt; alias: string | undefined; onanswer: (a: PromptAnswer) => void } =
@@ -111,8 +112,13 @@
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={remember} />
-        <span>Remember in the system keyring</span>
+        <span>{vault.inUse ? "Remember in Portico's encrypted vault" : "Remember in the system keyring"}</span>
       </label>
+      {#if remember && vault.status === "absent"}
+        <p class="remember-note">There is no vault yet: Portico will offer to create one, and remembers secrets from then on.</p>
+      {:else if remember && vault.status === "locked"}
+        <p class="remember-note">The vault is locked: Portico will offer to unlock it so this can be remembered next time.</p>
+      {/if}
     {:else}
       {@const message = [kind.name, kind.instructions].map((t) => sanitizeRemote(t, 512, true)).filter(Boolean)}
       {#if message.length}
@@ -193,6 +199,7 @@
     font-size: var(--text-sm);
   }
   .check input { accent-color: var(--accent); }
+  .remember-note { color: var(--text-muted); font-size: var(--text-xs); }
   .focus-sink {
     position: absolute;
     width: 1px;

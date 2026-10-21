@@ -8,6 +8,16 @@
   import { isLive, workspace } from "./lib/state/workspace.svelte";
   import { files } from "./lib/state/files.svelte";
   import { tunnels } from "./lib/state/tunnels.svelte";
+  import { keys } from "./lib/state/keys.svelte";
+  import { vault } from "./lib/state/vault.svelte";
+  import { emptyDraft, NEEDS_PASTE_MODE, scopeLabel, snippets, type SnippetTarget } from "./lib/state/snippets.svelte";
+  import type { Snippet } from "./lib/api";
+  import KeysDialog from "./lib/components/KeysDialog.svelte";
+  import KeyGenDialog from "./lib/components/KeyGenDialog.svelte";
+  import AgentAddDialog from "./lib/components/AgentAddDialog.svelte";
+  import CopyIdDialog from "./lib/components/CopyIdDialog.svelte";
+  import VaultDialog from "./lib/components/VaultDialog.svelte";
+  import SnippetsDialog from "./lib/components/SnippetsDialog.svelte";
   import FilesPanel from "./lib/components/FilesPanel.svelte";
   import TunnelsDialog from "./lib/components/TunnelsDialog.svelte";
   import Modal from "./lib/components/Modal.svelte";
@@ -47,7 +57,57 @@
   const prompt = $derived(workspace.prompts[0]);
   const alert = $derived(workspace.alerts[0]);
   const conflict = $derived(files.conflicts[0]);
-  const modalOpen = $derived(!!prompt || !!alert || !!conflict || tunnelsOpen);
+  const modalOpen = $derived(!!prompt || !!alert || !!conflict || tunnelsOpen || keys.open || snippets.open || !!vault.dialog);
+
+  /** Where snippets run: the active tab's shell. */
+  const snippetTarget: SnippetTarget | null = $derived(
+    tab
+      ? {
+          alias: tab.alias,
+          terminal: tab.terminal !== null && !tab.end ? tab.terminal : null,
+          bracketed: () => views[tab.key]?.bracketedPaste() ?? false,
+        }
+      : null,
+  );
+
+  function openSnippets() {
+    snippets.show(tab ? tab.alias : (hosts[selected]?.alias ?? null));
+  }
+
+  /** "Run: …" from the palette: straight to the shell unless it needs values. */
+  async function runFromPalette(s: Snippet) {
+    if (!tab) return;
+    if (s.placeholders.length) {
+      snippets.show(tab.alias, { kind: "run", snippet: s, error: null });
+      return;
+    }
+    const error = await snippets.run(snippetTarget, s, {});
+    if (!error) return;
+    if (error.code === NEEDS_PASTE_MODE) snippets.show(tab.alias, { kind: "run", snippet: s, error });
+    else workspace.notify(error);
+  }
+
+  // The palette lists the snippets of the active tab's host.
+  $effect(() => {
+    void paletteOpen;
+    void snippets.loadPalette(tab?.alias ?? null);
+  });
+  const paletteSnippets = $derived(
+    tab && snippetTarget?.terminal != null && snippets.palette?.alias === tab.alias ? snippets.palette.list : [],
+  );
+
+  const vaultCommands: Command[] = $derived(
+    vault.status === "locked"
+      ? [{ id: "vault-unlock", title: "Unlock the vault", run: () => vault.open("unlock", "keys") }]
+      : vault.status === "unlocked"
+        ? [
+            { id: "vault-lock", title: "Lock the vault", run: () => void vault.lock() },
+            { id: "vault-change", title: "Change the vault passphrase", run: () => vault.open("change", "keys") },
+          ]
+        : vault.status === "absent"
+          ? [{ id: "vault-create", title: "Create a vault for remembered secrets", run: () => vault.open("create", "keys") }]
+          : [],
+  );
   const showFiles = $derived(filesOpen && !!tab);
 
   /** Session the tunnels panel adds to: the active tab's, else the selected host's live one. */
@@ -150,6 +210,12 @@
           { id: "cancel-transfer", title: "Cancel the latest transfer", shortcut: "x", run: () => filesPanel?.run("cancel") },
         ]
       : []),
+    { id: "keys", title: "Keys", hint: "~/.ssh and ssh-agent", shortcut: kbdShift("I"), run: () => keys.show() },
+    { id: "new-key", title: "New key", run: () => keys.show({ kind: "new" }) },
+    ...vaultCommands,
+    { id: "snippets", title: "Snippets", shortcut: kbdShift("S"), run: openSnippets },
+    { id: "new-snippet", title: "New snippet", run: () => snippets.show(tab?.alias ?? null, { kind: "edit", draft: emptyDraft(tab?.alias ?? null) }) },
+    ...paletteSnippets.map((s) => ({ id: `snippet-${s.id}`, title: `Run: ${s.name}`, hint: scopeLabel(s), run: () => void runFromPalette(s) })),
     { id: "tunnels", title: "Tunnels", hint: tunnels.list.length ? `${tunnels.list.length} running` : undefined, shortcut: kbdShift("P"), run: () => (tunnelsOpen = true) },
     { id: "download-dir", title: "Change download folder", hint: files.downloadDir || undefined, run: () => void files.chooseDownloadDir() },
     { id: "home", title: "Go to hosts", shortcut: tabKbd(0), run: () => (workspace.active = null) },
@@ -191,6 +257,8 @@
         case "reload": void load(); break;
         case "files": toggleFiles(); break;
         case "tunnels": tunnelsOpen = true; break;
+        case "keys": keys.show(); break;
+        case "snippets": openSnippets(); break;
       }
       return;
     }
@@ -205,6 +273,8 @@
     else if (e.key === "t") cycleTheme();
     else if (e.key === "f") toggleFiles();
     else if (e.key === "p") tunnelsOpen = true;
+    else if (e.key === "i") keys.show();
+    else if (e.key === "s") openSnippets();
     else if (e.key === "d") {
       const host = hosts[selected];
       if (host) void workspace.disconnect(host.alias);
@@ -235,6 +305,7 @@
   onMount(() => {
     load();
     void files.init();
+    void vault.init();
     const unlisten = [
       backend.onEngineEvent((ev) => {
         workspace.onEvent(ev);
@@ -307,6 +378,7 @@
         <span class="optional"><kbd>{kbd("T")}</kbd> new tab</span>
         <span class="optional"><kbd>{kbd("W")}</kbd> close</span>
         <span class="optional"><kbd>{kbdShift("F")}</kbd> files</span>
+        <span class="optional"><kbd>{kbdShift("S")}</kbd> snippets</span>
         <span class="optional"><kbd>{tabKbd(0)}</kbd> hosts</span>
         <span><kbd>{kbd("K")}</kbd> commands</span>
       </span>
@@ -319,6 +391,8 @@
         <span class="optional"><kbd>d</kbd> disconnect</span>
         <span class="optional"><kbd>f</kbd> files</span>
         <span class="optional"><kbd>p</kbd> tunnels</span>
+        <span class="optional"><kbd>i</kbd> keys</span>
+        <span class="optional"><kbd>s</kbd> snippets</span>
         <span class="optional"><kbd>t</kbd> theme</span>
         <span><kbd>{kbd("K")}</kbd> commands</span>
       </span>
@@ -362,6 +436,28 @@
         <button class="primary" data-autofocus onclick={() => files.answerConflict("rename")}>Keep both <kbd>k</kbd></button>
       {/snippet}
     </Modal>
+  {/key}
+{:else if vault.dialog}
+  {#key vault.dialog}
+    <VaultDialog mode={vault.dialog.mode} reason={vault.dialog.reason} />
+  {/key}
+{:else if keys.open}
+  {#key keys.view}
+    {#if keys.view.kind === "new"}
+      <KeyGenDialog />
+    {:else if keys.view.kind === "agent-add"}
+      <AgentAddDialog key={keys.view.key} />
+    {:else if keys.view.kind === "copy-pick"}
+      <CopyIdDialog pick={keys.view.key} />
+    {:else if keys.view.kind === "copy"}
+      <CopyIdDialog pick={null} />
+    {:else}
+      <KeysDialog />
+    {/if}
+  {/key}
+{:else if snippets.open}
+  {#key snippets.view.kind}
+    <SnippetsDialog target={snippetTarget} />
   {/key}
 {:else if tunnelsOpen}
   <TunnelsDialog

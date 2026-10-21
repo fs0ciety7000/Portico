@@ -73,7 +73,9 @@ export interface HostKeyChanged {
 export type SessionEvent =
   | ({ kind: "phase" } & Phase)
   | { kind: "latency"; rtt: Duration }
-  | { kind: "started"; alias: string }
+  /** `probe`: a short-lived check (copy-id verification), not a session the
+   * user opened: never listed as the host's session. */
+  | { kind: "started"; alias: string; probe?: boolean }
   | { kind: "banner"; text: string }
   | ({ kind: "host_key_changed" } & HostKeyChanged);
 
@@ -164,6 +166,80 @@ export type PromptAnswer =
   | { kind: "answers"; values: string[] }
   | { kind: "cancel" };
 
+/** Mirrors `portico_core::keys::CertValidity`. */
+export type CertValidity =
+  | { state: "not_yet_valid"; starts_in_secs: number }
+  | { state: "valid"; expires_in_secs: number | null }
+  | { state: "expires_soon"; expires_in_secs: number }
+  | { state: "expired"; since_secs: number };
+
+/** Mirrors `keys::CertificateDto`. */
+export interface Certificate {
+  keyId: string;
+  principals: string[];
+  /** Unix seconds. */
+  validAfter: number;
+  /** Unix seconds; null = forever. */
+  validBefore: number | null;
+  validity: CertValidity;
+}
+
+/** Mirrors `keys::LocalKeyDto`. `id` (the file name) designates the key. */
+export interface LocalKey {
+  id: string;
+  privateDisplay: string;
+  publicDisplay: string;
+  algorithm: string;
+  fingerprint: string;
+  comment: string;
+  hasPrivate: boolean;
+  certificate: Certificate | null;
+}
+
+/** Mirrors `keys::AgentKeyDto`. */
+export interface AgentKey {
+  algorithm: string;
+  fingerprint: string;
+  comment: string;
+  certificate: Certificate | null;
+}
+
+/** Mirrors `portico_core::keys::KeyAlgorithm`. */
+export type KeyAlgorithm =
+  | { kind: "ed25519" }
+  | { kind: "rsa"; bits: number }
+  | { kind: "ecdsa"; curve: "p256" | "p384" | "p521" };
+
+/** Sent once and forgotten: the passphrase becomes a SecretString in Rust. */
+export interface KeyGenRequest {
+  name: string;
+  algorithm: KeyAlgorithm;
+  comment: string;
+  passphrase: string | null;
+}
+
+export type CopyIdOutcome = "added" | "already_present";
+
+/** Mirrors `portico_core::vault::VaultStatus`. */
+export type VaultStatus = "not_in_use" | "absent" | "locked" | "unlocked";
+
+/** Mirrors `portico_core::snippets::SnippetScope`. */
+export type SnippetScope = { kind: "global" } | { kind: "hosts"; values: string[] } | { kind: "tags"; values: string[] };
+
+/** Mirrors `snippets::SnippetDto` (`placeholders` is read-only, from Rust). */
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  description: string | null;
+  scope: SnippetScope;
+  run: boolean;
+  placeholders: string[];
+}
+
+/** What `save_snippet` takes (an empty id creates). */
+export type SnippetDraft = Omit<Snippet, "placeholders">;
+
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
 export const api = {
@@ -206,6 +282,28 @@ export const api = {
   startTunnel: (session: number, spec: string, allowExposed: boolean) =>
     invoke<number>("start_tunnel", { session, spec, allowExposed }),
   stopTunnel: (id: number) => invoke<void>("stop_tunnel", { id }),
+  listKeys: () => invoke<LocalKey[]>("list_keys"),
+  keyDefaults: () => invoke<{ comment: string }>("key_defaults"),
+  generateKey: (request: KeyGenRequest) => invoke<LocalKey>("generate_key", { request }),
+  publicKeyText: (key: string) => invoke<string>("public_key_text", { key }),
+  listAgentKeys: () => invoke<AgentKey[]>("list_agent_keys"),
+  agentAdd: (key: string, passphrase: string | null, lifetimeSecs: number | null) =>
+    invoke<AgentKey>("agent_add", { key, passphrase, lifetimeSecs }),
+  agentRemove: (fingerprint: string) => invoke<void>("agent_remove", { fingerprint }),
+  copyId: (session: number, key: string) => invoke<CopyIdOutcome>("copy_id", { session, key }),
+  verifyKeyLogin: (session: number, key: string) => invoke<void>("verify_key_login", { session, key }),
+  vaultStatus: () => invoke<VaultStatus>("vault_status"),
+  vaultCreate: (passphrase: string) => invoke<void>("vault_create", { passphrase }),
+  vaultUnlock: (passphrase: string) => invoke<void>("vault_unlock", { passphrase }),
+  vaultLock: () => invoke<void>("vault_lock"),
+  vaultChangePassphrase: (old: string, next: string) => invoke<void>("vault_change_passphrase", { old, new: next }),
+  listSnippets: () => invoke<Snippet[]>("list_snippets"),
+  snippetsFor: (alias: string) => invoke<Snippet[]>("snippets_for", { alias }),
+  saveSnippet: (snippet: SnippetDraft) => invoke<Snippet>("save_snippet", { snippet }),
+  deleteSnippet: (id: string) => invoke<void>("delete_snippet", { id }),
+  /** Rendered and checked in Rust; `run` overrides the snippet's flag. */
+  runSnippet: (terminal: number, id: string, values: Record<string, string>, bracketedPaste: boolean, run: boolean | null) =>
+    invoke<void>("run_snippet", { terminal, id, values, bracketedPaste, run }),
   /** Files dropped on the window, already registered as upload tokens. */
   onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
     listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),

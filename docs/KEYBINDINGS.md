@@ -109,6 +109,8 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app ci
 | Palette de commandes | `⌘K` | `Ctrl-Shift-K` |
 | Fichiers (SFTP) de cet hôte, à côté du terminal | `⌘⇧F` | `Ctrl-Shift-F` |
 | Tunnels | `⌘⇧P` | `Ctrl-Shift-P` |
+| Clés | `⌘⇧I` | `Ctrl-Shift-I` |
+| Snippets de cet hôte (la palette liste aussi « Run: <nom> » par snippet applicable) | `⌘⇧S` | `Ctrl-Shift-S` |
 | Copier la sélection / coller | `⌘C` / `⌘V` | `Ctrl-Shift-C` / `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
 | Reconnecter un onglet terminé ou en échec | `↵` | `↵` |
 | Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` | `Esc` |
@@ -151,6 +153,50 @@ le dossier affiché en bas du panneau (« Change » ou la palette pour en choisi
 | Démarrer le forward proposé choisi / arrêter le tunnel choisi | `↵` / `Suppr` (ou boutons `Start` / `Stop`) |
 | Écoute exposée (hors loopback) | bloc d'avertissement, focus sur `Cancel` ; `Expose tunnel` actif après 400 ms sans frappe ni clic · `Esc` annule |
 | Fermer | `Esc` |
+
+## Clés (GUI)
+
+Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent, puis le vault (masqué quand le trousseau
+système est utilisé). Le premier focus est sur la liste ; chaque action a aussi son bouton et son entrée de palette.
+
+| Action | Touches |
+|---|---|
+| Ouvrir (depuis la liste des hôtes / partout ; aussi « Keys » dans la palette) | `i` / `⌘⇧I` (Linux : `Ctrl-Shift-I`) |
+| Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
+| Nouvelle clé (Ed25519 par défaut, RSA 3072/4096, ECDSA P-256/384/521 ; `↵` crée) | `n` |
+| Ajouter à l'agent (durée : jusqu'au retrait, 1 h, 8 h ; passphrase demandée si la clé est chiffrée) | `a` |
+| Retirer de l'agent (confirmation, focus sur `Keep` : `y` retire, `n` / `Esc` garde) | `x` |
+| Copier sur un hôte (recherche d'hôte, `↑` `↓`, `↵`) | `c` |
+| Copier la clé publique (presse-papiers) | `y` |
+| Vault : déverrouiller / verrouiller (ou créer s'il n'existe pas) | `v` |
+| Vault : changer la passphrase (ou créer) | `V` |
+| Rafraîchir | `Ctrl-R` |
+| Fermer (depuis un sous-dialogue : revenir à la liste) | `Esc` |
+
+**Copy-id** : étapes « Connecting · Installing · Verifying ». Réutilise la session vivante de l'hôte, sinon en ouvre
+une (prompts habituels) et la ferme ensuite. Résultat : `↵` termine, `c` copie les lignes `Host` / `IdentityFile`
+à ajouter soi-même (Portico n'écrit jamais `~/.ssh/config`). Échec : message et hint, `↵` réessaie, `Esc` ferme.
+
+**Vault au démarrage** : verrouillé, Portico demande la passphrase maître une fois ; `Esc` (« Continue without ») laisse
+les secrets non mémorisés jusqu'au déverrouillage (`v` dans Clés). Cocher « Remember » sans vault (ou vault verrouillé)
+propose ensuite de le créer (ou de le déverrouiller).
+
+## Snippets (GUI)
+
+| Action | Touches |
+|---|---|
+| Ouvrir (hôte sélectionné depuis la liste / onglet actif ; aussi « Snippets » dans la palette) | `s` / `⌘⇧S` (Linux : `Ctrl-Shift-S`) |
+| Exécuter depuis la palette (une entrée « Run: <nom> » par snippet de l'hôte de l'onglet actif) | `⌘K` (Linux : `Ctrl-Shift-K`) |
+| Se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
+| Filtrer (dans le filtre : `↑` `↓`, `↵` exécute, `Esc` vide puis rend la liste) | `/` |
+| Exécuter dans l'onglet actif (formulaire des placeholders si besoin, `↵` envoie) | `↵`, double-clic |
+| Nouveau / éditer (`⌘↵` ou `Ctrl-↵` enregistre ; `↵` dans un champ d'une ligne aussi) | `n` / `e` |
+| Supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde) | `d` |
+| Snippet multi-ligne « paste only » refusé sans bracketed paste | `↵` « Run it » (l'exécute), `Esc` annule |
+| Fermer | `Esc` |
+
+Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée (bannière explicative).
+Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.
 
 ## Prévus
 

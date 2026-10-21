@@ -10,6 +10,7 @@
   let {
     title,
     tone = "default",
+    size = "default",
     labelledBy = "modal-title",
     armed = $bindable(false),
     armedAt = $bindable(0),
@@ -20,6 +21,8 @@
   }: {
     title: Snippet;
     tone?: "default" | "danger";
+    /** `wide` for list views (keys, snippets). */
+    size?: "default" | "wide";
     labelledBy?: string;
     armed?: boolean;
     /** `performance.now()` when the dialog armed. */
@@ -74,6 +77,9 @@
     };
   });
 
+  const isField = (t: EventTarget | null) =>
+    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
+
   function onkeydown(e: KeyboardEvent) {
     // Keep every key inside the dialog (no app shortcut, no terminal input).
     e.stopPropagation();
@@ -82,12 +88,12 @@
       if (armed) onescape();
       return;
     }
-    if (armed && onkey && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target instanceof HTMLInputElement) && onkey(e.key)) {
+    if (armed && onkey && !e.metaKey && !e.ctrlKey && !e.altKey && !isField(e.target) && !(e.key === "Enter" && e.target instanceof HTMLButtonElement) && onkey(e.key)) {
       e.preventDefault();
       return;
     }
     if (e.key !== "Tab") return;
-    const items = [...dialog.querySelectorAll<HTMLElement>("input, button, [tabindex='0']")].filter(
+    const items = [...dialog.querySelectorAll<HTMLElement>("input, textarea, select, button, [tabindex='0']")].filter(
       (el) => !el.hasAttribute("disabled"),
     );
     const first = items[0];
@@ -108,6 +114,7 @@
   <div
     class="modal"
     class:danger={tone === "danger"}
+    class:wide={size === "wide"}
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledBy}
@@ -145,6 +152,13 @@
     box-shadow: var(--shadow-overlay);
     outline: none;
   }
+  .modal.wide {
+    width: min(760px, 100%);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    max-height: min(720px, calc(100vh - 2 * var(--space-6)));
+  }
+  .modal.wide .body { overflow-y: auto; }
   .modal.danger {
     border-color: color-mix(in srgb, var(--status-error) 55%, var(--border-strong));
     border-top: 3px solid var(--status-error);
@@ -165,6 +179,7 @@
     display: flex;
     justify-content: flex-end;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-5);
     border-top: 1px solid var(--border-subtle);
@@ -228,5 +243,89 @@
     scrollbar-width: thin;
   }
   .modal :global(p) { margin: 0; }
+  /* Form parts shared by the keys, vault and snippet dialogs. */
+  .modal :global(.field) { display: grid; gap: var(--space-1); }
+  .modal :global(.field > span) { color: var(--text-muted); font-size: var(--text-sm); }
+  .modal :global(.field input:not([type="checkbox"]):not([type="radio"])),
+  .modal :global(.field textarea) {
+    height: 34px;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font: inherit;
+    outline: none;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .modal :global(.field textarea) {
+    height: auto;
+    min-height: calc(5 * 1.5em + 2 * var(--space-2));
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    resize: vertical;
+  }
+  .modal :global(.field input.mono:not([type="checkbox"]):not([type="radio"])) { font-family: var(--font-mono); font-size: var(--text-sm); }
+  .modal :global(.field input:focus),
+  .modal :global(.field textarea:focus) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .modal :global(.field [aria-invalid="true"]) { border-color: var(--status-error); }
+  .modal :global(.field .help) { color: var(--text-muted); font-size: var(--text-xs); }
+  .modal :global(.check) {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+  }
+  .modal :global(.check input) { accent-color: var(--accent); }
+  .modal :global(.inline-error) {
+    display: grid;
+    gap: 2px;
+    color: var(--status-error);
+    font-size: var(--text-sm);
+  }
+  .modal :global(.inline-error .hint) { color: var(--text-secondary); }
+  .modal :global(.soft-warning) { color: var(--status-warning); font-size: var(--text-sm); }
+  .modal :global(.note) { color: var(--text-muted); font-size: var(--text-sm); }
+  /* Segmented choice (algorithm, lifetime, scope). */
+  .modal :global(.segmented) {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    justify-self: start;
+  }
+  .modal :global(.segmented button) {
+    height: 26px;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+  }
+  .modal :global(.segmented button:hover) { color: var(--text-primary); }
+  .modal :global(.segmented button[aria-pressed="true"]) {
+    background: var(--bg-selected);
+    color: var(--text-primary);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .modal :global(.spinner) {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: modal-spin var(--motion-loop) linear infinite;
+  }
+  @keyframes modal-spin { to { transform: rotate(360deg); } }
+  .modal :global(button.small) { height: 26px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+  .modal :global(.footer-note) { margin-right: auto; color: var(--text-muted); font-size: var(--text-xs); }
   .modal :global(.title-host) { margin-left: var(--space-2); color: var(--text-muted); font-weight: 450; }
 </style>
