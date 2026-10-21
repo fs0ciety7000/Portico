@@ -79,16 +79,23 @@ annulation à 25 % sans fichier résiduel des deux côtés (`PORTICO_INTEROP_BIG
 (service écho, scénarios 10 et 11) et en TUI réelle (`nc` sur une écoute exposée). Le tunnel vers une vraie base de données
 reste à démontrer manuellement.
 
-## Phase 3 : clés, secrets et snippets ⏳ *(Opus ; revue `agent-security` obligatoire)*
-- Génération : ed25519 (défaut), RSA ≥ 3072, ECDSA P-256/384/521, passphrase (bcrypt-pbkdf, OpenSSH),
-  écriture en `0600` et `.pub` en `0644`, **refus d'écraser** une clé existante
-- Copy-id : auth initiale (mot de passe ou keyboard-interactive), puis `mkdir -p ~/.ssh && chmod 700`, ajout **idempotent**
-  à `authorized_keys` (pas de doublon), `chmod 600`, et vérification par reconnexion avec la clé
-- Agent : liste des identités, ajout et suppression (`ssh-add`) ; certificats affichés avec leur validité et une alerte d'expiration
-- Vault chiffré de repli (Argon2id + XChaCha20-Poly1305) avec déverrouillage au démarrage
-- Snippets : CRUD dans les deux UIs, portée (global, hôtes, tags), placeholders, exécution dans l'onglet actif (palette `⌘K`)
+## Phase 3 : clés, secrets et snippets ✅ *(Opus ; revues `agent-security`, `agent-ssh-protocols`, `agent-design-review`)*
+- [x] Génération : ed25519 (défaut), RSA 3072–8192, ECDSA P-256/384/521, passphrase (format OpenSSH, bcrypt-pbkdf),
+  privée créée en exclusif `0600`, `.pub` `0644`, **jamais d'écrasement**, aléa système, `~/.ssh` partagé refusé
+- [x] Copy-id : sur la session authentifiée (mot de passe, keyboard-interactive…), script POSIX d'une ligne (sh, dash, bash, fish,
+  tcsh, csh), clé sur stdin, ajout **idempotent** (blob, lignes commentées ignorées), aucune réécriture ni `chmod` de l'existant,
+  vérification par reconnexion avec **cette clé seule** (ni certificat, ni `none`), même compte
+- [x] Agent : liste, ajout (passphrase, durée de vie) et retrait vérifié ; certificats avec validité et alerte d'expiration (7 jours)
+- [x] Vault chiffré de repli `vault.toml` v2 (Argon2id 64 Mio/t=3 + XChaCha20-Poly1305, AAD d'en-tête, verrou de fichier,
+  compteur anti-retour), déverrouillage au démarrage, création proposée depuis « remember »
+- [x] Snippets : CRUD dans les deux UIs, portée (global, hôtes, tags), placeholders validés, rendu sûr (aucun contrôle, refus du
+  collage multi-ligne sans bracketed paste), exécution dans l'onglet actif (palette GUI « Run: … »)
+- Reporté : ajout d'un certificat à l'agent et retrait d'un certificat (limite russh), commentaire des clés ajoutées à l'agent,
+  expiration restante des identités de l'agent, copy-id par SFTP (comptes sans shell) et Windows, couleur du point de statut du vault
 
-**Sortie** : générer une clé, la copier sur un serveur et se reconnecter sans mot de passe, le tout sans quitter Portico.
+**Sortie** ✅ : en TUI contre OpenSSH réel, clé générée dans Portico (avec passphrase), installée par copy-id, vérifiée (prompt de
+passphrase de la sonde), puis reconnexion avec cette clé seule acceptée par sshd, ajout à l'agent et reconnexion depuis Portico.
+Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié en mode démo (pas encore dans l'app de bureau réelle).
 
 ## Phase 4 : finition MVP ⏳ *(Sonnet, revues Opus)*
 - Sessions récentes (`state/recent.toml`), favoris, édition des tags et groupes
@@ -124,8 +131,23 @@ reste à démontrer manuellement.
 | 1b Terminal TUI | ✅ | 103 + interop (shell réel) | ✅ (voir ci-dessous) | ✅ (tmux 80×24 et 110×28) |
 | 1c Terminal GUI | ✅ | 106 + 3 GUI + interop | ✅ (voir ci-dessous) | ✅ (captures démo 3 thèmes + app réelle WebKitGTK) |
 | 2 SFTP / tunnels | ✅ | 146 + 12 GUI + interop (11 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, tmux 80×24 et 110×28, re-vérifiée) |
-| 3 Clés / secrets / snippets | ⏳ | | | |
+| 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
 | 4 Finition | ⏳ | | | |
+
+## Revues de la phase 3 (2026-10-21)
+
+Aucun constat CRITIQUE ni ÉLEVÉ dans les cinq revues ; tous les autres ont été traités.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` clés/copy-id/agent | 2 MOYEN, 6 FAIBLE | Vérification sans certificat ni `none`, clés commentées ignorées, même compte, sonde fermée si abandonnée, codes d'erreur d'origine, `SysRng`, `~/.ssh` partagé refusé, bidi refusé |
+| `agent-ssh-protocols` | 1 BLOQUANT, 10 IMPORTANT, 9 MINEUR | Certificats exclus de la preuve, script d'une ligne compatible csh, marqueur de résultat (rc bavards, forced command), canal toujours fermé, données après acceptation d'`exec`, retrait agent vérifié, `publickey` forcé |
+| `agent-security` vault/snippets | 2 MOYEN, 6 FAIBLE | Verrou inter-processus, refus du collage multi-ligne sans bracketed paste, vault v2 (génération anti-retour, secrets en base64), bornes KDF 64–256 Mio, temporaires aléatoires, dossiers `0700`, snippets.toml borné et assaini, caractères invisibles refusés |
+| `agent-security` UIs | 1 MOYEN, 4 FAIBLE | « Run it » sur `r` seulement après armement, passphrase redemandée après un refus de génération, `Debug` caviardé (TUI), durée d'agent hors bornes refusée, démo exclue du build de production |
+| `agent-design-review` | 2 BLOQUANT, 8 IMPORTANT | Exception au déverrouillage du vault et toasts vides corrigés ; défilement TUI, sélection pendant les questions, vault toujours visible, pied sur une ligne, copy-id « Hide » + contexte dans les prompts, glossaire et raccourcis communs |
+
+Restent mineurs : le toast en haut à droite recouvre l'indication « Ctrl-R » du titre de la vue Clés à 900 px, couleur
+du point de statut du vault, libellé « Esc, then ↵ to connect » exact seulement depuis la liste d'hôtes.
 
 ## Revues de la phase 2 (2026-10-21)
 
