@@ -269,10 +269,29 @@ impl Error {
         };
         ErrorSummary {
             code: code.to_owned(),
-            message: self.to_string(),
+            message: without_os_codes(&self.to_string()),
             hint: hint.map(str::to_owned),
         }
     }
+}
+
+/// `Connection refused (os error 111)` → `Connection refused`: the errno
+/// says nothing more to a user (it stays in `Debug` for logs).
+fn without_os_codes(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(" (os error ") {
+        let after = rest.get(start..).unwrap_or_default();
+        let Some(end) = after.find(')') else { break };
+        let code = after.get(" (os error ".len()..end).unwrap_or_default();
+        out.push_str(rest.get(..start).unwrap_or_default());
+        if code.is_empty() || !code.chars().all(|c| c.is_ascii_digit()) {
+            out.push_str(after.get(..=end).unwrap_or_default());
+        }
+        rest = after.get(end + 1..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
 }
 
 /// UI-facing description of an error. Cheap to clone, safe to display and log
@@ -285,4 +304,19 @@ pub struct ErrorSummary {
     pub message: String,
     /// Optional actionable advice shown under the message.
     pub hint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn os_error_codes_are_dropped_from_summaries() {
+        assert_eq!(
+            without_os_codes("cannot connect to db:22: Connection refused (os error 111)"),
+            "cannot connect to db:22: Connection refused"
+        );
+        assert_eq!(without_os_codes("a (os error x) b"), "a (os error x) b");
+        assert_eq!(without_os_codes("plain"), "plain");
+    }
 }
