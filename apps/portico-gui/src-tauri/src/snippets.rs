@@ -125,7 +125,6 @@ pub(crate) async fn run_snippet(
         run.unwrap_or(snippet.run),
         bracketed_paste,
     )
-    .into_input()
     .map_err(summary)?;
     for part in bytes.chunks(INPUT_CHUNK) {
         inputs
@@ -134,26 +133,6 @@ pub(crate) async fn run_snippet(
             .map_err(|_| terminal_gone())?;
     }
     Ok(())
-}
-
-/// Bridge for the core's move of `snippet_input` to `Result` (it refuses,
-/// with `snippet_needs_paste_mode`, a multi-line paste without bracketed
-/// paste). Builds against both signatures; drop the `Vec` impl once the
-/// core change is merged.
-trait IntoInput {
-    fn into_input(self) -> portico_core::Result<Vec<u8>>;
-}
-
-impl IntoInput for Vec<u8> {
-    fn into_input(self) -> portico_core::Result<Vec<u8>> {
-        Ok(self)
-    }
-}
-
-impl IntoInput for portico_core::Result<Vec<u8>> {
-    fn into_input(self) -> portico_core::Result<Vec<u8>> {
-        self
-    }
 }
 
 fn not_here(alias: &str) -> ErrorSummary {
