@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Portico">
+  <!-- macOS app icon: design/portico-mark.svg placed on the Big Sur icon grid
+       (824 px tile, 100 px transparent margin) so the Dock shows it at the same
+       optical size as system icons. Source of icons/icon.icns. Keep in sync with the mark. -->
+  <g transform="translate(100 100) scale(1.609375)">
+    <rect width="512" height="512" rx="112" fill="#0b0c0e"/>
+    <g fill="none" stroke="#c8a96b" stroke-width="22" stroke-linecap="square" stroke-linejoin="miter">
+      <path d="M116 150 H396"/>
+      <path d="M136 186 H376"/>
+      <path d="M160 186 V392"/>
+      <path d="M352 186 V392"/>
+      <path d="M208 392 V290 A48 48 0 0 1 304 290 V392"/>
+      <path d="M116 412 H396"/>
+    </g>
+  </g>
+</svg>

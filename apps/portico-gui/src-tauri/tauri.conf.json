@@ -28,9 +28,38 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "deb", "appimage"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
+    "targets": ["deb", "appimage", "app", "dmg"],
+    "publisher": "Portico contributors",
+    "homepage": "https://github.com/fs0ciety7000/Portico",
+    "copyright": "Copyright © 2026 Portico contributors",
+    "license": "MIT OR Apache-2.0",
     "category": "DeveloperTool",
-    "shortDescription": "Local-first, keyboard-first SSH workspace"
+    "shortDescription": "Local-first, keyboard-first SSH workspace",
+    "longDescription": "Portico is a fast, keyboard-first SSH session manager. It reads ~/.ssh/config, known_hosts, ssh-agent and local keys as the source of truth, works offline without an account, keeps secrets in the system keyring, and offers terminals, SFTP, port forwarding, key management and snippets.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "section": "net",
+        "priority": "optional",
+        "depends": ["libdbus-1-3", "libc6 (>= 2.35)"]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true,
+      "entitlements": "../../../packaging/macos/Entitlements.plist",
+      "infoPlist": "../../../packaging/macos/Info.plist"
+    }
   }
 }
