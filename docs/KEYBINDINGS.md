@@ -45,6 +45,8 @@ l'annule.
 | Déconnecter cet hôte | `Ctrl-Space` puis `d` |
 | Explorateur de fichiers (SFTP) | `Ctrl-Space` puis `f` |
 | Tunnels | `Ctrl-Space` puis `p` |
+| Clés (locales, agent, vault) | `Ctrl-Space` puis `i` (depuis la liste : `i`) |
+| Snippets de l'hôte de l'onglet | `Ctrl-Space` puis `s` (depuis la liste : `s`) |
 | Rechercher un hôte | `Ctrl-Space` puis `/` |
 | Aide | `Ctrl-Space` puis `?` |
 | Envoyer `Ctrl-Space` au programme distant | `Ctrl-Space` deux fois |
@@ -86,6 +88,52 @@ Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés
 | Confirmer une écoute exposée (adresse autre que loopback) | `y` (toute autre touche annule) |
 | Fermer | `Esc`, `q`, `Ctrl-C` |
 
+## Clés (TUI)
+
+`i` depuis la liste des hôtes, `Ctrl-Space i` partout. Panneau en deux sections : clés locales
+(`~/.ssh`), puis identités de l'agent ; statut du vault en pied (seulement si le keyring système
+n'est pas disponible). Seules les touches utilisables sur la sélection sont proposées.
+
+| Action | Touches |
+|---|---|
+| Se déplacer / changer de section | `j` / `k`, `↓` / `↑`, `g` / `G` · `Tab` |
+| Nouvelle clé (formulaire) | `n` |
+| Ajouter à l'agent (durée : aucune / 1 h / 8 h, passphrase si besoin) | `a`, `←` `→`, `↵` |
+| Retirer de l'agent (confirmation) | `x` (ou `Suppr`), puis `y` |
+| Copier la clé sur un hôte (sélecteur flou, puis Connecting · Installing · Verifying) | `c`, saisie, `↵` |
+| Réessayer une copie en échec / quitter la vue (la copie continue) | `r` / `Esc` |
+| Copier la clé publique (OSC 52, et la ligne s'affiche) | `y` (`Esc` masque la ligne) |
+| Vault : déverrouiller ou verrouiller | `v` |
+| Vault : créer, ou changer la passphrase | `V` |
+| Rafraîchir | `Ctrl-R` |
+| Fermer | `Esc`, `q`, `Ctrl-C` |
+
+Formulaire de génération : `Tab` / `Shift-Tab` (ou `↓` / `↑`) entre les champs, `←` `→` ou `Espace`
+sur le type, `Ctrl-U` vide le champ, `↵` génère (les erreurs s'affichent sous le champ), `Esc` annule.
+
+## Snippets (TUI)
+
+`s` depuis la liste des hôtes, `Ctrl-Space s` partout. Liste des snippets qui s'appliquent à l'hôte
+de l'onglet actif (portée affichée : `global`, `host web`, `#tag`). La frappe filtre la liste, d'où
+les commandes en `Ctrl`. Sans onglet terminal ouvert sur l'hôte, l'exécution est désactivée (le
+panneau l'explique) ; la gestion reste possible.
+
+| Action | Touches |
+|---|---|
+| Filtrer / vider le filtre | saisie / `Ctrl-U` (ou `Esc` si le filtre n'est pas vide) |
+| Se déplacer | `↓` / `↑`, `PgUp` / `PgDn` |
+| Exécuter dans l'onglet (formulaire si `{{placeholders}}`) | `↵` |
+| Nouveau / éditer | `Ctrl-N` / `Ctrl-E` |
+| Supprimer (confirmation) | `Ctrl-D` (ou `Suppr`), puis `y` |
+| Recharger | `Ctrl-R` |
+| Fermer | `Esc`, `Ctrl-C` |
+
+Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera
+tapé, `↵` envoie (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la
+commande insère une ligne, `←` `→` change la portée, `Espace` coche « Run », `Ctrl-S` (ou `↵` hors
+commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant
+n'accepte pas le collage groupé) propose `r` pour l'exécuter quand même, ou `Esc`.
+
 ## Dialogues
 
 | Dialogue | Touches |
@@ -95,6 +143,9 @@ Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés
 | Mot de passe / passphrase | saisie masquée · `Tab` champ suivant / case « mémoriser » · `Espace` cocher · `↵` valider · `Esc` / `Ctrl-C` annuler |
 | Keyboard-interactive | `Tab` entre les champs · `↵` valider · `Esc` annuler |
 | Clé d'hôte modifiée (alerte) | `Esc` / `↵` fermer (aucune acceptation possible) |
+| Vault verrouillé au démarrage (TUI) | saisie masquée · `↵` déverrouiller · `Esc` continuer sans (secrets non mémorisés) |
+| Créer le vault / changer sa passphrase (TUI) | `Tab` champ suivant · `↵` valider · `Esc` annuler (« not now » quand il est proposé après « mémoriser ») |
+| Passphrase d'une clé pour l'agent (TUI) | saisie masquée · `↵` ajouter · `Esc` annuler |
 
 ## Terminal (GUI)
 
