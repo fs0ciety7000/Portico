@@ -8,14 +8,34 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
 import { demoKeys } from "./demo-keys";
+import { demoMeta } from "./demo-meta";
 
-const base = { identityFiles: [], localForwards: [], remoteForwards: [], warnings: [], group: null };
+const base = { identityFiles: [], localForwards: [], remoteForwards: [], warnings: [], group: null as string | null, notes: null as string | null };
+
+// `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).
+const grouped = new URLSearchParams(location.search).get("groups") !== "none";
+const group = (name: string) => (grouped ? name : null);
 
 export const demoHosts: Host[] = [
-  { ...base, alias: "db-prod", hostname: "10.0.4.12", user: "postgres", port: 22, proxyJump: ["bastion"], tags: ["prod", "db"], favorite: true, source: "~/.ssh/config:12" },
-  { ...base, alias: "bastion", hostname: "bastion.example.com", user: "ops", port: 2222, proxyJump: [], tags: ["infra"], favorite: false, source: "~/.ssh/config:1" },
-  { ...base, alias: "web-01", hostname: "web-01.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, source: "~/.ssh/config:5", localForwards: ["8080 localhost:80"] },
+  {
+    ...base,
+    alias: "db-prod",
+    hostname: "10.0.4.12",
+    user: "postgres",
+    port: 22,
+    proxyJump: ["bastion"],
+    tags: ["prod", "db"],
+    favorite: true,
+    group: group("Production"),
+    notes: "Primary PostgreSQL 16. Maintenance window: Sunday 02:00–04:00 UTC.\nPage the DBA on call before any restart.",
+    source: "~/.ssh/config:12",
+  },
+  { ...base, alias: "bastion", hostname: "bastion.example.com", user: "ops", port: 2222, proxyJump: [], tags: ["infra"], favorite: false, group: group("Infrastructure"), source: "~/.ssh/config:1" },
+  { ...base, alias: "web-01", hostname: "web-01.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, group: group("Production"), source: "~/.ssh/config:5", localForwards: ["8080 localhost:80"] },
+  { ...base, alias: "web-02", hostname: "web-02.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, group: group("Production"), source: "~/.ssh/config:8" },
+  { ...base, alias: "grafana", hostname: "grafana.internal", user: "ops", port: 22, proxyJump: ["bastion"], tags: ["monitoring"], favorite: true, group: group("Infrastructure"), source: "~/.ssh/config:20" },
   { ...base, alias: "staging", hostname: "staging.example.com", user: "deploy", port: 22, proxyJump: [], tags: ["staging"], favorite: false, source: "~/.ssh/conf.d/staging:1" },
+  { ...base, alias: "lab-pi", hostname: "192.168.1.40", user: "pi", port: 22, proxyJump: [], tags: ["home"], favorite: false, source: "~/.ssh/config:30" },
 ];
 
 export const demoThemes: ThemeInfo[] = [
@@ -51,6 +71,8 @@ const enc = new TextEncoder();
 
 function phase(id: number, p: Phase) {
   emit({ type: "session", id, event: { kind: "phase", ...p } });
+  if (p.phase === "failed") meta.sessionEnded(id, { kind: "failed", error: p.error });
+  else if (p.phase === "closed") meta.sessionEnded(id, { kind: "closed", reason: p.reason as "user_requested" });
 }
 
 function ask(session: number, kind: PromptKind): Promise<PromptAnswer> {
@@ -72,15 +94,20 @@ async function run(id: number, host: Host) {
   const s = sessions.get(id);
   if (!s) return;
   phase(id, { phase: "resolving" });
+  meta.log(id, "info", "config", `resolved ${host.hostname}:${host.port} as ${host.user ?? "user"} (${host.source})`);
   await sleep(250);
   const hops = host.proxyJump.length + 1;
   for (let hop = 1; hop <= hops; hop++) {
-    phase(id, { phase: "connecting", hop, hops, target: hop < hops ? (host.proxyJump[hop - 1] ?? "") : host.alias });
+    const target = hop < hops ? (host.proxyJump[hop - 1] ?? "") : host.alias;
+    phase(id, { phase: "connecting", hop, hops, target });
+    meta.log(id, "debug", hops > 1 ? "jump" : "tcp", hops > 1 ? `hop ${hop}/${hops}: opening ${target}` : `connecting to ${host.hostname}:${host.port}`);
     await sleep(450);
   }
   phase(id, { phase: "handshake" });
+  meta.log(id, "info", "kex", "kex curve25519-sha256 · host key ssh-ed25519 · cipher chacha20-poly1305@openssh.com");
   await sleep(250);
   phase(id, { phase: "verifying_host_key" });
+  meta.log(id, "debug", "known_hosts", `checking ${host.hostname} in ~/.ssh/known_hosts`);
   await sleep(300);
   if (host.alias === "staging") {
     emit({
@@ -136,10 +163,15 @@ async function run(id: number, host: Host) {
     }
   } else {
     phase(id, { phase: "authenticating", method: "agent" });
+    meta.log(id, "debug", "auth", "offering agent key SHA256:q2Xn8kD0bT1sV9cXr4mJ7yPwZ3aLhE5uGfN6oKiRtYs (id_ed25519_work)");
     await sleep(400);
   }
+  meta.log(id, "info", "auth", host.alias === "db-prod" ? "authenticated with password" : "authenticated with publickey (agent)");
+  meta.log(id, "warn", "banner", "server banner: \\r\\nAuthorized use only\\u{202e}");
   s.connected = true;
   phase(id, { phase: "connected" });
+  meta.connected(host.alias);
+  meta.log(id, "info", "session", "connected");
   s.waiters.splice(0).forEach((w) => w(true));
   const rtt = host.alias === "db-prod" ? 312 : 18;
   emit({ type: "session", id, event: { kind: "latency", rtt: { secs: 0, nanos: rtt * 1e6 } } });
@@ -304,11 +336,26 @@ const keyDemo = demoKeys({
   },
 });
 
+const meta = demoMeta({ emit, hosts: demoHosts });
+
+/** Rough stand-in for portico-core's search: words, `#tag`, `@group`, `*`. */
+function demoSearch(q: string): Host[] {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return demoHosts.filter((h) =>
+    words.every((w) => {
+      if (w === "*") return h.favorite;
+      if (w.startsWith("#")) return h.tags.some((t) => t.toLowerCase().startsWith(w.slice(1)));
+      if (w.startsWith("@")) return (h.group ?? "").toLowerCase().includes(w.slice(1));
+      return `${h.alias} ${h.hostname} ${h.user ?? ""}`.toLowerCase().includes(w);
+    }),
+  );
+}
+
 export const demoBackend: Backend = {
   ...keyDemo,
+  ...meta.backend,
   listHosts: async () => demoHosts,
-  searchHosts: async (q) =>
-    demoHosts.filter((h) => `${h.alias} ${h.hostname} ${h.tags.map((t) => "#" + t).join(" ")}`.includes(q)),
+  searchHosts: async (q) => demoSearch(q),
   listThemes: async () => demoThemes,
   homeDir: async () => "/home/demo",
   async connect(alias) {
@@ -316,6 +363,7 @@ export const demoBackend: Backend = {
     if (!host) throw { code: "unknown_host", message: `no host named ${alias}`, hint: null } satisfies ErrorSummary;
     const id = nextId++;
     sessions.set(id, { alias, connected: false, closed: false, waiters: [] });
+    meta.sessionStarted(id, alias);
     emit({ type: "session", id, event: { kind: "started", alias } });
     void run(id, host);
     return id;

@@ -11,6 +11,12 @@ import {
   type Snippet,
   type SnippetDraft,
   type VaultStatus,
+  type HostMeta,
+  type RecentHost,
+  type SessionLogInfo,
+  type LogLine,
+  type EffectiveConfig,
+  type Settings,
   isTauri,
   type EngineEvent,
   type ForwardCheck,
@@ -75,6 +81,19 @@ export interface Backend {
   deleteSnippet(id: string): Promise<void>;
   runSnippet(terminal: number, id: string, values: Record<string, string>, bracketedPaste: boolean, run: boolean | null): Promise<void>;
   onDragging(cb: (dragging: boolean) => void): Promise<UnlistenFn>;
+  setFavorite(alias: string, favorite: boolean): Promise<HostMeta>;
+  setTags(alias: string, tags: string[]): Promise<HostMeta>;
+  setGroup(alias: string, group: string | null): Promise<HostMeta>;
+  setNotes(alias: string, notes: string | null): Promise<HostMeta>;
+  recentHosts(limit: number): Promise<RecentHost[]>;
+  clearRecent(): Promise<void>;
+  forgetRecent(alias: string): Promise<boolean>;
+  sessionsWithLogs(): Promise<SessionLogInfo[]>;
+  sessionLogs(session: number): Promise<LogLine[]>;
+  sessionLogsText(session: number): Promise<string>;
+  effectiveConfig(alias: string): Promise<EffectiveConfig>;
+  getSettings(): Promise<Settings>;
+  saveTheme(theme: string): Promise<void>;
 }
 
 const tauriBackend: Backend = {

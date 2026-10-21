@@ -14,6 +14,8 @@ export interface Host {
   tags: string[];
   group: string | null;
   favorite: boolean;
+  /** Free text from hosts.toml (`\n` allowed, nothing else invisible). */
+  notes: string | null;
   source: string;
   warnings: string[];
 }
@@ -113,7 +115,8 @@ export type EngineEvent =
   | { type: "prompt_resolved"; id: number }
   | { type: "sftp"; id: number; session: number; event: SftpEvent }
   | { type: "tunnel"; id: number; session: number; event: TunnelEvent }
-  | { type: "log" }
+  /** A log record was added to `session` (display it via `sessionLogs`, which is sanitized). */
+  | { type: "log"; session: number | null }
   /** `hosts.toml` changed for `alias`: update the host in place. */
   | { type: "host_meta"; alias: string; meta: HostMeta }
   /** The recent-sessions list changed: fetch it again if shown. */
@@ -125,6 +128,61 @@ export interface HostMeta {
   group: string | null;
   favorite: boolean;
   notes: string | null;
+}
+
+/** Mirrors `meta::RecentDto`; `last` in Unix ms. */
+export interface RecentHost {
+  alias: string;
+  last: number;
+  count: number;
+}
+
+export type CloseReason = "user_requested" | "remote_closed" | "timeout";
+
+/** Mirrors `debug::SessionLogDto` (times in Unix ms; texts escaped in Rust). */
+export interface SessionLogInfo {
+  id: number;
+  alias: string;
+  probe: boolean;
+  started: number;
+  ended: number | null;
+  outcome: { kind: "closed"; reason: CloseReason } | { kind: "failed"; error: ErrorSummary } | null;
+}
+
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
+
+/** Mirrors `debug::LogLineDto`: one line, controls and bidi escaped. */
+export interface LogLine {
+  at: number;
+  level: LogLevel;
+  target: string;
+  message: string;
+}
+
+/** Mirrors `debug::EffectiveOptionDto`. `origin` null = Portico's default. */
+export interface EffectiveOption {
+  key: string;
+  values: string[];
+  origin: string | null;
+  command: boolean;
+  /** Runs commands (ProxyCommand…): values withheld by Rust, never shown or copied. */
+  sensitive: boolean;
+}
+
+/** Mirrors `debug::EffectiveConfigDto` (the `ssh -G` view). */
+export interface EffectiveConfig {
+  alias: string;
+  options: EffectiveOption[];
+  route: { alias: string; user: string; hostname: string; port: number }[];
+  routeError: ErrorSummary | null;
+  warnings: { origin: string; message: string }[];
+}
+
+/** Mirrors `settings::SettingsDto` (GUI part of settings.toml). */
+export interface Settings {
+  theme: string | null;
+  keymap: Record<string, string>;
+  error: ErrorSummary | null;
 }
 
 export type EntryKind = "file" | "dir" | "symlink" | "other";
@@ -316,6 +374,20 @@ export const api = {
   /** Rendered and checked in Rust; `run` overrides the snippet's flag. */
   runSnippet: (terminal: number, id: string, values: Record<string, string>, bracketedPaste: boolean, run: boolean | null) =>
     invoke<void>("run_snippet", { terminal, id, values, bracketedPaste, run }),
+  setFavorite: (alias: string, favorite: boolean) => invoke<HostMeta>("set_favorite", { alias, favorite }),
+  setTags: (alias: string, tags: string[]) => invoke<HostMeta>("set_tags", { alias, tags }),
+  setGroup: (alias: string, group: string | null) => invoke<HostMeta>("set_group", { alias, group }),
+  setNotes: (alias: string, notes: string | null) => invoke<HostMeta>("set_notes", { alias, notes }),
+  recentHosts: (limit: number) => invoke<RecentHost[]>("recent_hosts", { limit }),
+  clearRecent: () => invoke<void>("clear_recent"),
+  forgetRecent: (alias: string) => invoke<boolean>("forget_recent", { alias }),
+  sessionsWithLogs: () => invoke<SessionLogInfo[]>("sessions_with_logs"),
+  sessionLogs: (session: number) => invoke<LogLine[]>("session_logs", { session }),
+  /** "Copy all": `LogRecord::to_line`, one record per line. */
+  sessionLogsText: (session: number) => invoke<string>("session_logs_text", { session }),
+  effectiveConfig: (alias: string) => invoke<EffectiveConfig>("effective_config", { alias }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
   /** Files dropped on the window, already registered as upload tokens. */
   onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
     listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),
