@@ -407,7 +407,18 @@ impl Engine {
     /// The session's SFTP client, opened on first use and reopened if the
     /// previous one died.
     async fn sftp(&self, session: SessionId) -> Result<(Arc<SftpClient>, Attached)> {
-        let attached = self.attach(session).await?;
+        let attached = match self.attach(session).await {
+            Ok(a) => a,
+            Err(e) => {
+                // The session is gone: forget its client.
+                self.inner
+                    .sftp
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&session);
+                return Err(e);
+            }
+        };
         loop {
             let cell = Arc::clone(
                 self.inner
@@ -420,7 +431,7 @@ impl Engine {
             let client = cell
                 .get_or_try_init(|| async { crate::sftp::open(&attached).await.map(Arc::new) })
                 .await?;
-            if !client.cancel.is_cancelled() {
+            if !client.is_retired() {
                 return Ok((Arc::clone(client), attached));
             }
             // Dead client: forget it and open a new one.
@@ -435,21 +446,21 @@ impl Engine {
         }
     }
 
-    /// Runs an SFTP operation; a protocol-level failure retires the client.
+    /// Runs an SFTP operation. Only a transport failure retires the client
+    /// (a refused request, e.g. mkdir on an existing name, does not).
     async fn with_sftp<T, F, Fut>(&self, session: SessionId, op: F) -> Result<T>
     where
         F: FnOnce(Arc<SftpClient>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let (client, _) = self.sftp(session).await?;
-        let result = op(Arc::clone(&client)).await;
-        if let Err(Error::Sftp(crate::sftp::SftpError::Remote {
-            failure: crate::sftp::RemoteFailure::Other,
-            ..
-        })) = &result
-        {
-            // Could be a dead channel: reopen on next use (cheap).
-            client.cancel.cancel();
+        let (client, attached) = self.sftp(session).await?;
+        let result = tokio::select! {
+            biased;
+            () = attached.ctx.cancel.cancelled() => Err(Error::SessionEnded(session)),
+            r = op(Arc::clone(&client)) => r,
+        };
+        if let Err(e) = &result {
+            client.note(e);
         }
         result
     }
@@ -502,7 +513,9 @@ impl Engine {
     ) -> Result<TransferId> {
         let (client, attached) = self.sftp(session).await?;
         let id = TransferId::next();
-        let cancel = client.cancel.child_token();
+        // Under the session (closing it stops the transfer), never under the
+        // SFTP client: one refused request must not cancel other transfers.
+        let cancel = attached.ctx.cancel.child_token();
         self.inner
             .transfers
             .lock()
@@ -537,7 +550,21 @@ impl Engine {
 
     /// Starts a `-L` / `-R` tunnel on `session` (waits while it connects).
     /// `Listening` or `Failed` follows on the event bus.
-    pub async fn start_tunnel(&self, session: SessionId, spec: ForwardSpec) -> Result<TunnelId> {
+    /// A spec reachable from other machines ([`ForwardSpec::is_exposed`])
+    /// is refused unless `allow_exposed` (the UI asked the user).
+    pub async fn start_tunnel(
+        &self,
+        session: SessionId,
+        spec: ForwardSpec,
+        allow_exposed: bool,
+    ) -> Result<TunnelId> {
+        if spec.is_exposed() && !allow_exposed {
+            let (ForwardSpec::Local { bind, .. } | ForwardSpec::Remote { bind, .. }) = &spec;
+            return Err(crate::forward::TunnelError::ExposedNotConfirmed {
+                bind: bind.to_string(),
+            }
+            .into());
+        }
         let attached = self.attach(session).await?;
         let id = TunnelId::next();
         let cancel = attached.ctx.cancel.child_token();

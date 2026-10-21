@@ -322,11 +322,12 @@ async fn openssh_interop() {
     }));
 
     // 9. SFTP (internal-sftp): list, upload, download, rename, remove.
+    // Real keepalive budget (the test default is 200 ms), for scenario 11.
     let mut env = Env::new(&host(
         "t",
         port,
         &user,
-        "  IdentityFile ~/.ssh/id_ed25519\n",
+        "  IdentityFile ~/.ssh/id_ed25519\n  ServerAliveInterval 2\n",
     ));
     keygen(&env.ssh("id_ed25519"), "ed25519", "");
     sshd.authorize(&env.ssh("id_ed25519.pub"));
@@ -411,7 +412,11 @@ async fn openssh_interop() {
             target: ep("127.0.0.1", echo_port),
         },
     ] {
-        let tunnel = env.engine.start_tunnel(id, spec.clone()).await.unwrap();
+        let tunnel = env
+            .engine
+            .start_tunnel(id, spec.clone(), false)
+            .await
+            .unwrap();
         let bind = loop {
             match env.events.recv().await.unwrap() {
                 EngineEvent::Tunnel {
@@ -450,4 +455,63 @@ async fn openssh_interop() {
         assert_eq!(&buf, b"via openssh", "{spec}");
         env.engine.stop_tunnel(tunnel).unwrap();
     }
+
+    // 11. A local peer that stops reading a busy tunnel is cut (russh has one
+    // loop per session), and the session keeps serving other tunnels.
+    let flood = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let flood_port = flood.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = flood.accept().await {
+            tokio::spawn(async move {
+                let block = vec![b'x'; 64 * 1024];
+                while s.write_all(&block).await.is_ok() {}
+            });
+        }
+    });
+    let mut local_tunnel = async |target: u16| {
+        let tunnel = env
+            .engine
+            .start_tunnel(
+                id,
+                ForwardSpec::Local {
+                    bind: ep("127.0.0.1", 0),
+                    target: ep("127.0.0.1", target),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        loop {
+            if let EngineEvent::Tunnel {
+                id: t,
+                event: TunnelEvent::Listening { bind },
+                ..
+            } = env.events.recv().await.unwrap()
+                && t == tunnel
+            {
+                break bind.rsplit(':').next().unwrap().parse::<u16>().unwrap();
+            }
+        }
+    };
+    let busy = local_tunnel(flood_port).await;
+    let _hog = tokio::net::TcpStream::connect(("127.0.0.1", busy))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let other = local_tunnel(echo_port).await;
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", other))
+        .await
+        .unwrap();
+    s.write_all(b"still alive").await.unwrap();
+    let mut buf = [0_u8; 11];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf))
+        .await
+        .expect("other tunnels keep working after a stalled peer")
+        .unwrap();
+    assert_eq!(&buf, b"still alive");
+    let logs = env.engine.session_logs(id).unwrap();
+    assert!(
+        logs.iter().any(|l| l.message.contains("stopped reading")),
+        "the stall guard should have fired"
+    );
 }

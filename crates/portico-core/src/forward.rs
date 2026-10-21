@@ -33,6 +33,28 @@ use crate::session::{Attached, SessionCtx};
 const MAX_CONNECTIONS: usize = 256;
 /// Time allowed to open a channel or a local connection for one client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Data buffered from the SSH side towards a local peer (chunks).
+const PIPE_QUEUE: usize = 128;
+const PIPE_CHUNK: usize = 32 * 1024;
+/// A local peer that accepts nothing for this long is disconnected: russh
+/// has one session loop for every channel, so a stalled reader would
+/// otherwise freeze the whole connection (see docs/STACK.md).
+pub(crate) const STALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Shortest stall allowed, even with a very tight keepalive.
+const MIN_STALL: Duration = Duration::from_millis(100);
+
+/// Stall limit for a session: [`STALL_TIMEOUT`], shortened to half the
+/// keepalive budget (`ServerAliveInterval` × `ServerAliveCountMax`) so a
+/// stalled peer is cut before the frozen loop makes the session time out.
+pub(crate) fn stall_limit(keepalive: Duration, count_max: u32, disconnects: bool) -> Duration {
+    if !disconnects {
+        return STALL_TIMEOUT;
+    }
+    let budget = keepalive.saturating_mul(count_max.max(1)) / 2;
+    STALL_TIMEOUT.min(budget).max(MIN_STALL)
+}
+/// Pause after a failed `accept` (e.g. too many open files).
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(200);
 
 /// `[bind_address:]port`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,9 +120,15 @@ fn parse_pair(input: &str) -> Result<(Endpoint, Endpoint), ForwardParseError> {
         [bh, bp, h, p] => (bh.clone(), bp, h, p),
         _ => return Err(err("expected [bind:]port:host:hostport")),
     };
-    let parse = |p: &str| p.parse::<u16>().ok().filter(|&p| p != 0);
-    let bind_port = parse(bind_port).ok_or_else(|| err("invalid bind port"))?;
-    let port = parse(port).ok_or_else(|| err("invalid target port"))?;
+    // Bind port 0 asks for an ephemeral port (shown once listening).
+    let bind_port = bind_port
+        .parse::<u16>()
+        .map_err(|_| err("invalid bind port"))?;
+    let port = port
+        .parse::<u16>()
+        .ok()
+        .filter(|&p| p != 0)
+        .ok_or_else(|| err("invalid target port"))?;
     let bind_host = if bind_host.is_empty() || bind_host == "*" {
         // OpenSSH: empty or `*` means all interfaces, explicitly requested.
         "0.0.0.0".to_owned()
@@ -174,6 +202,8 @@ pub enum TunnelError {
     RemoteRefused { bind: String },
     #[error("unknown or stopped tunnel {0}")]
     UnknownTunnel(TunnelId),
+    #[error("{bind} is reachable from other machines: confirmation required")]
+    ExposedNotConfirmed { bind: String },
 }
 
 impl TunnelError {
@@ -199,6 +229,12 @@ impl TunnelError {
                 ),
             ),
             Self::UnknownTunnel(_) => ("unknown_tunnel", None),
+            Self::ExposedNotConfirmed { .. } => (
+                "tunnel_exposed",
+                Some(
+                    "This listens on all interfaces: confirm to expose it to the network, or bind to localhost.",
+                ),
+            ),
         }
     }
 }
@@ -252,14 +288,8 @@ pub(crate) async fn run(
     ctx.engine.forget_tunnel(id);
 }
 
-async fn run_local(
-    attached: &Attached,
-    id: TunnelId,
-    bind: &Endpoint,
-    target: &Endpoint,
-    cancel: &CancellationToken,
-) -> crate::Result<()> {
-    let ctx = &attached.ctx;
+/// Listens on every address `bind` resolves to, all on the same port.
+async fn bind_all(ctx: &SessionCtx, bind: &Endpoint) -> crate::Result<Vec<TcpListener>> {
     let bind_error = |source| TunnelError::Bind {
         bind: bind.to_string(),
         source,
@@ -270,10 +300,27 @@ async fn run_local(
         .collect();
     let mut listeners = Vec::new();
     let mut last_error = None;
-    for addr in addrs {
+    let mut port = bind.port;
+    for mut addr in addrs {
+        // With port 0, every address family gets the port chosen first.
+        addr.set_port(port);
         match TcpListener::bind(addr).await {
-            Ok(l) => listeners.push(l),
-            Err(e) => last_error = Some(e),
+            Ok(l) => {
+                if port == 0 {
+                    port = l.local_addr().map_or(0, |a| a.port());
+                }
+                listeners.push(l);
+            }
+            Err(e) => {
+                if !listeners.is_empty() || last_error.is_none() {
+                    ctx.log(
+                        LogLevel::Warn,
+                        "tunnel",
+                        format!("-L cannot listen on {addr}: {e}"),
+                    );
+                }
+                last_error = Some(e);
+            }
         }
     }
     if listeners.is_empty() {
@@ -282,6 +329,18 @@ async fn run_local(
         }))
         .into());
     }
+    Ok(listeners)
+}
+
+async fn run_local(
+    attached: &Attached,
+    id: TunnelId,
+    bind: &Endpoint,
+    target: &Endpoint,
+    cancel: &CancellationToken,
+) -> crate::Result<()> {
+    let ctx = &attached.ctx;
+    let listeners = bind_all(ctx, bind).await?;
     let shown = listeners
         .iter()
         .filter_map(|l| l.local_addr().ok())
@@ -307,10 +366,14 @@ async fn run_local(
                     () = cancel.cancelled() => return,
                     next = listener.accept() => next,
                 };
-                if let Ok(conn) = next
-                    && tx.send(conn).await.is_err()
-                {
-                    return;
+                match next {
+                    Ok(conn) => {
+                        if tx.send(conn).await.is_err() {
+                            return;
+                        }
+                    }
+                    // Out of file descriptors and the like: do not spin.
+                    Err(_) => tokio::time::sleep(ACCEPT_BACKOFF).await,
                 }
             }
         });
@@ -392,38 +455,71 @@ async fn run_remote(
     cancel: &CancellationToken,
 ) -> crate::Result<()> {
     let ctx = &attached.ctx;
-    let refused = || TunnelError::RemoteRefused {
-        bind: bind.to_string(),
+    let route = RemoteRoute {
+        tunnel: id,
+        target: target.clone(),
+        cancel: cancel.clone(),
+        slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
     };
-    let port = tokio::time::timeout(
+    let routes = &attached.routes;
+    let register = |port: u32| {
+        routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((bind.host.clone(), port), route.clone());
+    };
+    let unregister = |port: u32| {
+        routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(bind.host.clone(), port));
+    };
+    // A fixed port is routed before asking, so a connection arriving right
+    // after the server's reply is not refused.
+    if bind.port != 0 {
+        register(u32::from(bind.port));
+    }
+    let requested = tokio::time::timeout(
         CONNECT_TIMEOUT,
         attached
             .handle
             .tcpip_forward(bind.host.clone(), u32::from(bind.port)),
     )
-    .await
-    .map_err(|_| refused())?
-    .map_err(|_| refused())?;
+    .await;
+    let port = match requested {
+        Ok(Ok(port)) => port,
+        Ok(Err(_)) => {
+            unregister(u32::from(bind.port));
+            return Err(TunnelError::RemoteRefused {
+                bind: bind.to_string(),
+            }
+            .into());
+        }
+        Err(_) => {
+            unregister(u32::from(bind.port));
+            // The server may still accept later: withdraw the request.
+            let handle = Arc::clone(&attached.handle);
+            let host = bind.host.clone();
+            let port = u32::from(bind.port);
+            tokio::spawn(async move {
+                let _ =
+                    tokio::time::timeout(CONNECT_TIMEOUT, handle.cancel_tcpip_forward(host, port))
+                        .await;
+            });
+            return Err(crate::Error::Timeout {
+                phase: "asking the server to listen on",
+                target: bind.to_string(),
+            });
+        }
+    };
     // Port 0 asks the server to choose; it then reports the port.
     let port = if bind.port == 0 {
+        register(port);
         port
     } else {
         u32::from(bind.port)
     };
     let key = (bind.host.clone(), port);
-    attached
-        .routes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(
-            key.clone(),
-            RemoteRoute {
-                tunnel: id,
-                target: target.clone(),
-                cancel: cancel.clone(),
-                slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
-            },
-        );
     let shown = Endpoint {
         host: bind.host.clone(),
         port: u16::try_from(port).unwrap_or(bind.port),
@@ -488,7 +584,8 @@ pub(crate) fn serve_forwarded(
             "tunnel",
             format!(
                 "refused a forwarded connection to {}:{} that no tunnel asked for",
-                connected.0, connected.1
+                crate::sftp::display_safe(connected.0, 64),
+                connected.1
             ),
         );
         tokio::spawn(reply.reject(ChannelOpenFailure::AdministrativelyProhibited));
@@ -499,7 +596,12 @@ pub(crate) fn serve_forwarded(
         return;
     };
     let ctx = ctx.clone();
-    let peer = format!("{}:{}", originator.0, originator.1);
+    // Chosen by the server: shown in UIs, so made display-safe.
+    let peer = format!(
+        "{}:{}",
+        crate::sftp::display_safe(originator.0, 64),
+        originator.1
+    );
     tokio::spawn(async move {
         let _permit = permit;
         let target = route.target.to_socket_target();
@@ -535,25 +637,71 @@ pub(crate) fn serve_forwarded(
     });
 }
 
-/// Copies both ways until either side closes or the tunnel stops.
+/// Copies both ways until both sides are done, the tunnel stops, or the
+/// local peer stalls. SSH → peer data goes through a bounded queue drained
+/// by its own task, so russh's session loop never waits on a slow peer for
+/// more than the session's [`stall_limit`].
 async fn pipe(
     ctx: &SessionCtx,
     id: TunnelId,
     peer: String,
     channel: Channel<Msg>,
-    mut socket: TcpStream,
+    socket: TcpStream,
     cancel: &CancellationToken,
 ) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     emit(
         ctx,
         id,
         TunnelEvent::ConnectionOpened { peer: peer.clone() },
     );
-    let mut stream = channel.into_stream();
-    tokio::select! {
+    let (mut ssh_read, mut ssh_write) = tokio::io::split(channel.into_stream());
+    let (mut peer_read, mut peer_write) = socket.into_split();
+    let (queue, mut queued) = tokio::sync::mpsc::channel::<bytes::Bytes>(PIPE_QUEUE);
+    let stall = ctx.stall_limit();
+
+    let from_ssh = async move {
+        loop {
+            let mut buf = bytes::BytesMut::with_capacity(PIPE_CHUNK);
+            if ssh_read.read_buf(&mut buf).await? == 0 {
+                return Ok::<_, std::io::Error>(());
+            }
+            match tokio::time::timeout(stall, queue.send(buf.freeze())).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return Ok(()),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the local peer stopped reading",
+                    ));
+                }
+            }
+        }
+    };
+    let to_peer = async move {
+        while let Some(chunk) = queued.recv().await {
+            peer_write.write_all(&chunk).await?;
+        }
+        peer_write.shutdown().await
+    };
+    let to_ssh = async move {
+        tokio::io::copy(&mut peer_read, &mut ssh_write).await?;
+        ssh_write.shutdown().await
+    };
+    let outcome = tokio::select! {
         biased;
-        () = cancel.cancelled() => {}
-        _ = tokio::io::copy_bidirectional(&mut stream, &mut socket) => {}
+        () = cancel.cancelled() => Ok(((), (), ())),
+        r = async { tokio::try_join!(from_ssh, to_peer, to_ssh) } => r,
+    };
+    if let Err(e) = outcome
+        && e.kind() == std::io::ErrorKind::TimedOut
+    {
+        ctx.log(
+            LogLevel::Warn,
+            "tunnel",
+            format!("{peer} stopped reading: connection closed to keep the session responsive"),
+        );
     }
     emit(ctx, id, TunnelEvent::ConnectionClosed { peer });
 }
@@ -574,6 +722,17 @@ mod tests {
             host: h.into(),
             port: p,
         }
+    }
+
+    #[test]
+    fn stall_limit_stays_under_the_keepalive_budget() {
+        let s = Duration::from_secs;
+        assert_eq!(stall_limit(s(15), 3, true), STALL_TIMEOUT);
+        assert_eq!(stall_limit(s(1), 1, true), Duration::from_millis(500));
+        assert_eq!(stall_limit(Duration::from_millis(50), 1, true), MIN_STALL);
+        assert_eq!(stall_limit(s(1), 0, true), Duration::from_millis(500));
+        // ServerAliveInterval 0: silence never disconnects.
+        assert_eq!(stall_limit(s(1), 1, false), STALL_TIMEOUT);
     }
 
     #[test]
@@ -599,7 +758,11 @@ mod tests {
             }
         );
         assert!(ForwardSpec::parse_local("8080").is_err());
-        assert!(ForwardSpec::parse_local("0:db:1").is_err());
+        assert!(
+            ForwardSpec::parse_local("0:db:1").is_ok(),
+            "ephemeral bind port"
+        );
+        assert!(ForwardSpec::parse_local("8080:db:0").is_err());
     }
 
     #[test]

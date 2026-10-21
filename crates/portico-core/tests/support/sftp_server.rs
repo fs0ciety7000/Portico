@@ -19,14 +19,17 @@ pub struct SftpServer {
     root: PathBuf,
     handles: HashMap<String, Open>,
     next: u64,
+    /// Names a hostile server adds to every listing.
+    extra_names: Vec<String>,
 }
 
 impl SftpServer {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, extra_names: Vec<String>) -> Self {
         Self {
             root,
             handles: HashMap::new(),
             next: 0,
+            extra_names,
         }
     }
 
@@ -87,16 +90,24 @@ impl russh_sftp::server::Handler for SftpServer {
         id: u32,
         filename: String,
         pflags: OpenFlags,
-        _attrs: FileAttributes,
+        attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
+        use std::os::unix::fs::OpenOptionsExt;
         let path = self.local(&filename)?;
-        let file = fs::OpenOptions::new()
+        let mut options = fs::OpenOptions::new();
+        options
             .read(pflags.contains(OpenFlags::READ))
             .write(pflags.contains(OpenFlags::WRITE))
-            .create(pflags.contains(OpenFlags::CREATE))
-            .truncate(pflags.contains(OpenFlags::TRUNCATE))
-            .open(path)
-            .map_err(|e| io(&e))?;
+            .truncate(pflags.contains(OpenFlags::TRUNCATE));
+        if pflags.contains(OpenFlags::EXCLUDE) {
+            options.create_new(true);
+        } else {
+            options.create(pflags.contains(OpenFlags::CREATE));
+        }
+        if let Some(mode) = attrs.permissions {
+            options.mode(mode & 0o7777);
+        }
+        let file = options.open(path).map_err(|e| io(&e))?;
         Ok(Handle {
             id,
             handle: self.handle(Open::File(file)),
@@ -171,9 +182,17 @@ impl russh_sftp::server::Handler for SftpServer {
     async fn setstat(
         &mut self,
         id: u32,
-        _path: String,
-        _attrs: FileAttributes,
+        path: String,
+        attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = attrs.permissions {
+            fs::set_permissions(
+                self.local(&path)?,
+                fs::Permissions::from_mode(mode & 0o7777),
+            )
+            .map_err(|e| io(&e))?;
+        }
         Ok(ok(id))
     }
 
@@ -196,6 +215,12 @@ impl russh_sftp::server::Handler for SftpServer {
                 e.file_name().to_string_lossy().into_owned(),
                 FileAttributes::from(&meta),
             ));
+        }
+        for name in &self.extra_names {
+            let mut attrs = FileAttributes::empty();
+            attrs.size = Some(1);
+            attrs.permissions = Some(0o100_644);
+            entries.push(File::new(name.clone(), attrs));
         }
         Ok(Handle {
             id,

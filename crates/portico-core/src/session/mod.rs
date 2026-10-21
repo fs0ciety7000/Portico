@@ -97,6 +97,9 @@ pub(crate) struct SessionCtx {
     abort: CancellationToken,
     /// `-R` routes this session asked the server for.
     pub(crate) routes: crate::forward::RemoteRoutes,
+    /// How long a tunnel peer may stall before it is cut, in milliseconds
+    /// (kept below the keepalive budget once the connection is up).
+    stall_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SessionCtx {
@@ -115,7 +118,15 @@ impl SessionCtx {
             prompting: Arc::new(AtomicBool::new(false)),
             last_prompt_end: Arc::new(Mutex::new(None)),
             routes: Arc::default(),
+            stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(duration_ms(
+                crate::forward::STALL_TIMEOUT,
+            ))),
         }
+    }
+
+    /// See [`crate::forward::stall_limit`].
+    pub(crate) fn stall_limit(&self) -> Duration {
+        Duration::from_millis(self.stall_ms.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub(crate) fn event(&self, event: SessionEvent) {
@@ -477,6 +488,13 @@ impl Connection {
         let Some(target) = self.links.last() else {
             return CloseReason::RemoteClosed;
         };
+        let stall = crate::forward::stall_limit(
+            self.keepalive,
+            self.keepalive_max,
+            self.disconnect_on_silence,
+        );
+        ctx.stall_ms
+            .store(duration_ms(stall), std::sync::atomic::Ordering::Relaxed);
         // First probe slightly after login: right after authentication the
         // peer may delay its ACKs, which would inflate the first RTT sample.
         let mut ticker = tokio::time::interval_at(
@@ -556,4 +574,8 @@ impl Connection {
             let _ = tokio::time::timeout(CLOSE_GRACE, link.closed.cancelled()).await;
         }
     }
+}
+
+fn duration_ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }

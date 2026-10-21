@@ -80,6 +80,8 @@ pub struct Behaviour {
     pub closed_channels: AtomicUsize,
     /// Serve the `sftp` subsystem over this directory.
     pub sftp_root: Option<std::path::PathBuf>,
+    /// Hostile names added to every SFTP listing.
+    pub sftp_extra_names: Vec<String>,
     /// Accept `tcpip-forward` (listens on 127.0.0.1).
     pub allow_tcpip_forward: bool,
     /// On `tcpip-forward`, also try channels the client never asked for
@@ -374,7 +376,8 @@ impl russh::server::Handler for ServerHandler {
             (Some(root), Some(i)) if name == "sftp" => {
                 let ch = self.channels.remove(i);
                 session.channel_success(channel)?;
-                let server = sftp_server::SftpServer::new(root.clone());
+                let server =
+                    sftp_server::SftpServer::new(root.clone(), self.b.sftp_extra_names.clone());
                 tokio::spawn(russh_sftp::server::run(ch.into_stream(), server));
             }
             _ => session.channel_failure(channel)?,
@@ -459,15 +462,64 @@ impl russh::server::Handler for ServerHandler {
         }
         let target = format!("{host}:{port}");
         tokio::spawn(async move {
-            let Ok(mut tcp) = tokio::net::TcpStream::connect(target).await else {
+            let Ok(tcp) = tokio::net::TcpStream::connect(target).await else {
                 return;
             };
             reply.accept().await;
-            let mut stream = channel.into_stream();
-            let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+            serve_direct_tcpip(channel, tcp).await;
         });
         Ok(())
     }
+}
+
+/// Pipes a `direct-tcpip` channel like sshd does: EOF is a half-close, and
+/// the client's CLOSE ends the forward at once, even mid-stream. The channel
+/// is always drained (russh's session loop blocks on a full channel queue).
+async fn serve_direct_tcpip(channel: Channel<Msg>, tcp: tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut rx, tx) = channel.split();
+    let (mut tcp_r, mut tcp_w) = tcp.into_split();
+    let reader = async move {
+        loop {
+            match rx.wait().await {
+                Some(russh::ChannelMsg::Data { data }) => {
+                    if tcp_w.write_all(&data).await.is_err() {
+                        return;
+                    }
+                }
+                Some(russh::ChannelMsg::Eof) => {
+                    let _ = tcp_w.shutdown().await;
+                }
+                Some(russh::ChannelMsg::Close) | None => return,
+                Some(_) => {}
+            }
+        }
+    };
+    let writer = async {
+        let mut buf = vec![0_u8; 32 * 1024];
+        loop {
+            match tcp_r.read(&mut buf).await {
+                Ok(0) | Err(_) => {
+                    let _ = tx.eof().await;
+                    return;
+                }
+                Ok(n) => {
+                    if tx.data(buf.get(..n).unwrap_or_default()).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    {
+        // Scoped so a writer blocked on the window is dropped before close.
+        tokio::pin!(reader, writer);
+        tokio::select! {
+            () = &mut reader => {}
+            () = &mut writer => reader.await,
+        }
+    }
+    let _ = tx.close().await;
 }
 
 /// OpenSSH keeps every method available after a failure (russh's default

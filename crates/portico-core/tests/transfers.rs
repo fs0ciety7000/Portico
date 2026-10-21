@@ -34,7 +34,11 @@ struct Fixture {
     server: TestServer,
 }
 
-async fn connected(mut behaviour: Behaviour) -> Fixture {
+async fn connected(behaviour: Behaviour) -> Fixture {
+    connected_with(behaviour, "").await
+}
+
+async fn connected_with(mut behaviour: Behaviour, extra_config: &str) -> Fixture {
     let key = new_key();
     let root = tempfile::tempdir().unwrap();
     behaviour.keys = vec![key.public_key().clone()];
@@ -48,7 +52,7 @@ async fn connected(mut behaviour: Behaviour) -> Fixture {
     let mut env = Env::new(&target_config(
         "t",
         server.port,
-        "  IdentityFile ~/.ssh/id_test\n",
+        &format!("  IdentityFile ~/.ssh/id_test\n{extra_config}"),
     ));
     env.write_key("id_test", &key, None);
     env.trust(&server);
@@ -75,38 +79,50 @@ async fn sftp_fixture() -> Fixture {
 
 /// Waits for the end of a transfer, collecting its events.
 async fn finish(env: &mut Env, id: TransferId) -> Vec<SftpEvent> {
-    let mut seen = Vec::new();
-    loop {
+    finish_all(env, &[id]).await.remove(&id).unwrap_or_default()
+}
+
+/// Events of each transfer, collected until all of them ended (events of
+/// one are never lost while waiting for another).
+async fn finish_all(
+    env: &mut Env,
+    ids: &[TransferId],
+) -> std::collections::HashMap<TransferId, Vec<SftpEvent>> {
+    let mut seen: std::collections::HashMap<TransferId, Vec<SftpEvent>> =
+        std::collections::HashMap::new();
+    let mut pending = ids.len();
+    while pending > 0 {
         let ev = tokio::time::timeout(Duration::from_secs(30), env.events.recv())
             .await
             .expect("transfer did not end in time")
             .unwrap();
-        if let EngineEvent::Sftp { event, .. } = ev {
-            let transfer = match &event {
-                SftpEvent::TransferStarted { transfer, .. }
-                | SftpEvent::TransferProgress { transfer, .. }
-                | SftpEvent::TransferFinished { transfer, .. }
-                | SftpEvent::TransferSkipped { transfer }
-                | SftpEvent::TransferCancelled { transfer }
-                | SftpEvent::TransferFailed { transfer, .. } => *transfer,
-                _ => continue,
-            };
-            if transfer != id {
-                continue;
-            }
-            let done = matches!(
-                event,
-                SftpEvent::TransferFinished { .. }
-                    | SftpEvent::TransferSkipped { .. }
-                    | SftpEvent::TransferCancelled { .. }
-                    | SftpEvent::TransferFailed { .. }
-            );
-            seen.push(event);
-            if done {
-                return seen;
-            }
+        let EngineEvent::Sftp { event, .. } = ev else {
+            continue;
+        };
+        let transfer = match &event {
+            SftpEvent::TransferStarted { transfer, .. }
+            | SftpEvent::TransferProgress { transfer, .. }
+            | SftpEvent::TransferFinished { transfer, .. }
+            | SftpEvent::TransferSkipped { transfer }
+            | SftpEvent::TransferCancelled { transfer }
+            | SftpEvent::TransferFailed { transfer, .. } => *transfer,
+            _ => continue,
+        };
+        if !ids.contains(&transfer) {
+            continue;
         }
+        if matches!(
+            event,
+            SftpEvent::TransferFinished { .. }
+                | SftpEvent::TransferSkipped { .. }
+                | SftpEvent::TransferCancelled { .. }
+                | SftpEvent::TransferFailed { .. }
+        ) {
+            pending -= 1;
+        }
+        seen.entry(transfer).or_default().push(event);
     }
+    seen
 }
 
 fn no_part_files(dir: &Path) -> bool {
@@ -425,7 +441,12 @@ async fn local_forward_round_trip_and_stop() {
         bind: ep("127.0.0.1", 0),
         target: ep("127.0.0.1", echo),
     };
-    let id = f.env.engine.start_tunnel(f.id, spec.clone()).await.unwrap();
+    let id = f
+        .env
+        .engine
+        .start_tunnel(f.id, spec.clone(), false)
+        .await
+        .unwrap();
     let TunnelEvent::Listening { bind } = tunnel_event(&mut f.env, id).await else {
         panic!("expected Listening");
     };
@@ -469,6 +490,7 @@ async fn busy_local_port_fails_with_a_hint() {
                 bind: ep("127.0.0.1", port),
                 target: ep("127.0.0.1", 9),
             },
+            false,
         )
         .await
         .unwrap();
@@ -497,6 +519,7 @@ async fn remote_forward_round_trip() {
                 bind: ep("localhost", 0),
                 target: ep("127.0.0.1", echo),
             },
+            false,
         )
         .await
         .unwrap();
@@ -523,6 +546,7 @@ async fn server_opened_channels_are_refused() {
                 bind: ep("localhost", 0),
                 target: ep("127.0.0.1", 9),
             },
+            false,
         )
         .await
         .unwrap();
@@ -562,6 +586,7 @@ async fn tunnels_end_with_their_session() {
                 bind: ep("127.0.0.1", 0),
                 target: ep("127.0.0.1", echo),
             },
+            false,
         )
         .await
         .unwrap();
@@ -576,4 +601,362 @@ async fn tunnels_end_with_their_session() {
         }
     }
     assert!(f.env.engine.tunnels().is_empty());
+}
+
+// ── Review regressions (phase 2) ───────────────────────────────────────────
+
+fn download(remote: &str, local: &Path, on_conflict: OnConflict) -> TransferRequest {
+    TransferRequest {
+        direction: Direction::Download,
+        local: local.to_owned(),
+        remote: remote.into(),
+        on_conflict,
+    }
+}
+
+#[tokio::test]
+async fn a_refused_request_does_not_cancel_running_transfers() {
+    let mut f = sftp_fixture().await;
+    let local = tempfile::tempdir().unwrap();
+    std::fs::write(f.root.path().join("big.bin"), content(48 * 1024 * 1024)).unwrap();
+    std::fs::create_dir(f.root.path().join("exists")).unwrap();
+    std::fs::write(f.root.path().join("exists/x"), b"x").unwrap();
+    let id = f
+        .env
+        .engine
+        .transfer(
+            f.id,
+            download("/big.bin", &local.path().join("big.bin"), OnConflict::Ask),
+        )
+        .await
+        .unwrap();
+    // Refused by the server (SSH_FX_FAILURE): ordinary errors.
+    assert!(f.env.engine.sftp_mkdir(f.id, "/exists").await.is_err());
+    assert!(f.env.engine.sftp_remove(f.id, "/exists").await.is_err());
+    let events = finish(&mut f.env, id).await;
+    assert!(
+        matches!(events.last(), Some(SftpEvent::TransferFinished { .. })),
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(local.path().join("big.bin"))
+            .unwrap()
+            .len(),
+        48 * 1024 * 1024
+    );
+}
+
+#[tokio::test]
+async fn hostile_names_never_reach_the_listing() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("ok.txt"), b"ok").unwrap();
+    let f = connected(Behaviour {
+        sftp_root: Some(root.path().to_owned()),
+        sftp_extra_names: vec![
+            "../evil".into(),
+            "/abs".into(),
+            "a/b".into(),
+            "..".into(),
+            "nul\0x".into(),
+        ],
+        ..Behaviour::default()
+    })
+    .await;
+    let names: Vec<_> = f
+        .env
+        .engine
+        .sftp_list(f.id, "/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, ["ok.txt"]);
+}
+
+#[tokio::test]
+async fn modes_are_carried_across() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = sftp_fixture().await;
+    let local = tempfile::tempdir().unwrap();
+    let secret = f.root.path().join("id_secret");
+    std::fs::write(&secret, b"key").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let dst = local.path().join("id_secret");
+    let id = f
+        .env
+        .engine
+        .transfer(f.id, download("/id_secret", &dst, OnConflict::Ask))
+        .await
+        .unwrap();
+    assert!(matches!(
+        finish(&mut f.env, id).await.last(),
+        Some(SftpEvent::TransferFinished { .. })
+    ));
+    assert_eq!(
+        std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "never widened"
+    );
+
+    let script = local.path().join("run.sh");
+    std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let id = f
+        .env
+        .engine
+        .transfer(
+            f.id,
+            TransferRequest {
+                direction: Direction::Upload,
+                local: script,
+                remote: "/run.sh".into(),
+                on_conflict: OnConflict::Ask,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        finish(&mut f.env, id).await.last(),
+        Some(SftpEvent::TransferFinished { .. })
+    ));
+    assert_eq!(
+        std::fs::metadata(f.root.path().join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[tokio::test]
+async fn overwrite_upload_replaces_and_cancel_keeps_the_original() {
+    let mut f = sftp_fixture().await;
+    let local = tempfile::tempdir().unwrap();
+    std::fs::write(f.root.path().join("config.yml"), b"old").unwrap();
+    let new = local.path().join("config.yml");
+    std::fs::write(&new, b"new").unwrap();
+    let request = |on_conflict| TransferRequest {
+        direction: Direction::Upload,
+        local: new.clone(),
+        remote: "/config.yml".into(),
+        on_conflict,
+    };
+    let id = f
+        .env
+        .engine
+        .transfer(f.id, request(OnConflict::Overwrite))
+        .await
+        .unwrap();
+    assert!(matches!(
+        finish(&mut f.env, id).await.last(),
+        Some(SftpEvent::TransferFinished { .. })
+    ));
+    assert_eq!(
+        std::fs::read(f.root.path().join("config.yml")).unwrap(),
+        b"new"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(f.root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(leftovers, ["config.yml"], "no .part / .old left behind");
+
+    // Cancelled while copying: the remote original is untouched.
+    let big = local.path().join("big.bin");
+    std::fs::write(&big, content(64 * 1024 * 1024)).unwrap();
+    std::fs::write(f.root.path().join("big.bin"), b"original").unwrap();
+    let id = f
+        .env
+        .engine
+        .transfer(
+            f.id,
+            TransferRequest {
+                direction: Direction::Upload,
+                local: big,
+                remote: "/big.bin".into(),
+                on_conflict: OnConflict::Overwrite,
+            },
+        )
+        .await
+        .unwrap();
+    loop {
+        if let EngineEvent::Sftp {
+            event: SftpEvent::TransferProgress { transfer, .. },
+            ..
+        } = f.env.events.recv().await.unwrap()
+            && transfer == id
+        {
+            break;
+        }
+    }
+    f.env.engine.cancel_transfer(id).unwrap();
+    let ev = finish(&mut f.env, id).await;
+    assert!(
+        matches!(ev.last(), Some(SftpEvent::TransferCancelled { .. })),
+        "{ev:?}"
+    );
+    assert_eq!(
+        std::fs::read(f.root.path().join("big.bin")).unwrap(),
+        b"original"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_downloads_never_share_a_partial_file() {
+    let mut f = sftp_fixture().await;
+    let local = tempfile::tempdir().unwrap();
+    std::fs::create_dir(f.root.path().join("a")).unwrap();
+    std::fs::create_dir(f.root.path().join("b")).unwrap();
+    let (one, two) = (content(3 * 1024 * 1024), content(2 * 1024 * 1024 + 7));
+    std::fs::write(f.root.path().join("a/config.yml"), &one).unwrap();
+    std::fs::write(f.root.path().join("b/config.yml"), &two).unwrap();
+    // Someone else's partial download in the same folder.
+    std::fs::write(local.path().join("config.yml.part"), b"foreign").unwrap();
+    let dst = local.path().join("config.yml");
+    let first = f
+        .env
+        .engine
+        .transfer(f.id, download("/a/config.yml", &dst, OnConflict::Rename))
+        .await
+        .unwrap();
+    let second = f
+        .env
+        .engine
+        .transfer(f.id, download("/b/config.yml", &dst, OnConflict::Rename))
+        .await
+        .unwrap();
+    let mut events = finish_all(&mut f.env, &[first, second]).await;
+    let mut done = Vec::new();
+    for id in [first, second] {
+        let ev = events.remove(&id).unwrap_or_default();
+        let Some(SftpEvent::TransferFinished { destination, .. }) = ev.last() else {
+            panic!("{ev:?}");
+        };
+        done.push(std::fs::read(destination).unwrap());
+    }
+    done.sort_by_key(Vec::len);
+    assert_eq!(done, [two, one], "both intact, under two names");
+    assert!(local.path().join("config (1).yml").exists());
+    assert_eq!(
+        std::fs::read(local.path().join("config.yml.part")).unwrap(),
+        b"foreign"
+    );
+}
+
+#[tokio::test]
+async fn refused_subsystem_is_reported_quickly() {
+    // Session channels are accepted (PTY server) but there is no SFTP.
+    let f = connected(Behaviour {
+        pty_echo: true,
+        allow_direct_tcpip: true, // keeps the fixture from adding an SFTP root
+        ..Behaviour::default()
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let err = f.env.engine.sftp_home(f.id).await.unwrap_err();
+    assert_eq!(err.summary().code, "sftp_unavailable", "{err}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn exposed_tunnels_need_confirmation() {
+    let f = connected(Behaviour {
+        allow_direct_tcpip: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let spec = ForwardSpec::Local {
+        bind: ep("0.0.0.0", 0),
+        target: ep("127.0.0.1", 9),
+    };
+    let err = f
+        .env
+        .engine
+        .start_tunnel(f.id, spec, false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.summary().code, "tunnel_exposed");
+    assert!(f.env.engine.tunnels().is_empty());
+}
+
+/// A TCP service that sends data forever; returns its port.
+async fn flood_server() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let block = vec![b'x'; 64 * 1024];
+                while s.write_all(&block).await.is_ok() {}
+            });
+        }
+    });
+    port
+}
+
+/// russh has one loop per connection: a local peer that stops reading a
+/// busy tunnel must be cut before it freezes the whole session.
+#[tokio::test]
+async fn a_stalled_local_peer_does_not_freeze_the_session() {
+    let flood = flood_server().await;
+    let mut f = connected_with(
+        Behaviour {
+            allow_direct_tcpip: true,
+            ..Behaviour::default()
+        },
+        // Real keepalive budget (the test default is 200 ms).
+        "  ServerAliveInterval 2\n",
+    )
+    .await;
+    let (engine, session) = (f.env.engine.clone(), f.id);
+    let start = |target: u16| {
+        let engine = engine.clone();
+        let id = session;
+        async move {
+            engine
+                .start_tunnel(
+                    id,
+                    ForwardSpec::Local {
+                        bind: ep("127.0.0.1", 0),
+                        target: ep("127.0.0.1", target),
+                    },
+                    false,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let busy = start(flood).await;
+    let TunnelEvent::Listening { bind } = tunnel_event(&mut f.env, busy).await else {
+        panic!("expected Listening");
+    };
+    // Connects to the flood and never reads.
+    let _hog = tokio::net::TcpStream::connect(("127.0.0.1", port_of(&bind)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let logs: Vec<String> = f
+        .env
+        .engine
+        .session_logs(f.id)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.message)
+        .collect();
+    assert!(
+        logs.iter().any(|m| m.contains("stopped reading")),
+        "{logs:#?}"
+    );
+    assert!(
+        !logs.iter().any(|m| m.contains("closed (Timeout)")),
+        "{logs:#?}"
+    );
+    // The session is still up (tunnels end with their session) and its
+    // keepalives were answered. A round trip through another tunnel is
+    // checked against OpenSSH in `openssh_interop` (scenario 11): russh's own
+    // server stops sending on every channel while one holds unflushed data
+    // for a channel the client closed, so this fixture cannot show it.
+    assert!(f.env.engine.tunnels().iter().any(|t| t.id == busy));
 }
