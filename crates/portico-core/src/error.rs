@@ -154,7 +154,12 @@ impl Error {
     }
 
     /// Stable, serializable view of the error for UIs and event streams.
+    // One arm per error variant: splitting the table would scatter the codes.
+    #[allow(clippy::too_many_lines)]
     pub fn summary(&self) -> ErrorSummary {
+        if let Self::Key(crate::keys::KeyError::ProbeFailed { summary }) = self {
+            return summary.clone();
+        }
         let (code, hint) = match self {
             Self::Config(_) => (
                 "config",

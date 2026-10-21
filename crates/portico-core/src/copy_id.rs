@@ -17,7 +17,7 @@ use russh::ChannelMsg;
 use russh::keys::ssh_key::PublicKey;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{ConnectRequest, Engine};
+use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::events::{EngineEvent, SessionEvent, SessionPhase};
 use crate::ids::SessionId;
@@ -26,34 +26,37 @@ use crate::sftp::display_safe;
 
 /// Whole exchange (channel open, script, exit status).
 const COPY_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bytes of remote output kept for the error message.
-const OUTPUT_LIMIT: usize = 2048;
+/// Bytes of remote output kept (the end of it: the marker comes last).
+const OUTPUT_LIMIT: usize = 4096;
+/// Prefix of the result line printed by [`SCRIPT`].
+const MARKER: &str = "portico-copy-id:";
 
 /// Reads the key line from stdin, appends it unless its blob is present.
-/// Prints `added` or `present`. Exit codes ≥ 3 name the failing step.
-/// It is sent inside single quotes (`sh -c '…'`): it must contain no `'`,
-/// and no `\\` (fish gives it a meaning inside single quotes).
-const SCRIPT: &str = r#"umask 077
-set -f
-IFS= read -r key || exit 3
-set -- $key
-[ $# -ge 2 ] || exit 3
-blob=$2
-dir="$HOME/.ssh"
-file="$dir/authorized_keys"
-mkdir -p "$dir" || exit 4
-chmod 700 "$dir" 2>/dev/null
-if [ -f "$file" ] && awk -v b="$blob" "{ for (i = 1; i <= NF; i++) if (\$i == b) found = 1 } END { exit !found }" "$file"; then
-  echo present
-  exit 0
-fi
-if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
-  printf "\n" >> "$file" || exit 5
-fi
-printf "%s\n" "$key" >> "$file" || exit 5
-chmod 600 "$file" 2>/dev/null
-echo added
-"#;
+/// Prints `portico-copy-id:added` or `…:present` (a marker line: login
+/// shell rc files may print their own text first). Exit codes ≥ 3 name the
+/// failing step. Permissions of existing files are left alone (`umask 077`
+/// covers what it creates); labels are restored with `restorecon` if present.
+///
+/// It is sent inside single quotes (`exec sh -c '…'`) to whatever login
+/// shell the account has, so it is **one line** (csh/tcsh reject a newline
+/// inside quotes) without `'`, `!` (csh history expansion, even quoted) or
+/// `\\` (fish). A key counts as present only on a line that is not a
+/// comment, as the field right after a key type (options may precede it).
+const SCRIPT: &str = concat!(
+    "umask 077; set -f; ",
+    "IFS= read -r key || exit 3; set -- $key; [ $# -ge 2 ] || exit 3; blob=$2; ",
+    "[ -n \"$HOME\" ] || exit 4; dir=\"$HOME/.ssh\"; file=\"$dir/authorized_keys\"; ",
+    "mkdir -p \"$dir\" || exit 4; ",
+    "if [ -f \"$file\" ] && awk -v b=\"$blob\" ",
+    "\"/^[ \\t]*#/ { next } { for (i = 2; i <= NF; i++) ",
+    "if (\\$i == b && \\$(i - 1) ~ /^(ssh-|ecdsa-sha2-|sk-)/) found = 1 } ",
+    "END { exit (found ? 0 : 1) }\" \"$file\"; then echo portico-copy-id:present; exit 0; fi; ",
+    "if [ -s \"$file\" ] && [ -n \"$(tail -c 1 \"$file\")\" ]; then ",
+    "printf \"\\n\" >> \"$file\" || exit 5; fi; ",
+    "printf \"%s\\n\" \"$key\" >> \"$file\" || exit 5; ",
+    "command -v restorecon >/dev/null 2>&1 && restorecon -F \"$dir\" \"$file\" >/dev/null 2>&1; ",
+    "echo portico-copy-id:added",
+);
 
 /// What copy-id did on the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +81,11 @@ pub(crate) fn authorized_line(public_path: &Path) -> Result<String> {
     if lines.next().is_some() {
         return Err(bad("more than one key").into());
     }
-    if line.contains("-cert-v01@openssh.com") {
+    if line
+        .split_whitespace()
+        .next()
+        .is_some_and(|kind| kind.ends_with("-cert-v01@openssh.com"))
+    {
         return Err(bad("this is a certificate, not a key").into());
     }
     let key = PublicKey::from_openssh(line).map_err(|e| bad(&e.to_string()))?;
@@ -88,7 +95,7 @@ pub(crate) fn authorized_line(public_path: &Path) -> Result<String> {
         .comment()
         .to_string()
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !crate::keys::is_bidi_control(*c))
         .take(256)
         .collect();
     key.set_comment(comment.as_str());
@@ -111,59 +118,34 @@ impl Engine {
             }
             .into()
         };
-        let run = async {
-            let mut channel = attached
-                .handle
-                .channel_open_session()
-                .await
-                .map_err(|e| failed(e.to_string()))?;
-            let command = format!("exec sh -c '{SCRIPT}'");
-            channel
-                .exec(true, command.as_bytes())
-                .await
-                .map_err(|e| failed(e.to_string()))?;
-            channel
-                .data(format!("{line}\n").as_bytes())
-                .await
-                .map_err(|e| failed(e.to_string()))?;
-            channel.eof().await.map_err(|e| failed(e.to_string()))?;
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut status = None;
-            while let Some(msg) = channel.wait().await {
-                match msg {
-                    ChannelMsg::Failure => {
-                        return Err(failed("the server refused to run a command".into()));
-                    }
-                    ChannelMsg::Data { data } => keep(&mut stdout, &data),
-                    ChannelMsg::ExtendedData { data, .. } => keep(&mut stderr, &data),
-                    ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-                    ChannelMsg::ExitSignal { signal_name, .. } => {
-                        return Err(failed(format!("the command was killed ({signal_name:?})")));
-                    }
-                    ChannelMsg::Close => break,
-                    _ => {}
-                }
-            }
-            let _ = channel.close().await;
-            let out = String::from_utf8_lossy(&stdout);
-            match (status, out.trim()) {
-                (Some(0), "added") => Ok(CopyIdOutcome::Added),
-                (Some(0), "present") => Ok(CopyIdOutcome::AlreadyPresent),
-                (Some(code), _) => Err(failed(step_failure(
-                    code,
-                    &String::from_utf8_lossy(&stderr),
-                ))),
-                (None, _) => Err(failed("the command ended without a status".into())),
-            }
+        let command = format!("exec sh -c '{SCRIPT}'");
+        let opened = tokio::select! {
+            biased;
+            () = attached.ctx.cancel.cancelled() => return Err(Error::SessionEnded(session)),
+            r = tokio::time::timeout(COPY_TIMEOUT, attached.handle.channel_open_session()) => r,
         };
+        let mut channel = opened
+            .map_err(|_| Error::Timeout {
+                phase: "opening a channel on",
+                target: host.clone(),
+            })?
+            .map_err(|e| failed(e.to_string()))?;
         let outcome = tokio::select! {
             biased;
             () = attached.ctx.cancel.cancelled() => Err(Error::SessionEnded(session)),
-            r = tokio::time::timeout(COPY_TIMEOUT, run) => r.unwrap_or_else(|_| {
-                Err(Error::Timeout { phase: "installing the key on", target: host.clone() })
-            }),
+            r = tokio::time::timeout(COPY_TIMEOUT, exchange(&mut channel, &command, &line)) => {
+                match r {
+                    Ok(Ok(result)) => result.outcome().map_err(|reason| match reason {
+                        Unexpected::Output => KeyError::CopyUnexpectedOutput { host: host.clone() }.into(),
+                        Unexpected::Failed(reason) => failed(reason),
+                    }),
+                    Ok(Err(e)) => Err(failed(e)),
+                    Err(_) => Err(Error::Timeout { phase: "installing the key on", target: host.clone() }),
+                }
+            }
         };
+        // Always: a dropped russh channel stays open on the server.
+        let _ = channel.close().await;
         match &outcome {
             Ok(o) => attached.ctx.log(
                 crate::logs::LogLevel::Info,
@@ -180,50 +162,177 @@ impl Engine {
         outcome
     }
 
-    /// Logs in to `alias` with `private_key` only, then disconnects. A
-    /// passphrase prompt may appear (as for any login). Proves copy-id.
-    pub async fn verify_key_login(&self, alias: &str, private_key: PathBuf) -> Result<()> {
-        let mut events = self.subscribe();
-        let mut request = ConnectRequest::new(alias);
+    /// Logs in again to the account of `session` (same alias and user)
+    /// with `private_key` only, then disconnects. A passphrase prompt may
+    /// appear (as for any login). Proves copy-id. Dropping the future
+    /// closes the verification session.
+    pub async fn verify_key_login(&self, session: SessionId, private_key: PathBuf) -> Result<()> {
+        let mut request = self
+            .session_target(session)
+            .ok_or(Error::UnknownSession(session))?;
+        let host = request.alias.clone();
         request.only_identity = Some(private_key);
+        let mut events = self.subscribe();
         let id = self.connect(request)?;
-        let outcome = loop {
+        let _close = ProbeGuard(self.session_cancel(id));
+        loop {
             match events.recv().await {
                 Ok(EngineEvent::Session {
                     id: event_id,
                     event: SessionEvent::Phase(phase),
                 }) if event_id == id => match phase {
-                    SessionPhase::Connected => break Ok(()),
+                    SessionPhase::Connected => return Ok(()),
                     SessionPhase::Failed { error } if error.code == "auth_failed" => {
-                        break Err(KeyError::NotAccepted {
-                            host: alias.to_owned(),
-                        }
-                        .into());
+                        return Err(KeyError::NotAccepted { host }.into());
                     }
                     SessionPhase::Failed { error } => {
-                        break Err(KeyError::CopyFailed {
-                            host: alias.to_owned(),
-                            reason: error.message,
-                        }
-                        .into());
+                        return Err(KeyError::ProbeFailed { summary: error }.into());
                     }
-                    SessionPhase::Closed { .. } => break Err(Error::Cancelled),
+                    SessionPhase::Closed { .. } => return Err(Error::Cancelled),
                     _ => {}
                 },
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                // The outcome may have been among the lost events: ask the
+                // session itself (connected, or gone).
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(connected) = self.settled(id).await {
+                        return if connected {
+                            Ok(())
+                        } else {
+                            Err(KeyError::NotAccepted { host }.into())
+                        };
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    break Err(Error::EngineClosed);
+                    return Err(Error::EngineClosed);
                 }
             }
-        };
-        let _ = self.disconnect(id).await;
-        outcome
+        }
+    }
+
+    /// `Some(true)` once `id` is connected, `Some(false)` once it is gone,
+    /// `None` while it is still connecting.
+    async fn settled(&self, id: SessionId) -> Option<bool> {
+        match tokio::time::timeout(Duration::from_millis(50), self.attach(id)).await {
+            Ok(Ok(_)) => Some(true),
+            Ok(Err(_)) => Some(false),
+            Err(_) => None,
+        }
     }
 }
 
-fn keep(buffer: &mut Vec<u8>, data: &[u8]) {
-    let room = OUTPUT_LIMIT.saturating_sub(buffer.len());
-    buffer.extend(data.iter().take(room));
+/// Ends the verification session however `verify_key_login` returns.
+struct ProbeGuard(Option<tokio_util::sync::CancellationToken>);
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        if let Some(token) = &self.0 {
+            token.cancel();
+        }
+    }
+}
+
+/// What came back from the server.
+#[derive(Debug, Default)]
+struct Exchange {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    status: Option<u32>,
+    signal: Option<String>,
+}
+
+enum Unexpected {
+    /// Exit 0 without our marker: forced command, restricted account…
+    Output,
+    Failed(String),
+}
+
+impl Exchange {
+    fn outcome(&self) -> std::result::Result<CopyIdOutcome, Unexpected> {
+        let out = String::from_utf8_lossy(&self.stdout);
+        let marker = out
+            .lines()
+            .rev()
+            .find_map(|l| l.trim().strip_prefix(MARKER))
+            .map(str::to_owned);
+        if let Some(signal) = &self.signal {
+            return Err(Unexpected::Failed(format!(
+                "the command was killed ({signal})"
+            )));
+        }
+        match (self.status, marker.as_deref()) {
+            (Some(0) | None, Some("added")) => Ok(CopyIdOutcome::Added),
+            (Some(0) | None, Some("present")) => Ok(CopyIdOutcome::AlreadyPresent),
+            (Some(0), _) => Err(Unexpected::Output),
+            (Some(code), _) => Err(Unexpected::Failed(step_failure(
+                code,
+                &String::from_utf8_lossy(&self.stderr),
+            ))),
+            (None, _) => Err(Unexpected::Failed(
+                "the command ended without a status".into(),
+            )),
+        }
+    }
+
+    fn take(&mut self, msg: ChannelMsg) {
+        match msg {
+            ChannelMsg::Data { data } => keep_tail(&mut self.stdout, &data),
+            ChannelMsg::ExtendedData { data, .. } => keep_tail(&mut self.stderr, &data),
+            ChannelMsg::ExitStatus { exit_status } => self.status = Some(exit_status),
+            ChannelMsg::ExitSignal { signal_name, .. } => {
+                self.signal = Some(format!("{signal_name:?}"));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Runs `command`, feeds `line` on its stdin once the server accepted it,
+/// and collects the outcome until the channel closes.
+async fn exchange(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    command: &str,
+    line: &str,
+) -> std::result::Result<Exchange, String> {
+    let mut result = Exchange::default();
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    // Data sent before the answer could be dropped by a server that has
+    // not started the command yet.
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => return Err("the server refused to run a command".into()),
+            Some(ChannelMsg::Close | ChannelMsg::Eof) | None => {
+                return Err("the server closed the channel".into());
+            }
+            Some(msg) => result.take(msg),
+        }
+    }
+    channel
+        .data(format!("{line}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    channel.eof().await.map_err(|e| e.to_string())?;
+    while let Some(msg) = channel.wait().await {
+        if matches!(msg, ChannelMsg::Close) {
+            break;
+        }
+        result.take(msg);
+    }
+    Ok(result)
+}
+
+/// Keeps the last [`OUTPUT_LIMIT`] bytes (the stream keeps being drained, so
+/// the SSH window keeps opening).
+fn keep_tail(buffer: &mut Vec<u8>, data: &[u8]) {
+    buffer.extend_from_slice(data);
+    let excess = buffer.len().saturating_sub(OUTPUT_LIMIT);
+    if excess > 0 {
+        buffer.drain(..excess);
+    }
 }
 
 fn step_failure(code: u32, stderr: &str) -> String {
@@ -273,16 +382,79 @@ mod tests {
             .write_all(stdin.as_bytes())
             .unwrap();
         let out = child.wait_with_output().unwrap();
-        (
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        )
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let result = stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(MARKER))
+            .unwrap_or_default()
+            .to_owned();
+        (out.status.code().unwrap_or(-1), result)
     }
 
     #[test]
-    fn script_survives_single_quoting() {
+    fn script_survives_any_login_shell_quoting() {
         assert!(!SCRIPT.contains('\''));
+        assert!(!SCRIPT.contains('!'));
+        assert!(!SCRIPT.contains('\n'));
         assert!(!SCRIPT.contains("\\\\"));
+    }
+
+    /// The exact command sent to the server, through each login shell that
+    /// is installed here (sh always; bash, fish, tcsh, csh when present).
+    #[cfg(unix)]
+    #[test]
+    fn command_runs_under_every_login_shell() {
+        use std::io::Write;
+        let command = format!("exec sh -c '{SCRIPT}'");
+        for shell in ["sh", "bash", "dash", "fish", "tcsh", "csh", "zsh"] {
+            let Ok(mut child) = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&command)
+                .env("HOME", tempfile::tempdir().unwrap().keep())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            else {
+                continue; // not installed
+            };
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{KEY} me\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "portico-copy-id:added",
+                "{shell}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_or_quoted_keys_do_not_count() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".ssh")).unwrap();
+        let file = home.path().join(".ssh/authorized_keys");
+        let blob = KEY.split_whitespace().nth(1).unwrap();
+        std::fs::write(
+            &file,
+            format!("#{KEY} off\n  # {KEY}\nssh-rsa AAAAx {blob}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            run(home.path(), &format!("{KEY} me\n")),
+            (0, "added".into())
+        );
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .ends_with(&format!("{KEY} me\n"))
+        );
     }
 
     #[cfg(unix)]
@@ -298,6 +470,14 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&home.path().join(".ssh")), 0o700);
         assert_eq!(mode(&file), 0o600);
+        // An existing file keeps its permissions (never chmod what we did
+        // not create).
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let other =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherOtherOtherOtherOtherOtherOtherOther0";
+        assert_eq!(run(home.path(), &format!("{other} x\n")).1, "added");
+        assert_eq!(mode(&file), 0o640);
+        std::fs::write(&file, format!("{KEY} me@laptop\n")).unwrap();
         // Same blob, other comment: already there.
         assert_eq!(
             run(home.path(), &format!("{KEY} other\n")),
@@ -336,6 +516,64 @@ mod tests {
         assert_eq!(run(home.path(), "").0, 3);
         assert_eq!(run(home.path(), "justoneword\n").0, 3);
         assert!(!home.path().join(".ssh/authorized_keys").exists());
+    }
+
+    #[test]
+    fn outcome_reads_the_marker_whatever_comes_before() {
+        let ex = |out: &str, status: Option<u32>, signal: Option<&str>| Exchange {
+            stdout: out.as_bytes().to_vec(),
+            stderr: b"sh: 1: cannot create: Permission denied\n".to_vec(),
+            status,
+            signal: signal.map(str::to_owned),
+        };
+        let ok = |e: Exchange| e.outcome().ok();
+        assert_eq!(
+            ok(ex(
+                "Welcome!\nhello from rc\nportico-copy-id:added\n",
+                Some(0),
+                None
+            )),
+            Some(CopyIdOutcome::Added)
+        );
+        assert_eq!(
+            ok(ex("portico-copy-id:present\n", None, None)),
+            Some(CopyIdOutcome::AlreadyPresent)
+        );
+        // Forced command or restricted account: exit 0, no marker.
+        assert!(matches!(
+            ex("This account is restricted\n", Some(0), None).outcome(),
+            Err(Unexpected::Output)
+        ));
+        assert!(matches!(
+            ex("", Some(5), None).outcome(),
+            Err(Unexpected::Failed(m)) if m.contains("authorized_keys") && m.contains("Permission denied")
+        ));
+        assert!(matches!(
+            ex("portico-copy-id:added\n", Some(0), Some("KILL")).outcome(),
+            Err(Unexpected::Failed(_))
+        ));
+        // Huge output: only the end is kept, and the marker survives.
+        let mut big = Exchange::default();
+        keep_tail(&mut big.stdout, &vec![b'x'; 1 << 20]);
+        keep_tail(&mut big.stdout, b"\nportico-copy-id:added\n");
+        big.status = Some(0);
+        assert!(big.stdout.len() <= OUTPUT_LIMIT);
+        assert_eq!(ok(big), Some(CopyIdOutcome::Added));
+    }
+
+    #[test]
+    fn comments_lose_bidi_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("k.pub");
+        std::fs::write(&path, format!("{KEY} me\u{202e}moc.live\n")).unwrap();
+        assert_eq!(authorized_line(&path).unwrap(), format!("{KEY} memoc.live"));
+        // A comment that merely mentions a certificate type is a key.
+        std::fs::write(
+            &path,
+            format!("{KEY} not-a-ssh-ed25519-cert-v01@openssh.com\n"),
+        )
+        .unwrap();
+        assert!(authorized_line(&path).is_ok());
     }
 
     #[test]

@@ -727,6 +727,8 @@ async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {
         fields(&String::from_utf8_lossy(&derived.stdout))
     );
 
+    // A login shell rc that talks (very common): copy-id must not care.
+    std::fs::write(sshd.path("home/.bashrc"), "echo hello from bashrc\n").unwrap();
     let installed = sshd.path("home/.ssh/authorized_keys");
     assert_eq!(
         env.engine
@@ -751,14 +753,25 @@ async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {
     }
 
     // Log in with the new key only; its passphrase is asked for.
-    let answers = tokio::spawn(answer_passphrases(env.engine.clone(), "pp-1234"));
+    let log_before = sshd.log().len();
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let answers = tokio::spawn(answer_passphrases(
+        env.engine.clone(),
+        "pp-1234",
+        std::sync::Arc::clone(&served),
+    ));
     env.engine
-        .verify_key_login("t", generated.private_path.clone())
+        .verify_key_login(id, generated.private_path.clone())
         .await
         .unwrap();
     answers.abort();
+    assert!(served.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     let log = sshd.log();
-    assert!(log.contains("Accepted publickey"), "{log}");
+    let new_lines = log.get(log_before..).unwrap_or_default();
+    assert!(
+        new_lines.contains("Accepted publickey") && new_lines.contains(&generated.fingerprint),
+        "{new_lines}"
+    );
 
     // A key that is not installed is reported as such.
     let stranger = env
@@ -775,7 +788,18 @@ async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {
         .unwrap();
     let err = env
         .engine
-        .verify_key_login("t", stranger.private_path.clone())
+        .verify_key_login(id, stranger.private_path.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err.summary().code, "copy_id_not_accepted");
+
+    // Even with a certificate the server trusts next to it: the proof is
+    // about authorized_keys, so the certificate must not be used.
+    sign(&sshd.path("user_ca"), &stranger.public_path, user, false);
+    assert!(env.ssh("id_stranger-cert.pub").exists());
+    let err = env
+        .engine
+        .verify_key_login(id, stranger.private_path.clone())
         .await
         .unwrap_err();
     assert_eq!(err.summary().code, "copy_id_not_accepted");
@@ -783,13 +807,15 @@ async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {
     // ssh-agent: add (with passphrase and lifetime), list, remove.
     let agent_dir = tempfile::tempdir().unwrap();
     let socket = agent_dir.path().join("agent.sock");
-    let mut agent = Command::new("ssh-agent")
-        .arg("-D")
-        .arg("-a")
-        .arg(&socket)
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    let _agent = Killed(
+        Command::new("ssh-agent")
+            .arg("-D")
+            .arg("-a")
+            .arg(&socket)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -837,16 +863,42 @@ async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {
             .code,
         "agent_no_identity"
     );
-    let _ = agent.kill();
+    // A lifetime is enforced by the agent.
+    env.engine
+        .agent_add(
+            stranger.private_path.clone(),
+            None,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(env.engine.agent_keys().await.unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(env.engine.agent_keys().await.unwrap().is_empty());
+}
+
+/// Kills a helper process however the test ends.
+struct Killed(std::process::Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// Answers every key passphrase prompt of `engine` with `passphrase`.
-async fn answer_passphrases(engine: portico_core::Engine, passphrase: &'static str) {
+async fn answer_passphrases(
+    engine: portico_core::Engine,
+    passphrase: &'static str,
+    served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
     let mut events = engine.subscribe();
     loop {
         match events.recv().await {
             Ok(EngineEvent::Prompt(prompt)) => {
                 if let PromptKind::KeyPassphrase { .. } = prompt.kind {
+                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let _ = engine.respond(
                         prompt.id,
                         PromptResponse::Secret {

@@ -46,6 +46,14 @@ pub enum KeyError {
     CopyFailed { host: String, reason: String },
     #[error("the key was installed on {host} but logging in with it failed")]
     NotAccepted { host: String },
+    #[error("{host} ran the command but did not report a result")]
+    CopyUnexpectedOutput { host: String },
+    /// The verification login failed for another reason (host key
+    /// changed, unreachable…): reported with that error's own code.
+    #[error("{}", summary.message)]
+    ProbeFailed { summary: crate::error::ErrorSummary },
+    #[error("{} can be written by other accounts", path.display())]
+    UnsafeDir { path: PathBuf },
     #[error("no ssh-agent is reachable{}", socket.as_ref().map(|s| format!(" at {}", s.display())).unwrap_or_default())]
     AgentUnavailable { socket: Option<PathBuf> },
     #[error("ssh-agent refused the request: {0}")]
@@ -84,6 +92,10 @@ impl KeyError {
                 "copy_id_failed",
                 Some("Check that the account has a writable home and a POSIX shell."),
             ),
+            Self::UnsafeDir { .. } => (
+                "key_unsafe_dir",
+                Some("Make it yours and private: chmod 700 ~/.ssh."),
+            ),
             Self::AgentUnavailable { .. } => (
                 "agent_unavailable",
                 Some("Start ssh-agent (eval $(ssh-agent)) or set IdentityAgent / SSH_AUTH_SOCK."),
@@ -99,10 +111,17 @@ impl KeyError {
                 Some("Choose a private key in OpenSSH format (the file without .pub)."),
             ),
             Self::NotInAgent { .. } => ("agent_no_identity", Some("Refresh the list.")),
+            Self::ProbeFailed { .. } => ("copy_id_probe", None),
+            Self::CopyUnexpectedOutput { .. } => (
+                "copy_id_unexpected_output",
+                Some(
+                    "The account may be restricted (forced command, SFTP only) or not run a POSIX shell.",
+                ),
+            ),
             Self::NotAccepted { .. } => (
                 "copy_id_not_accepted",
                 Some(
-                    "The server may ignore ~/.ssh/authorized_keys (AuthorizedKeysFile, StrictModes or an ownership problem).",
+                    "If you dismissed the passphrase, verify again. Otherwise the server may ignore ~/.ssh/authorized_keys (AuthorizedKeysFile, StrictModes or ownership).",
                 ),
             ),
         }
@@ -182,7 +201,16 @@ pub fn generate(ssh_dir: &Path, request: &KeyGenRequest) -> Result<LocalKey> {
         }
     }
 
-    let mut rng = rand::rng();
+    // The OS generator itself (getrandom), as the project requires. Probed
+    // first so a broken entropy source is an error, not a panic inside
+    // `UnwrapErr`.
+    {
+        use rand::TryRng;
+        rand::rngs::SysRng
+            .try_next_u32()
+            .map_err(|e| KeyError::Generate(format!("no system randomness: {e}")))?;
+    }
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let gen_err = |e: russh::keys::ssh_key::Error| KeyError::Generate(e.to_string());
     let mut key = match request.algorithm {
         KeyAlgorithm::Ed25519 => PrivateKey::random(&mut rng, Algorithm::Ed25519),
@@ -262,8 +290,11 @@ fn validate_name(name: &str) -> Result<()> {
 fn validate_comment(comment: &str) -> Result<()> {
     let reason = if comment.chars().count() > MAX_COMMENT_LEN {
         Some("too long")
-    } else if comment.chars().any(char::is_control) {
-        Some("control characters or line breaks")
+    } else if comment
+        .chars()
+        .any(|c| c.is_control() || is_bidi_control(c))
+    {
+        Some("control or bidirectional characters, or line breaks")
     } else {
         None
     };
@@ -273,8 +304,35 @@ fn validate_comment(comment: &str) -> Result<()> {
     }
 }
 
+/// Bidirectional overrides and isolates: they can make a comment display
+/// as something else (`evil\u{202E}moc.liame`).
+pub(crate) fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 fn create_private_dir(dir: &Path) -> Result<()> {
-    if dir.is_dir() {
+    // `metadata` follows a symlinked ~/.ssh: what matters is the directory.
+    if let Ok(meta) = std::fs::metadata(dir) {
+        if !meta.is_dir() {
+            return Err(Error::io(
+                dir,
+                std::io::Error::from(std::io::ErrorKind::NotADirectory),
+            ));
+        }
+        // Another account able to write here could swap the new pair.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if meta.uid() != current_uid()? || meta.permissions().mode() & 0o022 != 0 {
+                return Err(KeyError::UnsafeDir {
+                    path: dir.to_path_buf(),
+                }
+                .into());
+            }
+        }
         return Ok(());
     }
     let mut builder = std::fs::DirBuilder::new();
@@ -282,6 +340,22 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(dir).map_err(|e| Error::io(dir, e))
+}
+
+/// The uid of this process: the owner of a file it creates (no `unsafe`
+/// libc call).
+#[cfg(unix)]
+fn current_uid() -> Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = std::env::temp_dir();
+    let probe = dir.join(format!(".portico-uid-{}", std::process::id()));
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|f| f.metadata());
+    let _ = std::fs::remove_file(&probe);
+    created.map(|m| m.uid()).map_err(|e| Error::io(&dir, e))
 }
 
 /// Creates `path` exclusively (never follows or replaces anything).
@@ -620,12 +694,29 @@ mod tests {
             assert_eq!(err.summary().code, "key_rsa_size");
         }
         let mut bad = request("id_c", KeyAlgorithm::Ed25519, None);
+        bad.comment = "evil\u{202e}moc".into();
+        assert_eq!(
+            generate(dir.path(), &bad).unwrap_err().summary().code,
+            "key_comment"
+        );
         bad.comment = "a\nb".into();
         assert_eq!(
             generate(dir.path(), &bad).unwrap_err().summary().code,
             "key_comment"
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_group_writable_ssh_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        let err = generate(dir.path(), &request("id", KeyAlgorithm::Ed25519, None)).unwrap_err();
+        assert_eq!(err.summary().code, "key_unsafe_dir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(generate(dir.path(), &request("id", KeyAlgorithm::Ed25519, None)).is_ok());
     }
 
     #[test]

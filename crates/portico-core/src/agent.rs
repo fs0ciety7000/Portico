@@ -103,7 +103,9 @@ impl Engine {
             tokio::task::spawn_blocking(move || load_private(&private_key, passphrase.as_ref()))
                 .await
                 .map_err(|_| Error::EngineClosed)??;
+        // `ssh-add -t 0` means no limit.
         let constraints: Vec<Constraint> = lifetime
+            .filter(|l| !l.is_zero())
             .map(|l| Constraint::KeyLifetime {
                 seconds: u32::try_from(l.as_secs()).unwrap_or(u32::MAX).max(1),
             })
@@ -118,34 +120,66 @@ impl Engine {
     }
 
     /// `ssh-add -d`, by fingerprint (as listed by [`Engine::agent_keys`]).
+    /// The agent's answer is checked by listing again (russh does not
+    /// report a refusal).
     pub async fn agent_remove(&self, fingerprint: &str) -> Result<()> {
         let mut agent = self.agent().await?;
-        let identities = tokio::time::timeout(AGENT_TIMEOUT, agent.request_identities())
-            .await
-            .map_err(|_| KeyError::AgentRefused("no answer".into()))?
-            .map_err(|e| KeyError::AgentRefused(e.to_string()))?;
-        let target = identities
-            .into_iter()
-            .find(|i| agent_key(i.clone()).fingerprint == fingerprint)
-            .ok_or_else(|| KeyError::NotInAgent {
-                fingerprint: fingerprint.to_owned(),
-            })?;
-        let public = match target {
-            AgentIdentity::PublicKey { key, .. } => key,
-            // russh removes identities by plain key only: sending the
-            // certified key would remove the wrong identity.
-            AgentIdentity::Certificate { .. } => {
-                return Err(KeyError::AgentRefused(
+        let identities = list(&mut agent).await?;
+        let matching = |ids: &[AgentIdentity]| -> (Option<PublicKey>, bool) {
+            let mut plain = None;
+            let mut certificate = false;
+            for id in ids
+                .iter()
+                .filter(|i| agent_key((*i).clone()).fingerprint == fingerprint)
+            {
+                match id {
+                    AgentIdentity::PublicKey { key, .. } => plain = Some(key.clone()),
+                    AgentIdentity::Certificate { .. } => certificate = true,
+                }
+            }
+            (plain, certificate)
+        };
+        let (plain, certificate) = matching(&identities);
+        let Some(public) = plain else {
+            return Err(if certificate {
+                // russh removes identities by plain key only: sending the
+                // certified key would remove the wrong identity.
+                KeyError::AgentRefused(
                     "certificates cannot be removed from Portico yet (use ssh-add -d)".into(),
                 )
-                .into());
+            } else {
+                KeyError::NotInAgent {
+                    fingerprint: fingerprint.to_owned(),
+                }
             }
+            .into());
         };
         tokio::time::timeout(AGENT_TIMEOUT, agent.remove_identity(&public))
             .await
             .map_err(|_| KeyError::AgentRefused("no answer".into()))?
-            .map_err(|e| KeyError::AgentRefused(e.to_string()).into())
+            .map_err(|e| KeyError::AgentRefused(e.to_string()))?;
+        let (still, certificate) = matching(&list(&mut agent).await?);
+        if still.is_some() {
+            return Err(
+                KeyError::AgentRefused("the key is still loaded (agent locked?)".into()).into(),
+            );
+        }
+        if certificate {
+            // Same private key, still able to sign: say so.
+            return Err(KeyError::AgentRefused(
+                "the key was removed but its certificate is still loaded (use ssh-add -d)".into(),
+            )
+            .into());
+        }
+        Ok(())
     }
+}
+
+async fn list(agent: &mut Client) -> Result<Vec<AgentIdentity>> {
+    tokio::time::timeout(AGENT_TIMEOUT, agent.request_identities())
+        .await
+        .map_err(|_| KeyError::AgentRefused("no answer".into()))?
+        .map_err(|e| KeyError::AgentRefused(e.to_string()).into())
 }
 
 fn agent_key(identity: AgentIdentity) -> AgentKey {

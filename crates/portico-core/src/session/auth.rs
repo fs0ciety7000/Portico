@@ -107,6 +107,14 @@ pub(crate) async fn authenticate(
         .await
         .map_err(|e| transport(hop, &e))?
     {
+        // Accepted without any key: proves nothing about one.
+        AuthResult::Success if hop.pubkey_only => {
+            return Err(Error::AuthFailed {
+                user: hop.user.clone(),
+                host: hop.alias.clone(),
+                tried: "none (the server needs no key)".into(),
+            });
+        }
         AuthResult::Success => return Ok(AuthMethod::None),
         AuthResult::Failure {
             remaining_methods, ..
@@ -187,11 +195,10 @@ fn method_order(hop: &Hop) -> Vec<&'static str> {
             .collect(),
         None => DEFAULT_ORDER.to_vec(),
     };
+    // Key login proof: publickey whatever the config prefers (like
+    // `ssh -o PreferredAuthentications=publickey`).
     if hop.pubkey_only {
-        return preferred
-            .into_iter()
-            .filter(|m| *m == "publickey")
-            .collect();
+        return vec!["publickey"];
     }
     let disabled = |key: &str| {
         hop.option_str(key)
@@ -259,7 +266,12 @@ impl Auth<'_> {
             None => Vec::new(),
         };
         let identities_only = self.hop.resolved.identities_only;
-        let attempts = plan_attempts(&identities, &agent_ids, identities_only);
+        let mut attempts = plan_attempts(&identities, &agent_ids, identities_only);
+        if self.hop.pubkey_only {
+            // Key login proof: a certificate would succeed without the key
+            // being in authorized_keys.
+            attempts.retain(|a| !matches!(a, Attempt::AgentCert(_) | Attempt::FileCert(..)));
+        }
         if attempts.is_empty() {
             self.ctx
                 .log(LogLevel::Info, "auth", "no public key identities available");

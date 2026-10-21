@@ -250,6 +250,7 @@ struct Inner {
 #[derive(Debug)]
 struct SessionEntry {
     alias: String,
+    user_override: Option<String>,
     commands: mpsc::Sender<SessionCommand>,
     cancel: CancellationToken,
     logs: Arc<Mutex<LogRing>>,
@@ -321,6 +322,7 @@ impl Engine {
                 id,
                 SessionEntry {
                     alias: request.alias.clone(),
+                    user_override: request.user_override.clone(),
                     commands: tx,
                     cancel: cancel.clone(),
                     logs: Arc::clone(&logs),
@@ -642,6 +644,31 @@ impl Engine {
     }
 
     /// Alias a session was opened for.
+    /// What a session was opened for (alias and user override), to open
+    /// another one to the same account.
+    pub(crate) fn session_target(&self, id: SessionId) -> Option<ConnectRequest> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|e| {
+                let mut request = ConnectRequest::new(e.alias.clone());
+                request.user_override.clone_from(&e.user_override);
+                request
+            })
+    }
+
+    /// The token that ends a session (and everything it runs).
+    pub(crate) fn session_cancel(&self, id: SessionId) -> Option<CancellationToken> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|e| e.cancel.clone())
+    }
+
     pub fn session_alias(&self, id: SessionId) -> Option<String> {
         self.inner
             .sessions
