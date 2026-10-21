@@ -5,3 +5,4 @@ apps/portico-gui/src-tauri/gen
 .DS_Store
 *.log
 .env
+.claude/worktrees/
