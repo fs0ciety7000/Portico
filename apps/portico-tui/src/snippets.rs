@@ -20,49 +20,15 @@ use crate::keys::{Load, Notice};
 /// Most placeholder value characters accepted by the form.
 const MAX_VALUE: usize = 1024;
 
-/// Bytes for the terminal, or why they cannot be sent as asked.
-///
-/// The core is moving `snippet_input` from `Vec<u8>` to `Result<Vec<u8>>`
-/// (it refuses a multi-line paste-only snippet when the remote program has
-/// not enabled bracketed paste: lines 1..n-1 would run). [`SnippetBytes`]
-/// accepts both signatures, and the same refusal is checked here first so
-/// the behaviour does not depend on which core this is built against.
+/// Bytes for the terminal, or why they cannot be sent as asked (the core
+/// refuses a multi-line paste-only snippet without bracketed paste:
+/// `snippet_needs_paste_mode`).
 pub(crate) fn snippet_bytes(
     rendered: &str,
     run: bool,
     bracketed_paste: bool,
 ) -> Result<Vec<u8>, ErrorSummary> {
-    let multi_line = rendered
-        .trim_end_matches(['\n', '\r'])
-        .contains(['\n', '\r']);
-    if multi_line && !run && !bracketed_paste {
-        return Err(ErrorSummary {
-            code: "snippet_needs_paste_mode".into(),
-            message: "this multi-line snippet cannot be pasted without running".into(),
-            hint: Some(
-                "The remote program does not accept a paste as a whole, so each line would run. Run it, or cancel."
-                    .into(),
-            ),
-        });
-    }
-    portico_core::snippets::snippet_input(rendered, run, bracketed_paste).into_bytes()
-}
-
-/// Bridges both `snippet_input` signatures (see [`snippet_bytes`]).
-trait SnippetBytes {
-    fn into_bytes(self) -> Result<Vec<u8>, ErrorSummary>;
-}
-
-impl SnippetBytes for Vec<u8> {
-    fn into_bytes(self) -> Result<Vec<u8>, ErrorSummary> {
-        Ok(self)
-    }
-}
-
-impl SnippetBytes for portico_core::Result<Vec<u8>> {
-    fn into_bytes(self) -> Result<Vec<u8>, ErrorSummary> {
-        self.map_err(|e| e.summary())
-    }
+    portico_core::snippets::snippet_input(rendered, run, bracketed_paste).map_err(|e| e.summary())
 }
 
 /// `global`, `hosts: web, db`, `#prod #eu`.

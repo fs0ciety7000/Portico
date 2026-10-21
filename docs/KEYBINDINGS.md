@@ -253,6 +253,5 @@ Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôt
 
 | Action | TUI | GUI | Phase |
 |---|---|---|---|
-| Snippets | `Ctrl-Space s` | `⌘K` puis « Snippet » | 3 |
 | Logs / debug de la session | `Ctrl-Space l` | `⌘⇧L` | 4 |
 | Favori on/off | `*` (`f` ouvre l'explorateur) | `⌘D` | 4 |

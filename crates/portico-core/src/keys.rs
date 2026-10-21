@@ -227,6 +227,8 @@ pub fn generate(ssh_dir: &Path, request: &KeyGenRequest) -> Result<LocalKey> {
     }
     .map_err(gen_err)?;
     key.set_comment(request.comment.as_str());
+    // Before encrypting: the encrypted form no longer carries the comment.
+    let public_text = key.public_key().to_openssh().map_err(gen_err)?;
     let passphrase = request
         .passphrase
         .as_ref()
@@ -237,7 +239,6 @@ pub fn generate(ssh_dir: &Path, request: &KeyGenRequest) -> Result<LocalKey> {
             .map_err(gen_err)?;
     }
     let private_text = key.to_openssh(LineEnding::LF).map_err(gen_err)?;
-    let public_text = key.public_key().to_openssh().map_err(gen_err)?;
 
     write_new(&private_path, private_text.as_bytes(), 0o600)?;
     if let Err(e) = write_new(&public_path, format!("{public_text}\n").as_bytes(), 0o644) {
@@ -632,6 +633,9 @@ mod tests {
         assert!(text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
         let private = PrivateKey::from_openssh(&text).unwrap();
         assert!(private.is_encrypted());
+        // The comment survives in the .pub (it is not readable from an
+        // encrypted private key).
+        assert_eq!(key.comment, "me@laptop");
         assert!(private.decrypt("wrong").is_err());
         let clear = private.decrypt("correct horse").unwrap();
         assert_eq!(
