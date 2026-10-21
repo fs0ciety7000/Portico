@@ -83,6 +83,8 @@ export interface Backend {
   onDragging(cb: (dragging: boolean) => void): Promise<UnlistenFn>;
   setFavorite(alias: string, favorite: boolean): Promise<HostMeta>;
   setTags(alias: string, tags: string[]): Promise<HostMeta>;
+  /** Normalized tags, or a `TagsError` (with the offending position). */
+  checkTags(tags: string[]): Promise<string[]>;
   setGroup(alias: string, group: string | null): Promise<HostMeta>;
   setNotes(alias: string, notes: string | null): Promise<HostMeta>;
   recentHosts(limit: number): Promise<RecentHost[]>;

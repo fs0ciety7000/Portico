@@ -3,7 +3,7 @@
   // suggestions) and notes, stored in hosts.toml by the core, which
   // validates and normalizes them (errors come back per field, with a hint).
   import { untrack } from "svelte";
-  import { asError, sentence, type ErrorSummary, type Host } from "../api";
+  import { asError, sentence, tagPosition, type ErrorSummary, type Host } from "../api";
   import { backend } from "../backend";
   import { groupNames } from "../hostlist";
   import { isMac } from "../keys";
@@ -36,20 +36,57 @@
   const showSuggestions = $derived(groupFocused && suggestions.length > 0);
   const saveKey = isMac ? "⌘S" : "Ctrl-S";
 
-  /** Splits typed or pasted text into tags (space, comma, Enter; `#` optional). */
-  function commit(text: string) {
-    for (const raw of text.split(/[\s,]+/)) {
-      const tag = raw.replace(/^#/, "").trim();
-      if (tag && !tags.some((t) => t.toLowerCase() === tag.toLowerCase())) tags.push(tag);
-    }
-    tagText = "";
-    errors.tags = undefined;
+  /** Index of the chip the core refused (from the error's position). */
+  let badTag: number | null = $state(null);
+  let chipEls: HTMLElement[] = $state([]);
+  let checks = 0;
+
+  function setTagsError(e: unknown) {
+    errors.tags = asError(e);
+    const position = tagPosition(e);
+    badTag = position !== null && position <= tags.length ? position - 1 : null;
   }
 
-  function removeTag(i: number) {
+  /** Validates the chips with the core's own rules as soon as they change
+   * (`check_tags`, no write): the refused chip is marked at once. */
+  async function check() {
+    const run = ++checks;
+    const list = [...tags];
+    try {
+      await backend.checkTags(list);
+      if (run !== checks) return;
+      errors.tags = undefined;
+      badTag = null;
+    } catch (e) {
+      if (run === checks) setTagsError(e);
+    }
+  }
+
+  /** Splits typed or pasted text into tags (space, comma, Enter; `#` optional). */
+  function commit(text: string) {
+    let added = false;
+    for (const raw of text.split(/[\s,]+/)) {
+      const tag = raw.replace(/^#/, "").trim();
+      if (tag && !tags.some((t) => t.toLowerCase() === tag.toLowerCase())) {
+        tags.push(tag);
+        added = true;
+      }
+    }
+    tagText = "";
+    if (added) void check();
+  }
+
+  /** Removes a chip; the focus goes to `focusNext` (a chip index), else the field. */
+  function removeTag(i: number, focusNext: number | null = null) {
     tags.splice(i, 1);
-    errors.tags = undefined;
-    tagInput?.focus();
+    if (errors.tags) void check();
+    else badTag = null;
+    const next = focusNext !== null && focusNext >= 0 && focusNext < tags.length ? focusNext : null;
+    queueMicrotask(() => (next !== null ? chipEls[next]?.focus() : tagInput?.focus()));
+  }
+
+  function focusChip(i: number) {
+    chipEls[i]?.focus();
   }
 
   function onTagKey(e: KeyboardEvent) {
@@ -62,7 +99,34 @@
       else void save();
     } else if (e.key === "Backspace" && !tagText && tags.length) {
       e.preventDefault();
-      tags.pop();
+      removeTag(tags.length - 1);
+    } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !tagText && tags.length) {
+      // From the empty field, the arrows walk onto the chips.
+      e.preventDefault();
+      focusChip(e.key === "ArrowLeft" ? tags.length - 1 : 0);
+    }
+  }
+
+  function onChipKey(e: KeyboardEvent, i: number) {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      focusChip(Math.max(0, i - 1));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (i + 1 < tags.length) focusChip(i + 1);
+      else tagInput?.focus();
+    } else if (e.key === "Backspace") {
+      e.preventDefault();
+      removeTag(i, i > 0 ? i - 1 : 0);
+    } else if (e.key === "Delete") {
+      e.preventDefault();
+      removeTag(i, i);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      focusChip(0);
+    } else if (e.key === "End" || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      // Typing on a chip goes back to the field (and types there).
+      tagInput?.focus();
     }
   }
 
@@ -115,7 +179,9 @@
         } catch (e) {
           const error = asError(e);
           const known = { host_tag: "tags", host_tags: "tags", host_group: "group", host_notes: "notes" } as const;
-          errors[known[error.code as keyof typeof known] ?? field] = error;
+          const at = known[error.code as keyof typeof known] ?? field;
+          if (at === "tags") setTagsError(e);
+          else errors[at] = error;
           return;
         }
       }
@@ -142,7 +208,16 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="chips" class:invalid={!!errors.tags} onclick={() => tagInput?.focus()}>
       {#each tags as tag, i (tag)}
-        <span class="chip">
+        <!-- Reached with ← / → from the empty field (not a Tab stop). -->
+        <span
+          class="chip"
+          class:invalid={badTag === i}
+          role="button"
+          tabindex="-1"
+          aria-label={`Tag ${tag}${badTag === i ? ", refused" : ""}: Backspace or Delete removes it`}
+          bind:this={chipEls[i]}
+          onkeydown={(e) => onChipKey(e, i)}
+        >
           #{tag}
           <button class="chip-remove" tabindex="-1" aria-label={`Remove tag ${tag}`} onclick={() => removeTag(i)}>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
@@ -167,7 +242,10 @@
     {#if errors.tags}
       <p class="inline-error"><span>{sentence(errors.tags.message)}</span>{#if errors.tags.hint}<span class="hint">{errors.tags.hint}</span>{/if}</p>
     {:else}
-      <span class="help">Space, comma or <kbd>↵</kbd> adds a tag; <kbd>Backspace</kbd> removes the last one. Search them with <span class="mono">#tag</span>.</span>
+      <span class="help">
+        Space, comma or <kbd>↵</kbd> adds a tag; <kbd>←</kbd> <kbd>→</kbd> select one, <kbd>Backspace</kbd> or <kbd>Del</kbd> removes it.
+        Search them with <span class="mono">#tag</span>.
+      </span>
     {/if}
   </div>
 
@@ -207,7 +285,7 @@
     {/if}
   </div>
 
-  <label class="field">
+  <label class="field notes-field">
     <span>Notes</span>
     <textarea bind:value={notes} aria-invalid={!!errors.notes} spellcheck="true" rows="4" oninput={() => (errors.notes = undefined)}></textarea>
     {#if errors.notes}
@@ -222,7 +300,7 @@
   {/if}
 
   {#snippet footer()}
-    <span class="footer-note">Portico never edits ~/.ssh/config: these live in hosts.toml</span>
+    <span class="footer-note">Portico never edits <span class="mono">~/.ssh/config</span>: these live in <span class="mono">hosts.toml</span>.</span>
     <button class="secondary" onclick={onclose}>Cancel <kbd>Esc</kbd></button>
     <button class="primary" disabled={!armed || busy} onclick={() => void save()}>
       {#if busy}<span class="spinner" aria-hidden="true"></span>{/if}Save <kbd>{saveKey}</kbd>
@@ -258,6 +336,11 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
   }
+  .chip { outline: 2px solid transparent; outline-offset: 1px; transition: outline-color var(--motion-fast) var(--ease-standard); }
+  /* Keyboard focus on a chip: the accent ring (a refused chip keeps its red border inside it). */
+  .chip:focus { outline-color: var(--accent); color: var(--text-primary); }
+  /* The tag the core refused. */
+  .chip.invalid { border-color: var(--status-error); color: var(--status-error); }
   .chips .chip-remove {
     display: grid;
     place-items: center;
@@ -310,6 +393,8 @@
   }
   .suggestions button:hover,
   .suggestions button.active { background: var(--bg-selected); color: var(--text-primary); }
+  /* Notes are prose: the UI font, not the shared mono textarea. */
+  .field.notes-field textarea { font-family: var(--font-ui); font-size: var(--text-base); }
   .counter { justify-self: end; font-variant-numeric: tabular-nums; }
   .counter.over { color: var(--status-error); }
   /* Wraps beside the buttons rather than pushing them to a second line. */

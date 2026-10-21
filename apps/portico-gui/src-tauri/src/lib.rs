@@ -128,6 +128,7 @@ fn run_app() {
             snippets::run_snippet,
             meta::set_favorite,
             meta::set_tags,
+            meta::check_tags,
             meta::set_group,
             meta::set_notes,
             meta::recent_hosts,
