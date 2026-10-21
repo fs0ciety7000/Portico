@@ -251,8 +251,20 @@ pub(crate) async fn list_keys(engine: State<'_, Engine>) -> Result<Vec<LocalKeyD
         .collect())
 }
 
+/// Async (and off the main thread): the host name may come from
+/// `/etc/hostname`, read in `spawn_blocking`.
 #[tauri::command]
-pub(crate) fn key_defaults() -> KeyDefaultsDto {
+pub(crate) async fn key_defaults() -> Result<KeyDefaultsDto, ErrorSummary> {
+    tauri::async_runtime::spawn_blocking(key_defaults_blocking)
+        .await
+        .map_err(|_| ErrorSummary {
+            code: "key_defaults".into(),
+            message: "cannot read the default key comment".into(),
+            hint: None,
+        })
+}
+
+fn key_defaults_blocking() -> KeyDefaultsDto {
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_default();
@@ -341,15 +353,29 @@ pub(crate) async fn agent_add(
 ) -> Result<AgentKeyDto, ErrorSummary> {
     let found = find_key(&engine, &key).await?;
     let private = private_path_of(&found, &key)?;
-    let lifetime = lifetime_secs
-        .filter(|s| (1..=MAX_LIFETIME_SECS).contains(s))
-        .map(Duration::from_secs);
+    let lifetime = agent_lifetime(lifetime_secs)?;
     let passphrase = passphrase.filter(|p| !p.expose_secret().is_empty());
     let added = engine
         .agent_add(private, passphrase, lifetime)
         .await
         .map_err(summary)?;
     Ok(AgentKeyDto::new(&added, unix_now()))
+}
+
+/// `None` keeps the key until removed; a duration outside
+/// `1..=MAX_LIFETIME_SECS` is refused (never silently made unlimited).
+fn agent_lifetime(lifetime_secs: Option<u64>) -> Result<Option<Duration>, ErrorSummary> {
+    match lifetime_secs {
+        None => Ok(None),
+        Some(secs) if (1..=MAX_LIFETIME_SECS).contains(&secs) => {
+            Ok(Some(Duration::from_secs(secs)))
+        }
+        Some(secs) => Err(ErrorSummary {
+            code: "agent_lifetime".into(),
+            message: format!("an agent lifetime of {secs} s is outside 1..={MAX_LIFETIME_SECS} s"),
+            hint: Some("Pick one of the offered durations, or until removed.".into()),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -501,6 +527,26 @@ mod tests {
         assert_eq!(read_public(&path).unwrap(), "ssh-ed25519 AAAA me@laptop");
         std::fs::write(&path, "").unwrap();
         assert_eq!(read_public(&path).unwrap_err().code, "key_public");
+    }
+
+    #[test]
+    fn out_of_range_lifetimes_are_refused() {
+        assert_eq!(agent_lifetime(None).unwrap(), None);
+        assert_eq!(
+            agent_lifetime(Some(3600)).unwrap(),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            agent_lifetime(Some(MAX_LIFETIME_SECS)).unwrap(),
+            Some(Duration::from_secs(MAX_LIFETIME_SECS))
+        );
+        for secs in [0, MAX_LIFETIME_SECS + 1, u64::MAX] {
+            assert_eq!(
+                agent_lifetime(Some(secs)).unwrap_err().code,
+                "agent_lifetime",
+                "{secs}"
+            );
+        }
     }
 
     #[test]
