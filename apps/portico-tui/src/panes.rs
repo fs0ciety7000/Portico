@@ -93,19 +93,20 @@ pub(crate) enum Refusal {
 }
 
 impl Refusal {
+    /// The same words as the GUI's refusal.
     pub(crate) fn message(self) -> String {
         match self {
-            Self::TooMany => format!("A tab holds at most {MAX_PANES} panes"),
-            Self::TooSmall => "Not enough room to split this pane".to_owned(),
+            Self::TooMany => format!("This tab already has {MAX_PANES} panes"),
+            Self::TooSmall => {
+                format!("Each pane needs at least {MIN_COLS} columns × {MIN_ROWS} rows")
+            }
         }
     }
 
     pub(crate) fn hint(self) -> String {
         match self {
-            Self::TooMany => "Close a pane, or open a new tab.".to_owned(),
-            Self::TooSmall => format!(
-                "Each pane needs at least {MIN_COLS}×{MIN_ROWS} cells: enlarge the window, zoom or close a pane."
-            ),
+            Self::TooMany => "Close a pane first.".to_owned(),
+            Self::TooSmall => "Enlarge the window, or close a pane.".to_owned(),
         }
     }
 }
@@ -1022,7 +1023,8 @@ mod tests {
         let refused = t.split(big, Split::Vertical, PaneId::next(), "y");
         assert!(matches!(refused, Err((Refusal::TooMany, "y"))));
         assert_eq!(t.len(), MAX_PANES);
-        assert!(Refusal::TooMany.message().contains('8'));
+        assert_eq!(Refusal::TooMany.message(), "This tab already has 8 panes");
+        assert_eq!(Refusal::TooMany.hint(), "Close a pane first.");
     }
 
     #[test]
@@ -1049,7 +1051,14 @@ mod tests {
             small.can_split(tiny, Split::Horizontal),
             Err(Refusal::TooSmall)
         );
-        assert!(Refusal::TooSmall.hint().contains("20×5"));
+        assert_eq!(
+            Refusal::TooSmall.message(),
+            "Each pane needs at least 20 columns × 5 rows"
+        );
+        assert_eq!(
+            Refusal::TooSmall.hint(),
+            "Enlarge the window, or close a pane."
+        );
     }
 
     #[test]

@@ -301,8 +301,8 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "prefix.split_horizontal",
         Prefix,
         ["\"", "-"],
-        "split below",
-        "Diviser le panneau : nouveau panneau dessous, même hôte (même session si elle est vivante)",
+        "split down",
+        "« Split down » : nouveau panneau dessous, même hôte (même session si elle est vivante)",
         Action::SplitPane(Split::Horizontal)
     ),
     bind!(
@@ -310,15 +310,15 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["%", "|"],
         "split right",
-        "Diviser le panneau : nouveau panneau à droite, même hôte",
+        "« Split right » : nouveau panneau à droite, même hôte",
         Action::SplitPane(Split::Vertical)
     ),
     bind!(
         "prefix.split_host",
         Prefix,
         ["S"],
-        "split host",
-        "Diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre)",
+        "split with host…",
+        "« Split with host… » : diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre)",
         Action::SplitPaneHost
     ),
     bind!(
@@ -326,7 +326,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["left"],
         "pane left",
-        "Focus au panneau de gauche",
+        "Focus au panneau de gauche (puis les flèches seules pendant 600 ms : mode `PANE`)",
         Action::FocusPane(Dir::Left)
     ),
     bind!(
@@ -334,7 +334,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["down"],
         "pane below",
-        "Focus au panneau du dessous",
+        "Focus au panneau du dessous (mode `PANE`)",
         Action::FocusPane(Dir::Down)
     ),
     bind!(
@@ -342,7 +342,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["up"],
         "pane above",
-        "Focus au panneau du dessus",
+        "Focus au panneau du dessus (mode `PANE`)",
         Action::FocusPane(Dir::Up)
     ),
     bind!(
@@ -350,7 +350,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["right"],
         "pane right",
-        "Focus au panneau de droite",
+        "Focus au panneau de droite (mode `PANE`)",
         Action::FocusPane(Dir::Right)
     ),
     bind!(
@@ -358,39 +358,39 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["o"],
         "next pane",
-        "Panneau suivant (ordre de lecture, boucle)",
+        "« Next pane » : panneau suivant (ordre de lecture, boucle)",
         Action::NextPane
     ),
     bind!(
         "prefix.resize_left",
         Prefix,
         ["shift-left"],
-        "resize ←",
-        "Déplacer la séparation verticale vers la gauche (4 colonnes)",
+        "move divider ←",
+        "« Move divider » : séparation verticale vers la gauche, 4 colonnes (puis `Shift` + flèche seul pendant 600 ms : mode `PANE`)",
         Action::ResizePane(Dir::Left)
     ),
     bind!(
         "prefix.resize_down",
         Prefix,
         ["shift-down"],
-        "resize ↓",
-        "Déplacer la séparation horizontale vers le bas (2 lignes)",
+        "move divider ↓",
+        "« Move divider » : séparation horizontale vers le bas, 2 lignes (mode `PANE`)",
         Action::ResizePane(Dir::Down)
     ),
     bind!(
         "prefix.resize_up",
         Prefix,
         ["shift-up"],
-        "resize ↑",
-        "Déplacer la séparation horizontale vers le haut (2 lignes)",
+        "move divider ↑",
+        "« Move divider » : séparation horizontale vers le haut, 2 lignes (mode `PANE`)",
         Action::ResizePane(Dir::Up)
     ),
     bind!(
         "prefix.resize_right",
         Prefix,
         ["shift-right"],
-        "resize →",
-        "Déplacer la séparation verticale vers la droite (4 colonnes)",
+        "move divider →",
+        "« Move divider » : séparation verticale vers la droite, 4 colonnes (mode `PANE`)",
         Action::ResizePane(Dir::Right)
     ),
     bind!(
@@ -398,7 +398,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["x"],
         "close pane",
-        "Fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte)",
+        "« Close pane » : fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte)",
         Action::ClosePane
     ),
     bind!(
@@ -406,7 +406,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["z"],
         "zoom",
-        "Zoom : le panneau seul dans l'onglet, ou retour à la division",
+        "« Zoom pane » : le panneau seul dans l'onglet, ou retour à la division",
         Action::ZoomPane
     ),
     bind!(
@@ -853,7 +853,8 @@ type HelpRows = &'static [(&'static [HelpKey], &'static str)];
 /// `(title, page, rows)` of the `?` overlay. Keys of the *same* action are
 /// separated by a space (`c F5`); keys of *different* actions by ` · `,
 /// matched in order by the description (`g · G` → `First · last`).
-/// Descriptions stay within 19 columns so two columns fit 80×24 (tested).
+/// Descriptions stay within 19 columns so two columns fit 80×24 (tested);
+/// a row without keys continues the description above it.
 /// When everything does not fit at once, the overlay shows one page at a
 /// time (0: hosts, sessions, edit, logs; 1: the explorer and the panels).
 const HELP: &[(&str, usize, HelpRows)] = &[
@@ -962,7 +963,9 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         "Files",
         1,
         &[
-            (&[Fixed("Tab")], "Switch pane"),
+            // "Switch side (local/remote)", over two rows (19 columns).
+            (&[Fixed("Tab")], "Switch side"),
+            (&[], "(local/remote)"),
             (&[Fixed("↵ · Bksp")], "Open · parent"),
             (&[Fixed("c F5")], "Copy across"),
             (&[Fixed("n F7")], "New folder"),
@@ -1002,14 +1005,9 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         "Panes (Ctrl-Space)",
         1,
         &[
-            (
-                &[
-                    Id("prefix.split_horizontal", 1),
-                    Id("prefix.split_vertical", 1),
-                ],
-                "Split below · right",
-            ),
-            (&[Id("prefix.split_host", 1)], "Split onto a host"),
+            (&[Id("prefix.split_vertical", 1)], "Split right"),
+            (&[Id("prefix.split_horizontal", 1)], "Split down"),
+            (&[Id("prefix.split_host", 1)], "Split with host…"),
             (
                 &[
                     Joined(&[
@@ -1029,12 +1027,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                     "prefix.resize_up",
                     "prefix.resize_right",
                 ])],
-                "Resize",
+                "Move divider",
             ),
-            (
-                &[Id("prefix.close_pane", 1), Id("prefix.zoom_pane", 1)],
-                "Close · zoom",
-            ),
+            (&[Id("prefix.close_pane", 1)], "Close pane"),
+            (&[Id("prefix.zoom_pane", 1)], "Zoom pane"),
         ],
     ),
     (
@@ -1085,15 +1081,41 @@ pub(crate) fn help(keymap: &Keymap) -> Vec<HelpSection> {
 // ── dispatch ────────────────────────────────────────────────────────────
 
 /// What the dispatcher needs to know about the app.
+// A snapshot of independent app flags, read once per key: not a state
+// machine to model.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeyContext<'a> {
     pub(crate) focus: Focus,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) dialog_open: bool,
     pub(crate) prefix: bool,
+    /// Pane mode: shortly after `Ctrl-Space` + arrow, the arrows and
+    /// `Shift`+arrows move the focus / the divider without the prefix.
+    pub(crate) pane_repeat: bool,
     /// The host list picks the host of a new pane (`Ctrl-Space S`).
     pub(crate) picking: bool,
     pub(crate) keymap: &'a Keymap,
+}
+
+/// In pane mode, an arrow (or `Shift`+arrow) bound to a pane move in the
+/// prefix table does it again. Anything else is not taken here: it goes
+/// where it always goes (the remote program), so no key is swallowed.
+/// Only in a terminal with nothing over it (the caller has already given
+/// dialogs and the prefix their keys).
+fn pane_repeat_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
+    let arrow = matches!(
+        key.code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+    );
+    let plain_or_shift = (key.modifiers - KeyModifiers::SHIFT).is_empty();
+    let active = cx.pane_repeat && cx.focus == Focus::Terminal && cx.overlay.is_none();
+    if !active || !arrow || !plain_or_shift {
+        return None;
+    }
+    cx.keymap
+        .lookup(Context::Prefix, &key)
+        .filter(|a| matches!(a, Action::FocusPane(_) | Action::ResizePane(_)))
 }
 
 /// While picking a pane's host, the list only moves, searches and chooses.
@@ -1108,6 +1130,9 @@ const PICKING_KEYS: &[&str] = &[
     "hosts.help",
 ];
 
+// One flat priority list (dialog, help, panel, prefix, pane mode, focus):
+// split up, the order that decides who gets a key would be hidden.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     let KeyContext {
         focus,
@@ -1116,6 +1141,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         prefix,
         picking,
         keymap,
+        ..
     } = cx;
     let overlay_open = overlay.is_some();
     if key.kind == KeyEventKind::Release {
@@ -1147,6 +1173,9 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     // The prefix works from every view, so tab commands are the same everywhere.
     if prefix {
         return Some(prefix_command(key, is_prefix_key, focus, keymap));
+    }
+    if let Some(action) = pane_repeat_key(key, cx) {
+        return Some(action);
     }
     if focus == Focus::Files && !overlay_open {
         return Some(match key.code {
@@ -1296,6 +1325,7 @@ mod tests {
             overlay,
             dialog_open: dialog,
             prefix,
+            pane_repeat: false,
             picking: false,
             keymap,
         }
@@ -1653,10 +1683,94 @@ mod tests {
             .find(|s| s.title == "Panes (Ctrl-Space)")
             .map(|s| s.rows.clone())
             .unwrap_or_default();
-        assert!(panes.contains(&("\" · %".to_owned(), "Split below · right")));
-        assert!(panes.contains(&("←↓↑→ · o".to_owned(), "Focus · next pane")));
-        assert!(panes.contains(&("Shift-←↓↑→".to_owned(), "Resize")));
-        assert!(panes.contains(&("x · z".to_owned(), "Close · zoom")));
+        // The GUI's words.
+        for row in [
+            ("%", "Split right"),
+            ("\"", "Split down"),
+            ("S", "Split with host…"),
+            ("←↓↑→ · o", "Focus · next pane"),
+            ("Shift-←↓↑→", "Move divider"),
+            ("x", "Close pane"),
+            ("z", "Zoom pane"),
+        ] {
+            assert!(
+                panes.contains(&(row.0.to_owned(), row.1)),
+                "{row:?}: {panes:?}"
+            );
+        }
+        let files = defaults
+            .iter()
+            .find(|s| s.title == "Files")
+            .map(|s| s.rows.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            files.first().zip(files.get(1)),
+            Some((
+                &("Tab".to_owned(), "Switch side"),
+                &(String::new(), "(local/remote)")
+            ))
+        );
+    }
+
+    #[test]
+    fn pane_mode_repeats_arrows_and_lets_every_other_key_through() {
+        let keymap = Keymap::defaults();
+        let repeat = KeyContext {
+            pane_repeat: true,
+            ..cx(Focus::Terminal, None, false, false, &keymap)
+        };
+        let at = |code, m| map_key(key(code, m), repeat);
+        assert!(matches!(
+            at(KeyCode::Left, KeyModifiers::NONE),
+            Some(Action::FocusPane(Dir::Left))
+        ));
+        assert!(matches!(
+            at(KeyCode::Up, KeyModifiers::NONE),
+            Some(Action::FocusPane(Dir::Up))
+        ));
+        assert!(matches!(
+            at(KeyCode::Right, KeyModifiers::SHIFT),
+            Some(Action::ResizePane(Dir::Right))
+        ));
+        assert!(matches!(
+            at(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(Action::ResizePane(Dir::Down))
+        ));
+        // Anything else goes to the remote program: nothing is swallowed.
+        for (code, m) in [
+            (KeyCode::Char('l'), KeyModifiers::NONE),
+            (KeyCode::Char('x'), KeyModifiers::NONE),
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Left, KeyModifiers::CONTROL),
+            (KeyCode::Left, KeyModifiers::ALT),
+        ] {
+            assert!(
+                matches!(at(code, m), Some(Action::TerminalKey(_))),
+                "{code:?} {m:?}"
+            );
+        }
+        // The prefix still opens the command mode.
+        assert!(matches!(
+            at(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            Some(Action::Prefix)
+        ));
+        // Out of a terminal (or under an overlay) the mode does nothing.
+        let hosts = KeyContext {
+            focus: Focus::Hosts,
+            ..repeat
+        };
+        assert!(!matches!(
+            map_key(key(KeyCode::Left, KeyModifiers::NONE), hosts),
+            Some(Action::FocusPane(_))
+        ));
+        let help = KeyContext {
+            overlay: Some(Overlay::Help),
+            ..repeat
+        };
+        assert!(!matches!(
+            map_key(key(KeyCode::Left, KeyModifiers::NONE), help),
+            Some(Action::FocusPane(_))
+        ));
     }
 
     #[test]

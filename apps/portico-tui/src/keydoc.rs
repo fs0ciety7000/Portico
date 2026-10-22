@@ -91,7 +91,10 @@ const FILES: Panel = Panel {
     title: "TUI : explorateur de fichiers",
     intro: "Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet actif (ou de l'hôte sélectionné). Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas tant qu'elle n'est pas vide.",
     rows: &[
-        ("Changer de panneau", "`Tab` / `Shift-Tab`"),
+        (
+            "« Switch side (local/remote) » : changer de côté",
+            "`Tab` / `Shift-Tab`",
+        ),
         (
             "Se déplacer",
             "`j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G`",
@@ -212,16 +215,20 @@ const PANES: Panel = Panel {
     intro: "Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 cellules. Les commandes sont dans la table du préfixe (`prefix.split_*`, `prefix.pane_*`, `prefix.next_pane`, `prefix.resize_*`, `prefix.close_pane`, `prefix.zoom_pane`). Seul le panneau actif reçoit les frappes, le collage et le défilement (aucune diffusion).",
     rows: &[
         (
-            "Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split onto… », recherche vide et active, rendue ensuite)",
+            "Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split with host… », recherche vide et active, rendue ensuite)",
             "saisie pour filtrer, `↓` / `↑`, `↵` pour diviser",
         ),
         ("Annuler le choix d'hôte", "`Esc`, `Ctrl-C`"),
         (
+            "Mode `PANE` : après `Ctrl-Space` + flèche ou `Shift` + flèche, les flèches (focus) et `Shift` + flèches (« Move divider ») restent actives 600 ms sans le préfixe ; toute autre touche quitte le mode et part au panneau",
+            "`←` `↓` `↑` `→`, `Shift` + flèche",
+        ),
+        (
             "Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte)",
-            "`↵` (dans le panneau)",
+            "`↵` (dans le panneau actif ; un autre panneau en échec indique « focus to retry (Ctrl-Space ←↓↑→) »)",
         ),
     ],
-    outro: "Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin. Une division impossible est refusée avec un message (« A tab holds at most 8 panes », « Not enough room to split this pane »).",
+    outro: "Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Un panneau en échec a un point plein et sa phase en couleur d'erreur, dans son titre comme dans l'onglet ; le point creux est réservé à un panneau sans shell (sorti, fermé). Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin, et diviser un panneau zoomé dézoome puis divise. Une division impossible est refusée sur une ligne de la barre de statut, pendant 4 s, sans couvrir aucun panneau (« This tab already has 8 panes · Close a pane first. », « Each pane needs at least 20 columns × 5 rows · Enlarge the window, or close a pane. »). Depuis un onglet divisé, `?` ouvre l'aide sur la page « Panes ».",
 };
 
 /// Fixed keys of the configurable contexts (not rebindable).

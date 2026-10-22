@@ -7,7 +7,12 @@
 //! surface; the others are dimmed (muted text on the base surface), their
 //! status dot keeping its meaning colour. A pane still opening shows the
 //! connection phase; a pane whose connection failed shows the error, its
-//! hint and `↵ retry`. Only theme tokens are used (through `Styles`).
+//! hint and `↵ retry` (focused) or how to focus it (others: `↵` goes to
+//! the focused pane). A failed pane has a filled dot and its phase in
+//! `status-error`, in its title as in its tab; the hollow dot is kept for
+//! a pane with no shell attached (exited, closed). Dividers are
+//! `border-subtle` strokes on the base surface. Only theme tokens are used
+//! (through `Styles`).
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -61,7 +66,8 @@ fn draw_divider(divider: Divider, s: Styles, buf: &mut Buffer) {
         Split::Vertical => "│",
         Split::Horizontal => "─",
     };
-    let style = s.border().patch(s.base());
+    // The stroke colour over the base surface (not the base text colour).
+    let style = s.base().patch(s.border());
     for y in divider.area.top()..divider.area.bottom() {
         for x in divider.area.left()..divider.area.right() {
             if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
@@ -133,7 +139,13 @@ fn render_title(
 ) {
     let s = app.styles();
     let width = usize::from(area.width);
-    let (dot, dot_color, label, latency) = pane_status(app, slot);
+    let PaneStatus {
+        dot,
+        color: dot_color,
+        label,
+        latency,
+        failed,
+    } = pane_status(app, slot);
     let latency_style = match &latency {
         Some((_, true)) => s.status(s.theme.status.warning),
         _ => s.muted(),
@@ -143,14 +155,22 @@ fn render_title(
     } else {
         (s.base(), s.muted(), s.muted())
     };
+    // A failure reads the same in every pane, focused or not.
+    let label_style = if failed {
+        s.status(dot_color)
+    } else {
+        text_style
+    };
     let lead = if focused {
         Span::styled("▍", s.accent())
     } else {
         Span::raw(" ")
     };
+    // A leading space keeps the counter clear of the latency when a long
+    // alias fills the row.
     let right = match (focused, place.zoomed) {
-        (true, true) => format!("zoom {}/{} ", place.number, place.count),
-        (true, false) => format!("{}/{} ", place.number, place.count),
+        (true, true) => format!(" zoom {}/{} ", place.number, place.count),
+        (true, false) => format!(" {}/{} ", place.number, place.count),
         _ => String::new(),
     };
     // What the status needs: `● label · 12 ms`; the label goes first when
@@ -174,7 +194,7 @@ fn render_title(
         Span::styled(format!("{dot} "), s.status(dot_color)),
     ];
     if with_label {
-        spans.push(Span::styled(label, text_style));
+        spans.push(Span::styled(label, label_style));
     }
     if let Some(text) = latency_text {
         if with_label {
@@ -190,30 +210,45 @@ fn render_title(
     frame.render_widget(Paragraph::new(Line::from(spans)).style(surface), area);
 }
 
-/// `(dot, colour, label, latency and whether it is slow)` of a pane.
-fn pane_status(
-    app: &App,
-    slot: &PaneSlot,
-) -> (
-    &'static str,
-    portico_theme::Rgb,
-    String,
-    Option<(String, bool)>,
-) {
+/// What a pane's title (and its tab, when it has the focus) shows.
+pub(super) struct PaneStatus {
+    pub(super) dot: &'static str,
+    pub(super) color: portico_theme::Rgb,
+    pub(super) label: String,
+    /// Latency, and whether it is slow.
+    pub(super) latency: Option<(String, bool)>,
+    /// The connection failed: filled dot, phase in the dot's colour.
+    pub(super) failed: bool,
+}
+
+/// The status of a pane, shared by its title and its tab so both say the
+/// same: `●` + `status-error` for a failure, `○` for no shell attached.
+pub(super) fn pane_status(app: &App, slot: &PaneSlot) -> PaneStatus {
     let s = app.styles();
     let view = slot.session().and_then(|id| app.session_by_id(id));
     let session_failed = view.is_some_and(|v| matches!(v.phase, SessionPhase::Failed { .. }));
     let st = status::status(view, s);
     let idle = s.theme.status.idle;
+    let plain = |dot, color, label| PaneStatus {
+        dot,
+        color,
+        label,
+        latency: None,
+        failed: false,
+    };
+    let failure = |color, label| PaneStatus {
+        failed: true,
+        ..plain("●", color, label)
+    };
     match slot {
         // The session's failure (or refusal) says it best.
-        PaneSlot::Failed { .. } if session_failed => ("●", st.color, st.label, None),
-        PaneSlot::Failed { .. } => ("●", s.theme.status.error, "Failed".to_owned(), None),
+        PaneSlot::Failed { .. } if session_failed => failure(st.color, st.label),
+        PaneSlot::Failed { .. } => failure(s.theme.status.error, "Failed".to_owned()),
         PaneSlot::Live(view) if view.ended.is_some() || view.closed => match &view.ended {
-            Some(Ended::Exited(code)) => ("○", idle, format!("Exited ({code})"), None),
-            Some(Ended::Killed(sig)) => ("○", idle, format!("Killed (SIG{sig})"), None),
-            _ if session_failed => ("●", st.color, st.label, None),
-            _ => ("○", idle, "Closed".to_owned(), None),
+            Some(Ended::Exited(code)) => plain("○", idle, format!("Exited ({code})")),
+            Some(Ended::Killed(sig)) => plain("○", idle, format!("Killed (SIG{sig})")),
+            _ if session_failed => failure(st.color, st.label),
+            _ => plain("○", idle, "Closed".to_owned()),
         },
         PaneSlot::Opening { .. } | PaneSlot::Live(_) => {
             let dot = if st.busy {
@@ -221,8 +256,10 @@ fn pane_status(
             } else {
                 "●"
             };
-            let latency = st.latency.map(|l| (l, st.slow));
-            (dot, st.color, st.label, latency)
+            PaneStatus {
+                latency: st.latency.map(|l| (l, st.slow)),
+                ..plain(dot, st.color, st.label)
+            }
         }
     }
 }
@@ -305,16 +342,29 @@ fn render_failure(
     lines.push(Line::from(""));
     // Each key with its label; side by side when they fit, else stacked.
     let mut keys: Vec<Vec<Span<'static>>> = Vec::new();
-    if failure.retry {
-        let style = if focused {
-            s.key_primary()
-        } else {
-            s.key_hint()
-        };
+    if failure.retry && focused {
         keys.push(vec![
-            Span::styled(" ↵ ", style),
+            Span::styled(" ↵ ", s.key_primary()),
             Span::styled(" retry", s.muted()),
         ]);
+    } else if failure.retry {
+        // `↵` goes to the focused pane: say how to get here first.
+        let arrows = app.keymap.joined(&[
+            "prefix.pane_left",
+            "prefix.pane_down",
+            "prefix.pane_up",
+            "prefix.pane_right",
+        ]);
+        let text = if arrows.is_empty() {
+            "focus to retry".to_owned()
+        } else {
+            format!("focus to retry (Ctrl-Space {arrows})")
+        };
+        lines.extend(
+            fmt::wrap(&text, width)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, s.muted()))),
+        );
     }
     keys.push(vec![
         Span::styled(

@@ -82,6 +82,8 @@ pub(crate) enum Action {
     ResizePane(Dir),
     ClosePane,
     ZoomPane,
+    /// A timed state ran out (pane repeat window, status-bar note).
+    Expire,
     // SFTP explorer
     OpenFiles,
     FilesKey(KeyEvent),
