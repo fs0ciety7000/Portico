@@ -6,8 +6,10 @@
 //!   REC badge turns on with `RecordingState::Started` and off with
 //!   `Stopped`, never on the answer of `start_recording`; after a lagged
 //!   engine bus every open terminal is resynchronised with `is_recording`.
-//! - A recording that stops for another reason than a request or the
-//!   terminal closing says so on one line of the status bar, with a hint.
+//! - A requested stop says where the file went, on one neutral line of
+//!   the status bar ("Recording saved · <file>", how to open Recordings).
+//!   A recording that stops for another reason than a request or the
+//!   terminal closing says so as a warning, with a hint.
 //! - Engine errors are shown through their `ErrorSummary` only (never
 //!   matched on text). Recorded output is never logged or shown outside
 //!   the player.
@@ -22,28 +24,51 @@ use portico_core::recording::RecordingStopReason;
 
 use crate::action::Action;
 use crate::app::{App, Focus, Overlay};
-use crate::app_panes::{PaneSlot, StatusNote};
+use crate::app_panes::{NoteTone, PaneSlot, StatusNote};
 use crate::dialog::{ConfirmAction, ConfirmDialog, Dialog};
 use crate::keys::{Load, Notice};
-use crate::player::Player;
+use crate::player::{Player, PlayerState, Seek};
 use crate::recordings::{RecOutcome, RecordingsPanel};
 use crate::ui::fmt;
 
 /// How long a recording notice stays in the status bar (longer than a
 /// refused split: it reports something that happened on its own).
 pub(crate) const RECORDING_NOTE_TTL: Duration = Duration::from_secs(8);
+/// How long "Recording saved" stays in the status bar.
+pub(crate) const SAVED_NOTE_TTL: Duration = Duration::from_secs(4);
+/// The recordings folder, at most this wide in the confirmation (a middle
+/// ellipsis keeps both ends).
+const FOLDER_WIDTH: usize = 48;
 
-/// Command name shared with the GUI (its counterpart, "Record session",
-/// names `prefix.record` in the documentation).
-pub(crate) const STOP_COMMAND: &str = "Stop recording";
+/// "Stop recording" (the command name shared with the GUI) as a status-bar
+/// hint: hints are lower case.
+pub(crate) const STOP_HINT: &str = "stop recording";
 /// Title of the start confirmation (shared with the GUI).
 pub(crate) const CONFIRM_TITLE: &str = "Record this terminal?";
+/// The same, when the tab is split (shared with the GUI).
+pub(crate) const CONFIRM_TITLE_PANE: &str = "Record this pane?";
 
 /// The start confirmation's text (shared with the GUI).
-pub(crate) fn confirm_body(path: &str) -> String {
+pub(crate) fn confirm_body(folder: &str) -> String {
     format!(
-        "Everything shown on screen is recorded — including secrets printed by commands and anything the remote echoes. What you type is never recorded. Saved to {path}, readable only by you."
+        "Everything the terminal shows is recorded, including the commands you type (the shell echoes them) and any secret a command prints. Keystrokes themselves are not stored, so a password typed at a prompt that does not echo stays out. Saved to {folder}, readable only by you."
     )
+}
+
+/// The neutral notice of a requested stop: `(message, hint)`.
+/// `open_key`: the effective `Ctrl-Space` key of "Recordings".
+pub(crate) fn saved_notice(name: &str, open_key: &str) -> (String, String) {
+    (
+        format!("Recording saved · {name}"),
+        format!("Ctrl-Space {open_key} to open Recordings"),
+    )
+}
+
+/// The recordings folder as shown: `~` for `$HOME`, a trailing `/`, the
+/// middle cut when long.
+pub(crate) fn folder_label(dir: &std::path::Path, width: usize) -> String {
+    let folder = format!("{}/", fmt::display_path(&dir.display().to_string()));
+    fmt::truncate_middle(&folder, width)
 }
 
 /// The status-bar notice of a recording that stopped on its own:
@@ -100,6 +125,7 @@ impl App {
             }
             Action::RecordingDeleted { name, result } => {
                 if let Some(panel) = &mut self.recordings_panel {
+                    panel.refused = None;
                     panel.notice = Some(match result {
                         Ok(()) => Notice::ok(format!("Deleted {}", fmt::truncate(&name, 48))),
                         Err(error) => Notice::error(error),
@@ -113,6 +139,18 @@ impl App {
                 result,
             } => self.playback_opened(name, total, result),
             Action::PlayerKey(key) => self.player_key(key),
+            Action::PlaybackSeek { generation, result } => {
+                let now = Instant::now();
+                if let Some(player) = &mut self.player {
+                    match result {
+                        // A stale start is dropped (its reader stops).
+                        Ok(start) => {
+                            player.restart(generation, start, now);
+                        }
+                        Err(error) => player.seek_failed(generation, error),
+                    }
+                }
+            }
             Action::PlayerFeed(msg) => {
                 if let Some(player) = &mut self.player {
                     player.feed(msg, Instant::now());
@@ -133,13 +171,23 @@ impl App {
             RecordingState::Started { name, .. } => {
                 self.recording.insert(terminal, Some(name));
             }
-            RecordingState::Stopped { reason, .. } => {
+            RecordingState::Stopped { reason, name, .. } => {
                 self.recording.remove(&terminal);
                 if let Some((message, hint)) = stop_notice(reason) {
                     self.note = Some(StatusNote {
                         message: message.to_owned(),
                         hint: hint.to_owned(),
                         until: Instant::now() + RECORDING_NOTE_TTL,
+                        tone: NoteTone::Warning,
+                    });
+                } else if reason == RecordingStopReason::Requested {
+                    let open_key = self.keymap.shown("prefix.recordings", 1);
+                    let (message, hint) = saved_notice(&name, &open_key);
+                    self.note = Some(StatusNote {
+                        message,
+                        hint,
+                        until: Instant::now() + SAVED_NOTE_TTL,
+                        tone: NoteTone::Neutral,
                     });
                 }
             }
@@ -147,7 +195,17 @@ impl App {
             _ => {}
         }
         // Sizes, durations and the "recording" marks changed.
+        self.sync_panel_active();
         self.reload_recordings();
+    }
+
+    /// The panel knows which files are being written (their delete is
+    /// refused up front).
+    fn sync_panel_active(&mut self) {
+        let active: Vec<String> = self.recording.values().flatten().cloned().collect();
+        if let Some(panel) = &mut self.recordings_panel {
+            panel.active = active;
+        }
     }
 
     /// After a lagged bus: every open terminal is asked again.
@@ -161,6 +219,7 @@ impl App {
                 self.recording.remove(&id);
             }
         }
+        self.sync_panel_active();
         self.reload_recordings();
     }
 
@@ -171,6 +230,7 @@ impl App {
             message: fmt::sentence(&error.message),
             hint: error.hint.unwrap_or_default(),
             until: Instant::now() + RECORDING_NOTE_TTL,
+            tone: NoteTone::Warning,
         });
     }
 
@@ -186,6 +246,7 @@ impl App {
                 message: "No terminal to record".into(),
                 hint: "Open a terminal tab, then Ctrl-Space R.".into(),
                 until: Instant::now() + crate::app_panes::NOTE_TTL,
+                tone: NoteTone::Warning,
             });
             return;
         };
@@ -200,15 +261,34 @@ impl App {
                 message: "This pane's shell has ended".into(),
                 hint: "Only a live terminal can be recorded.".into(),
                 until: Instant::now() + crate::app_panes::NOTE_TTL,
+                tone: NoteTone::Warning,
             });
             return;
         }
-        let folder = format!(
-            "{}/",
-            fmt::display_path(&self.engine.recordings_dir().display().to_string())
-        );
+        let folder = folder_label(&self.engine.recordings_dir(), FOLDER_WIDTH);
+        // A split tab: which pane, by its host and its place.
+        let (title, subject) = match self.active_tab().filter(|t| t.len() > 1) {
+            Some(tab) => {
+                let number = tab
+                    .ids()
+                    .iter()
+                    .position(|id| *id == tab.focus())
+                    .map_or(1, |i| i + 1);
+                let alias = tab.focused().map(PaneSlot::alias).unwrap_or_default();
+                (
+                    CONFIRM_TITLE_PANE,
+                    Some(format!(
+                        "{} · pane {number}/{}",
+                        fmt::truncate(alias, 32),
+                        tab.len()
+                    )),
+                )
+            }
+            None => (CONFIRM_TITLE, None),
+        };
         self.dialogs.push_back(Dialog::Confirm(ConfirmDialog {
-            title: CONFIRM_TITLE.into(),
+            title: title.into(),
+            subject,
             body: confirm_body(&folder),
             confirm: "record",
             action: ConfirmAction::StartRecording(terminal),
@@ -234,9 +314,19 @@ impl App {
     fn open_recordings(&mut self) {
         self.prefix = false;
         self.close_panels();
-        let folder = fmt::display_path(&self.engine.recordings_dir().display().to_string());
+        // "Recording saved · … to open Recordings" was just followed: it
+        // gives the bar back to the panel's keys.
+        if self
+            .note
+            .as_ref()
+            .is_some_and(|n| n.tone == NoteTone::Neutral)
+        {
+            self.note = None;
+        }
+        let folder = folder_label(&self.engine.recordings_dir(), usize::MAX);
         self.recordings_panel = Some(RecordingsPanel::new(folder));
         self.overlay = Some(Overlay::Recordings);
+        self.sync_panel_active();
         self.reload_recordings();
     }
 
@@ -333,17 +423,60 @@ impl App {
         let Some(player) = &mut self.player else {
             return;
         };
-        match key.code {
-            KeyCode::Char(' ') if !ctrl => player.toggle_pause(now),
-            KeyCode::Char('+' | '=') if !ctrl => player.change_speed(true, now),
-            KeyCode::Char('-' | '_') if !ctrl => player.change_speed(false, now),
-            KeyCode::Right => player.skip_idle(now),
-            KeyCode::Char('q') | KeyCode::Esc => self.close_player(),
-            _ => {}
+        let seek = match key.code {
+            // Ended: Space plays it again from the start.
+            KeyCode::Char(' ') if !ctrl && player.state() == PlayerState::Ended => {
+                Some(Seek::Restart)
+            }
+            KeyCode::Char(' ') if !ctrl => {
+                player.toggle_pause(now);
+                None
+            }
+            KeyCode::Char('+' | '=') if !ctrl => {
+                player.change_speed(true, now);
+                None
+            }
+            KeyCode::Char('-' | '_') if !ctrl => {
+                player.change_speed(false, now);
+                None
+            }
+            KeyCode::Right => {
+                player.skip_idle(now);
+                None
+            }
+            KeyCode::Left => Some(Seek::Back),
+            KeyCode::Home => Some(Seek::Restart),
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.close_player();
+                return;
+            }
+            _ => None,
+        };
+        if let Some(seek) = seek {
+            self.seek_player(seek);
         }
         if let Some(player) = &mut self.player {
             player.step(now);
         }
+    }
+
+    /// Reopens the playing file for a seek (off the UI thread); the player
+    /// starts over once it is open ([`Action::PlaybackSeek`]).
+    fn seek_player(&mut self, seek: Seek) {
+        let Some(player) = &mut self.player else {
+            return;
+        };
+        let generation = player.request_seek(seek);
+        let name = player.name.clone();
+        let engine = self.engine.clone();
+        spawn(self, async move {
+            let result = engine
+                .open_recording(&name)
+                .await
+                .map_err(|e| e.summary())
+                .and_then(crate::player::spawn_reader);
+            Action::PlaybackSeek { generation, result }
+        });
     }
 
     /// Back to the recordings list (the reader thread stops).

@@ -260,3 +260,123 @@ async fn closing_the_player_stops_its_reader() {
     // Nothing to join: the test passes when no thread is left hanging on
     // a channel nobody reads (it would keep the test binary alive).
 }
+
+/// The same file, reopened (what the app does for a seek).
+fn reopen(bytes: &[u8]) -> PlaybackStart {
+    let reader = CastReader::new(Cursor::new(bytes.to_vec()), "test.cast").unwrap();
+    spawn_reader(reader).unwrap()
+}
+
+#[tokio::test]
+async fn seeking_back_replays_to_the_target_at_once() {
+    let bytes = cast(
+        20,
+        5,
+        &[
+            (1.0, "o", "a"),
+            (2.0, "o", "b"),
+            (8.0, "o", "c"),
+            (9.0, "o", "d"),
+            // A mode set late must be gone after a seek before it.
+            (9.5, "o", "\u{1b}[?2004h"),
+        ],
+    );
+    let mut player = player_of(bytes.clone(), None);
+    play_all(&mut player).await;
+    assert_eq!(rows(&player)[0], "abcd");
+    assert!(player.mode().contains(TermMode::BRACKETED_PASTE));
+    assert!((player.position - 9.5).abs() < 1e-9);
+
+    // `←`: 5 s back (4.5 s): a and b again at once, c waits its turn.
+    let generation = player.request_seek(Seek::Back);
+    let now = Instant::now();
+    assert!(player.restart(generation, reopen(&bytes), now));
+    settle(&mut player, now).await;
+    assert_eq!(rows(&player)[0], "ab");
+    assert!((player.position - 2.0).abs() < 1e-9);
+    assert_eq!(player.state(), PlayerState::Playing);
+    // The emulator started over: the late mode is gone with the rest.
+    assert!(!player.mode().contains(TermMode::BRACKETED_PASTE));
+    // Past the target, the recording's own pace (6 s, capped at 2 s).
+    assert_eq!(player.next_due(), Some(now + Duration::from_secs(2)));
+
+    // Two `←` in a row add up; the stale reopening is dropped.
+    let first = player.request_seek(Seek::Back);
+    let second = player.request_seek(Seek::Back);
+    assert!(!player.restart(first, reopen(&bytes), now));
+    assert_eq!(rows(&player)[0], "ab", "a stale seek changes nothing");
+    assert!(player.restart(second, reopen(&bytes), now));
+    settle(&mut player, now).await;
+    // 2 − 10 → 0: from the start, nothing shown before its time.
+    assert_eq!(rows(&player)[0], "");
+    assert_eq!(player.next_due(), Some(now + Duration::from_secs(1)));
+}
+
+#[tokio::test]
+async fn a_paused_seek_shows_the_target_and_stays_paused() {
+    let bytes = cast(
+        20,
+        5,
+        &[
+            (1.0, "o", "a"),
+            (2.0, "o", "b"),
+            (8.0, "o", "c"),
+            (9.0, "o", "d"),
+        ],
+    );
+    let mut player = player_of(bytes.clone(), None);
+    play_all(&mut player).await;
+    assert_eq!(player.state(), PlayerState::Ended);
+    // Ended: `Home` (or Space) restarts, playing.
+    let generation = player.request_seek(Seek::Restart);
+    let now = Instant::now();
+    assert!(player.restart(generation, reopen(&bytes), now));
+    settle(&mut player, now).await;
+    assert_eq!(rows(&player)[0], "");
+    settle(&mut player, now + Duration::from_secs(1)).await;
+    let t1 = now + Duration::from_secs(2);
+    settle(&mut player, t1).await;
+    assert_eq!(rows(&player)[0], "ab");
+    // Paused, then 5 s back from 2 s: the screen at 0, still paused, no
+    // wake-up planned.
+    player.toggle_pause(t1);
+    let generation = player.request_seek(Seek::Back);
+    assert!(player.restart(generation, reopen(&bytes), t1));
+    settle(&mut player, t1).await;
+    assert_eq!(rows(&player)[0], "");
+    assert_eq!(player.state(), PlayerState::Paused);
+    assert_eq!(player.next_due(), None);
+    // A seek lands where asked while paused (here 8 s, set directly: the
+    // keys only go back): the frame there, at once, still paused.
+    player.pending = Some((player.generation, 8.0));
+    assert!(player.restart(player.generation, reopen(&bytes), t1));
+    settle(&mut player, t1).await;
+    assert_eq!(rows(&player)[0], "abc");
+    assert_eq!(player.state(), PlayerState::Paused);
+    assert_eq!(player.next_due(), None);
+    // Resumed: the next event at its own pace.
+    player.toggle_pause(t1);
+    assert_eq!(player.next_due(), Some(t1 + Duration::from_secs(1)));
+}
+
+#[tokio::test]
+async fn a_failed_reopening_keeps_the_playback_and_says_why() {
+    let bytes = cast(20, 5, &[(1.0, "o", "a")]);
+    let mut player = player_of(bytes, None);
+    play_all(&mut player).await;
+    let generation = player.request_seek(Seek::Back);
+    let error = ErrorSummary {
+        code: "recording_not_found".into(),
+        message: "recording test.cast not found".into(),
+        hint: Some("It was deleted meanwhile.".into()),
+    };
+    // A stale failure is ignored.
+    player.seek_failed(generation.wrapping_add(7), error.clone());
+    assert!(player.error.is_none());
+    player.seek_failed(generation, error);
+    assert_eq!(rows(&player)[0], "a");
+    assert_eq!(
+        player.error.as_ref().map(|e| e.code.as_str()),
+        Some("recording_not_found")
+    );
+}

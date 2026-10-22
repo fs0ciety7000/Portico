@@ -200,8 +200,11 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
     ));
     for (i, tab) in app.tabs.iter().enumerate() {
         let (label, dot) = tab_label(app, i, tab);
-        // A one-pane tab has no pane title: its tab carries the REC badge.
-        let rec = tab.len() == 1 && tab.focused().is_some_and(|slot| app.recorded_in(slot));
+        // REC when any pane of the tab is recorded (seen from any tab).
+        let rec = tab
+            .items()
+            .into_iter()
+            .any(|(_, slot)| app.recorded_in(slot));
         tabs.push(tab_spans(s, &label, Some(dot), app.active == Some(i), rec));
     }
 
@@ -310,16 +313,19 @@ fn tab_spans(
         };
         spans.push(Span::styled(format!("{dot} "), style));
     }
+    // `1 alpha ● · REC`: the separator keeps REC apart from the connection
+    // dot (two meanings, two marks).
     if rec {
-        let style = rec_style(s);
-        spans.push(Span::styled(
-            "REC ",
-            if active {
-                style.patch(s.selected())
-            } else {
-                style
-            },
-        ));
+        let (sep, style) = if active {
+            (
+                s.muted().patch(s.selected()),
+                rec_style(s).patch(s.selected()),
+            )
+        } else {
+            (s.muted(), rec_style(s))
+        };
+        spans.push(Span::styled("· ", sep));
+        spans.push(Span::styled("REC ", style));
     }
     let width = spans.iter().map(Span::width).sum();
     (spans, width)

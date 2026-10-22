@@ -4,10 +4,12 @@
 //! Only names that came from the listing are ever handed back to the
 //! engine (`open_recording`, `delete_recording`). A deletion is an armed
 //! confirmation: keys are ignored for [`ARM_DELAY`], then only `y`
-//! deletes and any other key cancels. A recording still being written is
-//! refused by the engine (`recording_active`), and the panel shows that
-//! error's summary. Files whose header is invalid stay listed, marked, and
-//! can be deleted.
+//! deletes, `n` and `Esc` keep the file, and other keys are ignored (the
+//! same rule as the recording confirmation). A recording still being
+//! written is refused up front (no question that would only fail): the
+//! panel says so, and its delete key is not offered; the engine refuses it
+//! too (`recording_active`), should another Portico be writing it. Files
+//! whose header is invalid stay listed, marked, and can be deleted.
 
 use std::time::Instant;
 
@@ -48,7 +50,18 @@ pub(crate) struct RecordingsPanel {
     pub(crate) folder: String,
     /// A playback is being opened.
     pub(crate) opening: bool,
+    /// Files being written right now (from the engine's events).
+    pub(crate) active: Vec<String>,
+    /// A deletion refused up front: `(message, hint)`, as a warning.
+    pub(crate) refused: Option<(&'static str, &'static str)>,
 }
+
+/// Refusal of a deletion while the file is being written (shared with the
+/// GUI).
+pub(crate) const STILL_WRITTEN: (&str, &str) = (
+    "This recording is still being written",
+    "Stop the recording first",
+);
 
 impl RecordingsPanel {
     pub(crate) fn new(folder: String) -> Self {
@@ -59,7 +72,15 @@ impl RecordingsPanel {
             notice: None,
             folder,
             opening: false,
+            active: Vec::new(),
+            refused: None,
         }
+    }
+
+    /// The selected file is being written (it cannot be deleted yet).
+    pub(crate) fn selected_active(&self) -> bool {
+        self.selected()
+            .is_some_and(|e| self.active.contains(&e.name))
     }
 
     pub(crate) fn busy(&self) -> bool {
@@ -114,13 +135,25 @@ impl RecordingsPanel {
                 return RecOutcome::None;
             }
             let name = confirm.name.clone();
-            self.confirm = None;
             return match key.code {
-                KeyCode::Char('y') if !ctrl => RecOutcome::Delete(name),
+                KeyCode::Char('y') if !ctrl => {
+                    self.confirm = None;
+                    RecOutcome::Delete(name)
+                }
+                KeyCode::Char('n') if !ctrl => {
+                    self.confirm = None;
+                    RecOutcome::None
+                }
+                KeyCode::Esc => {
+                    self.confirm = None;
+                    RecOutcome::None
+                }
+                // Not an answer.
                 _ => RecOutcome::None,
             };
         }
         self.notice = None;
+        self.refused = None;
         let current = self.list.selected().unwrap_or(0);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return RecOutcome::Close,
@@ -138,6 +171,9 @@ impl RecordingsPanel {
                     return RecOutcome::Play(entry.name.clone(), entry.duration);
                 }
             }
+            KeyCode::Char('d') | KeyCode::Delete if self.selected_active() => {
+                self.refused = Some(STILL_WRITTEN);
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 if let Some(entry) = self.selected() {
                     self.confirm = Some(ConfirmDelete {
@@ -154,18 +190,18 @@ impl RecordingsPanel {
     /// Footer keys (most important first).
     pub(crate) fn hints(&self) -> Vec<(&'static str, &'static str)> {
         if self.confirm.is_some() {
-            return vec![("any key", "keep"), ("y", "delete")];
+            return vec![("n / Esc", "keep"), ("y", "delete")];
         }
-        match self.selected() {
-            Some(entry) if entry.valid => vec![
-                ("↵", "play"),
-                ("d", "delete"),
-                ("Ctrl-R", "refresh"),
-                ("Esc", "close"),
-            ],
-            Some(_) => vec![("d", "delete"), ("Ctrl-R", "refresh"), ("Esc", "close")],
-            None => vec![("Ctrl-R", "refresh"), ("Esc", "close")],
+        let mut hints = Vec::new();
+        if self.selected().is_some_and(|e| e.valid) {
+            hints.push(("↵", "play"));
         }
+        // A file being written cannot be deleted yet: not offered.
+        if self.selected().is_some() && !self.selected_active() {
+            hints.push(("d", "delete"));
+        }
+        hints.extend([("Ctrl-R", "refresh"), ("Esc", "close")]);
+        hints
     }
 }
 
@@ -221,12 +257,34 @@ mod tests {
             press(&mut panel, KeyCode::Char('y')),
             RecOutcome::Delete("a.cast".into())
         );
-        // Anything but `y` cancels.
-        press(&mut panel, KeyCode::Char('d'));
-        arm(&mut panel);
-        assert_eq!(press(&mut panel, KeyCode::Enter), RecOutcome::None);
-        assert!(panel.confirm.is_none());
+        // A key that is not an answer is ignored; `n` and `Esc` keep it.
+        for keep in [KeyCode::Char('n'), KeyCode::Esc] {
+            press(&mut panel, KeyCode::Char('d'));
+            arm(&mut panel);
+            assert_eq!(press(&mut panel, KeyCode::Enter), RecOutcome::None);
+            assert_eq!(press(&mut panel, KeyCode::Char('Y')), RecOutcome::None);
+            assert!(panel.confirm.is_some());
+            assert_eq!(press(&mut panel, keep), RecOutcome::None);
+            assert!(panel.confirm.is_none(), "{keep:?}");
+        }
         assert_eq!(press(&mut panel, KeyCode::Esc), RecOutcome::Close);
+    }
+
+    #[test]
+    fn a_file_being_written_is_refused_before_asking() {
+        let mut panel = RecordingsPanel::new("/r".into());
+        panel.loaded(Ok(vec![entry("live.cast", true), entry("old.cast", true)]));
+        panel.active = vec!["live.cast".into()];
+        assert!(!panel.hints().contains(&("d", "delete")));
+        assert_eq!(press(&mut panel, KeyCode::Char('d')), RecOutcome::None);
+        assert!(panel.confirm.is_none(), "no question that would only fail");
+        assert_eq!(panel.refused, Some(STILL_WRITTEN));
+        // The next key clears it; another file can be deleted.
+        press(&mut panel, KeyCode::Down);
+        assert_eq!(panel.refused, None);
+        assert!(panel.hints().contains(&("d", "delete")));
+        press(&mut panel, KeyCode::Char('d'));
+        assert!(panel.confirm.is_some());
     }
 
     #[test]

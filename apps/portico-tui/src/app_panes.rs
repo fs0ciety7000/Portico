@@ -95,13 +95,24 @@ pub(crate) const PANE_REPEAT: Duration = Duration::from_millis(600);
 /// How long a refusal stays in the status bar.
 pub(crate) const NOTE_TTL: Duration = Duration::from_secs(4);
 
-/// A refusal shown on one line of the status bar, in `status-warning`:
-/// compact, it never covers a pane (nor its prompt line).
+/// A note on one line of the status bar: compact, it never covers a pane
+/// (nor its prompt line). A refusal or a failure is a warning; a plain
+/// report ("Recording saved") is neutral, without any status colour.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StatusNote {
     pub(crate) message: String,
     pub(crate) hint: String,
     pub(crate) until: Instant,
+    pub(crate) tone: NoteTone,
+}
+
+/// How a [`StatusNote`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoteTone {
+    /// `▲` and the message in `status-warning`.
+    Warning,
+    /// Secondary text, no mark, no status colour.
+    Neutral,
 }
 
 /// The error a dead pane shows, and whether `↵` may retry it.
@@ -250,7 +261,8 @@ impl App {
     }
 
     /// Requests a shell, served once the session is connected. `pane`:
-    /// the pane waiting for it; `None` opens a new tab.
+    /// the pane waiting for it (`None` would open a background tab: every
+    /// caller names its pane, created at the user's action).
     pub(crate) fn request_terminal(
         &self,
         alias: String,
@@ -272,6 +284,23 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// A new tab for a shell on `alias`: created and shown **now**, at the
+    /// user's action, with a pane waiting for its shell. The shell fills
+    /// that pane when it arrives, without touching the focus (the user
+    /// may be typing in another tab by then).
+    pub(crate) fn open_tab(&mut self, alias: String, session: SessionId) {
+        let pane = PaneId::next();
+        let slot = PaneSlot::Opening {
+            alias: alias.clone(),
+            session,
+        };
+        self.tabs.push(Tab::new(pane, slot));
+        let index = self.tabs.len() - 1;
+        self.activate(index);
+        let size = self.pane_size(index, pane);
+        self.request_terminal(alias, session, Some(pane), size);
     }
 
     /// Grid size of `pane` in tab `index`, as laid out now.
@@ -299,12 +328,15 @@ impl App {
         result: Result<Box<TerminalHandle>, ErrorSummary>,
     ) {
         let Some(pane) = pane else {
+            // Every request names its pane now (see `open_tab`). A shell
+            // without one still gets a tab, but in the background: a
+            // shell arriving late never takes the focus (the keys being
+            // typed elsewhere would go to it).
             match result {
                 Ok(handle) => {
                     let view = TerminalView::spawn(*handle, alias, self.term_size, self.tx.clone());
                     self.tabs
                         .push(Tab::new(PaneId::next(), PaneSlot::Live(view)));
-                    self.activate(self.tabs.len() - 1);
                 }
                 // The session's own failure is already reported.
                 Err(error) if error.code == "session_ended" => {}
@@ -357,6 +389,7 @@ impl App {
             message: refusal.message(),
             hint: refusal.hint(),
             until: Instant::now() + NOTE_TTL,
+            tone: NoteTone::Warning,
         });
     }
 
@@ -399,7 +432,14 @@ impl App {
             .player
             .as_ref()
             .and_then(crate::player::Player::next_due);
-        [self.pane_repeat, note, playback]
+        // An armed question is redrawn once, when `y` starts to count.
+        let armed = match self.dialogs.front() {
+            Some(crate::dialog::Dialog::Confirm(c)) => {
+                c.arms_at().filter(|at| *at > Instant::now())
+            }
+            _ => None,
+        };
+        [self.pane_repeat, note, playback, armed]
             .into_iter()
             .flatten()
             .min()

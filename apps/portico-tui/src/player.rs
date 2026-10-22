@@ -23,6 +23,12 @@
 //!   through a **bounded** channel ([`PLAYBACK_QUEUE`]). The UI keeps one
 //!   event ahead and waits for its time ([`PlaybackTiming`]): no redraw
 //!   while nothing is due, none at all while paused.
+//! - **Seeking replays**: `←` (back [`BACK_STEP`]), `Home` and the replay
+//!   of an ended playback reopen the file (a new reader thread; the old one
+//!   stops with its channel), reset the emulator, the parser and the
+//!   sanitiser, and fast-replay every event up to the target without
+//!   waiting: the screen at the target is exactly what a playback from
+//!   the start shows there. Nothing is kept in memory for it.
 //! - Output text is never logged, toasted or put in an error: errors are
 //!   the engine's `ErrorSummary`.
 
@@ -48,6 +54,10 @@ pub(crate) const PLAYBACK_QUEUE: usize = 256;
 /// Most events applied in one step (a burst of zero-delay events): the UI
 /// stays responsive, the rest follows on the next wake-up.
 const MAX_EVENTS_PER_STEP: usize = 512;
+/// Most events applied in one step of a seek's fast replay.
+const MAX_SEEK_EVENTS_PER_STEP: usize = 4_096;
+/// `←`: how far back (recording seconds).
+pub(crate) const BACK_STEP: f64 = 5.0;
 /// Scrollback of a playback emulator.
 const PLAYBACK_SCROLLBACK: usize = 1_000;
 /// Speeds offered by `+` / `-`.
@@ -166,6 +176,17 @@ enum Due {
 struct Head {
     event: TimedEvent,
     due: Due,
+    /// Before a seek's target: shown at once, paused or not.
+    fast: bool,
+}
+
+/// Where a seek goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Seek {
+    /// `←`: [`BACK_STEP`] before the position.
+    Back,
+    /// `Home`, or `Space` once ended: from the start, playing.
+    Restart,
 }
 
 /// Where the playback is.
@@ -211,6 +232,11 @@ pub(crate) struct Player {
     stage: Stage,
     /// The error that ended the reading early.
     pub(crate) error: Option<ErrorSummary>,
+    /// Fast-replaying up to this time (a seek in progress).
+    seek_to: Option<f64>,
+    /// Last seek asked, and its target, while the file reopens.
+    pending: Option<(u64, f64)>,
+    generation: u64,
     #[cfg(test)]
     pub(crate) listener: PlayerListener,
 }
@@ -234,23 +260,28 @@ fn clamp_size(cols: u16, rows: u16) -> GridSize {
     }
 }
 
+/// A fresh playback emulator of `size`.
+fn emulator(size: GridSize, listener: PlayerListener) -> Term<PlayerListener> {
+    let config = Config {
+        scrolling_history: PLAYBACK_SCROLLBACK,
+        // No clipboard access from a file (the sanitiser drops OSC 52
+        // too).
+        osc52: Osc52::Disabled,
+        kitty_keyboard: false,
+        ..Config::default()
+    };
+    Term::new(config, &size, listener)
+}
+
 impl Player {
     pub(crate) fn new(name: String, total: Option<f64>, start: PlaybackStart) -> Self {
         let PlaybackStart { header, rx } = start;
         let size = clamp_size(header.width, header.height);
         let listener = PlayerListener::default();
-        let config = Config {
-            scrolling_history: PLAYBACK_SCROLLBACK,
-            // No clipboard access from a file (the sanitiser drops OSC 52
-            // too).
-            osc52: Osc52::Disabled,
-            kitty_keyboard: false,
-            ..Config::default()
-        };
         #[cfg(test)]
-        let term = Term::new(config, &size, listener.clone());
+        let term = emulator(size, listener.clone());
         #[cfg(not(test))]
-        let term = Term::new(config, &size, listener);
+        let term = emulator(size, listener);
         Self {
             name,
             title: header.title.filter(|t| !t.trim().is_empty()),
@@ -267,8 +298,67 @@ impl Player {
             reading: true,
             stage: Stage::Waiting,
             error: None,
+            seek_to: None,
+            pending: None,
+            generation: 0,
             #[cfg(test)]
             listener,
+        }
+    }
+
+    /// Asks for a seek: the app reopens the file and hands it to
+    /// [`Self::restart`] with the returned generation. Seeks in a row add
+    /// up (two `←` go back 10 s). A restart plays (it is not paused).
+    pub(crate) fn request_seek(&mut self, seek: Seek) -> u64 {
+        let from = self.pending.map_or(self.position, |(_, target)| target);
+        let target = match seek {
+            Seek::Back => (from - BACK_STEP).max(0.0),
+            Seek::Restart => 0.0,
+        };
+        if seek == Seek::Restart {
+            self.paused = false;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = Some((self.generation, target));
+        self.generation
+    }
+
+    /// The file reopened for seek `generation`: everything starts over and
+    /// the events up to the target are replayed at once. A stale
+    /// reopening (another seek was asked since) is dropped, and `false`
+    /// returned.
+    pub(crate) fn restart(&mut self, generation: u64, start: PlaybackStart, now: Instant) -> bool {
+        let Some((_, target)) = self.pending.filter(|(g, _)| *g == generation) else {
+            return false;
+        };
+        self.pending = None;
+        let PlaybackStart { header, rx } = start;
+        self.size = clamp_size(header.width, header.height);
+        #[cfg(test)]
+        let listener = self.listener.clone();
+        #[cfg(not(test))]
+        let listener = PlayerListener::default();
+        self.term = emulator(self.size, listener);
+        self.parser = Processor::new();
+        self.sanitizer = PlaybackSanitizer::new();
+        self.timing = PlaybackTiming::new(self.timing.speed());
+        self.head = None;
+        self.position = 0.0;
+        self.rx = rx;
+        self.reading = true;
+        self.stage = Stage::Waiting;
+        self.error = None;
+        self.seek_to = (target > 0.0).then_some(target);
+        self.step(now);
+        true
+    }
+
+    /// The reopening for seek `generation` failed: the playback stays
+    /// where it is, and says why.
+    pub(crate) fn seek_failed(&mut self, generation: u64, error: ErrorSummary) {
+        if self.pending.is_some_and(|(g, _)| g == generation) {
+            self.pending = None;
+            self.error = Some(error);
         }
     }
 
@@ -307,9 +397,14 @@ impl Player {
     }
 
     /// When the waiting event is due (`None`: paused, or nothing waits).
+    /// A seek's fast replay is due at once, paused or not.
     pub(crate) fn next_due(&self) -> Option<Instant> {
-        match self.head.as_ref().map(|h| h.due) {
-            Some(Due::At(at)) if !self.paused => Some(at),
+        match self.head.as_ref() {
+            Some(Head {
+                due: Due::At(at),
+                fast,
+                ..
+            }) if *fast || !self.paused => Some(*at),
             _ => None,
         }
     }
@@ -325,12 +420,19 @@ impl Player {
         match msg {
             Some(ReaderMsg::Event(event)) => {
                 let delay = self.timing.delay_until(event.time);
-                let due = if self.paused {
+                let fast = self.seek_to.is_some_and(|target| event.time <= target);
+                if !fast {
+                    // Past the target: back to the recording's own pace.
+                    self.seek_to = None;
+                }
+                let due = if fast {
+                    Due::At(now)
+                } else if self.paused {
                     Due::Left(delay)
                 } else {
                     Due::At(now + delay)
                 };
-                self.head = Some(Head { event, due });
+                self.head = Some(Head { event, due, fast });
             }
             Some(ReaderMsg::End(error)) => {
                 self.reading = false;
@@ -344,7 +446,12 @@ impl Player {
     /// reader already sent. Returns whether the screen changed.
     pub(crate) fn step(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        for _ in 0..MAX_EVENTS_PER_STEP {
+        let limit = if self.seek_to.is_some() {
+            MAX_SEEK_EVENTS_PER_STEP
+        } else {
+            MAX_EVENTS_PER_STEP
+        };
+        for _ in 0..limit {
             if self.head.is_none() {
                 if !self.reading {
                     changed |= self.finish();
@@ -357,10 +464,13 @@ impl Player {
                 }
                 continue;
             }
-            let due = matches!(
-                self.head.as_ref().map(|h| h.due),
-                Some(Due::At(at)) if !self.paused && at <= now
-            );
+            let due = match self.head.as_ref() {
+                Some(head) if head.fast => true,
+                Some(Head {
+                    due: Due::At(at), ..
+                }) => !self.paused && *at <= now,
+                _ => false,
+            };
             if !due {
                 break;
             }
@@ -407,7 +517,8 @@ impl Player {
             return;
         }
         self.paused = !self.paused;
-        if let Some(head) = &mut self.head {
+        // A seek's fast replay goes on, paused or not.
+        if let Some(head) = self.head.as_mut().filter(|h| !h.fast) {
             head.due = match (head.due, self.paused) {
                 (Due::At(at), true) => Due::Left(at.saturating_duration_since(now)),
                 (Due::Left(left), false) => Due::At(now + left),

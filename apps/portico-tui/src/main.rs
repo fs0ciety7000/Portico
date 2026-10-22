@@ -116,6 +116,8 @@ fn parse_args(args: &[String]) -> Command {
 // The CLI answers on stdout / stderr by design (no TUI is drawn there).
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> Result<ExitCode> {
+    // Before any thread exists (see `init_local_offset`).
+    ui::fmt::init_local_offset();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_args(&args) {
         Command::Help => {

@@ -183,7 +183,7 @@ Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. 
 | Enregistrer | `↵` (ou `Ctrl-S`) |
 | Vider le champ | `Ctrl-U` |
 | Annuler (avec des changements : `y` les abandonne, toute autre touche revient au formulaire) | `Esc`, `Ctrl-C` |
-| Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime) | `Del` depuis la liste |
+| Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime ; `n` ou `Esc` annule, les autres touches sont ignorées) | `Del` depuis la liste |
 
 Après un enregistrement, la liste se recharge (`HostsChanged`) et sélectionne l'hôte. Les hôtes Portico portent `◆` dans la liste, les hôtes importés `◇` ; les détails indiquent l'origine. Tant que `~/.ssh/config` n'inclut pas `hosts.conf`, un bandeau sous les détails donne la ligne `Include` à ajouter en tête du fichier (`y` la copie, `z` masque le bandeau jusqu'au prochain lancement).
 
@@ -295,21 +295,23 @@ Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, ap
 
 ### TUI : enregistrements et lecture
 
-« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début (UTC), durée, taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` pour un fichier invalide (non lisible, mais supprimable). Le nom du fichier sélectionné s'affiche sous la liste.
+« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début en heure locale sur 24 h (`22 Oct 13:34`, l'année seulement si ce n'est pas l'année en cours ; suffixe « UTC » si le fuseau local n'a pas pu être lu au démarrage), durée (`m:ss` ou `h:mm:ss`), taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` en couleur d'avertissement pour un fichier invalide (non lisible, mais supprimable : « Not a valid asciicast v2 recording: it cannot be played, it can be deleted. » s'affiche quand il est sélectionné). Le nom du fichier sélectionné s'affiche sous la liste ; les touches sont dans la barre de statut.
 
 | Action | Touches |
 |---|---|
 | Se déplacer | `j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G` |
 | Lire l'enregistrement | `↵` |
-| Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, toute autre touche annule ; refusé tant que l'enregistrement est en cours) | `d` ou `Suppr`, puis `y` |
+| Supprimer (« The file is removed from the recordings folder. This cannot be undone. » ; confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, `n` ou `Esc` garde le fichier, les autres touches sont ignorées). Un enregistrement en cours d'écriture est refusé d'emblée (« This recording is still being written » · « Stop the recording first ») et `d` n'est pas proposé sur sa ligne | `d` ou `Suppr`, puis `y` |
 | Rafraîchir | `Ctrl-R` |
 | Fermer | `Esc`, `q`, `Ctrl-C` |
-| Lecture : pause / reprise | `Espace` |
+| Lecture : pause / reprise ; une fois terminée, rejouer depuis le début | `Espace` |
 | Lecture : vitesse (×0,5 à ×8) | `+` / `-` |
 | Lecture : sauter le silence en cours | `→` |
+| Lecture : revenir de 5 s | `←` |
+| Lecture : reprendre au début | `Home` |
 | Lecture : revenir à la liste | `q`, `Esc` (`Ctrl-C` ferme tout) |
 
-Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total », la taille et la vitesse. Les silences de plus de 2 s sont raccourcis. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.
+Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre ; puis l'état et la vitesse), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total » (jauge en accent) et la taille, ou ce qui ne tient pas (« 2 rows hidden »). Sur un écran de 24 lignes, la ligne de titre disparaît : nom du fichier, état et vitesse passent sur la ligne de progression, et la grille gagne une ligne. `←` et `Home` rouvrent le fichier et rejouent instantanément jusqu'au point visé (l'émulateur repart de zéro). Les silences de plus de 2 s sont raccourcis. Une erreur de lecture s'affiche à la place de la jauge (message · conseil). Le statut de la session (`● alias · latence`) et `● REC` restent visibles dans la barre de statut. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique
@@ -360,17 +362,26 @@ ses tags, son groupe et ses notes.
 ### Enregistrer une session dans la TUI
 
 `Ctrl-Space R` (« Record session ») enregistre le panneau actif au format asciicast v2. Une confirmation
-« Record this terminal? » rappelle ce qui est enregistré : tout ce qui s'affiche, y compris un secret imprimé par
-une commande ou une saisie que le distant fait écho ; ce que l'on tape ne l'est jamais ; le fichier va dans le
-dossier `recordings/` des données de Portico, lisible par soi seul. Les touches tapées dans les 400 ms qui suivent
-son ouverture sont ignorées, puis seul `y` démarre : toute autre touche annule. Le badge `REC` (couleur d'erreur)
-s'allume sur le titre du panneau, ou sur l'onglet quand il n'a qu'un panneau, et `● REC` dans la barre de statut,
-dès que le moteur annonce le début de l'enregistrement, et s'éteint quand il en annonce la fin (jamais sur la
-seule réponse de la commande). La même touche l'arrête, sans confirmation (« Stop recording »). Si
+« Record this terminal? » (« Record this pane? » dans un onglet partagé, avec l'alias et « pane n/N ») dit
+exactement : « Everything the terminal shows is recorded, including the commands you type (the shell echoes them)
+and any secret a command prints. Keystrokes themselves are not stored, so a password typed at a prompt that does
+not echo stays out. Saved to <dossier>, readable only by you. » Le dossier est `recordings/` des données de
+Portico, `~` pour le dossier personnel, le milieu coupé s'il est long. Les touches tapées dans les 400 ms qui
+suivent son ouverture sont ignorées (`y record` reste atténué, puis passe en accent quand il devient actif) ;
+ensuite seul `y` démarre, `n` ou `Esc` annule, et les autres touches sont ignorées. Le badge `REC` (couleur
+d'erreur) s'allume sur le titre du panneau, sur l'onglet dès qu'un de ses panneaux est enregistré
+(`1 alpha ● · REC`, séparé du point de connexion) et `● REC` dans la barre de statut, dès que le moteur annonce le
+début de l'enregistrement, et s'éteint quand il en annonce la fin (jamais sur la seule réponse de la commande). La
+même touche l'arrête, sans confirmation (« stop recording » dans la barre de statut) ; la barre le confirme
+pendant 4 s, en texte neutre : « Recording saved · <fichier> » · « Ctrl-Space v to open Recordings ». Si
 l'enregistrement s'arrête de lui-même, une ligne de la barre de statut le dit, avec quoi faire (« Recording
 stopped: the disk could not keep up », « … the file could not be written », « … size limit reached (512 MiB) »).
+Le statut de la session (`● alias · latence`) et `● REC` gardent toujours leur place à droite de la barre : sur
+une barre courte, l'alias est raccourci (12 caractères), puis les raccourcis les moins utiles disparaissent.
 `v` (liste des hôtes) ou `Ctrl-Space v` ouvre « Recordings » pour relire ou supprimer ; un enregistrement en
-cours ne peut pas être supprimé. Un fichier relu est traité comme non fiable : il est rejoué dans un émulateur
+cours d'écriture ne peut pas être supprimé (refus immédiat, sans question). Dans le lecteur : `Espace` pause,
+reprend, ou rejoue depuis le début une fois terminé ; `+` / `-` la vitesse ; `→` saute le silence en cours ; `←`
+revient de 5 s ; `Home` reprend au début ; `q` ou `Esc` revient à la liste. Un fichier relu est traité comme non fiable : il est rejoué dans un émulateur
 dédié dont les réponses aux requêtes, le titre et le presse-papiers ne vont nulle part, ses modes (souris,
 collage, écran alternatif) ne touchent pas le vrai terminal, et aucune touche ni aucun collage ne part vers une
 session pendant la lecture.

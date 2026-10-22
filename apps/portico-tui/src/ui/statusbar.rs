@@ -7,11 +7,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Focus};
+use crate::app_panes::NoteTone;
 use crate::dialog::{Dialog, SecretPurpose};
 use crate::ui::{fmt, status};
 
+/// Longest alias in the right block, and how short it gets on a narrow
+/// bar before any hint goes.
+const ALIAS_MAX: usize = 24;
+const ALIAS_SHORT: usize = 12;
+
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
+    let width = usize::from(area.width);
     let (mode, hints) = mode_and_hints(app, frame.area());
     let pill = if (app.prefix || pane_mode(app)) && app.dialogs.is_empty() {
         s.prefix_pill()
@@ -19,46 +26,82 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         s.mode_pill()
     };
     let mut spans = vec![Span::styled(mode, pill), Span::raw(" ")];
-    // A refusal takes the hints' place for a few seconds: one line, never
+    let lead: usize = spans.iter().map(Span::width).sum();
+    // The right block is laid out first and its room kept: the session's
+    // status and latency, then `● REC`, are never pushed out by hints. On
+    // a short bar the remote title goes, then the alias shortens, then
+    // hints are dropped.
+    let rec = rec_spans(app);
+    let right_of = |alias_max: usize, title: bool| {
+        let mut right = session_spans(app, alias_max, title);
+        right.extend(rec.iter().cloned());
+        right
+    };
+    let width_of = |spans: &[Span<'static>]| spans.iter().map(Span::width).sum::<usize>();
+
+    // A note takes the hints' place for a few seconds: one line, never
     // over a pane (the next keys still go to the focused one).
     if let Some(note) = app.note.as_ref().filter(|_| app.dialogs.is_empty()) {
-        let warning = s.status(s.theme.status.warning);
-        let width = usize::from(area.width);
-        let used: usize = spans.iter().map(Span::width).sum();
-        let message = fmt::truncate(&note.message, width.saturating_sub(used + 3));
-        spans.push(Span::styled("▲ ", warning));
-        spans.push(Span::styled(message, warning));
-        let used: usize = spans.iter().map(Span::width).sum();
+        let (mark, style) = match note.tone {
+            NoteTone::Warning => ("▲ ", s.status(s.theme.status.warning)),
+            NoteTone::Neutral => ("", s.secondary()),
+        };
+        let mark_width = mark.chars().count();
+        let message_width = note.message.chars().count();
+        let mut right = right_of(ALIAS_MAX, false);
+        if lead + mark_width + message_width + 1 + width_of(&right) > width {
+            right = right_of(ALIAS_SHORT, false);
+        }
+        let right_width = width_of(&right);
+        let room = width.saturating_sub(lead + mark_width + right_width + 1);
+        if !mark.is_empty() {
+            spans.push(Span::styled(mark, style));
+        }
+        spans.push(Span::styled(fmt::truncate(&note.message, room), style));
         // ` · hint`, cut when the bar is narrow (the message comes first).
-        let room = width.saturating_sub(used + 3 + 1);
-        let rec = rec_spans(app);
-        let rec_width: usize = rec.iter().map(Span::width).sum();
-        let room = room.saturating_sub(rec_width);
+        let used = width_of(&spans);
+        let room = width.saturating_sub(used + 3 + 1 + right_width);
         if room >= 8 && !note.hint.is_empty() {
             spans.push(Span::styled(" · ", s.muted()));
-            spans.push(Span::styled(fmt::truncate(&note.hint, room), s.secondary()));
+            let hint_style = match note.tone {
+                NoteTone::Warning => s.secondary(),
+                NoteTone::Neutral => s.muted(),
+            };
+            spans.push(Span::styled(fmt::truncate(&note.hint, room), hint_style));
         }
-        push_right(&mut spans, rec, width);
+        push_right(&mut spans, right, width);
         frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
         return;
     }
     // Hints are listed by importance: drop the tail rather than overflow.
-    // `quit` is the exception: always last, and its room is kept.
+    // `quit` (and the player's `back to list`) is the exception: always
+    // last, and its room is kept.
     let mut hints = hints;
-    let pinned = if hints.last().is_some_and(|(_, label)| *label == "quit") {
+    let pinned = if hints
+        .last()
+        .is_some_and(|(_, label)| matches!(*label, "quit" | "back to list"))
+    {
         hints.pop()
     } else {
         None
     };
     let need = |(key, label): &(String, &str)| key.chars().count() + label.chars().count() + 4;
-    // `● REC` keeps its room: a recording is never hidden by key hints.
-    let rec = rec_spans(app);
-    let rec_width: usize = rec.iter().map(Span::width).sum();
-    let mut used: usize =
-        spans.iter().map(Span::width).sum::<usize>() + pinned.as_ref().map_or(0, need) + rec_width;
+    let all_hints: usize = hints.iter().chain(pinned.iter()).map(need).sum();
+    let mut right = right_of(ALIAS_MAX, true);
+    for (alias_max, title) in [(ALIAS_MAX, false), (ALIAS_SHORT, false)] {
+        if lead + all_hints + width_of(&right) <= width {
+            break;
+        }
+        right = right_of(alias_max, title);
+    }
+    if lead + width_of(&right) > width {
+        // Not even the status fits next to the mode: REC alone.
+        right.clone_from(&rec);
+    }
+    let mut used = lead + pinned.as_ref().map_or(0, need) + width_of(&right);
     let mut shown: Vec<&(String, &str)> = Vec::new();
     for hint in &hints {
-        if used + need(hint) > usize::from(area.width) {
+        if used + need(hint) > width {
             break;
         }
         used += need(hint);
@@ -69,44 +112,48 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         spans.push(Span::styled(format!(" {key} "), s.key_hint()));
         spans.push(Span::styled(format!(" {label} "), s.muted()));
     }
+    push_right(&mut spans, right, width);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
+}
 
-    // Right side: `● alias · 12 ms · remote title`, only when it fits,
-    // then `● REC` (always).
+/// `● alias · 12 ms · remote title ` for the focused pane, in a terminal
+/// (or behind a panel opened from one); empty elsewhere. `alias_max`: how
+/// much of the alias shows; `title`: with the remote title.
+fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>> {
+    let s = app.styles();
     let mut right = Vec::new();
-    if let Some(slot) = app
+    let Some(slot) = app
         .focused_slot()
         .filter(|_| matches!(app.focus, Focus::Terminal) || app.prefix)
         .filter(|_| app.focus != Focus::Files)
-    {
-        let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
-        right.push(Span::styled("● ", s.status(st.color)));
-        right.push(Span::styled(fmt::truncate(slot.alias(), 24), s.secondary()));
-        if let Some(rtt) = st.latency {
-            let style = if st.slow {
-                s.status(s.theme.status.warning)
-            } else {
-                s.muted()
-            };
-            right.push(Span::styled(" · ", s.muted()));
-            right.push(Span::styled(rtt, style));
-        }
-        if let Some(title) = slot
+    else {
+        return right;
+    };
+    let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
+    right.push(Span::styled("● ", s.status(st.color)));
+    right.push(Span::styled(
+        fmt::truncate(slot.alias(), alias_max),
+        s.secondary(),
+    ));
+    if let Some(rtt) = st.latency {
+        let style = if st.slow {
+            s.status(s.theme.status.warning)
+        } else {
+            s.muted()
+        };
+        right.push(Span::styled(" · ", s.muted()));
+        right.push(Span::styled(rtt, style));
+    }
+    if title
+        && let Some(remote) = slot
             .view()
             .and_then(crate::terminal::TerminalView::remote_title)
-        {
-            right.push(Span::styled(" · ", s.muted()));
-            right.push(Span::styled(fmt::truncate(&title, 32), s.muted()));
-        }
-        right.push(Span::raw(" "));
-        let used: usize = spans.iter().map(Span::width).sum();
-        let need: usize = right.iter().chain(&rec).map(Span::width).sum();
-        if used + need >= usize::from(area.width) {
-            right.clear();
-        }
+    {
+        right.push(Span::styled(" · ", s.muted()));
+        right.push(Span::styled(fmt::truncate(&remote, 32), s.muted()));
     }
-    right.extend(rec);
-    push_right(&mut spans, right, usize::from(area.width));
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
+    right.push(Span::raw(" "));
+    right
 }
 
 /// `● REC` (`● REC 2` for two recorded terminals) in the error colour,
@@ -163,7 +210,14 @@ fn owned(hints: Vec<(&'static str, &'static str)>) -> Hints {
 fn record_hint(app: &App) -> Option<(String, &'static str)> {
     let (key, label) = app.keymap.hint("prefix.record")?;
     let recorded = app.focused_slot().is_some_and(|slot| app.recorded_in(slot));
-    Some((key, if recorded { "stop recording" } else { label }))
+    Some((
+        key,
+        if recorded {
+            crate::app_recording::STOP_HINT
+        } else {
+            label
+        },
+    ))
 }
 
 /// Effective keys of `ids`, in order (unbound actions are left out).
@@ -307,16 +361,25 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             return (" RECORDINGS ", owned(hints));
         }
         _ if app.overlay == Some(crate::app::Overlay::Player) => {
-            let pause = match app.player.as_ref().map(crate::player::Player::state) {
-                Some(crate::player::PlayerState::Ended) => None,
-                Some(crate::player::PlayerState::Paused) => Some(("Space", "resume")),
-                _ => Some(("Space", "pause")),
+            // Most used first; `q back to list` is pinned (see `render`).
+            let space = match app.player.as_ref().map(crate::player::Player::state) {
+                Some(crate::player::PlayerState::Ended) => {
+                    return (
+                        " PLAYBACK ",
+                        owned(vec![("Space", "replay"), ("q", "back to list")]),
+                    );
+                }
+                Some(crate::player::PlayerState::Paused) => ("Space", "resume"),
+                _ => ("Space", "pause"),
             };
-            let mut hints: Vec<(&'static str, &'static str)> = pause.into_iter().collect();
-            if pause.is_some() {
-                hints.extend([("+ -", "speed"), ("→", "skip idle")]);
-            }
-            hints.push(("q", "back to list"));
+            let hints = vec![
+                space,
+                ("←", "back 5 s"),
+                ("→", "skip idle"),
+                ("+ -", "speed"),
+                ("Home", "restart"),
+                ("q", "back to list"),
+            ];
             return (" PLAYBACK ", owned(hints));
         }
         _ if app.overlay == Some(crate::app::Overlay::HostForm) => {
@@ -411,16 +474,14 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             {
                 hints.push(("↵".to_owned(), "retry"));
             }
-            hints.push(("Ctrl-Space".to_owned(), "commands"));
-            // A recorded pane: how to stop, right away.
+            // A recorded pane: how to stop comes first (it names the
+            // prefix too, so it is what stays on a narrow bar).
             if app.focused_slot().is_some_and(|slot| app.recorded_in(slot))
                 && let Some((key, _)) = app.keymap.hint("prefix.record")
             {
-                hints.push((
-                    format!("Ctrl-Space {key}"),
-                    crate::app_recording::STOP_COMMAND,
-                ));
+                hints.push((format!("Ctrl-Space {key}"), crate::app_recording::STOP_HINT));
             }
+            hints.push(("Ctrl-Space".to_owned(), "commands"));
             hints.extend(keyed(app, &["terminal.scroll_up"]));
             return (" TERMINAL ", hints);
         }

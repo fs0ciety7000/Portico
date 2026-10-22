@@ -102,6 +102,7 @@ impl App {
                 } else {
                     self.dialogs.push_back(Dialog::Confirm(ConfirmDialog {
                         title: "Clear recent hosts?".into(),
+                        subject: None,
                         body:
                             "The Recent section empties. Hosts, tags and groups stay as they are."
                                 .into(),

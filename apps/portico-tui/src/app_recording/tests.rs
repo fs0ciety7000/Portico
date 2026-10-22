@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 
 use super::*;
 use crate::app::{SessionView, test_app};
+use crate::app_panes::NoteTone;
 use crate::app_panes::Tab;
 use crate::dialog::ARM_DELAY;
 use crate::keymap::{KeyContext, Keymap, map_key};
@@ -132,7 +133,12 @@ fn the_badge_follows_events_never_the_start_answer() {
     app.update(stopped(terminal, RecordingStopReason::Requested));
     assert!(!app.is_recorded(terminal));
     assert_eq!(app.recording.len(), 1);
-    // A requested stop says nothing more.
+    // A requested stop says where the file went: neutral, 4 s.
+    let note = app.note.clone().unwrap();
+    assert_eq!(note.message, "Recording saved · web-01.cast");
+    assert_eq!(note.hint, "Ctrl-Space v to open Recordings");
+    assert_eq!(note.tone, NoteTone::Neutral);
+    app.expire(Instant::now() + SAVED_NOTE_TTL);
     assert!(app.note.is_none());
 
     // A failed start is reported in the status bar, from its summary.
@@ -170,6 +176,7 @@ fn stops_on_their_own_show_a_notice_with_a_hint() {
         assert!(app.recording.is_empty());
         let note = app.note.clone().unwrap();
         assert_eq!(note.message, message);
+        assert_eq!(note.tone, NoteTone::Warning);
         assert!(!note.hint.is_empty());
         let lines = screen(&mut app, 120, 24);
         assert!(lines[23].contains(message), "{}", text(&lines));
@@ -178,15 +185,40 @@ fn stops_on_their_own_show_a_notice_with_a_hint() {
         app.expire(Instant::now() + RECORDING_NOTE_TTL);
         assert!(app.note.is_none());
     }
-    for reason in [
-        RecordingStopReason::Requested,
-        RecordingStopReason::TerminalClosed,
-    ] {
-        let mut app = test_app();
-        let terminal = TerminalId::next();
-        app.update(started(terminal, "web-01.cast"));
-        app.update(stopped(terminal, reason));
-        assert!(app.note.is_none(), "{reason:?}");
+    // A closed terminal says nothing (its pane says it).
+    let mut app = test_app();
+    let terminal = TerminalId::next();
+    app.update(started(terminal, "web-01.cast"));
+    app.update(stopped(terminal, RecordingStopReason::TerminalClosed));
+    assert!(app.note.is_none());
+}
+
+#[tokio::test]
+async fn a_requested_stop_is_a_neutral_notice() {
+    let mut app = test_app();
+    let terminal = TerminalId::next();
+    app.update(started(terminal, "web-01.cast"));
+    app.update(stopped(terminal, RecordingStopReason::Requested));
+    let buf = {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let lines = screen(&mut app, 80, 24);
+    let bar = &lines[23];
+    assert!(
+        bar.contains("Recording saved · web-01.cast · Ctrl-Space v to open Recordings"),
+        "{}",
+        text(&lines)
+    );
+    assert!(!bar.contains('▲'), "no warning mark");
+    // No status colour: secondary text.
+    let s = app.styles();
+    let x = u16::try_from(bar.find("Recording").unwrap()).unwrap();
+    let cell = buf.cell((x, 23)).unwrap();
+    assert_eq!(cell.fg, crate::theme::c(s.theme.palette.text_secondary));
+    for status in [s.theme.status.warning, s.theme.status.error] {
+        assert_ne!(cell.fg, crate::theme::c(status));
     }
 }
 
@@ -279,9 +311,24 @@ async fn the_panel_lists_marks_and_fits_80x24() {
         text(&lines)
     );
     app.update(Action::RecordingsLoaded(Ok(Vec::new())));
-    let all = text(&screen(&mut app, 80, 24));
+    let lines = screen(&mut app, 80, 24);
+    let all = text(&lines);
     assert!(all.contains("No recordings yet."), "{all}");
     assert!(all.contains("Ctrl-Space R records"), "{all}");
+    // No count when there is nothing, no key line inside the panel (the
+    // status bar has them).
+    assert!(lines[1].contains("╭ Recordings ─"), "{all}");
+    assert!(!lines[1].contains('·'), "{all}");
+    assert!(!text(&lines[1..23]).contains("Esc close"), "{all}");
+    assert!(lines[23].contains("Esc  close"), "{all}");
+    // At 80 columns the panel takes the whole width: nothing of what is
+    // behind shows in a margin.
+    for row in &lines[1..23] {
+        let first = row.chars().next().unwrap();
+        let last = row.chars().last().unwrap();
+        assert!("╭│╰".contains(first), "{all}");
+        assert!("╮│╯".contains(last), "{all}");
+    }
 
     let terminal = TerminalId::next();
     app.update(started(terminal, "web-01-20261022T140300Z.cast"));
@@ -296,34 +343,61 @@ async fn the_panel_lists_marks_and_fits_80x24() {
     // Being written: `●`; invalid: `▲`, no duration.
     let web = lines.iter().find(|l| l.contains("web-01 ")).unwrap();
     assert!(web.contains("▍● web-01"), "{all}");
+    // The local offset is unknown in tests: UTC, and it says so.
     assert!(
-        web.contains("22 Oct 14:03") && web.contains("1:23"),
+        web.contains("22 Oct 14:03 UTC") && web.contains("1:23"),
         "{all}"
     );
     assert!(web.contains("1.4 MiB"), "{all}");
     let junk = lines.iter().find(|l| l.contains("junk ")).unwrap();
     assert!(junk.contains("▲ junk") && junk.contains("—"), "{all}");
-    // The selected file's name, and the keys.
+    // The selected file's name; the keys in the status bar. The file being
+    // written cannot be deleted: its delete key is not offered.
     assert!(all.contains("file  web-01-20261022T140300Z.cast"), "{all}");
+    assert!(lines[23].contains("RECORDINGS"), "{all}");
+    assert!(lines[23].contains("↵  play"), "{all}");
+    assert!(!lines[23].contains("d  delete"), "{all}");
+    app.update(Action::RecordingsKey(key(KeyCode::Char('d'))));
+    let lines = screen(&mut app, 80, 24);
+    let all = text(&lines);
     assert!(
-        all.contains("↵  play") && all.contains("d  delete"),
+        all.contains("▲ This recording is still being written"),
         "{all}"
     );
-    assert!(lines[23].contains("RECORDINGS"), "{all}");
+    assert!(all.contains("Stop the recording first"), "{all}");
+    assert!(!all.contains("Delete web-01"), "no question: {all}");
 
-    // The armed delete question.
+    // The armed delete question, on a file that is not being written.
+    app.update(Action::RecordingsKey(key(KeyCode::Down)));
+    assert!(screen(&mut app, 80, 24)[23].contains("d  delete"));
     app.update(Action::RecordingsKey(key(KeyCode::Char('d'))));
+    let lines = screen(&mut app, 80, 24);
+    let all = text(&lines);
+    assert!(all.contains("Delete db-20261021T090000Z.cast?"), "{all}");
+    assert!(
+        all.contains("The file is removed from the recordings folder. This cannot be undone."),
+        "{all}"
+    );
+    assert!(
+        lines[23].contains("n / Esc  keep") && lines[23].contains("y  delete"),
+        "{all}"
+    );
+    // Not armed yet: Esc is ignored too; armed, it keeps the file.
+    app.update(Action::RecordingsKey(key(KeyCode::Esc)));
+    assert!(app.recordings_panel.as_ref().unwrap().confirm.is_some());
+    arm_panel(&mut app);
+    app.update(Action::RecordingsKey(key(KeyCode::Esc)));
+    assert!(app.recordings_panel.as_ref().unwrap().confirm.is_none());
+    // An invalid file, selected: a warning (not an error), and why.
+    app.update(Action::RecordingsKey(key(KeyCode::Down)));
     let all = text(&screen(&mut app, 80, 24));
     assert!(
-        all.contains("Delete web-01-20261022T140300Z.cast?"),
-        "{all}"
-    );
-    assert!(
-        all.contains("any key  keep") && all.contains("y  delete"),
+        all.contains("Not a valid asciicast v2 recording: it cannot be played,"),
         "{all}"
     );
     // A refusal from the engine shows its summary.
-    app.update(Action::RecordingsKey(key(KeyCode::Esc)));
+    app.update(Action::RecordingsKey(key(KeyCode::Up)));
+    app.update(Action::RecordingsKey(key(KeyCode::Up)));
     app.update(Action::RecordingDeleted {
         name: "web-01-20261022T140300Z.cast".into(),
         result: Err(ErrorSummary {
@@ -447,9 +521,11 @@ async fn record_stop_list_and_play_back() {
     assert_eq!(
         dialog.body,
         format!(
-            "Everything shown on screen is recorded — including secrets printed by commands and anything the remote echoes. What you type is never recorded. Saved to {folder}, readable only by you."
+            "Everything the terminal shows is recorded, including the commands you type (the shell echoes them) and any secret a command prints. Keystrokes themselves are not stored, so a password typed at a prompt that does not echo stays out. Saved to {folder}, readable only by you."
         )
     );
+    // One pane: no subject line.
+    assert_eq!(dialog.subject, None);
     // Shown in full (word-wrapped, nothing cut).
     let shown: String = lines
         .iter()
@@ -458,27 +534,33 @@ async fn record_stop_list_and_play_back() {
         .join(" ");
     let shown = shown.split_whitespace().collect::<Vec<_>>().join(" ");
     for words in [
-        "Everything shown on screen is recorded — including secrets",
-        "What you type is never recorded.",
+        "Everything the terminal shows is recorded, including the commands you type",
+        "Keystrokes themselves are not stored,",
         "readable only by you.",
     ] {
         assert!(shown.contains(words), "{words}\n{all}");
     }
     assert!(
-        all.contains("any key  cancel") && all.contains("y  record"),
+        all.contains("n / Esc  cancel") && all.contains("y  record"),
         "{all}"
     );
     assert!(lines[23].contains("CONFIRM"), "{all}");
     // Keys typed for the shell right before are ignored, `y` included.
     lab.app.update(Action::DialogKey(key(KeyCode::Char('y'))));
     assert_eq!(lab.app.dialogs.len(), 1, "not armed yet");
-    // Armed: anything but `y` cancels (`Y`, Enter, n…).
-    for cancel in [KeyCode::Char('Y'), KeyCode::Enter, KeyCode::Char('n')] {
-        arm_dialog(&mut lab.app);
+    // Armed: other keys are not an answer (`Y`, Enter, a letter)…
+    arm_dialog(&mut lab.app);
+    for ignored in [KeyCode::Char('Y'), KeyCode::Enter, KeyCode::Char('l')] {
+        lab.app.update(Action::DialogKey(key(ignored)));
+        assert_eq!(lab.app.dialogs.len(), 1, "{ignored:?}");
+    }
+    // …`n` and `Esc` cancel.
+    for cancel in [KeyCode::Char('n'), KeyCode::Esc] {
         lab.app.update(Action::DialogKey(key(cancel)));
         assert!(lab.app.dialogs.is_empty(), "{cancel:?}");
         assert!(!lab.env.engine.is_recording(terminal));
         lab.app.update(Action::ToggleRecording);
+        arm_dialog(&mut lab.app);
     }
     arm_dialog(&mut lab.app);
     lab.app.update(Action::DialogKey(key(KeyCode::Char('y'))));
@@ -487,10 +569,15 @@ async fn record_stop_list_and_play_back() {
     assert!(!lab.app.is_recorded(terminal));
     lab.until(|app| app.is_recorded(terminal)).await;
     let lines = screen(&mut lab.app, 80, 24);
-    // One pane: the badge is on its tab; the status bar says it too.
-    assert!(lines[0].contains("1 alpha ● REC"), "{}", text(&lines));
+    // One pane: the badge is on its tab, apart from the connection dot;
+    // the status bar says it too, with how to stop (lower case).
+    assert!(lines[0].contains("1 alpha ● · REC"), "{}", text(&lines));
     assert!(lines[23].contains("● REC"), "{}", text(&lines));
-    assert!(lines[23].contains("Stop recording"), "{}", text(&lines));
+    assert!(
+        lines[23].contains("Ctrl-Space R  stop recording"),
+        "{}",
+        text(&lines)
+    );
 
     // Split: the recorded pane carries the badge in its title.
     lab.app
@@ -503,7 +590,22 @@ async fn record_stop_list_and_play_back() {
     let lines = screen(&mut lab.app, 80, 24);
     assert_eq!(lines[1].matches("REC").count(), 1, "{}", text(&lines));
     assert!(lines[1].contains("alpha  REC  ●"), "{}", text(&lines));
-    assert!(!lines[0].contains("REC"), "{}", text(&lines));
+    // The tab says it too, whatever pane has the focus.
+    assert!(lines[0].contains("(2) ● · REC"), "{}", text(&lines));
+    // Recording the other pane: the question names it.
+    lab.app.update(Action::ToggleRecording);
+    let Some(Dialog::Confirm(dialog)) = lab.app.dialogs.front() else {
+        panic!("no confirmation")
+    };
+    assert_eq!(dialog.title, "Record this pane?");
+    assert_eq!(dialog.subject.as_deref(), Some("alpha · pane 2/2"));
+    let all = text(&screen(&mut lab.app, 80, 24));
+    assert!(all.contains("Record this pane?"), "{all}");
+    assert!(all.contains("alpha · pane 2/2"), "{all}");
+    lab.app.update(Action::DialogKey(key(KeyCode::Esc)));
+    arm_dialog(&mut lab.app);
+    lab.app.update(Action::DialogKey(key(KeyCode::Esc)));
+    assert!(lab.app.dialogs.is_empty());
     lab.app.update(Action::ClosePane);
     assert_eq!(lab.app.active_tab().map(Tab::len), Some(1));
 
@@ -520,7 +622,15 @@ async fn record_stop_list_and_play_back() {
     lab.app.update(Action::ToggleRecording);
     assert!(lab.app.dialogs.is_empty());
     lab.until(|app| !app.is_recorded(terminal)).await;
-    assert!(lab.app.note.is_none(), "a requested stop says nothing");
+    let note = lab.app.note.clone().unwrap();
+    assert!(
+        note.message.starts_with("Recording saved · alpha-"),
+        "{note:?}"
+    );
+    assert_eq!(note.tone, NoteTone::Neutral);
+    // It goes after 4 s (it holds the hints' place meanwhile).
+    lab.app.expire(Instant::now() + SAVED_NOTE_TTL);
+    assert!(lab.app.note.is_none());
 
     // The list: the new file, then play it.
     lab.app.update(Action::OpenRecordings);
@@ -562,16 +672,46 @@ async fn record_stop_list_and_play_back() {
     // What the session showed once recording, not before.
     assert!(all.contains("hello-record"), "{all}");
     assert!(!all.contains("welcome"), "{all}");
+    // 80×24: one row of chrome, at the bottom: the file name, the time,
+    // the state and the speed (the grid gets the title row).
+    assert!(lines[22].contains(&entry.name[..12]), "{all}");
+    assert!(
+        lines[22].contains(" / ") && lines[22].contains("■ Ended"),
+        "{all}"
+    );
+    assert!(!all.contains("cropped"), "{all}");
+    assert!(
+        lines[23].contains("PLAYBACK")
+            && lines[23].contains("Space  replay")
+            && lines[23].contains("q  back to list"),
+        "{all}"
+    );
+    // The status of the session behind stays visible.
+    assert!(lines[23].contains("● alpha"), "{all}");
+    // Taller: a title row with the name, the state and the speed.
+    let lines = screen(&mut lab.app, 120, 32);
+    let all = text(&lines);
     assert!(
         lines[1].contains("Playback") && lines[1].contains(&entry.name),
         "{all}"
     );
     assert!(lines[1].contains("■ Ended"), "{all}");
-    assert!(lines[22].contains(" / "), "{all}");
-    assert!(
-        lines[23].contains("PLAYBACK") && lines[23].contains("back to list"),
-        "{all}"
-    );
+
+    // Space replays from the start (the file reopens).
+    lab.app.update(Action::PlayerKey(key(KeyCode::Char(' '))));
+    lab.until(|app| {
+        app.player
+            .as_ref()
+            .is_some_and(|p| p.state() != PlayerState::Ended)
+    })
+    .await;
+    lab.until(|app| {
+        app.player
+            .as_ref()
+            .is_some_and(|p| p.state() == PlayerState::Ended)
+    })
+    .await;
+    assert!(text(&screen(&mut lab.app, 80, 24)).contains("hello-record"));
     // `q`: back to the list.
     lab.app.update(Action::PlayerKey(key(KeyCode::Char('q'))));
     assert!(lab.app.player.is_none());
@@ -599,29 +739,12 @@ async fn deletion_is_refused_while_recording_and_invalid_files_go() {
     let panel = lab.app.recordings_panel.as_ref().unwrap();
     let active = panel.selected().cloned().unwrap();
     assert!(active.valid && active.alias == "alpha", "{active:?}");
+    // Refused up front: no question that would only fail.
     lab.app
         .update(Action::RecordingsKey(key(KeyCode::Char('d'))));
-    arm_panel(&mut lab.app);
-    lab.app
-        .update(Action::RecordingsKey(key(KeyCode::Char('y'))));
-    lab.until(|app| {
-        app.recordings_panel
-            .as_ref()
-            .is_some_and(|p| p.notice.as_ref().is_some_and(|n| !n.ok))
-    })
-    .await;
-    let notice = lab
-        .app
-        .recordings_panel
-        .as_ref()
-        .unwrap()
-        .notice
-        .clone()
-        .unwrap();
-    assert_eq!(
-        notice.hint.as_deref(),
-        Some("Stop the recording first, then delete it.")
-    );
+    let panel = lab.app.recordings_panel.as_ref().unwrap();
+    assert!(panel.confirm.is_none());
+    assert_eq!(panel.refused, Some(crate::recordings::STILL_WRITTEN));
     assert!(lab.recordings_dir().join(&active.name).exists());
 
     // The invalid file: deletable.
@@ -735,7 +858,7 @@ async fn a_hostile_recording_reaches_no_terminal() {
     assert_eq!(view_mode, live_mode, "the live terminal is untouched");
     assert!(!view_mode.intersects(crate::player::HOST_AFFECTING_MODES));
     // The title row shows the file name next to the header title.
-    let lines = screen(&mut lab.app, 80, 24);
+    let lines = screen(&mut lab.app, 100, 30);
     assert!(
         lines[1].contains("“web-01”") && lines[1].contains("hostile.cast"),
         "{}",
@@ -764,4 +887,178 @@ async fn sessions_still_render_without_recording() {
         },
     );
     assert!(!text(&screen(&mut app, 80, 24)).contains("REC"));
+}
+
+/// Every session of the lab measured at 12 ms.
+fn measured(app: &mut App) {
+    for view in app.sessions.values_mut() {
+        view.latency = Some(Duration::from_millis(12));
+    }
+}
+
+#[tokio::test]
+async fn the_status_bar_keeps_status_and_rec_at_80_columns() {
+    let mut lab = lab().await;
+    let terminal = lab.open_terminal().await;
+    lab.app.update(started(terminal, "alpha.cast"));
+    measured(&mut lab.app);
+    // Recorded + connected, 80 columns: status, latency and REC stay; the
+    // stop key comes first among the hints.
+    let lines = screen(&mut lab.app, 80, 24);
+    let bar = &lines[23];
+    assert!(bar.starts_with(" TERMINAL "), "{bar}");
+    assert!(bar.contains("Ctrl-Space R  stop recording"), "{bar}");
+    assert!(bar.contains("● alpha · 12 ms"), "{bar}");
+    assert!(bar.ends_with("● REC "), "{bar}");
+
+    // A long alias: shortened (12) before anything else goes; the
+    // latency and REC stay.
+    if let Some(view) = lab
+        .app
+        .tabs
+        .get_mut(0)
+        .and_then(Tab::focused_mut)
+        .and_then(PaneSlot::view_mut)
+    {
+        view.alias = "production-eu-west-3-postgres-primary".into();
+    }
+    let lines = screen(&mut lab.app, 80, 24);
+    let bar = &lines[23];
+    assert!(bar.contains("● production-… · 12 ms"), "{bar}");
+    assert!(bar.ends_with("● REC "), "{bar}");
+    assert!(bar.contains("stop recording"), "{bar}");
+    assert_eq!(bar.chars().count(), 80);
+
+    // The player, playing and paused: the session's status stays visible,
+    // and so does the way back.
+    let bytes =
+        crate::player::tests::cast(80, 24, &[(0.1, "o", "first"), (100.0, "o", "much later")]);
+    plant(&lab.recordings_dir(), "long.cast", &bytes);
+    lab.app.update(Action::OpenRecordings);
+    lab.until(|app| {
+        app.recordings_panel
+            .as_ref()
+            .is_some_and(|p| p.entries.ready().is_some_and(|e| !e.is_empty()))
+    })
+    .await;
+    lab.app.update(Action::RecordingsKey(key(KeyCode::Enter)));
+    lab.until(|app| {
+        app.player
+            .as_ref()
+            .is_some_and(|p| p.state() == PlayerState::Playing)
+    })
+    .await;
+    for state in ["▶ Playing", "❚❚ Paused"] {
+        let lines = screen(&mut lab.app, 80, 24);
+        let all = text(&lines);
+        assert!(lines[22].contains(state), "{all}");
+        let bar = &lines[23];
+        assert!(bar.contains("PLAYBACK"), "{bar}");
+        assert!(bar.contains("● production-… · 12 ms"), "{bar}");
+        assert!(bar.contains("q  back to list"), "{bar}");
+        assert!(bar.ends_with("● REC "), "{bar}");
+        lab.app.update(Action::PlayerKey(key(KeyCode::Char(' '))));
+    }
+}
+
+#[tokio::test]
+async fn the_player_seeks_back_and_restarts() {
+    let mut lab = lab().await;
+    let bytes = crate::player::tests::cast(
+        40,
+        5,
+        &[
+            (0.1, "o", "one "),
+            (0.2, "o", "two "),
+            (30.0, "o", "three "),
+            (60.0, "o", "four"),
+        ],
+    );
+    plant(&lab.recordings_dir(), "seek.cast", &bytes);
+    lab.app.update(Action::OpenRecordings);
+    lab.until(|app| {
+        app.recordings_panel
+            .as_ref()
+            .is_some_and(|p| p.entries.ready().is_some_and(|e| !e.is_empty()))
+    })
+    .await;
+    lab.app.update(Action::RecordingsKey(key(KeyCode::Enter)));
+    // To the end (each silence is capped at 2 s).
+    lab.until(|app| {
+        app.player
+            .as_ref()
+            .is_some_and(|p| p.state() == PlayerState::Ended)
+    })
+    .await;
+    let shown = |app: &App| {
+        app.player
+            .as_ref()
+            .map(|p| crate::player::tests::rows(p).join("\n"))
+            .unwrap_or_default()
+    };
+    assert!(shown(&lab.app).contains("one two three four"));
+    assert!(screen(&mut lab.app, 80, 24)[23].contains("Space  replay"));
+
+    // `←`: 5 s back (55 s): the screen as it was then, at once.
+    lab.app.update(Action::PlayerKey(key(KeyCode::Left)));
+    lab.until(|app| {
+        app.player
+            .as_ref()
+            .is_some_and(|p| p.state() != PlayerState::Ended && p.position >= 30.0)
+    })
+    .await;
+    assert_eq!(shown(&lab.app).trim_end(), "one two three");
+    // `Home`: from the start.
+    lab.app.update(Action::PlayerKey(key(KeyCode::Home)));
+    lab.until(|app| app.player.as_ref().is_some_and(|p| p.position < 1.0))
+        .await;
+    assert!(!shown(&lab.app).contains("three"));
+    // Keys never reach a shell, and `Esc` closes like `q`.
+    lab.app.update(Action::PlayerKey(key(KeyCode::Esc)));
+    assert!(lab.app.player.is_none());
+    assert_eq!(lab.app.overlay, Some(Overlay::Recordings));
+}
+
+#[test]
+fn the_record_key_turns_accent_once_armed_with_one_wake_up() {
+    let mut app = test_app();
+    let opened = Instant::now();
+    app.dialogs.push_back(Dialog::Confirm(ConfirmDialog {
+        title: CONFIRM_TITLE.into(),
+        subject: None,
+        body: confirm_body("~/r/"),
+        confirm: "record",
+        action: ConfirmAction::StartRecording(TerminalId::next()),
+        armed: Some(opened),
+    }));
+    // One wake-up, at the instant `y` starts to count (no ticking).
+    assert_eq!(app.next_deadline(), Some(opened + ARM_DELAY));
+    let accent = crate::theme::c(app.styles().theme.palette.accent);
+    let y_cell = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let lines = screen(app, 80, 24);
+        let (y, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.contains(" y  record"))
+            .unwrap();
+        let byte = line.find(" y  record").unwrap();
+        let x = line[..byte].chars().count() + 1;
+        buffer
+            .cell((u16::try_from(x).unwrap(), u16::try_from(y).unwrap()))
+            .unwrap()
+            .clone()
+    };
+    // Not armed: muted, like any other key.
+    let cell = y_cell(&mut app);
+    assert_eq!(cell.symbol(), "y");
+    assert_ne!(cell.bg, accent);
+    // Armed: the primary key, in the accent; nothing more to wake for.
+    arm_dialog(&mut app);
+    app.expire(Instant::now());
+    let cell = y_cell(&mut app);
+    assert_eq!(cell.bg, accent);
+    assert_eq!(app.next_deadline(), None);
 }

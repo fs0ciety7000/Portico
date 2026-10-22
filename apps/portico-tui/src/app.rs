@@ -551,7 +551,7 @@ impl App {
                         _ => self.session_or_connect(&alias),
                     };
                     if let Some(session) = session {
-                        self.open_terminal(alias, session);
+                        self.open_tab(alias, session);
                     }
                 }
             }
@@ -1003,11 +1003,14 @@ impl App {
         let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
             return;
         };
-        // Existing live pane for this host: just switch to it.
+        // Existing live (or opening) pane for this host: just switch to it.
         let live = self.tabs.iter().enumerate().find_map(|(index, tab)| {
             tab.items()
                 .into_iter()
-                .find(|(_, slot)| slot.live() && slot.alias() == alias)
+                .find(|(_, slot)| {
+                    (slot.live() || matches!(slot, PaneSlot::Opening { .. }))
+                        && slot.alias() == alias
+                })
                 .map(|(pane, _)| (index, pane))
         });
         if let Some((index, pane)) = live {
@@ -1038,13 +1041,7 @@ impl App {
                 }
             },
         };
-        self.open_terminal(alias, session);
-    }
-
-    /// Requests a shell for a new tab; served once the session is
-    /// connected.
-    fn open_terminal(&self, alias: String, session: SessionId) {
-        self.request_terminal(alias, session, None, self.term_size);
+        self.open_tab(alias, session);
     }
 
     fn disconnect_current(&mut self) {
