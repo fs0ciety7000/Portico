@@ -560,13 +560,23 @@ impl IgnoredSecrets {
     }
 
     /// Advice shown when the export held secrets (`None` otherwise): it
-    /// must be deleted once imported.
+    /// must be deleted once imported. Only the non-zero counts are named
+    /// ("1 password ignored", never "0 keys"); with nothing ignored but
+    /// keys in the export (all imported), only the deletion advice is left.
     pub fn advice(self) -> Option<String> {
         if self.total() == 0 && self.keys_in_export == 0 {
             return None;
         }
         let plural =
             |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let ignored: Vec<String> = [
+            (self.passwords, "password", "passwords"),
+            (self.keys, "key", "keys"),
+        ]
+        .into_iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(n, one, many)| plural(n, one, many))
+        .collect();
         let holds = if self.keys_in_export > 0 {
             format!(
                 "The export holds {} in clear text or encrypted",
@@ -575,11 +585,17 @@ impl IgnoredSecrets {
         } else {
             "The export holds them in clear text".to_owned()
         };
-        Some(format!(
-            "{} and {} ignored (never imported). {holds}: delete it once the import is done, and keep secrets in your keychain or ssh-agent.",
-            plural(self.passwords, "password", "passwords"),
-            plural(self.keys, "key", "keys"),
-        ))
+        let delete = format!(
+            "{holds}: delete it once the import is done, and keep secrets in your keychain or ssh-agent."
+        );
+        Some(if ignored.is_empty() {
+            delete
+        } else {
+            format!(
+                "{} ignored (never imported). {delete}",
+                ignored.join(" and ")
+            )
+        })
     }
 }
 
@@ -1182,6 +1198,48 @@ mod tests {
         .expect("advice");
         assert!(advice.contains("2 private keys"), "{advice}");
         assert!(advice.contains("delete it"), "{advice}");
+    }
+
+    #[test]
+    fn secrets_advice_names_only_non_zero_counts() {
+        // Every key imported, no password: no "0 passwords and 0 keys".
+        let advice = IgnoredSecrets {
+            passwords: 0,
+            keys: 0,
+            keys_in_export: 2,
+        }
+        .advice()
+        .expect("advice");
+        assert_eq!(
+            advice,
+            "The export holds 2 private keys in clear text or encrypted: delete it once the import is done, and keep secrets in your keychain or ssh-agent."
+        );
+        assert!(!advice.contains("ignored"), "{advice}");
+        // One password only (Termius without keys).
+        let advice = IgnoredSecrets {
+            passwords: 1,
+            keys: 0,
+            keys_in_export: 0,
+        }
+        .advice()
+        .expect("advice");
+        assert_eq!(
+            advice,
+            "1 password ignored (never imported). The export holds them in clear text: delete it once the import is done, and keep secrets in your keychain or ssh-agent."
+        );
+        // Keys only.
+        let advice = IgnoredSecrets {
+            passwords: 0,
+            keys: 1,
+            keys_in_export: 3,
+        }
+        .advice()
+        .expect("advice");
+        assert!(
+            advice.starts_with("1 key ignored (never imported). The export holds 3 private keys"),
+            "{advice}"
+        );
+        assert!(!advice.contains("0 "), "{advice}");
     }
 
     #[test]
