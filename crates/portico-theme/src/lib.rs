@@ -55,6 +55,13 @@ pub struct Palette {
     pub accent: Rgb,
     pub accent_strong: Rgb,
     pub text_on_accent: Rgb,
+    /// Terminal scrollback search: background of every visible match
+    /// (the selection surface tinted 20 % towards the accent, so terminal
+    /// text keeps its AAA contrast).
+    pub search_match: Rgb,
+    /// Terminal scrollback search: background of the current match (the
+    /// accent; its text is `text_on_accent`).
+    pub search_current: Rgb,
 }
 
 /// Status colours: the only place where saturated colour is allowed.
@@ -187,6 +194,8 @@ pub const OBSIDIAN: Theme = Theme {
         accent: Rgb::hex(0xc8_a9_6b),
         accent_strong: Rgb::hex(0xdd_c0_85),
         text_on_accent: Rgb::hex(0x14_11_0b),
+        search_match: Rgb::hex(0x43_3f_38),
+        search_current: Rgb::hex(0xc8_a9_6b),
     },
     status: StatusPalette {
         idle: Rgb::hex(0x6c_6a_65),
@@ -235,6 +244,8 @@ pub const BASALT: Theme = Theme {
         accent: Rgb::hex(0xb4_bc_c6),
         accent_strong: Rgb::hex(0xcc_d3_db),
         text_on_accent: Rgb::hex(0x0b_12_1a),
+        search_match: Rgb::hex(0x40_47_51),
+        search_current: Rgb::hex(0xb4_bc_c6),
     },
     status: StatusPalette {
         idle: Rgb::hex(0x63_6c_78),
@@ -283,6 +294,8 @@ pub const TRAVERTINE: Theme = Theme {
         accent: Rgb::hex(0xc9_9a_74),
         accent_strong: Rgb::hex(0xdc_b0_8e),
         text_on_accent: Rgb::hex(0x1a_0f_09),
+        search_match: Rgb::hex(0x4b_3d_31),
+        search_current: Rgb::hex(0xc9_9a_74),
     },
     status: StatusPalette {
         idle: Rgb::hex(0x75_6b_60),
@@ -384,6 +397,8 @@ pub fn export_css() -> String {
             ("accent", p.accent),
             ("accent-strong", p.accent_strong),
             ("text-on-accent", p.text_on_accent),
+            ("search-match", p.search_match),
+            ("search-current", p.search_current),
         ] {
             let _ = writeln!(css, "  --{name}: {};", c.to_hex());
         }
@@ -467,6 +482,18 @@ mod tests {
                 "{} on-accent",
                 t.id
             );
+            // Scrollback search: terminal text stays AAA on a match, the
+            // current match reads like the selection.
+            assert!(
+                contrast(p.text_primary, p.search_match) >= 7.0,
+                "{} text on search match (AAA)",
+                t.id
+            );
+            assert!(
+                contrast(p.text_on_accent, p.search_current) >= 4.5,
+                "{} text on current search match",
+                t.id
+            );
             let s = t.status;
             for c in [
                 s.connecting,
@@ -532,6 +559,26 @@ mod tests {
                     t.id
                 );
             }
+        }
+    }
+
+    /// A search match must be seen on the terminal background and must not
+    /// read as the selection; the current one is the accent.
+    #[test]
+    fn search_tokens_stand_out() {
+        for t in THEMES {
+            let p = t.palette;
+            assert_eq!(p.search_current, p.accent, "{}", t.id);
+            for (name, bg) in [("bg-base", p.bg_base), ("bg-selected", p.bg_selected)] {
+                let d = delta_e(p.search_match, bg);
+                assert!(
+                    d >= 8.0,
+                    "{}: search match too close to {name} (ΔE {d:.1})",
+                    t.id
+                );
+            }
+            let d = delta_e(p.search_match, p.search_current);
+            assert!(d >= 20.0, "{}: match and current match (ΔE {d:.1})", t.id);
         }
     }
 
