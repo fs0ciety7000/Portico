@@ -248,7 +248,7 @@
   }
   /* Focus shows on the selected row, not around the whole list. */
   .lists:focus-visible { outline: none; }
-  .lists:focus-visible .row.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+  .lists:focus-visible .row.selected { box-shadow: inset 0 0 0 var(--size-bar) var(--accent); }
   .title-hint {
     float: right;
     display: inline-flex;
@@ -286,7 +286,7 @@
   .row {
     position: relative;
     display: grid;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
     cursor: default;
@@ -300,7 +300,7 @@
     left: 0;
     top: var(--space-2);
     bottom: var(--space-2);
-    width: 2px;
+    width: var(--size-bar);
     border-radius: var(--radius-pill);
     background: var(--accent);
   }

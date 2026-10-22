@@ -2,16 +2,20 @@
   // Recordings: the files of the recordings folder (newest first), played
   // in a read-only player, deleted after an armed confirmation.
   // Keys: j/k ↑↓ move · ↵ play · Del (or x) delete · Ctrl-R refresh · Esc close.
+  // A recording still being written cannot be deleted: refused up front
+  // (`deleteRefusal`), its Delete button is disabled.
   //
   // The file name is always shown next to the title: a third-party file
   // sets any title it likes. Requests carry the listed `name` only.
   import { fly } from "svelte/transition";
   import { formatSize, sentence } from "../api";
   import { dur } from "../motion";
-  import { formatDuration } from "../recording";
+  import { DELETE_RECORDING_TEXT, formatDuration, formatWhen, INVALID_RECORDING_TEXT, playerKey } from "../recording";
+  import { keymap } from "../state/keymap.svelte";
   import { recordings } from "../state/recordings.svelte";
   import Modal from "./Modal.svelte";
   import PlayerView from "./PlayerView.svelte";
+  import RecBadge from "./RecBadge.svelte";
 
   let { themeId }: { themeId: string } = $props();
 
@@ -21,15 +25,21 @@
 
   const current = $derived(recordings.list[recordings.selected]);
   const active = $derived(recordings.activeNames);
+  const recordKey = $derived(keymap.label("session.record"));
+  const now = new Date();
 
   $effect(() => {
     void recordings.selected;
     listEl?.querySelector(".row.selected")?.scrollIntoView({ block: "nearest" });
   });
 
-  function when(ms: number | null): string {
-    if (ms === null) return "Unknown date";
-    return new Date(ms).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  /** Player keys; `q` goes back to the list like Esc. */
+  function playerKeys(k: string): boolean {
+    if (playerKey(k) === "close") {
+      recordings.backToList();
+      return true;
+    }
+    return player?.key(k) ?? false;
   }
 
   function act(key: string): boolean {
@@ -65,7 +75,7 @@
 {#if recordings.view.kind === "player"}
   {@const r = recordings.view.recording}
   {#key r.name}
-    <Modal size="full" scroll={false} onescape={() => recordings.backToList()} onkey={(k) => player?.key(k) ?? false} labelledBy="player-title">
+    <Modal size="full" scroll={false} onescape={() => recordings.backToList()} onkey={playerKeys} labelledBy="player-title">
       {#snippet title()}{r.alias}<span class="title-host mono">· {r.name}</span>{/snippet}
       <PlayerView bind:this={player} recording={r} {themeId} />
       {#snippet footer()}
@@ -83,7 +93,7 @@
     labelledBy="recording-delete-title"
   >
     {#snippet title()}Delete this recording?{/snippet}
-    <p>The file is removed from the recordings folder. This cannot be undone.</p>
+    <p>{DELETE_RECORDING_TEXT}</p>
     <dl>
       <dt>Title</dt><dd>{v.recording.alias}</dd>
       <dt>File</dt><dd>{v.recording.name}</dd>
@@ -112,7 +122,10 @@
       {:else if !recordings.list.length}
         <div class="state">
           <strong>No recordings yet</strong>
-          <span>In a terminal, open the palette and choose “Record session”: what the terminal shows is saved until you stop it.</span>
+          <span
+            >In a terminal, press {#if recordKey}<kbd>{recordKey}</kbd>{/if} (Record session): what the terminal shows is saved until you stop
+            it.</span
+          >
         </div>
       {:else}
         {#each recordings.list as r, i (r.name)}
@@ -131,9 +144,9 @@
           >
             <div class="line">
               <span class="name">{r.alias}</span>
-              {#if writing}<span class="badge rec">REC</span>{/if}
-              {#if !r.valid}<span class="badge" data-tone="error" title="Not an asciicast v2 file, or damaged">invalid</span>{/if}
-              <span class="when">{when(r.started)}</span>
+              {#if writing}<RecBadge compact role="img" title="Still being written" />{/if}
+              {#if !r.valid}<span class="badge" data-tone="warning" title="Not an asciicast v2 file, or damaged">invalid</span>{/if}
+              <span class="when">{formatWhen(r.started, now)}</span>
             </div>
             <div class="line sub">
               <span class="file mono">{r.name}</span>
@@ -145,6 +158,9 @@
         {/each}
       {/if}
     </div>
+    {#if recordings.listState === "ready" && current && !current.valid}
+      <p class="invalid-note" role="status">{INVALID_RECORDING_TEXT}</p>
+    {/if}
 
     {#snippet footer()}
       <!-- The folder (display string from Rust) gives way first: an ellipsis
@@ -153,7 +169,12 @@
         {#if recordings.folder}<span class="path mono"><bdi>{recordings.folder}</bdi></span><span aria-hidden="true">·</span>{/if}<span class="rest">readable only by you · asciicast v2</span>
       </span>
       {#if current}
-        <button class="secondary small" onclick={() => recordings.askDelete(current)}>Delete <kbd>Del</kbd></button>
+        <button
+          class="secondary small"
+          disabled={active.has(current.name)}
+          title={active.has(current.name) ? "Stop the recording first" : undefined}
+          onclick={() => recordings.askDelete(current)}>Delete <kbd>Del</kbd></button
+        >
         <button class="primary" disabled={!current.valid} onclick={() => recordings.play(current)}>Play <kbd>↵</kbd></button>
       {:else}
         <button class="secondary" onclick={() => recordings.close()}>Close <kbd>Esc</kbd></button>
@@ -178,7 +199,9 @@
     border-radius: var(--radius-md);
   }
   .lists:focus-visible { outline: none; }
-  .lists:focus-visible .row.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+  /* The selected row shows the bar and the selected background, focused or
+     not; the ring is only for a row focused without being selected. */
+  .row:focus-visible:not(.selected) { outline: none; box-shadow: inset 0 0 0 var(--size-bar) var(--accent); }
   .title-hint {
     float: right;
     display: inline-flex;
@@ -193,7 +216,7 @@
   .row {
     position: relative;
     display: grid;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
     cursor: default;
@@ -207,7 +230,7 @@
     left: 0;
     top: var(--space-2);
     bottom: var(--space-2);
-    width: 2px;
+    width: var(--size-bar);
     border-radius: var(--radius-pill);
     background: var(--accent);
   }
@@ -232,8 +255,8 @@
     font-size: var(--text-xs);
     white-space: nowrap;
   }
-  .badge[data-tone="error"] { --c: var(--status-error); }
-  .badge.rec { --c: var(--status-error); font-weight: 600; letter-spacing: var(--tracking-caps); }
+  .badge[data-tone="warning"] { --c: var(--status-warning); }
+  .invalid-note { flex: none; margin: 0; padding: 0 var(--space-3); color: var(--status-warning); font-size: var(--text-sm); }
   .state { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3); color: var(--text-secondary); font-size: var(--text-sm); }
   .state strong { color: var(--text-primary); font-weight: 550; font-size: var(--text-base); }
   .state.error strong { color: var(--status-error); }
@@ -244,10 +267,4 @@
     animation: shimmer var(--motion-loop) var(--ease-standard) infinite;
   }
   @keyframes shimmer { 50% { opacity: 0.45; } }
-  :global(.modal button.danger) {
-    border: 0;
-    background: var(--status-error);
-    color: var(--text-on-accent);
-    font-weight: 600;
-  }
 </style>

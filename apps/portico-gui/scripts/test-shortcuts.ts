@@ -184,7 +184,7 @@ test("pane commands: terminal only, distinct per platform, need a modifier", () 
   assert.deepEqual(resolveKeymap({ "pane.next": "Mod+R" }, "linux").problems, ['pane.next = "Mod+R": already used by session.record']);
 });
 
-test("recording: Mod+Shift+R in a terminal only; Recordings has no default key", () => {
+test("recording: Mod+Shift+R in a terminal only; Recordings is `v` in the host list only", () => {
   const mac = matchTables(defaultBindings("mac"), "mac");
   const linux = matchTables(defaultBindings("linux"), "linux");
   const ev = (k: string, code: string, mods: Partial<KeyLike>) => eventSignature(key(k, code, mods))!;
@@ -196,6 +196,19 @@ test("recording: Mod+Shift+R in a terminal only; Recordings has no default key",
   assert.equal(formatCombo(parseCombo("Mod+Shift+R")!, "linux", "terminal"), "Ctrl-Shift-R");
   assert.deepEqual(defaultBindings("linux")["recordings.open"], []);
   assert.deepEqual(defaultBindings("mac")["recordings.open"], []);
+  // `v` (same id and key as the TUI), next to the host editor keys
+  // (Shift-E, Shift-D, Mod+Shift+N, ⌘⌫ / Del) without touching them.
+  for (const [p, t] of [["mac", mac], ["linux", linux]] as const) {
+    assert.equal(t.hosts.get(ev("v", "KeyV", {})), "hosts.recordings", p);
+    assert.equal(t.terminal.get(ev("v", "KeyV", {})), undefined, p);
+    assert.equal(t.hosts.get(ev("V", "KeyV", { shiftKey: true })), undefined, p);
+    assert.equal(t.hosts.get(ev("E", "KeyE", { shiftKey: true })), "host.edit", p);
+    assert.equal(t.hosts.get(ev("D", "KeyD", { shiftKey: true })), "host.duplicate", p);
+    assert.equal(t.hosts.get(ev("N", "KeyN", { ctrlKey: p === "linux", metaKey: p === "mac", shiftKey: true })), "host.add", p);
+    assert.deepEqual(resolveKeymap({}, p).problems, [], p);
+  }
+  assert.equal(formatCombo(parseCombo("V")!, "linux", "hosts"), "v");
+  assert.equal(ACTIONS.find((a) => a.id === "hosts.recordings")?.title, "Recordings…");
 });
 
 test("closing: Mod+W closes the focused pane (or the tab), close-all the whole tab; pane.close has no key", () => {

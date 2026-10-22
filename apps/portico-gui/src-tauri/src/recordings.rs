@@ -575,10 +575,15 @@ where
 // ── Registry of playbacks ───────────────────────────────────────────────
 
 /// Open playbacks, by id: the webview can only reach the ones it opened.
+///
+/// `epoch` counts [`Playbacks::close_all`] calls (page reloads): a playback
+/// whose `play_recording` started before one is refused at registration,
+/// so a page that went away cannot leave one holding a slot and a thread.
 #[derive(Debug, Default)]
 pub(crate) struct Playbacks {
     map: Mutex<HashMap<u64, Arc<Playback>>>,
     next: AtomicU64,
+    epoch: AtomicU64,
 }
 
 impl Playbacks {
@@ -594,9 +599,26 @@ impl Playbacks {
         })
     }
 
-    /// Registers a playback; refused beyond [`MAX_PLAYBACKS`].
-    fn register(&self, playback: Arc<Playback>) -> Result<u64, ErrorSummary> {
+    /// The current epoch, read by `play_recording` before it awaits.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    /// Registers a playback opened in `epoch`; refused (and the playback
+    /// closed) when [`Playbacks::close_all`] ran since, or beyond
+    /// [`MAX_PLAYBACKS`]. The epoch is compared under the map's lock, the
+    /// one `close_all` holds while it moves to the next epoch.
+    fn register(&self, playback: Arc<Playback>, epoch: u64) -> Result<u64, ErrorSummary> {
         let mut map = self.lock();
+        if self.epoch.load(Ordering::Acquire) != epoch {
+            drop(map);
+            playback.close();
+            return Err(ErrorSummary {
+                code: "playback_closed".into(),
+                message: "the window reloaded while this recording was opening".into(),
+                hint: Some("Open the recording again.".into()),
+            });
+        }
         if map.len() >= MAX_PLAYBACKS {
             return Err(ErrorSummary {
                 code: "playback_limit".into(),
@@ -615,9 +637,15 @@ impl Playbacks {
         }
     }
 
-    /// Closes every playback (page reload, exit).
+    /// Closes every playback (page reload, exit) and starts a new epoch:
+    /// a playback still opening is refused when it registers.
     pub(crate) fn close_all(&self) {
-        for (_, p) in self.lock().drain() {
+        let drained: Vec<Arc<Playback>> = {
+            let mut map = self.lock();
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+            map.drain().map(|(_, p)| p).collect()
+        };
+        for p in drained {
             p.close();
         }
     }
@@ -724,13 +752,15 @@ pub(crate) async fn play_recording(
     frames: Channel<PlaybackFrame>,
 ) -> Result<PlaybackDto, ErrorSummary> {
     let name = checked_name(&name)?.to_owned();
+    // Before the await: a reload during it makes `register` refuse.
+    let epoch = playbacks.epoch();
     let reader = engine
         .open_recording(&name)
         .await
         .map_err(|e| safe_summary(&e.summary()))?;
     let header = reader.header().clone();
     let playback = Arc::new(Playback::new(speed));
-    let id = playbacks.register(Arc::clone(&playback))?;
+    let id = playbacks.register(Arc::clone(&playback), epoch)?;
     let state = playback.state();
     let engine = engine.inner().clone();
     let registry = Arc::clone(playbacks.inner());
@@ -1117,10 +1147,17 @@ mod tests {
     #[test]
     fn registry_limits_and_closes() {
         let registry = Playbacks::default();
+        let epoch = registry.epoch();
         let ids: Vec<u64> = (0..MAX_PLAYBACKS)
-            .map(|_| registry.register(Arc::new(Playback::new(1.0))).unwrap())
+            .map(|_| {
+                registry
+                    .register(Arc::new(Playback::new(1.0)), epoch)
+                    .unwrap()
+            })
             .collect();
-        let err = registry.register(Arc::new(Playback::new(1.0))).unwrap_err();
+        let err = registry
+            .register(Arc::new(Playback::new(1.0)), epoch)
+            .unwrap_err();
         assert_eq!(err.code, "playback_limit");
         let first = registry.get(ids[0]).unwrap();
         registry.remove(ids[0]);
@@ -1129,5 +1166,31 @@ mod tests {
         let second = registry.get(ids[1]).unwrap();
         registry.close_all();
         assert!(second.is_closed());
+    }
+
+    #[test]
+    fn registry_refuses_a_playback_opened_before_close_all() {
+        let registry = Playbacks::default();
+        // `play_recording` reads the epoch, then awaits the file…
+        let epoch = registry.epoch();
+        let kept = Arc::new(Playback::new(1.0));
+        let kept_id = registry.register(Arc::clone(&kept), epoch).unwrap();
+        // …while the page reloads.
+        registry.close_all();
+        assert!(kept.is_closed());
+        let late = Arc::new(Playback::new(1.0));
+        let err = registry.register(Arc::clone(&late), epoch).unwrap_err();
+        assert_eq!(err.code, "playback_closed");
+        // Refused and closed: its task stops at once, no slot is held.
+        assert!(late.is_closed());
+        assert_eq!(registry.get(kept_id).unwrap_err().code, "playback_closed");
+        // The new page opens all its slots.
+        let now = registry.epoch();
+        assert_ne!(now, epoch);
+        for _ in 0..MAX_PLAYBACKS {
+            registry
+                .register(Arc::new(Playback::new(1.0)), now)
+                .unwrap();
+        }
     }
 }

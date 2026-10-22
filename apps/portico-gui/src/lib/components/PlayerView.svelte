@@ -9,21 +9,37 @@
   // Frames arrive already sanitised from Rust (one PlaybackSanitizer for
   // the whole playback); pause, speed, skip and seek are decided there too.
   // Output text is written to the emulator and nowhere else (no log, no
-  // notice). Keys (in the dialog): Space play/pause · + / - speed ·
-  // → skip the silence · ← back 5 s · Home restart · Esc close.
+  // notice). Keys (`playerKey`, same as the TUI): Space play/pause (replay
+  // when ended) · + / - speed · → skip the silence · ← back 5 s · Home
+  // restart · q / Esc close (handled by the dialog).
   import { onMount } from "svelte";
   import { Terminal } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
   import { asError, formatSize, sentence, type ErrorSummary, type PlaybackFrame, type PlaybackInfo, type Recording } from "../api";
   import { backend } from "../backend";
-  import { createPlayerTerminal, formatClock, formatSpeed, frameTime, MAX_SPEED, MIN_SPEED, PlayerFeed, seekTime, stepSpeed } from "../recording";
+  import {
+    createPlayerTerminal,
+    formatClock,
+    formatSpeed,
+    frameTime,
+    MAX_SPEED,
+    MIN_SPEED,
+    PlayerFeed,
+    playerFontSize,
+    playerKey,
+    seekTime,
+    stepSpeed,
+  } from "../recording";
 
   let { recording, themeId }: { recording: Recording; themeId: string } = $props();
 
   /** Rewind step of ← (seconds). */
   const BACK_STEP = 5;
+  /** Line height of the player's emulator (as in `playerOptions`). */
+  const LINE_HEIGHT = 1.2;
 
   let host: HTMLDivElement;
+  let screen: HTMLDivElement;
   let term: Terminal | undefined;
   let feed: PlayerFeed | undefined;
   let info: PlaybackInfo | null = $state(null);
@@ -49,7 +65,7 @@
       foreground: v("--text-primary"),
       cursor: v("--text-muted"),
       cursorAccent: v("--bg-base"),
-      selectionBackground: `${v("--accent")}55`,
+      selectionBackground: v("--accent-selection"),
       black: ansi(0), red: ansi(1), green: ansi(2), yellow: ansi(3),
       blue: ansi(4), magenta: ansi(5), cyan: ansi(6), white: ansi(7),
       brightBlack: ansi(8), brightRed: ansi(9), brightGreen: ansi(10), brightYellow: ansi(11),
@@ -58,18 +74,45 @@
   }
 
   /** Font size: the base size, smaller (down to `--text-xs`) when the
-   * recorded width does not fit. */
-  function fontFor(cols: number): { family: string; size: number } {
+   * recorded width or height does not fit the screen (`playerFontSize`);
+   * below that, the screen scrolls to keep the cursor row in view. */
+  function fontFor(cols: number, rows: number): { family: string; size: number } {
     const css = getComputedStyle(document.documentElement);
     const family = css.getPropertyValue("--font-mono").trim();
-    const base = Number.parseFloat(css.getPropertyValue("--text-base")) || 13;
-    const min = Number.parseFloat(css.getPropertyValue("--text-xs")) || base;
+    const base = Number.parseFloat(css.getPropertyValue("--text-base"));
+    const min = Math.min(base, Number.parseFloat(css.getPropertyValue("--text-xs")));
     const ctx = document.createElement("canvas").getContext("2d");
     if (ctx) ctx.font = `${base}px ${family}`;
-    const cell = ctx?.measureText("W").width || base * 0.6;
-    const room = host.clientWidth;
-    if (!room || cols * cell <= room) return { family, size: base };
-    return { family, size: Math.max(min, Math.floor((base * room) / (cols * cell))) };
+    const box = getComputedStyle(screen);
+    const padX = Number.parseFloat(box.paddingLeft) + Number.parseFloat(box.paddingRight);
+    const padY = Number.parseFloat(box.paddingTop) + Number.parseFloat(box.paddingBottom);
+    const size = playerFontSize({
+      base,
+      min,
+      cellW: ctx?.measureText("W").width ?? 0,
+      cellH: Math.ceil(base * LINE_HEIGHT),
+      cols,
+      rows,
+      width: screen.clientWidth - padX,
+      height: screen.clientHeight - padY,
+    });
+    return { family, size };
+  }
+
+  /** A recording taller than the screen even at the smallest size: keep
+   * the cursor row in view (the screen scrolls, like a terminal). */
+  let follow = 0;
+  function keepCursorInView() {
+    if (follow || !term) return;
+    follow = requestAnimationFrame(() => {
+      follow = 0;
+      const rowsEl = host.querySelector<HTMLElement>(".xterm-screen");
+      if (!term || !rowsEl || screen.scrollHeight <= screen.clientHeight) return;
+      const rowH = rowsEl.clientHeight / Math.max(1, term.rows);
+      const top = rowsEl.offsetTop + term.buffer.active.cursorY * rowH;
+      if (top < screen.scrollTop) screen.scrollTop = top;
+      else if (top + rowH > screen.scrollTop + screen.clientHeight) screen.scrollTop = top + rowH - screen.clientHeight;
+    });
   }
 
   function onFrame(frame: PlaybackFrame) {
@@ -120,27 +163,26 @@
     seek(time - BACK_STEP);
   }
 
-  /** Keys of the player; true when handled (Modal's `onkey`). */
+  /** Keys of the player; true when handled (Modal's `onkey`). Closing
+   * (`q`, Esc) belongs to the dialog. */
   export function key(k: string): boolean {
-    switch (k) {
-      case " ":
+    switch (playerKey(k)) {
+      case "toggle":
         toggle();
         return true;
-      case "+":
-      case "=":
+      case "faster":
         faster(1);
         return true;
-      case "-":
-      case "_":
+      case "slower":
         faster(-1);
         return true;
-      case "ArrowRight":
+      case "skip":
         skip();
         return true;
-      case "ArrowLeft":
+      case "back":
         back();
         return true;
-      case "Home":
+      case "restart":
         seek(0);
         return true;
       default:
@@ -160,7 +202,7 @@
     let early = 0;
     // The emulator: created at once with the listed size, resized from the
     // header and from `resize` frames.
-    const font = fontFor(recording.width ?? 80);
+    const font = fontFor(recording.width ?? 80, recording.height ?? 24);
     term = createPlayerTerminal(Terminal, {
       fontFamily: font.family,
       fontSize: font.size,
@@ -172,6 +214,7 @@
     // Keys never reach the emulator (it has no input anyway): the dialog
     // handles them. A click into it gives the focus back to the dialog.
     term.attachCustomKeyEventHandler(() => false);
+    const cursor = term.onCursorMove(keepCursorInView);
     const refocus = () => host.closest<HTMLElement>("[role=dialog]")?.focus();
     host.addEventListener("focusin", refocus);
     feed = new PlayerFeed(term, (total) => {
@@ -193,6 +236,8 @@
     })();
     return () => {
       closed = true;
+      cursor.dispose();
+      cancelAnimationFrame(follow);
       feed?.dispose();
       host.removeEventListener("focusin", refocus);
       if (id !== null) void backend.playbackClose(id).catch(() => {});
@@ -213,7 +258,7 @@
 </script>
 
 <div class="player">
-  <div class="screen" class:dimmed={!!error}>
+  <div class="screen" class:dimmed={!!error} bind:this={screen}>
     <div class="xterm-host" bind:this={host} aria-label="Recording playback" role="img"></div>
     {#if error}
       <div class="failure" role="alert">
@@ -255,24 +300,32 @@
     >
       <span class="track"><span class="fill" style:transform={`scaleX(${progress})`}></span></span>
     </div>
+    <!-- Text, not only the icon: the state is read without decoding it. -->
+    {#if info && (ended || paused)}<span class="state">{ended ? "Ended" : "Paused"}</span>{/if}
     <span class="clock mono">{formatClock(time)} / {formatClock(total)}</span>
     <span class="speed">
       <button class="secondary small" onclick={() => faster(-1)} disabled={!info || speed <= MIN_SPEED} aria-label="Slower">−</button>
       <span class="mono value">{formatSpeed(speed)}</span>
       <button class="secondary small" onclick={() => faster(1)} disabled={!info || speed >= MAX_SPEED} aria-label="Faster">+</button>
     </span>
+    <button class="secondary small" onclick={back} disabled={!info} aria-label="Back 5 seconds">↺ 5 s <kbd>←</kbd></button>
+    <button class="secondary small" onclick={() => seek(0)} disabled={!info} aria-label="Restart">Restart <kbd>Home</kbd></button>
     <button class="secondary small" onclick={skip} disabled={!info || ended}>Skip idle <kbd>→</kbd></button>
   </div>
   <p class="meta">
-    <span class="mono">{recording.name}</span>
     <span>{formatSize(recording.size)}</span>
     {#if info}<span class="mono">{info.cols}×{info.rows}</span>{/if}
-    <span class="keys"><kbd>←</kbd> back 5 s · <kbd>Home</kbd> start · <kbd>+</kbd> <kbd>−</kbd> speed</span>
+    {#if ended}
+      <span class="keys"><kbd>Space</kbd> replay · <kbd>q</kbd> back to list</span>
+    {:else}
+      <span class="keys"><kbd>+</kbd> <kbd>−</kbd> speed · <kbd>q</kbd> back to list</span>
+    {/if}
   </p>
 </div>
 
 <style>
-  .player { display: flex; flex-direction: column; gap: var(--space-3); flex: 1 1 auto; min-height: 0; }
+  /* A container: the controls and the key hints follow the dialog's width. */
+  .player { display: flex; flex-direction: column; gap: var(--space-3); flex: 1 1 auto; min-height: 0; container-type: inline-size; }
   .screen {
     position: relative;
     flex: 1 1 auto;
@@ -342,6 +395,7 @@
     transition: transform var(--motion-fast) linear;
   }
   .bar:hover .track { background: var(--bg-selected); }
+  .state { flex: none; color: var(--text-secondary); font-size: var(--text-sm); }
   .clock { flex: none; color: var(--text-secondary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
   .speed { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
   .speed .value { min-width: 4ch; text-align: center; color: var(--text-primary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
@@ -357,9 +411,6 @@
   .meta .mono { color: var(--text-secondary); }
   .meta .keys { margin-left: auto; }
   @container (max-width: 640px) {
-    .meta .keys { display: none; }
-  }
-  @media (max-width: 900px) {
     .meta .keys { display: none; }
   }
 </style>

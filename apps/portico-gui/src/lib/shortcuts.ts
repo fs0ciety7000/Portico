@@ -143,7 +143,9 @@ export const ACTIONS: ActionDef[] = [
   // Recording (ADR "Enregistrement de sessions, asciicast v2"). Linux: Ctrl-Shift-R
   // in a terminal; `app.reload` (Mod+R) only listens in the host list.
   { id: "session.record", title: "Record session", doc: "Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état", scope: "terminal", defaults: both("Mod+Shift+R") },
-  { id: "recordings.open", title: "Recordings…", doc: "Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut : palette", scope: "global", defaults: both() },
+  { id: "recordings.open", title: "Recordings…", doc: "Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette", scope: "global", defaults: both() },
+  // Same id and key as the TUI's host list.
+  { id: "hosts.recordings", title: "Recordings…", doc: "Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes)", scope: "hosts", defaults: both("V") },
   { id: "keys.new", title: "New key", doc: "Nouvelle clé", scope: "global", defaults: both() },
   { id: "snippets.new", title: "New snippet", doc: "Nouveau snippet", scope: "global", defaults: both() },
   { id: "files.download-dir", title: "Change download folder", doc: "Changer de dossier de téléchargement", scope: "global", defaults: both() },

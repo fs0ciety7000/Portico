@@ -252,7 +252,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--size-line-gap);
   }
   li {
     position: relative;
@@ -277,7 +277,7 @@
     left: 0;
     top: 8px;
     bottom: 8px;
-    width: 2px;
+    width: var(--size-bar);
     border-radius: 2px;
     background: var(--accent);
   }

@@ -200,7 +200,7 @@
 {/if}
 
 <style>
-  .hosts { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; max-height: calc(34px * 6); overflow-y: auto; }
+  .hosts { display: grid; gap: var(--size-line-gap); margin: 0; padding: 0; list-style: none; max-height: calc(34px * 6); overflow-y: auto; }
   .hosts li {
     --c: var(--status-idle);
     position: relative;
@@ -224,7 +224,7 @@
     left: 0;
     top: var(--space-2);
     bottom: var(--space-2);
-    width: 2px;
+    width: var(--size-bar);
     border-radius: var(--radius-pill);
     background: var(--accent);
   }

@@ -6,7 +6,7 @@
 // errors are shown from their `ErrorSummary`, never matched on text.
 import { asError, type EngineEvent, type ErrorSummary, type Recording } from "../api";
 import { backend } from "../backend";
-import { reduceRecording, resyncRecording, type RecMap } from "../recording";
+import { deleteRefusal, forgetRecording, reduceRecording, resyncRecording, type RecMap } from "../recording";
 import { workspace, type Pane } from "./workspace.svelte";
 
 export type ListState = "loading" | "ready" | "error";
@@ -20,8 +20,9 @@ export type RecordingsView =
 class Recordings {
   /** Terminal id → recording, between `Started` and `Stopped`. */
   active: RecMap = $state({});
-  /** Pane waiting for the start confirmation. */
-  confirm: { terminal: number; alias: string; folder: string } | null = $state(null);
+  /** Pane waiting for the start confirmation; `pane` is its place in a
+   * split tab (`n/N`), null when the tab has one pane. */
+  confirm: { terminal: number; alias: string; folder: string; pane: { index: number; count: number } | null } | null = $state(null);
   open = $state(false);
   view: RecordingsView = $state({ kind: "list" });
   list: Recording[] = $state([]);
@@ -51,7 +52,15 @@ class Recordings {
     if (this.isRecording(pane.terminal)) return this.stop(pane.terminal);
     try {
       const folder = await backend.recordingsFolder();
-      this.confirm = { terminal: pane.terminal, alias: pane.alias, folder };
+      const tab = workspace.tabOf(pane.key);
+      const panes = tab ? workspace.panesIn(tab) : [];
+      const index = panes.findIndex((p) => p.key === pane.key);
+      this.confirm = {
+        terminal: pane.terminal,
+        alias: pane.alias,
+        folder,
+        pane: panes.length > 1 && index >= 0 ? { index: index + 1, count: panes.length } : null,
+      };
     } catch (e) {
       workspace.notify(e);
     }
@@ -75,8 +84,10 @@ class Recordings {
       await backend.recordingStop(terminal);
     } catch (e) {
       const err = asError(e);
-      // Already stopped (its event is on the way): nothing to say.
-      if (err.code !== "recording_not_active") workspace.notify(err);
+      // Already stopped: nothing to say, but REC goes off here even if its
+      // `stopped` event was lost (an entry from a resync).
+      if (err.code === "recording_not_active") this.active = forgetRecording(this.active, terminal);
+      else workspace.notify(err);
     }
   }
 
@@ -85,8 +96,8 @@ class Recordings {
     const { map, notice } = reduceRecording(this.active, ev.terminal, ev.session, ev.state);
     this.active = map;
     if (notice) {
-      const { tone, ...summary } = notice;
-      workspace.notify(summary, tone, 6000);
+      const { tone, ms, ...summary } = notice;
+      workspace.notify(summary, tone, ms);
     }
     // A finished file shows up in an open list.
     if (ev.state.state === "stopped" && this.open && this.view.kind === "list") void this.refresh(false);
@@ -144,8 +155,12 @@ class Recordings {
     if (recording?.valid) this.view = { kind: "player", recording };
   }
 
+  /** A recording still being written is refused at once (not asked, then failed). */
   askDelete(recording: Recording | undefined) {
-    if (recording) this.view = { kind: "delete", recording, error: null, busy: false };
+    if (!recording) return;
+    const refusal = deleteRefusal(recording.name, this.activeNames);
+    if (refusal) return workspace.notify(refusal, "warning");
+    this.view = { kind: "delete", recording, error: null, busy: false };
   }
 
   /** Deletes the confirmed recording; a refusal (still written…) stays in the dialog. */
