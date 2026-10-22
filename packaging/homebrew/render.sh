@@ -101,7 +101,7 @@ awk -v text="$caveats_text" '
       print "    " text
       print "    Gatekeeper blocks its first launch: after checking the download against"
       print "    SHA256SUMS (see docs/RELEASE.md), allow it once in System Settings >"
-      print "    Privacy & Security, or run:"
+      print "    Privacy & Security > Open Anyway, or run:"
       print "      xattr -dr com.apple.quarantine \"#{appdir}/Portico.app\""
       print "  EOS"
     }
