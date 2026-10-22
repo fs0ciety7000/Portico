@@ -14,7 +14,7 @@ import {
   preferredAxis,
   ratioBounds,
   removePane,
-  resizePane,
+  parentSplit,
   setRatio,
   splitPane,
   toggleZoom,
@@ -151,22 +151,16 @@ test("next pane cycles in reading order", () => {
   assert.equal(nextPane(leaf(7), 7, 1), 7);
 });
 
-test("keyboard resize moves the nearest divider across the direction, within limits", () => {
+test("the divider of a pane is its parent split's", () => {
   let t: PaneNode = split(leaf(1), 1, "row", 2);
-  const id = (t as Split).id;
-  t = resizePane(t, 1, "right", STAGE, LIMITS);
-  assert.equal((t as Split).ratio, 0.55);
-  t = resizePane(t, 2, "left", STAGE, LIMITS);
-  t = resizePane(t, 2, "left", STAGE, LIMITS);
-  assert.equal(Math.round((t as Split).ratio * 100), 45);
-  // No horizontal divider: ↑ changes nothing.
-  assert.equal(resizePane(t, 1, "up", STAGE, LIMITS), t);
-  // Clamped: each side keeps 200 px of the 1196 px of room.
-  for (let i = 0; i < 40; i++) t = resizePane(t, 1, "left", STAGE, LIMITS);
-  assert.equal((t as Split).ratio, 200 / 1196);
-  for (let i = 0; i < 40; i++) t = resizePane(t, 1, "right", STAGE, LIMITS);
-  assert.equal((t as Split).ratio, 1 - 200 / 1196);
-  assert.equal((t as Split).id, id);
+  t = split(t, 2, "column", 3);
+  const outer = t as Split;
+  // Pane 1 sits right under the outer split; 2 and 3 under the inner one.
+  assert.equal(parentSplit(t, 1), outer);
+  assert.equal(parentSplit(t, 2), outer.b);
+  assert.equal(parentSplit(t, 3), outer.b);
+  assert.equal(parentSplit(leaf(1), 1), null);
+  assert.equal(parentSplit(t, 99), null);
 });
 
 test("resize of a nested split counts the minimum size of the whole subtree", () => {
@@ -180,10 +174,6 @@ test("resize of a nested split counts the minimum size of the whole subtree", ()
   assert.equal(bounds[1], 1 - (200 + 4 + 200) / 1196);
   assert.equal(clampRatio(outer, 0.99, STAGE, LIMITS), bounds[1]);
   assert.equal(clampRatio(outer, -1, STAGE, LIMITS), bounds[0]);
-  // Pane 3's ← resizes its own split (2 | 3), the nearest one.
-  const after = resizePane(t, 3, "left", STAGE, LIMITS) as Split;
-  assert.equal(after.ratio, outer.ratio);
-  assert.equal((after.b as Split).ratio, 0.45);
   // A window too small for the tree: the ratio stays as it is.
   assert.equal(clampRatio(outer, 0.2, { w: 500, h: 800 }, LIMITS), outer.ratio);
 });

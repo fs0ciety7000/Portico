@@ -26,6 +26,11 @@
   --text-xl: 20px;
   --text-display-sm: 30px;
   --text-display: 34px;
+  --size-dot: 6px;
+  --size-dot-ring: 1.5px;
+  --size-icon-sm: 12px;
+  --size-card: 540px;
+  --tracking-caps: 0.08em;
   --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
   --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);

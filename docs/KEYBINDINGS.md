@@ -334,16 +334,24 @@ theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé qua
 
 ## Panneaux (GUI) : principe
 
-Un onglet se divise en panneaux (8 au plus), chacun un terminal indépendant : « Split right » / « Split down »
-ouvrent un canal PTY de plus sur la **même session** (aucune nouvelle connexion), « Split with another host… »
-ouvre le sélecteur d'hôtes et place un terminal d'un **autre hôte** à côté. Un seul panneau a le focus (liseré
-d'accent, en-tête lumineux) et lui seul reçoit les frappes ; les autres sont atténués. Chaque panneau affiche son
-statut (phase, latence, titre distant) dans son en-tête, et la barre d'état parle du panneau actif (« pane 2/4 »).
-Une division qui laisserait un panneau sous 20 colonnes × 5 lignes, ou un neuvième panneau, est refusée par une
-notification. Les séparations se déplacent au clavier (`pane.resize-*`, ou flèches sur une séparation qui a le
-focus) ou à la souris ; chaque terminal suit sa taille (resize PTY après un court délai). Le zoom donne tout
-l'onglet au panneau actif sans fermer les autres. Fermer un panneau ferme son canal PTY ; le dernier panneau
-d'un onglet ferme l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier onglet.
+Un onglet se divise en panneaux (8 au plus), chacun un terminal indépendant : « Split pane right » / « Split pane
+down » ouvrent un canal PTY de plus sur la **même session** (aucune nouvelle connexion), « Split pane with host… »
+ouvre le sélecteur d'hôtes (récents, puis favoris, puis les autres, chacun avec son point de statut et
+`user@host` ; « reuses connection » signale un hôte dont la session vivante sera réutilisée) et place un terminal
+d'un **autre hôte** à côté. Diviser un onglet zoomé annule d'abord le zoom. Un seul panneau a le focus (liseré
+d'accent, barre d'accent en tête) et lui seul reçoit les frappes et affiche un curseur ; les autres sont atténués.
+Chaque panneau affiche son statut (point, alias, phase, latence) dans son en-tête ; un panneau en échec a un point
+plein et une phase en couleur d'erreur, et son encart propose `Retry ↵` et `Close pane`. La barre d'état parle du
+panneau actif (« pane 2/4 ») et ses indications deviennent « panes », « close pane », « split ». Une division
+impossible est refusée par une notification en haut à droite de la zone des terminaux : « This tab already has
+8 panes » (« Close a pane first. ») ou « Each pane needs at least 20 columns × 5 rows » (« Enlarge the window,
+or close a pane. »). `pane.divider` (« Move pane divider… ») donne le focus à la séparation la plus proche du
+panneau actif : flèches pour la déplacer, `Home` / `End` jusqu'aux limites, `↵` / `Esc` pour rendre le clavier ;
+la souris la fait glisser. Chaque terminal suit sa taille (resize PTY après un court délai). Le zoom donne tout
+l'onglet au panneau actif sans fermer les autres. `tab.close` (`⌘W` / `Ctrl-Shift-W`) ferme le panneau actif d'un
+onglet divisé, `tab.close-all` (`⌘⇧W` / `Ctrl-Alt-Shift-W` : sur Linux, `Ctrl-Shift-W` est déjà `tab.close`
+dans un terminal) ferme l'onglet et tous ses panneaux ; `pane.close` reste dans la palette, sans touche. Fermer un panneau ferme son canal PTY ; le dernier panneau d'un onglet ferme
+l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier onglet.
 
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
@@ -363,7 +371,8 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Snippets de l'hôte (la palette liste aussi « Run: <nom> ») | `app.snippets` | `⌘⇧S` | `Ctrl-Shift-S` |
 | Journaux de session et config effective (panneau debug) | `app.logs` | `⌘⇧L` | `Ctrl-Shift-L` |
 | Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `tab.new` | `⌘T` | `Ctrl-Shift-T` |
-| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `tab.close` | `⌘W` | `Ctrl-Shift-W` |
+| Fermer l'onglet ; dans un onglet divisé, le panneau actif (le dernier panneau ferme l'onglet ; le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `tab.close` | `⌘W` | `Ctrl-Shift-W` |
+| Fermer l'onglet et tous ses panneaux | `tab.close-all` | `⌘⇧W` | `Ctrl-Alt-Shift-W` |
 | Onglet suivant | `tab.next` | `Ctrl-Tab`, `⌘]` | `Ctrl-Tab` |
 | Onglet précédent | `tab.prev` | `Ctrl-Shift-Tab`, `⌘[` | `Ctrl-Shift-Tab` |
 | Liste des hôtes | `tab.hosts` | `⌘0` | `Alt-0` |
@@ -380,24 +389,22 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 ## Panneaux (GUI)
 
 Actives dans un onglet terminal (division, focus, taille, zoom, fermeture ; voir « Panneaux (GUI) : principe » plus haut). Sur Linux,
-`Ctrl-Shift-…` comme pour les actions globales ; les flèches passent par `Ctrl-Alt` (`⌘⌥` sur macOS).
+`Ctrl-Shift-…` comme pour les actions globales : le focus passe par `Ctrl-Shift` + flèches (`⌘⌥` + flèches sur macOS),
+pas par `Ctrl-Alt` + flèches, que GNOME, Cinnamon et Xfce gardent pour les espaces de travail.
 
 | Action | Identifiant | macOS | Linux |
 |---|---|---|---|
 | Diviser à droite (même session : un canal PTY de plus) | `pane.split-right` | `⌘D` | `Ctrl-Shift-D` |
-| Diviser en bas (même session) | `pane.split-down` | `⌘⇧D` | `Ctrl-Shift-E` |
+| Diviser en bas (même session) | `pane.split-down` | `⌘⇧D` | `Ctrl-Shift-O` |
 | Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas) | `pane.split-host` | — | — |
-| Focus au panneau voisin à gauche | `pane.focus-left` | `⌥⌘←` | `Ctrl-Alt-←` |
-| Focus au panneau voisin à droite | `pane.focus-right` | `⌥⌘→` | `Ctrl-Alt-→` |
-| Focus au panneau voisin vers le haut | `pane.focus-up` | `⌥⌘↑` | `Ctrl-Alt-↑` |
-| Focus au panneau voisin vers le bas | `pane.focus-down` | `⌥⌘↓` | `Ctrl-Alt-↓` |
-| Déplacer la séparation la plus proche à gauche (dans la taille minimale des panneaux) | `pane.resize-left` | `⌥⌘⇧←` | `Ctrl-Alt-Shift-←` |
-| Déplacer la séparation la plus proche à droite (dans la taille minimale des panneaux) | `pane.resize-right` | `⌥⌘⇧→` | `Ctrl-Alt-Shift-→` |
-| Déplacer la séparation la plus proche vers le haut (dans la taille minimale des panneaux) | `pane.resize-up` | `⌥⌘⇧↑` | `Ctrl-Alt-Shift-↑` |
-| Déplacer la séparation la plus proche vers le bas (dans la taille minimale des panneaux) | `pane.resize-down` | `⌥⌘⇧↓` | `Ctrl-Alt-Shift-↓` |
+| Focus au panneau voisin à gauche | `pane.focus-left` | `⌥⌘←` | `Ctrl-Shift-←` |
+| Focus au panneau voisin à droite | `pane.focus-right` | `⌥⌘→` | `Ctrl-Shift-→` |
+| Focus au panneau voisin vers le haut | `pane.focus-up` | `⌥⌘↑` | `Ctrl-Shift-↑` |
+| Focus au panneau voisin vers le bas | `pane.focus-down` | `⌥⌘↓` | `Ctrl-Shift-↓` |
+| Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau | `pane.divider` | `⌥⌘R` | `Ctrl-Alt-Shift-R` |
 | Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
 | Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
-| Fermer le panneau (son canal PTY ; le dernier panneau d'une session la déconnecte) | `pane.close` | `⌘⇧W` | `Ctrl-Shift-Q` |
+| Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif | `pane.close` | — | — |
 
 ## Liste des hôtes (GUI)
 
@@ -431,13 +438,13 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (t
 | Action | Touches |
 |---|---|
 | Reconnecter un onglet terminé ou en échec | `↵` |
-| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` |
+| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell ; dans un onglet divisé, `Esc` annule seulement) | `Esc` |
 | Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer | `←` `→`, `Home` / `End`, `Suppr` |
 | Fermer un onglet (souris) | clic milieu sur l'onglet |
 | Coller (Linux) | `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
 | Panneaux : donner le focus à un panneau (souris) | clic dans le panneau |
 | Séparation entre panneaux (souris) | glisser |
-| Séparation entre panneaux (focus clavier) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
+| Séparation entre panneaux (focus clavier, par `pane.divider` ou `Tab`) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
 

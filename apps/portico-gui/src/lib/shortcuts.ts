@@ -61,32 +61,32 @@ const arrows = ["left", "right", "up", "down"] as const;
 const towards = { left: "à gauche", right: "à droite", up: "vers le haut", down: "vers le bas" } as const;
 const arrowKey = { left: "Left", right: "Right", up: "Up", down: "Down" } as const;
 
-/** Split panes (ADR "Split panes", docs/STACK.md): only in a terminal tab. */
+/** Split panes (ADR "Split panes", docs/STACK.md): only in a terminal tab.
+ * Palette titles always say "pane" (same wording as the TUI). */
 const panes: ActionDef[] = [
-  { id: "pane.split-right", title: "Split right", doc: "Diviser à droite (même session : un canal PTY de plus)", scope: "terminal", defaults: both("Mod+D") },
-  { id: "pane.split-down", title: "Split down", doc: "Diviser en bas (même session)", scope: "terminal", defaults: per(["Mod+Shift+D"], ["Mod+E"]) },
-  { id: "pane.split-host", title: "Split with another host…", doc: "Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas)", scope: "terminal", defaults: both() },
+  { id: "pane.split-right", title: "Split pane right", doc: "Diviser à droite (même session : un canal PTY de plus)", scope: "terminal", defaults: both("Mod+D") },
+  { id: "pane.split-down", title: "Split pane down", doc: "Diviser en bas (même session)", scope: "terminal", defaults: per(["Mod+Shift+D"], ["Mod+O"]) },
+  { id: "pane.split-host", title: "Split pane with host…", doc: "Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas)", scope: "terminal", defaults: both() },
   ...arrows.map(
     (d): ActionDef => ({
       id: `pane.focus-${d}`,
       title: `Focus pane ${d}`,
       doc: `Focus au panneau voisin ${towards[d]}`,
       scope: "terminal",
-      defaults: per([`Mod+Alt+${arrowKey[d]}`], [`Ctrl+Alt+${arrowKey[d]}`]),
+      // Linux: not Ctrl-Alt-arrows, which GNOME, Cinnamon and Xfce keep for workspaces.
+      defaults: per([`Mod+Alt+${arrowKey[d]}`], [`Mod+${arrowKey[d]}`]),
     }),
   ),
-  ...arrows.map(
-    (d): ActionDef => ({
-      id: `pane.resize-${d}`,
-      title: `Move divider ${d}`,
-      doc: `Déplacer la séparation la plus proche ${towards[d]} (dans la taille minimale des panneaux)`,
-      scope: "terminal",
-      defaults: per([`Mod+Alt+Shift+${arrowKey[d]}`], [`Ctrl+Alt+Shift+${arrowKey[d]}`]),
-    }),
-  ),
+  {
+    id: "pane.divider",
+    title: "Move pane divider…",
+    doc: "Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau",
+    scope: "terminal",
+    defaults: both("Mod+Alt+R"),
+  },
   { id: "pane.next", title: "Next pane", doc: "Panneau suivant (ordre de lecture)", scope: "terminal", defaults: per(["Mod+Alt+N"], ["Ctrl+Alt+N"]) },
   { id: "pane.zoom", title: "Zoom pane", doc: "Zoom on/off : le panneau actif occupe tout l'onglet", scope: "terminal", defaults: both("Mod+Shift+Enter") },
-  { id: "pane.close", title: "Close pane", doc: "Fermer le panneau (son canal PTY ; le dernier panneau d'une session la déconnecte)", scope: "terminal", defaults: per(["Mod+Shift+W"], ["Mod+Q"]) },
+  { id: "pane.close", title: "Close pane", doc: "Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif", scope: "terminal", defaults: both() },
 ];
 
 /**
@@ -103,7 +103,9 @@ export const ACTIONS: ActionDef[] = [
   { id: "app.logs", title: "Session logs", doc: "Journaux de session et config effective (panneau debug)", scope: "global", defaults: both("Mod+Shift+L") },
   { id: "app.favorite", title: "Toggle favorite", doc: "Favori on/off de l'hôte sélectionné (depuis un onglet : palette, « Add <alias> to favorites » ; dans un terminal, `Mod+D` divise le panneau)", scope: "hosts", defaults: both("Mod+D") },
   { id: "tab.new", title: "New tab", doc: "Nouvel onglet sur le même hôte (depuis la liste : se connecter)", scope: "global", defaults: both("Mod+T") },
-  { id: "tab.close", title: "Close tab", doc: "Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler)", scope: "global", defaults: both("Mod+W") },
+  { id: "tab.close", title: "Close tab", doc: "Fermer l'onglet ; dans un onglet divisé, le panneau actif (le dernier panneau ferme l'onglet ; le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler)", scope: "global", defaults: both("Mod+W") },
+  // Linux: Mod+Shift+W is Ctrl-Shift-W in a terminal, i.e. `tab.close` there.
+  { id: "tab.close-all", title: "Close tab and its panes", doc: "Fermer l'onglet et tous ses panneaux", scope: "global", defaults: per(["Mod+Shift+W"], ["Mod+Alt+W"]) },
   { id: "tab.next", title: "Next tab", doc: "Onglet suivant", scope: "global", defaults: per(["Ctrl+Tab", "Mod+]"], ["Ctrl+Tab"]) },
   { id: "tab.prev", title: "Previous tab", doc: "Onglet précédent", scope: "global", defaults: per(["Ctrl+Shift+Tab", "Mod+["], ["Ctrl+Shift+Tab"]) },
   { id: "tab.hosts", title: "Go to hosts", doc: "Liste des hôtes", scope: "global", defaults: per(["Mod+0"], ["Alt+0"]) },
