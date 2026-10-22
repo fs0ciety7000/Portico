@@ -251,6 +251,11 @@ struct Inner {
     tasks: TaskTracker,
     // ── Phase 3: snippets ──
     snippets: Arc<crate::snippets::SnippetStore>,
+    // ── Phase 6: open terminals and their recording taps ──
+    /// Weak: only the terminal tasks keep a tap (and so a recording's
+    /// queue) alive; if they are dropped without closing, the writer ends.
+    terminals:
+        Mutex<HashMap<TerminalId, (SessionId, std::sync::Weak<crate::recording::TerminalTap>)>>,
 }
 
 #[derive(Debug)]
@@ -284,6 +289,7 @@ impl Engine {
                 sessions: Mutex::new(HashMap::new()),
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
+                terminals: Mutex::default(),
             }),
         }
     }
@@ -1180,6 +1186,274 @@ impl Engine {
 }
 
 // ════ end Phase 5 ════════════════════════════════════════════════════════
+
+// ════ Phase 6: session recording (additive block) ════════════════════════
+//
+// The file side lives in `crate::recording`; here: the terminal registry and
+// the public commands. File I/O runs on `spawn_blocking`, the writer on a
+// tracked blocking thread (so `shutdown_and_wait` waits for the flush).
+
+impl Engine {
+    /// Called by a terminal when it opens: makes it recordable.
+    pub(crate) fn register_terminal(
+        &self,
+        id: TerminalId,
+        session: SessionId,
+        tap: &Arc<crate::recording::TerminalTap>,
+    ) {
+        self.inner
+            .terminals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, (session, Arc::downgrade(tap)));
+    }
+
+    /// Called by a terminal when it ends.
+    pub(crate) fn unregister_terminal(&self, id: TerminalId) {
+        self.inner
+            .terminals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    }
+
+    fn terminal_tap(
+        &self,
+        terminal: TerminalId,
+    ) -> Result<(SessionId, Arc<crate::recording::TerminalTap>)> {
+        self.inner
+            .terminals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&terminal)
+            .and_then(|(session, tap)| Some((*session, tap.upgrade()?)))
+            .ok_or(Error::Recording(
+                crate::recording::RecordingError::UnknownTerminal(terminal),
+            ))
+    }
+
+    /// Adds a line to a session's debug log (no-op for an unknown session).
+    fn session_log(&self, session: SessionId, level: LogLevel, target: &str, message: String) {
+        let logs = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .map(|entry| Arc::clone(&entry.logs));
+        let record = LogRecord {
+            at: time::OffsetDateTime::now_utc(),
+            level,
+            session: Some(session),
+            target: target.to_owned(),
+            message,
+        };
+        if let Some(logs) = logs {
+            logs.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(record.clone());
+        }
+        self.emit(EngineEvent::Log(record));
+    }
+
+    /// Starts recording the output of `terminal` (asciicast v2, opt-in).
+    /// Emits [`RecordingState::Started`], and later exactly one
+    /// [`RecordingState::Stopped`] (stop requested, terminal closed, writer
+    /// behind, write error or size cap).
+    ///
+    /// Errors: `recording_unknown_terminal`, `recording_already_active`,
+    /// `recording_unsafe_path` (symlinked folder), `recording_create_failed`.
+    ///
+    /// [`RecordingState::Started`]: crate::events::RecordingState::Started
+    /// [`RecordingState::Stopped`]: crate::events::RecordingState::Stopped
+    pub async fn start_recording(
+        &self,
+        terminal: TerminalId,
+    ) -> Result<crate::recording::RecordingInfo> {
+        use crate::recording::{MAX_RECORDING_BYTES, NewRecording, RecordingInfo};
+
+        let (session, tap) = self.terminal_tap(terminal)?;
+        let size = tap.begin(terminal).map_err(Error::Recording)?;
+        let alias = self
+            .session_alias(session)
+            .unwrap_or_else(|| "session".to_owned());
+        let dir = self.inner.config.paths.recordings();
+        let started = time::OffsetDateTime::now_utc();
+        let created = tokio::task::spawn_blocking(move || {
+            crate::recording::create_recording(&dir, &alias, started, size, MAX_RECORDING_BYTES)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)
+        .and_then(|created| created);
+        let NewRecording { name, path, writer } = match created {
+            Ok(created) => created,
+            Err(e) => {
+                tap.abort_start();
+                return Err(e);
+            }
+        };
+        let info = RecordingInfo {
+            terminal,
+            session,
+            name: name.clone(),
+            path: path.clone(),
+            started,
+        };
+        let path_text = path.display().to_string();
+        self.emit(EngineEvent::Recording {
+            terminal,
+            session,
+            state: crate::events::RecordingState::Started {
+                name: name.clone(),
+                path: path_text.clone(),
+            },
+        });
+        self.session_log(
+            session,
+            LogLevel::Info,
+            "recording",
+            format!("terminal {terminal}: recording to {path_text}"),
+        );
+
+        let (tx, rx) = mpsc::channel(crate::recording::RECORDING_QUEUE_CAPACITY);
+        let stop = Arc::new(crate::recording::StopCell::default());
+        // A terminal closed meanwhile drops `tx`: the writer then ends at
+        // once with `terminal_closed`, after the header.
+        tap.activate(tx, Arc::clone(&stop), size);
+        let engine = self.clone();
+        let job = RecordingJob {
+            terminal,
+            session,
+            name,
+            path,
+            path_text,
+        };
+        self.inner
+            .tasks
+            .spawn_blocking(move || job.run(&engine, rx, writer, &stop));
+        Ok(info)
+    }
+
+    /// Stops the recording of `terminal` (`requested`); the file is flushed
+    /// and closed by its writer, then `Stopped` is emitted.
+    /// Errors: `recording_unknown_terminal`, `recording_not_active`.
+    pub fn stop_recording(&self, terminal: TerminalId) -> Result<()> {
+        let (_, tap) = self.terminal_tap(terminal)?;
+        if tap.stop(crate::recording::RecordingStopReason::Requested) {
+            Ok(())
+        } else {
+            Err(Error::Recording(
+                crate::recording::RecordingError::NotRecording(terminal),
+            ))
+        }
+    }
+
+    /// Whether `terminal` is being recorded right now.
+    pub fn is_recording(&self, terminal: TerminalId) -> bool {
+        self.terminal_tap(terminal)
+            .is_ok_and(|(_, tap)| tap.is_recording())
+    }
+
+    /// The recordings folder (`<data_dir>/recordings`).
+    pub fn recordings_dir(&self) -> PathBuf {
+        self.inner.config.paths.recordings()
+    }
+
+    /// Recording files, newest first (header, size, duration).
+    pub async fn list_recordings(&self) -> Result<Vec<crate::recording::RecordingEntry>> {
+        let dir = self.recordings_dir();
+        tokio::task::spawn_blocking(move || crate::recording::list(&dir))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Deletes the recording `name` (a file name from the listing). Paths,
+    /// `..`, symlinks and anything outside the recordings folder are refused.
+    pub async fn delete_recording(&self, name: &str) -> Result<()> {
+        let dir = self.recordings_dir();
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || crate::recording::delete(&dir, &name))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Opens the recording `name` for playback: header validated, events
+    /// streamed by the returned reader (blocking reads: iterate it on a
+    /// blocking thread). Output is untrusted: pass it through
+    /// [`crate::recording::PlaybackSanitizer`].
+    pub async fn open_recording(&self, name: &str) -> Result<crate::recording::RecordingReader> {
+        let dir = self.recordings_dir();
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || crate::recording::open(&dir, &name))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+}
+
+/// The writer side of one recording (runs on a blocking thread).
+#[derive(Debug)]
+struct RecordingJob {
+    terminal: TerminalId,
+    session: SessionId,
+    name: String,
+    path: PathBuf,
+    path_text: String,
+}
+
+impl RecordingJob {
+    fn run(
+        self,
+        engine: &Engine,
+        mut rx: mpsc::Receiver<crate::recording::TapEvent>,
+        mut writer: crate::recording::CastWriter<std::io::BufWriter<std::fs::File>>,
+        stop: &crate::recording::StopCell,
+    ) {
+        use crate::recording::RecordingStopReason as Reason;
+
+        let failed = crate::recording::run_writer(&mut rx, &mut writer);
+        drop(rx);
+        let duration = writer.last_time();
+        let (sink, finished) = writer.finish();
+        let synced = sink
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)
+            .and_then(|file| file.sync_all());
+        let reason = match (failed, finished, synced) {
+            (Some(stop), _, _) | (None, Err(stop), _) => stop.reason(),
+            (None, Ok(()), Err(_)) => Reason::WriteFailed,
+            (None, Ok(()), Ok(())) => stop.get().unwrap_or(Reason::TerminalClosed),
+        };
+        let bytes = std::fs::symlink_metadata(&self.path).map_or(0, |m| m.len());
+        let duration = Duration::try_from_secs_f64(duration).unwrap_or(Duration::ZERO);
+        let level = if matches!(reason, Reason::Requested | Reason::TerminalClosed) {
+            LogLevel::Info
+        } else {
+            LogLevel::Warn
+        };
+        engine.session_log(
+            self.session,
+            level,
+            "recording",
+            format!(
+                "terminal {}: recording stopped ({}), {bytes} bytes, {:.1} s",
+                self.terminal,
+                reason.code(),
+                duration.as_secs_f64()
+            ),
+        );
+        engine.emit(EngineEvent::Recording {
+            terminal: self.terminal,
+            session: self.session,
+            state: crate::events::RecordingState::Stopped {
+                reason,
+                name: self.name,
+                path: self.path_text,
+                bytes,
+                duration,
+            },
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests {

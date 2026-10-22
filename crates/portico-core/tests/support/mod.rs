@@ -66,6 +66,9 @@ pub struct Behaviour {
     pub pubkey_offers: AtomicUsize,
     /// Accept PTY shells that echo input; the line `exit` ends with status 3.
     pub pty_echo: bool,
+    /// Accept PTY shells that do **not** echo input (like `stty -echo`):
+    /// each line received is answered with `OUTPUT-MARKER\r\n` only.
+    pub pty_no_echo: bool,
     /// Last `window-change` received (cols, rows).
     pub last_resize: std::sync::Mutex<Option<(u32, u32)>>,
     /// `TERM` sent with the PTY request.
@@ -262,7 +265,7 @@ impl russh::server::Handler for ServerHandler {
         reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.b.pty_echo || self.b.sftp_root.is_some() {
+        if self.b.pty_echo || self.b.pty_no_echo || self.b.sftp_root.is_some() {
             reply.accept().await;
             self.channels.push(channel);
         }
@@ -331,9 +334,14 @@ impl russh::server::Handler for ServerHandler {
         if self.b.flood {
             return Ok(());
         }
-        session.data(channel, bytes::Bytes::copy_from_slice(data))?;
+        if !self.b.pty_no_echo {
+            session.data(channel, bytes::Bytes::copy_from_slice(data))?;
+        }
         for &b in data {
             if b == b'\r' || b == b'\n' {
+                if self.b.pty_no_echo && !self.line.is_empty() {
+                    session.data(channel, bytes::Bytes::from_static(b"OUTPUT-MARKER\r\n"))?;
+                }
                 if self.line == b"exit" {
                     session.exit_status_request(channel, 3)?;
                     session.eof(channel)?;

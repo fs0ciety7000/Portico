@@ -16,7 +16,7 @@ mod handler;
 pub(crate) mod route;
 mod signer;
 mod stream;
-mod terminal;
+pub(crate) mod terminal;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -140,6 +140,10 @@ pub enum Error {
     // ── Phase 5: imports ────────────────────────────────────────────────
     #[error(transparent)]
     Import(#[from] crate::import::ImportError),
+
+    // ── Phase 6: recording ──────────────────────────────────────────────
+    #[error(transparent)]
+    Recording(#[from] crate::recording::RecordingError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -315,6 +319,9 @@ impl Error {
 
             // ── Phase 5 ──
             Self::Import(e) => e.code_and_hint(),
+
+            // ── Phase 6 ──
+            Self::Recording(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),

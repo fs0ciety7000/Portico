@@ -6,7 +6,9 @@
   import { isMac } from "./lib/keys";
   import { dur } from "./lib/motion";
   import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
-  import { isLive, workspace } from "./lib/state/workspace.svelte";
+  import { isLive, workspace, type Tab } from "./lib/state/workspace.svelte";
+  import { layout, minPanePx, MAX_PANES, panesOf, type Direction, type Layout } from "./lib/panes";
+  import PaneDivider from "./lib/components/PaneDivider.svelte";
   import { files } from "./lib/state/files.svelte";
   import { tunnels } from "./lib/state/tunnels.svelte";
   import { keys } from "./lib/state/keys.svelte";
@@ -50,7 +52,7 @@
   let filesOpen = $state(false);
   let tunnelsOpen = $state(false);
   let filesPanel: FilesPanel | undefined = $state();
-  /** Terminal components by tab key (copy, paste, focus). */
+  /** Terminal components by pane key (copy, paste, focus). */
   const views: Record<number, TerminalView> = $state({});
 
   const searching = $derived(query.trim().length > 0);
@@ -59,7 +61,9 @@
   const selectedHost = $derived(rowHost(selectedRow));
 
   const tab = $derived(workspace.activeTab);
-  const tabSession = $derived(tab ? workspace.sessions[tab.session] : undefined);
+  /** The focused pane of the active tab: files, snippets, logs, copy and paste act on it. */
+  const pane = $derived(workspace.activePane);
+  const tabSession = $derived(pane ? workspace.sessions[pane.session] : undefined);
   const tabStatus = $derived(describe(tabSession));
   const prompt = $derived(workspace.prompts[0]);
   const alert = $derived(workspace.alerts[0]);
@@ -78,8 +82,8 @@
       logs.open ||
       importer.open,
   );
-  /** Favorite, edit: the active tab's host, else the selected one. */
-  const targetAlias = $derived(tab ? tab.alias : selectedHost?.alias);
+  /** Favorite, edit: the active pane's host, else the selected one. */
+  const targetAlias = $derived(pane ? pane.alias : selectedHost?.alias);
   const targetHost = $derived(targetAlias ? hosts.byAlias[targetAlias] : undefined);
 
   // The selection is an index: when the list changes under it (an edit
@@ -104,41 +108,41 @@
   /** First host row (the list starts with a section header when grouped). */
   const firstHost = () => Math.max(0, rows.findIndex((r) => r.kind === "host"));
 
-  /** Where snippets run: the active tab's shell. */
+  /** Where snippets run: the active pane's shell. */
   const snippetTarget: SnippetTarget | null = $derived(
-    tab
+    pane
       ? {
-          alias: tab.alias,
-          terminal: tab.terminal !== null && !tab.end ? tab.terminal : null,
-          bracketed: () => views[tab.key]?.bracketedPaste() ?? false,
+          alias: pane.alias,
+          terminal: pane.terminal !== null && !pane.end ? pane.terminal : null,
+          bracketed: () => views[pane.key]?.bracketedPaste() ?? false,
         }
       : null,
   );
 
   function openSnippets() {
-    snippets.show(tab ? tab.alias : (selectedHost?.alias ?? null));
+    snippets.show(pane ? pane.alias : (selectedHost?.alias ?? null));
   }
 
   /** "Run: …" from the palette: straight to the shell unless it needs values. */
   async function runFromPalette(s: Snippet) {
-    if (!tab) return;
+    if (!pane) return;
     if (s.placeholders.length) {
-      snippets.show(tab.alias, { kind: "run", snippet: s, error: null });
+      snippets.show(pane.alias, { kind: "run", snippet: s, error: null });
       return;
     }
     const error = await snippets.run(snippetTarget, s, {});
     if (!error) return;
-    if (error.code === NEEDS_PASTE_MODE) snippets.show(tab.alias, { kind: "run", snippet: s, error });
+    if (error.code === NEEDS_PASTE_MODE) snippets.show(pane.alias, { kind: "run", snippet: s, error });
     else workspace.notify(error);
   }
 
-  // The palette lists the snippets of the active tab's host.
+  // The palette lists the snippets of the active pane's host.
   $effect(() => {
     void paletteOpen;
-    void snippets.loadPalette(tab?.alias ?? null);
+    void snippets.loadPalette(pane?.alias ?? null);
   });
   const paletteSnippets = $derived(
-    tab && snippetTarget?.terminal != null && snippets.palette?.alias === tab.alias ? snippets.palette.list : [],
+    pane && snippetTarget?.terminal != null && snippets.palette?.alias === pane.alias ? snippets.palette.list : [],
   );
 
   /** Effective label of an action (undefined when unbound). */
@@ -157,18 +161,18 @@
           ? [{ id: "vault.create", title: "Create a vault for remembered secrets", shortcut: inKeys("V"), run: () => vault.open("create", "keys") }]
           : [],
   );
-  const showFiles = $derived(filesOpen && !!tab);
+  const showFiles = $derived(filesOpen && !!pane);
 
-  /** Session the tunnels panel adds to: the active tab's, else the selected host's live one. */
+  /** Session the tunnels panel adds to: the active pane's, else the selected host's live one. */
   const tunnelSession = $derived.by(() => {
-    if (tab) return isLive(workspace.sessions[tab.session]) ? { id: tab.session, alias: tab.alias } : null;
+    if (pane) return isLive(workspace.sessions[pane.session]) ? { id: pane.session, alias: pane.alias } : null;
     const alias = selectedHost?.alias;
     const live = alias ? workspace.byAlias[alias] : undefined;
     return live && alias && isLive(live) ? { id: live.id, alias } : null;
   });
 
   function toggleFiles() {
-    if (!tab) {
+    if (!pane) {
       // From the host list: open (or reuse) the host's tab, files beside it.
       const host = selectedHost;
       if (!host) return;
@@ -243,14 +247,14 @@
     if (at >= 0 && collapse) selected = at;
   }
 
-  /** Debug panel on the active tab's session, else the selected host's latest. */
+  /** Debug panel on the active pane's session, else the selected host's latest. */
   function showLogs() {
-    const session = tab ? tab.session : selectedHost ? (workspace.byAlias[selectedHost.alias]?.id ?? null) : null;
+    const session = pane ? pane.session : selectedHost ? (workspace.byAlias[selectedHost.alias]?.id ?? null) : null;
     void logs.show(session);
   }
 
   async function paste() {
-    const view = tab ? views[tab.key] : undefined;
+    const view = pane ? views[pane.key] : undefined;
     if (!view) return;
     try {
       view.pasteText(await navigator.clipboard.readText());
@@ -264,12 +268,101 @@
   }
 
   function copy() {
-    const text = tab ? views[tab.key]?.copySelection() : "";
+    const text = pane ? views[pane.key]?.copySelection() : "";
     if (text) navigator.clipboard.writeText(text).catch((e) => workspace.notify(e));
   }
 
   /** The selected row when it is in "Recent" (x removes it). */
-  const recentRow = $derived(!tab && selectedRow?.kind === "host" && selectedRow.section.kind === "recent" ? selectedRow.host : undefined);
+  const recentRow = $derived(!pane && selectedRow?.kind === "host" && selectedRow.section.kind === "recent" ? selectedRow.host : undefined);
+
+  // ── Split panes: geometry of the active tab ──
+  let stageW = $state(0);
+  let stageH = $state(0);
+  /** Room between panes and around them (tokens, read once the styles are in). */
+  let paneGap = $state(8);
+  let panePad = $state(4);
+  /** Smallest pane in px: 20 × 5 cells plus the pane's chrome (TerminalView). */
+  let paneMin = $state({ w: 0, h: 0 });
+  /** Where split panes go: the stage, inset so frames do not touch the window. */
+  const paneRect = $derived({ x: panePad, y: panePad, w: Math.max(0, stageW - 2 * panePad), h: Math.max(0, stageH - 2 * panePad) });
+  const paneLayout: Layout = $derived.by(() => {
+    if (!tab) return { panes: new Map(), dividers: [] };
+    // A lone pane keeps the whole stage, frameless (as before panes existed).
+    if (panesOf(tab.root).length < 2) return layout(tab.root, { x: 0, y: 0, w: stageW, h: stageH }, 0);
+    return layout(tab.root, paneRect, paneGap, tab.zoom);
+  });
+  /** Every pane of every tab, with its tab. */
+  const placed = $derived(workspace.tabs.flatMap((t) => workspace.panesIn(t).map((p) => ({ pane: p, tab: t }))));
+  $effect(() => {
+    workspace.geometry = { rect: paneRect, limits: { maxPanes: MAX_PANES, min: paneMin, gap: paneGap } };
+  });
+
+  /** Reads the tokens and the terminal cell size the pane geometry depends on. */
+  function measurePanes() {
+    const css = getComputedStyle(document.documentElement);
+    const px = (name: string) => Number.parseFloat(css.getPropertyValue(name)) || 0;
+    paneGap = px("--space-2");
+    panePad = px("--space-1");
+    const fontSize = px("--text-base") || 13;
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (ctx) ctx.font = `${fontSize}px ${css.getPropertyValue("--font-mono").trim()}`;
+    const cell = { w: ctx?.measureText("W").width || fontSize * 0.6, h: Math.ceil(fontSize * 1.2) };
+    // TerminalView's split chrome: 1 px frame, header, insets of the xterm
+    // host, and room for the scrollbar.
+    const chrome = {
+      w: 2 + px("--space-3") + px("--space-2") + px("--space-3"),
+      h: 2 + px("--space-5") + px("--space-1") + px("--space-1") + px("--space-2"),
+    };
+    paneMin = minPanePx(cell, chrome);
+  }
+
+  /** Palette hint of a tab: its pane count, else the remote title. */
+  function tabHint(t: Tab): string | undefined {
+    const n = panesOf(t.root).length;
+    return n > 1 ? `${n} panes` : workspace.focusOf(t)?.title || undefined;
+  }
+
+  const paneCount = $derived(tab ? panesOf(tab.root).length : 0);
+  /** Split panes (only with a terminal tab). */
+  const paneCommands: Command[] = $derived([
+    { id: "pane.split-right", title: "Split right", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-right"), run: () => void workspace.split("row") },
+    { id: "pane.split-down", title: "Split down", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-down"), run: () => void workspace.split("column") },
+    { id: "pane.split-host", title: "Split with another host…", hint: "host picker", shortcut: k("pane.split-host"), run: openHostPicker },
+    ...(paneCount > 1
+      ? [
+          { id: "pane.next", title: "Next pane", shortcut: k("pane.next"), run: () => workspace.focusNext() },
+          ...(["left", "right", "up", "down"] as const).map((d) => ({
+            id: `pane.focus-${d}`,
+            title: `Focus pane ${d}`,
+            shortcut: k(`pane.focus-${d}`),
+            run: () => workspace.focusDirection(d),
+          })),
+          ...(["left", "right", "up", "down"] as const).map((d) => ({
+            id: `pane.resize-${d}`,
+            title: `Move divider ${d}`,
+            hint: "resize panes",
+            shortcut: k(`pane.resize-${d}`),
+            run: () => workspace.resize(d),
+          })),
+          { id: "pane.zoom", title: tab?.zoom != null ? "Unzoom pane" : "Zoom pane", shortcut: k("pane.zoom"), run: () => workspace.toggleZoom() },
+          { id: "pane.close", title: `Close pane (${pane?.alias ?? ""})`, shortcut: k("pane.close"), run: () => void workspace.closePane() },
+        ]
+      : []),
+  ]);
+
+  /** "Split with another host…": the palette, listing hosts. */
+  let pickerOpen = $state(false);
+  function openHostPicker() {
+    if (pane) pickerOpen = true;
+  }
+  const hostChoices: Command[] = $derived(
+    hosts.all.map((h) => ({
+      id: `split-host-${h.alias}`,
+      title: h.alias,
+      hint: [h.user && `${h.user}@`, h.hostname].filter(Boolean).join("") || undefined,
+      run: () => void workspace.split(null, h.alias),
+    })),
+  );
 
   // Ids are the stable action ids of `shortcuts.ts` (bindable in settings.toml).
   const commands: Command[] = $derived([
@@ -280,14 +373,15 @@
       shortcut: k("hosts.search"),
       run: () => ((workspace.active = null), queueMicrotask(() => searchEl?.focus())),
     },
-    ...(tab
+    ...(pane
       ? [
-          { id: "tab.new", title: `New tab on ${tab.alias}`, shortcut: k("tab.new"), run: () => void workspace.duplicate() },
+          { id: "tab.new", title: `New tab on ${pane.alias}`, shortcut: k("tab.new"), run: () => void workspace.duplicate() },
           { id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() },
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
-          { id: "tab.reconnect", title: `Reconnect ${tab.alias}`, shortcut: k("tab.reconnect"), run: () => void workspace.reconnect(tab.key) },
-          { id: "tab.disconnect", title: `Disconnect ${tab.alias}`, shortcut: k("tab.disconnect"), run: () => void workspace.disconnect(tab.alias) },
+          { id: "tab.reconnect", title: `Reconnect ${pane.alias}`, shortcut: k("tab.reconnect"), run: () => void workspace.reconnect(pane.key) },
+          { id: "tab.disconnect", title: `Disconnect ${pane.alias}`, shortcut: k("tab.disconnect"), run: () => void workspace.disconnect(pane.alias) },
+          ...paneCommands,
         ]
       : [
           {
@@ -303,14 +397,15 @@
             id: "app.favorite",
             title: targetHost.favorite ? `Remove ${targetHost.alias} from favorites` : `Add ${targetHost.alias} to favorites`,
             hint: "Toggle favorite",
-            shortcut: k("app.favorite"),
+            // In a terminal, Mod+D splits the pane.
+            shortcut: pane ? undefined : k("app.favorite"),
             run: () => void hosts.toggleFavorite(targetHost.alias),
           },
           {
             id: "hosts.edit",
             title: `Edit ${targetHost.alias}`,
             hint: "tags, group, notes",
-            shortcut: tab ? undefined : k("hosts.edit"),
+            shortcut: pane ? undefined : k("hosts.edit"),
             run: () => (hosts.editing = targetHost.alias),
           },
         ]
@@ -327,17 +422,17 @@
         ]
       : []),
     ...(hosts.recent.length
-      ? [{ id: "hosts.clear-recent", title: "Clear recent", shortcut: tab ? undefined : k("hosts.clear-recent"), run: () => (hosts.confirmClear = true) }]
+      ? [{ id: "hosts.clear-recent", title: "Clear recent", shortcut: pane ? undefined : k("hosts.clear-recent"), run: () => (hosts.confirmClear = true) }]
       : []),
     {
       id: "app.files",
-      title: tab ? (showFiles ? "Hide files" : `Files on ${tab.alias}`) : `Files on ${selectedHost?.alias ?? "host"}`,
+      title: pane ? (showFiles ? "Hide files" : `Files on ${pane.alias}`) : `Files on ${selectedHost?.alias ?? "host"}`,
       shortcut: k("app.files"),
       run: toggleFiles,
     },
-    ...(showFiles && tab
+    ...(showFiles && pane
       ? [
-          { id: "files.upload", title: `Upload files to ${tab.alias}`, shortcut: "u", run: () => filesPanel?.run("upload") },
+          { id: "files.upload", title: `Upload files to ${pane.alias}`, shortcut: "u", run: () => filesPanel?.run("upload") },
           { id: "files.mkdir", title: "New folder", shortcut: "n", run: () => filesPanel?.run("mkdir") },
           { id: "files.rename", title: "Rename selected file", shortcut: "r", run: () => filesPanel?.run("rename") },
           { id: "files.delete", title: "Delete selected file", shortcut: "d", run: () => filesPanel?.run("delete") },
@@ -354,7 +449,7 @@
       id: "snippets.new",
       title: "New snippet",
       shortcut: k("snippets.new") ?? (k("app.snippets") ? `${k("app.snippets")}, n` : undefined),
-      run: () => snippets.show(tab?.alias ?? null, { kind: "edit", draft: emptyDraft(tab?.alias ?? null) }),
+      run: () => snippets.show(pane?.alias ?? null, { kind: "edit", draft: emptyDraft(pane?.alias ?? null) }),
     },
     ...paletteSnippets.map((s) => ({ id: `snippet-${s.id}`, title: `Run: ${s.name}`, hint: scopeLabel(s), run: () => void runFromPalette(s) })),
     {
@@ -381,8 +476,8 @@
     { id: "tab.hosts", title: "Go to hosts", shortcut: k("tab.hosts"), run: () => (workspace.active = null) },
     ...workspace.tabs.map((t, i) => ({
       id: `tab-${t.key}`,
-      title: `Go to ${t.alias}`,
-      hint: t.title || undefined,
+      title: `Go to ${workspace.focusOf(t)?.alias ?? "tab"}`,
+      hint: tabHint(t),
       shortcut: i < 9 ? k(`tab.goto-${i + 1}`) : undefined,
       run: () => (workspace.active = t.key),
     })),
@@ -401,12 +496,18 @@
   function runAction(id: string) {
     const goto = /^tab\.goto-(\d)$/.exec(id);
     if (goto?.[1]) return workspace.go(Number(goto[1]) - 1);
+    const arrow = /^pane\.(focus|resize)-(left|right|up|down)$/.exec(id);
+    if (arrow?.[2]) {
+      const dir = arrow[2] as Direction;
+      return arrow[1] === "focus" ? workspace.focusDirection(dir) : workspace.resize(dir);
+    }
     switch (id) {
       case "app.palette":
         paletteOpen = !paletteOpen;
+        pickerOpen = false;
         return;
       case "tab.new":
-        return tab ? void workspace.duplicate() : connectSelected();
+        return pane ? void workspace.duplicate() : connectSelected();
       case "tab.close":
         return void workspace.close();
       case "tab.hosts":
@@ -466,6 +567,18 @@
         return fold(true);
       case "hosts.expand":
         return fold(false);
+      case "pane.split-right":
+        return void workspace.split("row");
+      case "pane.split-down":
+        return void workspace.split("column");
+      case "pane.split-host":
+        return openHostPicker();
+      case "pane.next":
+        return workspace.focusNext();
+      case "pane.zoom":
+        return workspace.toggleZoom();
+      case "pane.close":
+        return void workspace.closePane();
       default:
         // Palette-only actions bound in settings.toml run their command.
         commands.find((c) => c.id === id)?.run();
@@ -481,16 +594,16 @@
   function onkeydown(e: KeyboardEvent) {
     if (modalOpen) return;
     // In a field (search, xterm's textarea) or the palette, plain keys type.
-    const id = keymap.match(e, tab ? "terminal" : "hosts", paletteOpen || isField(e.target));
+    const id = keymap.match(e, pane ? "terminal" : "hosts", paletteOpen || pickerOpen || isField(e.target));
     if (!id) return;
     e.preventDefault();
-    if (paletteOpen && id !== "app.palette") return;
+    if ((paletteOpen || pickerOpen) && id !== "app.palette") return;
     runAction(id);
   }
 
   // Leaving a terminal: take the focus out of its (now hidden) textarea.
   $effect(() => {
-    if (tab) return;
+    if (pane) return;
     const el = document.activeElement;
     if (el instanceof HTMLElement && el.closest(".terminal")) el.blur();
   });
@@ -498,8 +611,8 @@
   // Give the keyboard back when an overlay closes: to the files panel when
   // it is open (and just opened), else to the terminal.
   $effect(() => {
-    if (!paletteOpen && !modalOpen && tab) {
-      const view = views[tab.key];
+    if (!paletteOpen && !pickerOpen && !modalOpen && pane) {
+      const view = views[pane.key];
       const panel = showFiles ? filesPanel : undefined;
       queueMicrotask(() => (panel ? panel.focus() : view?.focus()));
     }
@@ -527,6 +640,9 @@
   onMount(() => {
     // New aliases (and their metadata) show up once the Include line is in place.
     importer.onimported = () => void load();
+    measurePanes();
+    // The mono font may arrive after the first measure.
+    void document.fonts.ready.then(measurePanes);
     load();
     void files.init();
     void vault.init();
@@ -542,7 +658,7 @@
         }
       }),
       backend.onDragging((d) => (files.dragging = d)),
-      backend.onDropped((list) => files.dropped(list, showFiles && tab ? tab.session : null)),
+      backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
     ];
     return () => {
       for (const u of unlisten) void u.then((f) => f());
@@ -554,6 +670,7 @@
   const tabHints = [
     ["tab.hosts", "hosts"],
     ["tab.new", "new tab"],
+    ["pane.split-right", "split"],
     ["tab.close", "close"],
     ["app.files", "files"],
     ["app.logs", "logs"],
@@ -587,7 +704,7 @@
   </header>
 
   <main class:with-files={showFiles}>
-    <div class="hosts" class:hidden={!!tab}>
+    <div class="hosts" class:hidden={!!pane}>
       <Sidebar
         {rows}
         total={hosts.all.length}
@@ -611,31 +728,58 @@
         onlogs={showLogs}
       />
     </div>
-    <div class="stage">
-      {#each workspace.tabs as t (t.key)}
-        <TerminalView bind:this={views[t.key]} tab={t} active={workspace.active === t.key} themeId={settings.themeId} autofocus={!showFiles} />
+    <div class="stage" bind:clientWidth={stageW} bind:clientHeight={stageH}>
+      <!-- Flat and keyed by pane: a split or a close never remounts a terminal. -->
+      {#each placed as { pane: p, tab: t } (p.key)}
+        {@const rect = t.key === workspace.active ? paneLayout.panes.get(p.key) : undefined}
+        <div
+          class="slot"
+          class:hidden={!rect}
+          style:left={rect ? `${rect.x}px` : null}
+          style:top={rect ? `${rect.y}px` : null}
+          style:width={rect ? `${rect.w}px` : null}
+          style:height={rect ? `${rect.h}px` : null}
+        >
+          <TerminalView
+            bind:this={views[p.key]}
+            pane={p}
+            visible={!!rect}
+            focused={t.focus === p.key}
+            split={panesOf(t.root).length > 1}
+            zoomed={t.zoom === p.key}
+            themeId={settings.themeId}
+            autofocus={!showFiles}
+            onfocusin={() => workspace.focusPane(p.key)}
+          />
+        </div>
+      {/each}
+      {#each paneLayout.dividers as d (d.id)}
+        <PaneDivider divider={d} onrelease={() => pane && views[pane.key]?.focus()} />
       {/each}
     </div>
-    {#if showFiles && tab}
-      {#key tab.session}
-        <FilesPanel bind:this={filesPanel} session={tab.session} alias={tab.alias} onclose={closeFiles} onreconnect={() => workspace.reconnect(tab.key)} />
+    {#if showFiles && pane}
+      {#key pane.session}
+        <FilesPanel bind:this={filesPanel} session={pane.session} alias={pane.alias} onclose={closeFiles} onreconnect={() => workspace.reconnect(pane.key)} />
       {/key}
     {/if}
   </main>
 
   <footer class="statusbar">
-    {#if tab}
+    {#if pane}
       <!-- The status (dot, alias, phase, latency) never shrinks; only the
            terminal title does, then the hints give way (see .hints). -->
       <span class="session" data-status={tabStatus.status}>
-        <span class="dot" class:busy={tabStatus.busy} class:hollow={!!tab.end}></span>
-        <span class="alias">{tab.alias}</span>
-        {#if tab.end}<span class="ended">{tab.end.kind === "closed" ? "Shell closed" : "Shell exited"}</span>{/if}
-        <span class="phase">{tab.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
+        <span class="dot" class:busy={tabStatus.busy} class:hollow={!!pane.end}></span>
+        <span class="alias">{pane.alias}</span>
+        {#if tab && paneCount > 1}
+          <span class="pane-pos">pane <span class="mono">{panesOf(tab.root).indexOf(pane.key) + 1}/{paneCount}</span>{tab.zoom !== null ? ", zoomed" : ""}</span>
+        {/if}
+        {#if pane.end}<span class="ended">{pane.end.kind === "closed" ? "Shell closed" : "Shell exited"}</span>{/if}
+        <span class="phase">{pane.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
         {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected"}
           <span class="rtt mono" class:slow={tabStatus.status === "warning"}>{formatRtt(tabSession.latencyMs)}</span>
         {/if}
-        {#if tab.title}<span class="title" title={tab.title}>{tab.title}</span>{/if}
+        {#if pane.title}<span class="title" title={pane.title}>{pane.title}</span>{/if}
       </span>
       <span class="hints">
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
@@ -660,6 +804,13 @@
 </div>
 
 <CommandPalette bind:open={paletteOpen} {commands} />
+<CommandPalette
+  bind:open={pickerOpen}
+  commands={hostChoices}
+  label="Split with another host"
+  placeholder={pane ? `Split ${pane.alias} with…` : "Split with…"}
+  empty="No host found"
+/>
 
 {#if alert}
   {#key alert}
@@ -830,7 +981,8 @@
      host list's clicks. Hidden while a tab is active. */
   main > .hosts { position: absolute; inset: 0; z-index: 1; }
   .stage { position: relative; min-width: 0; min-height: 0; }
-  .stage > :global(*) { position: absolute; inset: 0; }
+  .slot { position: absolute; inset: 0; }
+  .slot.hidden { display: none; }
   .hosts {
     display: grid;
     grid-template-columns: minmax(280px, 340px) 1fr;
@@ -892,6 +1044,7 @@
   .session .ended { color: var(--text-primary); }
   .session .alias { color: var(--text-primary); font-weight: 550; }
   .rtt { color: var(--text-muted); }
+  .pane-pos .mono { font-variant-numeric: tabular-nums; }
   .rtt.slow { color: var(--status-warning); }
   .session > .title { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; }
   .session > * + *:not(.alias)::before { content: "·"; margin-right: var(--space-2); color: var(--text-muted); }

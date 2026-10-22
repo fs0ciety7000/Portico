@@ -250,9 +250,9 @@ class Keys {
     return ours ? `Copy ${run.key.id} to ${run.alias} · ${COPY_STEP_LABEL[run.step]}` : null;
   }
 
-  /** Closes a session opened for copy-id, unless a tab now uses it. */
+  /** Closes a session opened for copy-id, unless a pane now uses it. */
   #release(session: number) {
-    if (workspace.tabs.some((t) => t.session === session)) return;
+    if (workspace.usesSession(session)) return;
     if (isLive(workspace.sessions[session])) backend.disconnect(session).catch(() => {});
   }
 }

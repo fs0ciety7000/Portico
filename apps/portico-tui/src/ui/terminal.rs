@@ -15,10 +15,13 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::terminal::TerminalView;
 use crate::theme::{Styles, c};
 
-/// Draws the terminal. `focused` controls the cursor and the scroll badge.
+/// Draws the terminal. `focused` controls the cursor; `banner` the
+/// one-line notice once the shell ended (`close`: the close-pane key).
 pub(crate) fn render(
     view: &TerminalView,
     focused: bool,
+    banner: bool,
+    close: &str,
     s: Styles,
     frame: &mut Frame<'_>,
     area: Rect,
@@ -46,16 +49,16 @@ pub(crate) fn render(
         .right_aligned();
         frame.render_widget(Paragraph::new(badge), Rect { height: 1, ..area });
     }
-    if let Some(ended) = &view.ended {
+    if let Some(ended) = view.ended.as_ref().filter(|_| banner) {
         let text = match ended {
             crate::terminal::Ended::Exited(code) => {
-                format!(" shell exited ({code}) · Ctrl-Space w to close ")
+                format!(" shell exited ({code}) · Ctrl-Space {close} to close ")
             }
             crate::terminal::Ended::Killed(sig) => {
-                format!(" shell killed by SIG{sig} · Ctrl-Space w to close ")
+                format!(" shell killed by SIG{sig} · Ctrl-Space {close} to close ")
             }
             crate::terminal::Ended::Closed => {
-                " connection closed · Ctrl-Space w to close ".to_owned()
+                format!(" connection closed · ↵ reconnect · Ctrl-Space {close} to close ")
             }
         };
         // A failing exit status is worth noticing; a clean one is not.

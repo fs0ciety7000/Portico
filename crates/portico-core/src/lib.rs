@@ -33,6 +33,7 @@ pub mod keys;
 pub mod known_hosts;
 pub mod logs;
 pub mod recent;
+pub mod recording;
 pub mod search;
 pub mod secrets;
 pub mod session;

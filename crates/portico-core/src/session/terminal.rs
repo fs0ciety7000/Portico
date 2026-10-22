@@ -8,6 +8,12 @@
 //! flood, and a writer stalled on the remote window can never stop the
 //! reader (which would freeze russh's session loop and every other channel).
 //!
+//! Recording (phase 6): a [`TerminalTap`] sits on the output path of the
+//! reader, after a chunk was handed to the UI, so a recording holds exactly
+//! what the UI received; the writer reports resizes to it. Neither ever
+//! waits on the recording (`try_send`, see [`crate::recording`]). When the
+//! terminal ends, the tap is closed, which stops a running recording.
+//!
 //! Backpressure: russh 0.64 re-opens the SSH window as soon as a packet is
 //! received, so a slow UI is throttled at the TCP level for the *whole
 //! connection* (russh's per-channel queue, then the session loop, then the
@@ -33,6 +39,7 @@ use crate::error::{Error, Result};
 use crate::events::{EngineEvent, TerminalEvent};
 use crate::ids::TerminalId;
 use crate::logs::LogLevel;
+use crate::recording::TerminalTap;
 
 /// `TERM` announced to the server (what both UI emulators implement).
 pub(crate) const TERM: &str = "xterm-256color";
@@ -88,6 +95,8 @@ pub(crate) async fn open(
     let (output_tx, output_rx) = mpsc::channel(TERMINAL_OUTPUT_CAPACITY);
     let close = ctx.cancel.child_token();
     let peer_closed = Arc::new(AtomicBool::new(false));
+    let tap = Arc::new(TerminalTap::new(size));
+    ctx.engine.register_terminal(id, ctx.id, &tap);
     for chunk in prelude {
         // Output that arrived before the shell was confirmed.
         let _ = output_tx.try_send(chunk);
@@ -110,6 +119,7 @@ pub(crate) async fn open(
         output_tx,
         close.clone(),
         Arc::clone(&peer_closed),
+        Arc::clone(&tap),
     ));
     tokio::spawn(writer(
         ctx.clone(),
@@ -119,6 +129,7 @@ pub(crate) async fn open(
         size_rx,
         close.clone(),
         peer_closed,
+        tap,
     ));
     Ok(TerminalHandle {
         id,
@@ -190,6 +201,7 @@ async fn reader(
     output: mpsc::Sender<Bytes>,
     close: CancellationToken,
     peer_closed: Arc<AtomicBool>,
+    tap: Arc<TerminalTap>,
 ) {
     let mut exited = false;
     loop {
@@ -200,6 +212,8 @@ async fn reader(
         };
         match msg {
             Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
+                // A refcount, not a copy.
+                let recorded = data.clone();
                 tokio::select! {
                     biased;
                     () = close.cancelled() => break,
@@ -211,6 +225,8 @@ async fn reader(
                         }
                     }
                 }
+                // Exactly what the UI received; never waits.
+                tap.output(&recorded);
             }
             Some(ChannelMsg::ExitStatus { exit_status }) => {
                 exited = true;
@@ -271,7 +287,9 @@ async fn reader(
 }
 
 /// UI → remote. Owns the channel's end of life: EOF + CLOSE on every exit
-/// path, unless the peer closed first.
+/// path, unless the peer closed first; then closes the recording tap.
+// One argument per channel end, plus the tap.
+#[allow(clippy::too_many_arguments)]
 async fn writer(
     ctx: SessionCtx,
     id: TerminalId,
@@ -280,6 +298,7 @@ async fn writer(
     mut size: watch::Receiver<PtySize>,
     close: CancellationToken,
     peer_closed: Arc<AtomicBool>,
+    tap: Arc<TerminalTap>,
 ) {
     loop {
         tokio::select! {
@@ -290,6 +309,7 @@ async fn writer(
                     break;
                 }
                 let s = *size.borrow_and_update();
+                tap.resize(s);
                 let _ = write
                     .window_change(
                         u32::from(s.cols),
@@ -321,6 +341,10 @@ async fn writer(
         })
         .await;
     }
+    // Stops a running recording (`terminal_closed`): its writer flushes
+    // and closes the file.
+    ctx.engine.unregister_terminal(id);
+    tap.close();
     ctx.log(LogLevel::Info, "pty", format!("terminal {id} closed"));
     emit(&ctx, id, TerminalEvent::Closed);
 }

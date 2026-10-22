@@ -32,6 +32,11 @@ time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The in-process SSH server of portico-core's tests (`ssh_support` in
+# main.rs): pane tests run real sessions without any network.
+russh.workspace = true
+russh-sftp.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
