@@ -8,7 +8,7 @@
 // restart with the vault unlocked. Screenshots go to $E2E_ROOT/shots.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -155,6 +155,54 @@ test("connect: new host key, terminal command, status and latency", async () => 
   await waitFor("title from the shell", async () => (await title()) === "e2e-42");
   assert.ok(await s.find(".statusbar .rtt"), "latency shown");
   await capture("terminal");
+});
+
+test("recording: confirm, REC from the engine event, stop, list, play", async () => {
+  const recDir = join(dataDir, "recordings");
+  // Ctrl-Shift-R in the terminal: the armed confirmation, with the folder.
+  await press(Key.Control, Key.Shift, "R");
+  await dialog("Record this terminal?");
+  assert.match(await modal(), /What you type is never recorded/);
+  assert.match(await modal(), /recordings\/, readable only by you/);
+  await capture("record-confirm");
+  await press(Key.Enter);
+  await noDialog();
+  await waitFor("REC in the status bar", async () => (await text(".statusbar")).includes("REC"));
+  await shellReady();
+  await type("echo rec-e2e-$((6*7))");
+  await press(Key.Enter);
+  await sleep(1500);
+  await capture("recording");
+  // Stopping needs no confirmation; REC goes with the `stopped` event.
+  await press(Key.Control, Key.Shift, "R");
+  await waitFor("REC gone", async () => !(await text(".statusbar")).includes("REC"));
+  assert.equal(await s.find(".modal"), null, "no confirmation to stop");
+  const files = readdirSync(recDir).filter((f) => f.endsWith(".cast"));
+  assert.equal(files.length, 1, `one recording in ${recDir}`);
+  const file = join(recDir, files[0] ?? "");
+  const cast = readFileSync(file, "utf8");
+  assert.match(cast.split("\n")[0] ?? "", /"version":2/);
+  assert.ok(cast.includes("rec-e2e-42"), "the output is recorded");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  // The list, then the player (read-only, its own xterm.js instance).
+  await palette("Recordings");
+  await dialog(files[0] ?? "?");
+  assert.match(await modal(), /alpha/);
+  await capture("recordings");
+  await press(Key.Enter);
+  await waitFor("player", () => s.find(".player .xterm-screen"));
+  // The end: the play button offers "Replay".
+  await waitFor("played to the end", () => s.find(".player button[aria-label=Replay]"), 20_000);
+  // The player's own emulator (DOM renderer: its rows are readable) shows
+  // the recorded output.
+  await waitFor("recorded output in the player", async () => (await text(".player .xterm-rows")).includes("rec-e2e-42"));
+  await sleep(300);
+  await capture("player");
+  await press(Key.Escape);
+  await dialog("Recordings");
+  await press(Key.Escape);
+  await noDialog();
+  await shellReady();
 });
 
 test("vault: created from the keys view", async () => {

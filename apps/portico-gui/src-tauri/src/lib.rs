@@ -12,6 +12,7 @@ mod files;
 mod import;
 mod keys;
 mod meta;
+mod recordings;
 mod settings;
 mod snippets;
 mod terminals;
@@ -25,6 +26,7 @@ use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::files::Files;
 use crate::import::Imports;
+use crate::recordings::Playbacks;
 use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
@@ -33,6 +35,9 @@ pub const ENGINE_EVENT: &str = "engine://event";
 pub const DROPPED_EVENT: &str = "portico://dropped";
 /// A drag with files entered (`true`) or left (`false`) the window.
 pub const DRAGGING_EVENT: &str = "portico://dragging";
+/// The engine event stream lagged (events were lost): the view resyncs
+/// what it derives from events (recording state) with queries.
+pub const LAGGED_EVENT: &str = "portico://engine-lagged";
 
 /// Longest wait for sessions to close when quitting.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
@@ -70,6 +75,7 @@ fn run_app() {
             app.manage(Arc::new(Terminals::default()));
             app.manage(Files::default());
             app.manage(Imports::default());
+            app.manage(Arc::new(Playbacks::default()));
             Ok(())
         })
         // Dropped files become upload tokens; their paths stay in Rust.
@@ -147,6 +153,16 @@ fn run_app() {
             import::import_termius_replan,
             import::import_apply,
             import::import_cancel,
+            recordings::recording_start,
+            recordings::recording_stop,
+            recordings::recording_status,
+            recordings::recordings_folder,
+            recordings::list_recordings,
+            recordings::delete_recording,
+            recordings::play_recording,
+            recordings::playback_control,
+            recordings::playback_ack,
+            recordings::playback_close,
         ])
         .build(tauri::generate_context!());
 
@@ -170,6 +186,9 @@ fn run_app() {
             if let Some(terminals) = handle.try_state::<Arc<Terminals>>() {
                 terminals.close_all();
             }
+            if let Some(playbacks) = handle.try_state::<Arc<Playbacks>>() {
+                playbacks.close_all();
+            }
             let engine = handle.try_state::<Engine>().map(|e| e.inner().clone());
             let handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -182,11 +201,14 @@ fn run_app() {
     });
 }
 
-/// Closes what a (re)loading page opened: terminals, upload tokens, a
-/// pending import, sessions.
+/// Closes what a (re)loading page opened: terminals (and so their
+/// recordings), playbacks, upload tokens, a pending import, sessions.
 fn release_page(webview: &tauri::Webview) {
     if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
         terminals.close_all();
+    }
+    if let Some(playbacks) = webview.try_state::<Arc<Playbacks>>() {
+        playbacks.close_all();
     }
     if let Some(files) = webview.try_state::<Files>() {
         files.clear();
@@ -233,9 +255,13 @@ fn forward_engine_events(engine: &Engine, handle: tauri::AppHandle) {
                         tracing::warn!(error = %e, "failed to forward engine event");
                     }
                 }
-                // A burst overflowed the channel: keep forwarding.
+                // A burst overflowed the channel: keep forwarding, and let
+                // the view resync what it derives from events.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(skipped = n, "engine events lagged");
+                    if let Err(e) = handle.emit(LAGGED_EVENT, n) {
+                        tracing::warn!(error = %e, "failed to forward the lag notice");
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

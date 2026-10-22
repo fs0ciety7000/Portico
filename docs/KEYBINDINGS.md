@@ -405,6 +405,24 @@ onglet divisé, `tab.close-all` (`⌘⇧W` / `Ctrl-Alt-Shift-W` : sur Linux, `Ct
 dans un terminal) ferme l'onglet et tous ses panneaux ; `pane.close` reste dans la palette, sans touche. Fermer un panneau ferme son canal PTY ; le dernier panneau d'un onglet ferme
 l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier onglet.
 
+## Enregistrement de sessions (GUI) : principe
+
+Enregistrer est un choix explicite, **par panneau** : « Record session » (`session.record`, `⌘⇧R` / `Ctrl-Shift-R`
+dans un terminal, ou la palette) ouvre la confirmation « Record this terminal? », qui rappelle que tout ce qui
+s'affiche est enregistré (y compris un secret affiché par une commande ou ce que le distant fait écho) mais jamais
+ce qui est tapé, et indique le dossier (`~/…/portico/recordings/`, lisible par vous seul) ; « Record » ne s'active
+qu'après 400 ms sans frappe. Un badge `REC` (couleur d'erreur) apparaît sur l'en-tête du panneau, sur l'onglet et
+dans la barre d'état **à l'événement `started` du moteur** et disparaît à `stopped`, jamais sur la seule réponse de
+la commande ; après une perte d'événements, l'état est relu auprès du moteur. Arrêter (`session.record` à nouveau,
+« Stop recording ») se fait sans confirmation. Un arrêt involontaire est signalé : « Recording stopped: the disk
+could not keep up », « … the file could not be written », « … size limit reached (512 MiB) ». « Recordings… » liste
+les fichiers (titre de l'en-tête **et** nom de fichier, toujours affiché car un fichier tiers peut porter n'importe
+quel titre ; date, durée, taille, marque « invalid ») ; la suppression est confirmée et refusée tant que le fichier
+s'écrit. La lecture se fait dans une instance xterm.js dédiée, en lecture seule : la sortie est assainie côté Rust
+(OSC hors couleurs, DCS/APC, C1 retirés), le terminal n'a ni entrée, ni liens, ni presse-papiers, ni réponse aux
+requêtes (`ESC[6n`, `ESC[c`), et les modes que joue l'enregistrement (souris, bracketed paste, focus) restent dans
+le lecteur. « Show in folder » n'existe pas : il faudrait un plugin d'ouverture et une capability de plus.
+
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
 
@@ -433,6 +451,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Coller (macOS : `⌘V` ; Linux aussi `Shift-Insert`, clic milieu) | `tab.paste` (fixe) | — | `Ctrl-Shift-V` |
 | Reconnecter l'hôte de l'onglet | `tab.reconnect` | — | — |
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
+| Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut : palette | `recordings.open` | — | — |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
@@ -457,6 +476,7 @@ pas par `Ctrl-Alt` + flèches, que GNOME, Cinnamon et Xfce gardent pour les espa
 | Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
 | Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
 | Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif | `pane.close` | — | — |
+| Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état | `session.record` | `⌘⇧R` | `Ctrl-Shift-R` |
 
 ## Liste des hôtes (GUI)
 
@@ -609,4 +629,21 @@ Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent (seules l
 | Fermer | `Esc` |
 
 Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée ; la bannière « No open terminal » donne l'action suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé). Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.
+
+## Enregistrements (GUI)
+
+« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » ; « Recordings… » (`recordings.open`, palette) ouvre la liste.
+
+| Action | Touches |
+|---|---|
+| Confirmer l'enregistrement (actif après 400 ms sans frappe) / annuler | `↵` ou `y` / `Esc` ou `n` |
+| Arrêter l'enregistrement du panneau actif (sans confirmation) | `session.record` à nouveau, ou « Stop recording » dans la palette |
+| Liste : se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
+| Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde) | `↵` ou double-clic / `Suppr` ou `x` |
+| Liste : rafraîchir | `Ctrl-R` |
+| Lecture : pause / reprise (à la fin : rejouer depuis le début) | `Espace` |
+| Lecture : vitesse ×0,5 · ×1 · ×2 · ×4 · ×8 | `+` / `-` |
+| Lecture : sauter le silence en cours / reculer de 5 s / revenir au début | `→` / `←` / `Home` |
+| Lecture : aller à un instant | clic sur la barre de progression |
+| Fermer la lecture (retour à la liste) / fermer la liste | `Esc` |
 <!-- END GENERATED: gui -->

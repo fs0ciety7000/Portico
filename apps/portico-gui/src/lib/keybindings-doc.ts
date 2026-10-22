@@ -168,4 +168,22 @@ export const GUI_FIXED: DocTable[] = [
       "suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé). Les snippets hors portée de l'hôte " +
       "sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.",
   },
+  {
+    title: "Enregistrements (GUI)",
+    intro:
+      "« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » ; « Recordings… » " +
+      "(`recordings.open`, palette) ouvre la liste.",
+    rows: [
+      ["Confirmer l'enregistrement (actif après 400 ms sans frappe) / annuler", "`↵` ou `y` / `Esc` ou `n`"],
+      ["Arrêter l'enregistrement du panneau actif (sans confirmation)", "`session.record` à nouveau, ou « Stop recording » dans la palette"],
+      ["Liste : se déplacer", "`j` / `k`, `↓` / `↑`, `Home` / `End`"],
+      ["Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde)", "`↵` ou double-clic / `Suppr` ou `x`"],
+      ["Liste : rafraîchir", "`Ctrl-R`"],
+      ["Lecture : pause / reprise (à la fin : rejouer depuis le début)", "`Espace`"],
+      ["Lecture : vitesse ×0,5 · ×1 · ×2 · ×4 · ×8", "`+` / `-`"],
+      ["Lecture : sauter le silence en cours / reculer de 5 s / revenir au début", "`→` / `←` / `Home`"],
+      ["Lecture : aller à un instant", "clic sur la barre de progression"],
+      ["Fermer la lecture (retour à la liste) / fermer la liste", "`Esc`"],
+    ],
+  },
 ];

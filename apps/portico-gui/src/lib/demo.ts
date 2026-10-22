@@ -10,6 +10,7 @@ import type { Backend } from "./backend";
 import { demoKeys } from "./demo-keys";
 import { demoMeta } from "./demo-meta";
 import { demoImport } from "./demo-import";
+import { demoRecording } from "./demo-recording";
 
 const base = { identityFiles: [], localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [], group: null as string | null, notes: null as string | null };
 
@@ -205,9 +206,14 @@ function exec(id: number, t: DemoTerminal, cmd: string) {
     case "uptime":
       out(" 17:42:08 up 41 days,  3:12,  1 user,  load average: 0.08, 0.11, 0.09\r\n");
       break;
+    case "flood":
+      for (let i = 0; i < 40; i++) out(`\x1b[2m${String(i).padStart(4, "0")}\x1b[0m GET /api/orders?page=${i} 200 ${12 + (i % 7)} ms\r\n`);
+      rec.flood(id);
+      break;
     case "exit":
       out("logout\r\n");
       terminals.delete(id);
+      rec.terminalClosed(id);
       emit({ type: "terminal", id, session: t.session, event: { kind: "exited", status: 0, signal: null } });
       emit({ type: "terminal", id, session: t.session, event: { kind: "closed" } });
       return;
@@ -343,6 +349,14 @@ const keyDemo = demoKeys({
 
 const meta = demoMeta({ emit, hosts: demoHosts });
 
+const rec = demoRecording({
+  emit,
+  terminal: (id) => {
+    const t = terminals.get(id);
+    return t ? { alias: t.host.alias, session: t.session } : undefined;
+  },
+});
+
 /** Rough stand-in for portico-core's search: words, `#tag`, `@group`, `*`. */
 function demoSearch(q: string): Host[] {
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -360,6 +374,7 @@ export const demoBackend: Backend = {
   ...keyDemo,
   ...meta.backend,
   ...demoImport,
+  ...rec.backend,
   listHosts: async () => demoHosts,
   searchHosts: async (q) => demoSearch(q),
   listThemes: async () => demoThemes,
@@ -382,6 +397,7 @@ export const demoBackend: Backend = {
     for (const [tid, t] of terminals) {
       if (t.session === id) {
         terminals.delete(tid);
+        rec.terminalClosed(tid);
         emit({ type: "terminal", id: tid, session: id, event: { kind: "closed" } });
       }
     }
@@ -404,7 +420,16 @@ export const demoBackend: Backend = {
     const host = demoHosts.find((h) => h.alias === s.alias);
     if (!host) throw { code: "unknown_host", message: "unknown host", hint: null } satisfies ErrorSummary;
     const id = nextId++;
-    const t: DemoTerminal = { session, host, onData, line: "" };
+    const t: DemoTerminal = {
+      session,
+      host,
+      // Output counts towards a demo recording's size.
+      onData: (b) => {
+        rec.output(id, b.length);
+        onData(b);
+      },
+      line: "",
+    };
     terminals.set(id, t);
     setTimeout(() => {
       onData(enc.encode(`\x1b]0;${host.user}@${host.alias}: ~\x07`));
@@ -442,6 +467,7 @@ export const demoBackend: Backend = {
     const t = terminals.get(id);
     if (!t) return;
     terminals.delete(id);
+    rec.terminalClosed(id);
     emit({ type: "terminal", id, session: t.session, event: { kind: "closed" } });
   },
   async onEngineEvent(cb): Promise<UnlistenFn> {

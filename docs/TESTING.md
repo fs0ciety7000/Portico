@@ -28,7 +28,7 @@ l'IPC Tauri, le moteur réel, WebKitGTK et un serveur SSH.
 
 Le scénario, dans l'ordre : démarrage (hôtes, pas de vault) ; connexion et clé hôte acceptée (`known_hosts`) ;
 commande dans le terminal, dont la sortie revient par le PTY (le shell pose un titre OSC que la barre d'état
-affiche) ; statut et latence ; création du vault ; génération d'une clé ed25519 avec passphrase ; ajout à
+affiche) ; statut et latence ; enregistrement de la session (confirmation, `REC` à l'événement du moteur, arrêt sans confirmation, fichier `0600` qui contient la sortie, liste, lecture jusqu'au bout puis fermeture) ; création du vault ; génération d'une clé ed25519 avec passphrase ; ajout à
 l'agent pour une heure puis retrait (`ssh-add -l`) ; copy-id vers `alpha`, vérification avec la clé (prompt de
 passphrase, mémorisée dans le vault) ; connexion à `gamma` avec cette seule clé, sans prompt ; téléchargement
 SFTP ; snippet avec placeholder, puis refus du collage multi-ligne sous `sh` (sans bracketed paste) et
