@@ -96,9 +96,9 @@ test("shared host-list keys: `*` toggles a favorite, Shift-X clears recent", () 
 });
 
 test("overrides replace defaults; invalid entries are reported", () => {
-  const ok = resolveKeymap({ "app.files": "Mod+Shift+O", "app.reload": "none", "hosts.clear-recent": "F9" }, "linux");
+  const ok = resolveKeymap({ "app.files": "Mod+Shift+U", "app.reload": "none", "hosts.clear-recent": "F9" }, "linux");
   assert.deepEqual(ok.problems, []);
-  assert.equal(ok.bindings["app.files"]?.[0]?.key, "o");
+  assert.equal(ok.bindings["app.files"]?.[0]?.key, "u");
   assert.deepEqual(ok.bindings["app.reload"], []);
   assert.equal(ok.bindings["hosts.clear-recent"]?.[0]?.key, "f9");
 
@@ -145,30 +145,59 @@ test("pane commands: terminal only, distinct per platform, need a modifier", () 
   const mac = matchTables(defaultBindings("mac"), "mac");
   const linux = matchTables(defaultBindings("linux"), "linux");
   const ev = (k: string, code: string, mods: Partial<KeyLike>) => eventSignature(key(k, code, mods))!;
-  // ⌘D / ⌘⇧D on macOS; Ctrl-Shift-D / Ctrl-Shift-E on Linux (Ctrl-Shift-D is also Mod+Shift+D there).
+  // ⌘D / ⌘⇧D on macOS; Ctrl-Shift-D / Ctrl-Shift-O on Linux (Ctrl-Shift-D is also Mod+Shift+D there).
   assert.equal(mac.terminal.get(ev("d", "KeyD", { metaKey: true })), "pane.split-right");
   assert.equal(mac.terminal.get(ev("D", "KeyD", { metaKey: true, shiftKey: true })), "pane.split-down");
-  assert.equal(linux.terminal.get(ev("E", "KeyE", { ctrlKey: true, shiftKey: true })), "pane.split-down");
-  // Focus: ⌘⌥ arrows / Ctrl-Alt arrows; resize adds Shift.
+  assert.equal(linux.terminal.get(ev("O", "KeyO", { ctrlKey: true, shiftKey: true })), "pane.split-down");
+  assert.equal(linux.terminal.get(ev("E", "KeyE", { ctrlKey: true, shiftKey: true })), undefined);
+  // Focus: ⌘⌥ arrows on macOS; Mod+arrows (Ctrl-Shift-arrows in a terminal) on Linux, never
+  // Ctrl-Alt-arrows (workspace switching in GNOME, Cinnamon, Xfce).
   assert.equal(mac.terminal.get(ev("ArrowLeft", "ArrowLeft", { metaKey: true, altKey: true })), "pane.focus-left");
-  assert.equal(linux.terminal.get(ev("ArrowDown", "ArrowDown", { ctrlKey: true, altKey: true })), "pane.focus-down");
-  assert.equal(linux.terminal.get(ev("ArrowUp", "ArrowUp", { ctrlKey: true, altKey: true, shiftKey: true })), "pane.resize-up");
+  assert.equal(linux.terminal.get(ev("ArrowDown", "ArrowDown", { ctrlKey: true, shiftKey: true })), "pane.focus-down");
+  for (const d of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+    assert.equal(linux.terminal.get(ev(d, d, { ctrlKey: true, altKey: true })), undefined, d);
+    assert.equal(linux.terminal.get(ev(d, d, { ctrlKey: true, altKey: true, shiftKey: true })), undefined, d);
+  }
+  assert.equal(formatCombo(parseCombo("Mod+Left")!, "linux", "terminal"), "Ctrl-Shift-←");
+  // Divider: ⌥⌘R / Ctrl-Alt-Shift-R gives the nearest divider the keyboard; no resize-* defaults left.
+  assert.equal(mac.terminal.get(ev("®", "KeyR", { metaKey: true, altKey: true })), "pane.divider");
+  assert.equal(linux.terminal.get(ev("R", "KeyR", { ctrlKey: true, altKey: true, shiftKey: true })), "pane.divider");
+  assert.equal(formatCombo(parseCombo("Mod+Alt+R")!, "mac", "terminal"), "⌥⌘R");
+  assert.ok(!ACTIONS.some((a) => a.id.startsWith("pane.resize-")));
   // Option changes the typed character on macOS: the physical key counts.
   assert.equal(mac.terminal.get(ev("˜", "KeyN", { metaKey: true, altKey: true })), "pane.next");
-  // Zoom and close.
+  // Zoom.
   assert.equal(mac.terminal.get(ev("Enter", "Enter", { metaKey: true, shiftKey: true })), "pane.zoom");
   assert.equal(linux.terminal.get(ev("Enter", "Enter", { ctrlKey: true, shiftKey: true })), "pane.zoom");
-  assert.equal(mac.terminal.get(ev("W", "KeyW", { metaKey: true, shiftKey: true })), "pane.close");
-  assert.equal(linux.terminal.get(ev("Q", "KeyQ", { ctrlKey: true, shiftKey: true })), "pane.close");
   // Never in the host list.
   for (const t of [mac, linux]) {
     for (const id of t.hosts.values()) assert.ok(!id.startsWith("pane."), id);
   }
   // Labels: Ctrl-Shift on Linux, as for the global shortcuts.
-  assert.equal(formatCombo(parseCombo("Mod+E")!, "linux", "terminal"), "Ctrl-Shift-E");
+  assert.equal(formatCombo(parseCombo("Mod+O")!, "linux", "terminal"), "Ctrl-Shift-O");
   assert.equal(formatCombo(parseCombo("Mod+Alt+Left")!, "mac", "terminal"), "⌥⌘←");
   // A terminal action needs a modifier, like a global one.
   assert.match(resolveKeymap({ "pane.zoom": "Z" }, "linux").problems.join(), /needs Mod/);
   // Rebinding a pane command onto a host-list key is fine (other context).
   assert.deepEqual(resolveKeymap({ "pane.next": "Mod+R" }, "linux").problems, []);
+});
+
+test("closing: Mod+W closes the focused pane (or the tab), close-all the whole tab; pane.close has no key", () => {
+  const mac = matchTables(defaultBindings("mac"), "mac");
+  const linux = matchTables(defaultBindings("linux"), "linux");
+  const ev = (k: string, code: string, mods: Partial<KeyLike>) => eventSignature(key(k, code, mods))!;
+  assert.equal(mac.terminal.get(ev("w", "KeyW", { metaKey: true })), "tab.close");
+  assert.equal(mac.terminal.get(ev("W", "KeyW", { metaKey: true, shiftKey: true })), "tab.close-all");
+  assert.equal(linux.terminal.get(ev("W", "KeyW", { ctrlKey: true, shiftKey: true })), "tab.close");
+  // Mod+Shift+W would be Ctrl-Shift-W too in a Linux terminal: close-all takes Alt instead.
+  assert.equal(linux.terminal.get(ev("W", "KeyW", { ctrlKey: true, altKey: true, shiftKey: true })), "tab.close-all");
+  assert.equal(linux.hosts.get(ev("w", "KeyW", { ctrlKey: true, altKey: true })), "tab.close-all");
+  // The old Ctrl-Shift-Q is gone (it quits other apps); pane.close stays bindable.
+  assert.equal(linux.terminal.get(ev("Q", "KeyQ", { ctrlKey: true, shiftKey: true })), undefined);
+  for (const p of ["mac", "linux"] as Platform[]) assert.deepEqual(defaultBindings(p)["pane.close"], [], p);
+  assert.deepEqual(resolveKeymap({ "pane.close": "Mod+Shift+X" }, "linux").problems, []);
+});
+
+test("palette titles of pane commands say \"pane\"", () => {
+  for (const a of ACTIONS.filter((a) => a.id.startsWith("pane."))) assert.match(a.title, /\bpane\b/, a.id);
 });

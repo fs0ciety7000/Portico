@@ -135,6 +135,21 @@ pub const TYPE_SCALE: [(&str, u16); 8] = [
     ("display", 34),
 ];
 
+/// Component sizes (GUI, CSS lengths), exported as `--size-<name>`:
+/// - `dot`: the status dot, everywhere (tabs, pane headers, lists, status bar);
+/// - `dot-ring`: the ring of a hollow dot ("no shell attached");
+/// - `icon-sm`: small inline icons (pane count, close crosses);
+/// - `card`: the widest connection or failure card over a terminal.
+pub const SIZES: [(&str, &str); 4] = [
+    ("dot", "6px"),
+    ("dot-ring", "1.5px"),
+    ("icon-sm", "12px"),
+    ("card", "540px"),
+];
+
+/// Letter spacing of small capitals (badges such as ZOOM and DEMO, section labels).
+pub const TRACKING_CAPS: &str = "0.08em";
+
 /// **Obsidian**: the default. Near-black mineral, marble text, brass accent.
 pub const OBSIDIAN: Theme = Theme {
     id: "obsidian",
@@ -311,6 +326,10 @@ pub fn export_css() -> String {
     for (k, v) in TYPE_SCALE {
         let _ = writeln!(css, "  --text-{k}: {v}px;");
     }
+    for (k, v) in SIZES {
+        let _ = writeln!(css, "  --size-{k}: {v};");
+    }
+    let _ = writeln!(css, "  --tracking-caps: {TRACKING_CAPS};");
     for (k, v) in SHADOWS {
         let _ = writeln!(css, "  --shadow-{k}: {v};");
     }

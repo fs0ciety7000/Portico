@@ -6,7 +6,7 @@
   import { isMac } from "./lib/keys";
   import { dur } from "./lib/motion";
   import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
-  import { isLive, workspace, type Tab } from "./lib/state/workspace.svelte";
+  import { isLive, paneStatus, workspace, type Tab } from "./lib/state/workspace.svelte";
   import { layout, minPanePx, MAX_PANES, panesOf, type Direction, type Layout } from "./lib/panes";
   import PaneDivider from "./lib/components/PaneDivider.svelte";
   import { files } from "./lib/state/files.svelte";
@@ -64,7 +64,8 @@
   /** The focused pane of the active tab: files, snippets, logs, copy and paste act on it. */
   const pane = $derived(workspace.activePane);
   const tabSession = $derived(pane ? workspace.sessions[pane.session] : undefined);
-  const tabStatus = $derived(describe(tabSession));
+  /** Same dot grammar as the pane header and the tab (`paneStatus`). */
+  const tabStatus = $derived(paneStatus(pane, tabSession));
   const prompt = $derived(workspace.prompts[0]);
   const alert = $derived(workspace.alerts[0]);
   const conflict = $derived(files.conflicts[0]);
@@ -323,11 +324,13 @@
   }
 
   const paneCount = $derived(tab ? panesOf(tab.root).length : 0);
-  /** Split panes (only with a terminal tab). */
+  /** In a split tab `tab.close` closes the focused pane: its key, unless `pane.close` has one. */
+  const closePaneKey = $derived(k("pane.close") ?? k("tab.close"));
+  /** Split panes (only with a terminal tab). Titles always say "pane" (as in the TUI). */
   const paneCommands: Command[] = $derived([
-    { id: "pane.split-right", title: "Split right", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-right"), run: () => void workspace.split("row") },
-    { id: "pane.split-down", title: "Split down", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-down"), run: () => void workspace.split("column") },
-    { id: "pane.split-host", title: "Split with another host…", hint: "host picker", shortcut: k("pane.split-host"), run: openHostPicker },
+    { id: "pane.split-right", title: "Split pane right", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-right"), run: () => void workspace.split("row") },
+    { id: "pane.split-down", title: "Split pane down", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-down"), run: () => void workspace.split("column") },
+    { id: "pane.split-host", title: "Split pane with host…", hint: "host picker", shortcut: k("pane.split-host"), run: openHostPicker },
     ...(paneCount > 1
       ? [
           { id: "pane.next", title: "Next pane", shortcut: k("pane.next"), run: () => workspace.focusNext() },
@@ -337,32 +340,55 @@
             shortcut: k(`pane.focus-${d}`),
             run: () => workspace.focusDirection(d),
           })),
-          ...(["left", "right", "up", "down"] as const).map((d) => ({
-            id: `pane.resize-${d}`,
-            title: `Move divider ${d}`,
-            hint: "resize panes",
-            shortcut: k(`pane.resize-${d}`),
-            run: () => workspace.resize(d),
-          })),
+          { id: "pane.divider", title: "Move pane divider…", hint: "arrows, Home / End, ↵ when done", shortcut: k("pane.divider"), run: focusDivider },
           { id: "pane.zoom", title: tab?.zoom != null ? "Unzoom pane" : "Zoom pane", shortcut: k("pane.zoom"), run: () => workspace.toggleZoom() },
-          { id: "pane.close", title: `Close pane (${pane?.alias ?? ""})`, shortcut: k("pane.close"), run: () => void workspace.closePane() },
+          { id: "pane.close", title: "Close pane", hint: pane?.alias, shortcut: closePaneKey, run: () => void workspace.closePane() },
+          { id: "tab.close-all", title: "Close tab and its panes", hint: `${paneCount} panes`, shortcut: k("tab.close-all"), run: () => void workspace.close() },
         ]
       : []),
   ]);
+
+  /** A divider has the keyboard: it holds the accent, the focused pane a neutral ring. */
+  let dividerFocused = $state(false);
+
+  /** "Move pane divider…": the focused pane's nearest divider takes the keyboard. */
+  function focusDivider() {
+    const id = workspace.dividerOfFocus();
+    if (id === null) return;
+    // After the unzoom (if any) has laid the dividers out.
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`.stage [data-divider="${id}"]`)?.focus());
+  }
 
   /** "Split with another host…": the palette, listing hosts. */
   let pickerOpen = $state(false);
   function openHostPicker() {
     if (pane) pickerOpen = true;
   }
-  const hostChoices: Command[] = $derived(
-    hosts.all.map((h) => ({
-      id: `split-host-${h.alias}`,
-      title: h.alias,
-      hint: [h.user && `${h.user}@`, h.hostname].filter(Boolean).join("") || undefined,
-      run: () => void workspace.split(null, h.alias),
-    })),
-  );
+  /** Recent hosts first, then favourites, then the rest (configuration order). */
+  const hostChoices: Command[] = $derived.by(() => {
+    const recent = hosts.recent.flatMap((r) => {
+      const h = hosts.byAlias[r.alias];
+      return h ? [h] : [];
+    });
+    const seen = new Set(recent.map((h) => h.alias));
+    const favorites = hosts.all.filter((h) => h.favorite && !seen.has(h.alias));
+    for (const h of favorites) seen.add(h.alias);
+    const ordered = [...recent, ...favorites, ...hosts.all.filter((h) => !seen.has(h.alias))];
+    return ordered.map((h) => {
+      const session = workspace.byAlias[h.alias];
+      const d = describe(session);
+      return {
+        id: `split-host-${h.alias}`,
+        title: h.alias,
+        status: { status: d.status, busy: d.busy },
+        // The split reuses the host's live session: no new connection, no prompt.
+        note: isLive(session) ? "reuses connection" : undefined,
+        hint: [h.user && `${h.user}@`, h.hostname].filter(Boolean).join("") || undefined,
+        mono: true,
+        run: () => void workspace.split(null, h.alias),
+      };
+    });
+  });
 
   // Ids are the stable action ids of `shortcuts.ts` (bindable in settings.toml).
   const commands: Command[] = $derived([
@@ -376,7 +402,7 @@
     ...(pane
       ? [
           { id: "tab.new", title: `New tab on ${pane.alias}`, shortcut: k("tab.new"), run: () => void workspace.duplicate() },
-          { id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() },
+          ...(paneCount > 1 ? [] : [{ id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() }]),
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
           { id: "tab.reconnect", title: `Reconnect ${pane.alias}`, shortcut: k("tab.reconnect"), run: () => void workspace.reconnect(pane.key) },
@@ -496,11 +522,8 @@
   function runAction(id: string) {
     const goto = /^tab\.goto-(\d)$/.exec(id);
     if (goto?.[1]) return workspace.go(Number(goto[1]) - 1);
-    const arrow = /^pane\.(focus|resize)-(left|right|up|down)$/.exec(id);
-    if (arrow?.[2]) {
-      const dir = arrow[2] as Direction;
-      return arrow[1] === "focus" ? workspace.focusDirection(dir) : workspace.resize(dir);
-    }
+    const arrow = /^pane\.focus-(left|right|up|down)$/.exec(id);
+    if (arrow?.[1]) return workspace.focusDirection(arrow[1] as Direction);
     switch (id) {
       case "app.palette":
         paletteOpen = !paletteOpen;
@@ -509,6 +532,9 @@
       case "tab.new":
         return pane ? void workspace.duplicate() : connectSelected();
       case "tab.close":
+        // In a split tab: the focused pane (the last one closes the tab).
+        return void (pane ? workspace.closePane() : workspace.close());
+      case "tab.close-all":
         return void workspace.close();
       case "tab.hosts":
         workspace.active = null;
@@ -579,6 +605,8 @@
         return workspace.toggleZoom();
       case "pane.close":
         return void workspace.closePane();
+      case "pane.divider":
+        return focusDivider();
       default:
         // Palette-only actions bound in settings.toml run their command.
         commands.find((c) => c.id === id)?.run();
@@ -628,6 +656,8 @@
     hadModal = open;
   });
   let toastHeight = $state(0);
+  /** A terminal is on screen (no dialog): notices go to the stage's top-right corner. */
+  const toastOnStage = $derived(!!pane && !modalOpen);
   $effect(() => {
     const room = modalOpen && workspace.toast && toastHeight ? `calc(${toastHeight}px + var(--space-4))` : "0px";
     document.documentElement.style.setProperty("--toast-room", room);
@@ -665,17 +695,37 @@
     };
   });
 
+  /** "⌥⌘←→" / "Ctrl-Shift-←→": the focus keys of the panes, in one hint. */
+  function arrowsLabel(): string | undefined {
+    const left = k("pane.focus-left");
+    const right = k("pane.focus-right");
+    if (left?.endsWith("←") && right === `${left.slice(0, -1)}→`) return `${left}→`;
+    return left ?? k("pane.next");
+  }
+
   // Status-bar hints, most useful first: when the bar runs out of room
   // they give way from the end of each list (the palette hint stays last).
-  const tabHints = [
-    ["tab.hosts", "hosts"],
-    ["tab.new", "new tab"],
-    ["pane.split-right", "split"],
-    ["tab.close", "close"],
-    ["app.files", "files"],
-    ["app.logs", "logs"],
-    ["app.snippets", "snippets"],
-  ] as const;
+  // A split tab speaks of its panes first.
+  const tabHints: [string | undefined, string][] = $derived(
+    paneCount > 1
+      ? [
+          [arrowsLabel(), "panes"],
+          [closePaneKey, "close pane"],
+          [k("pane.split-right"), "split"],
+          [k("tab.hosts"), "hosts"],
+          [k("app.files"), "files"],
+          [k("app.logs"), "logs"],
+        ]
+      : [
+          [k("tab.hosts"), "hosts"],
+          [k("tab.new"), "new tab"],
+          [k("pane.split-right"), "split"],
+          [k("tab.close"), "close"],
+          [k("app.files"), "files"],
+          [k("app.logs"), "logs"],
+          [k("app.snippets"), "snippets"],
+        ],
+  );
   const hostHints = [
     ["hosts.connect", "connect"],
     ["hosts.search", "search"],
@@ -747,6 +797,7 @@
             focused={t.focus === p.key}
             split={panesOf(t.root).length > 1}
             zoomed={t.zoom === p.key}
+            demoted={dividerFocused && t.key === workspace.active}
             themeId={settings.themeId}
             autofocus={!showFiles}
             onfocusin={() => workspace.focusPane(p.key)}
@@ -754,8 +805,11 @@
         </div>
       {/each}
       {#each paneLayout.dividers as d (d.id)}
-        <PaneDivider divider={d} onrelease={() => pane && views[pane.key]?.focus()} />
+        <PaneDivider divider={d} onrelease={() => pane && views[pane.key]?.focus()} onfocuschange={(f) => (dividerFocused = f)} />
       {/each}
+      {#if workspace.toast && toastOnStage}
+        {@render toastView(workspace.toast)}
+      {/if}
     </div>
     {#if showFiles && pane}
       {#key pane.session}
@@ -769,22 +823,23 @@
       <!-- The status (dot, alias, phase, latency) never shrinks; only the
            terminal title does, then the hints give way (see .hints). -->
       <span class="session" data-status={tabStatus.status}>
-        <span class="dot" class:busy={tabStatus.busy} class:hollow={!!pane.end}></span>
-        <span class="alias">{pane.alias}</span>
+        <span class="dot" class:busy={tabStatus.busy} class:hollow={tabStatus.hollow}></span>
+        <span class="alias" title={pane.alias}>{pane.alias}</span>
         {#if tab && paneCount > 1}
           <span class="pane-pos">pane <span class="mono">{panesOf(tab.root).indexOf(pane.key) + 1}/{paneCount}</span>{tab.zoom !== null ? ", zoomed" : ""}</span>
         {/if}
         {#if pane.end}<span class="ended">{pane.end.kind === "closed" ? "Shell closed" : "Shell exited"}</span>{/if}
         <span class="phase">{pane.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
-        {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected"}
+        {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected" && !tabStatus.failed}
           <span class="rtt mono" class:slow={tabStatus.status === "warning"}>{formatRtt(tabSession.latencyMs)}</span>
         {/if}
-        {#if pane.title}<span class="title" title={pane.title}>{pane.title}</span>{/if}
+        <!-- Split: each pane header shows its own title already. -->
+        {#if pane.title && paneCount < 2}<span class="title" title={pane.title}>{pane.title}</span>{/if}
       </span>
       <span class="hints">
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
-        {#each tabHints as [id, label] (id)}
-          {#if k(id)}<span><kbd>{k(id)}</kbd> {label}</span>{/if}
+        {#each tabHints as [key, label] (label)}
+          {#if key}<span><kbd>{key}</kbd> {label}</span>{/if}
         {/each}
       </span>
     {:else}
@@ -807,8 +862,8 @@
 <CommandPalette
   bind:open={pickerOpen}
   commands={hostChoices}
-  label="Split with another host"
-  placeholder={pane ? `Split ${pane.alias} with…` : "Split with…"}
+  label="Split pane with host"
+  placeholder={pane ? `Split ${pane.alias}'s pane with…` : "Split pane with…"}
   empty="No host found"
 />
 
@@ -908,16 +963,22 @@
   <ImportDialog />
 {/if}
 
-{#if workspace.toast}
-  {@const toast = workspace.toast}
-  <!-- Above an open dialog, the notice goes to the top, in the room the dialog leaves it. -->
+{#if workspace.toast && !toastOnStage}
+  {@render toastView(workspace.toast)}
+{/if}
+
+{#snippet toastView(toast: NonNullable<typeof workspace.toast>)}
+  <!-- Above an open dialog, the notice goes to the top, in the room the
+       dialog leaves it. Over a terminal it goes to the stage's top-right
+       corner, compact: the active pane's input line stays in sight. -->
   <div
     class="toast"
     class:top={modalOpen}
+    class:on-stage={toastOnStage}
     data-tone={toast.tone}
     role={toast.tone === "error" ? "alert" : "status"}
     bind:offsetHeight={toastHeight}
-    transition:fly={{ y: modalOpen ? -12 : 12, duration: dur("base") }}
+    transition:fly={{ y: modalOpen || toastOnStage ? -12 : 12, duration: dur("base") }}
   >
     <svg viewBox="0 0 16 16" aria-hidden="true">
       {#if toast.tone === "error"}<circle cx="8" cy="8" r="6.25" /><path d="M8 4.75v3.75M8 11.1v.1" />
@@ -929,12 +990,14 @@
       {#if toast.hint}<span>{toast.hint}</span>{/if}
     </div>
   </div>
-{/if}
+{/snippet}
 
 <style>
   .shell {
+    --titlebar-h: 44px;
+    --statusbar-h: 28px;
     display: grid;
-    grid-template-rows: 44px 1fr 28px;
+    grid-template-rows: var(--titlebar-h) 1fr var(--statusbar-h);
     height: 100%;
   }
   .titlebar {
@@ -1038,11 +1101,12 @@
   .session[data-status="connected"] { --c: var(--status-connected); }
   .session[data-status="warning"] { --c: var(--status-warning); }
   .session[data-status="error"] { --c: var(--status-error); }
-  .session .dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
-  .session .dot.hollow { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+  .session .dot { flex: 0 0 auto; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; background: var(--c); }
+  .session .dot.hollow { background: transparent; box-shadow: inset 0 0 0 var(--size-dot-ring) var(--c); }
   .session .dot.busy { animation: pulse var(--motion-loop) var(--ease-standard) infinite; }
   .session .ended { color: var(--text-primary); }
-  .session .alias { color: var(--text-primary); font-weight: 550; }
+  .session .alias { max-width: 24ch; overflow: hidden; color: var(--text-primary); font-weight: 550; text-overflow: ellipsis; }
+  .session[data-status="error"] .phase { color: var(--status-error); }
   .rtt { color: var(--text-muted); }
   .pane-pos .mono { font-variant-numeric: tabular-nums; }
   .rtt.slow { color: var(--status-warning); }
@@ -1077,6 +1141,17 @@
     width: fit-content;
     margin-inline: auto;
   }
+  /* Below the first row of pane headers, clear of every input line. */
+  .toast.on-stage {
+    position: absolute;
+    top: var(--space-7);
+    right: var(--space-3);
+    bottom: auto;
+    gap: var(--space-2);
+    max-width: min(var(--size-card), calc(100% - var(--space-6)));
+    padding: var(--space-2) var(--space-3);
+  }
+  .toast.on-stage .toast-text { gap: 0; }
   .toast[data-tone="warning"] { --c: var(--status-warning); }
   .toast[data-tone="info"] { --c: var(--border-strong); }
   .toast svg {
@@ -1099,7 +1174,7 @@
     padding: 0 var(--space-2);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-pill);
-    letter-spacing: 0.08em;
+    letter-spacing: var(--tracking-caps);
     text-transform: uppercase;
   }
 </style>
