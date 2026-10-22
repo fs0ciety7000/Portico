@@ -171,7 +171,7 @@ l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Ter
 propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première release taguée) ; import d'un vrai export Termius
 (fixtures synthétiques seulement à ce jour).
 
-### Phase 6 : terminal 🔄 *(décisions : `docs/STACK.md`, 2026-10-22, split panes et enregistrement)*
+### Phase 6 : terminal ✅ *(décisions : `docs/STACK.md`, 2026-10-22, split panes et enregistrement)*
 - **Split panes** : divisions horizontales et verticales dans un onglet, focus et redimensionnement au clavier, chaque
   panneau étant un terminal indépendant (même session ou autre hôte) ; TUI et GUI
 - **Enregistrement asciicast v2** (ADR du 2026-10-22 : exception encadrée à l'interdit « contenu de terminal en clair ») :
@@ -236,9 +236,22 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 | 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
 | 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
 | 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
-| 6 Split panes, asciicast | ⏳ | | | |
+| 6 Split panes, asciicast | ✅ | 548 + 50 GUI + interop (13 scénarios) + E2E bureau 15/15 | ✅ (moteur + clôture, voir ci-dessous) | ✅ (panneaux + enregistrement, 2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 7 Sync locale | ❌ abandonnée | | | |
 | 8 Windows | ⏳ | | | |
+
+## Revues de la phase 6 (2026-10-22)
+
+Aucun constat CRITIQUE restant ; tous les autres ont été traités. Sortie vérifiée : quatre panneaux sur deux hôtes au clavier
+(TUI, tmux contre un vrai sshd ; GUI, mode démo et app de bureau) ; une session enregistrée sur un vrai sshd se relit
+(E2E bureau : fichier v2, `0600`, contenu rejoué dans le lecteur).
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` moteur d'enregistrement | 1 ÉLEVÉ, 7 FAIBLE | Contournements du filtre de relecture (ESC + C0/DEL, C1 en UTF-8) fermés ; invariant « aucun C1, tout ESC suivi de 0x20–0x7E » vérifié par un fuzz différentiel contre vte et un modèle de la table de xterm.js ; noms valides, démarrage annulable, thread d'écriture dédié, troncature aux lignes complètes, dimensions bornées, dossier vérifié par descripteur (propriétaire, `openat`), suppression refusée en cours d'écriture, titres sans caractères de format |
+| `agent-design-review` panneaux | 2 BLOQUANT, 7 IMPORTANT | Séparateurs TUI en `border-subtle`, statut toujours visible avec un alias long, `⌘W` ferme le panneau et `⌘⇧W` l'onglet, raccourcis Linux hors `Ctrl-Alt` (espaces de travail GNOME), mode panneau répétable (TUI), refus sur une ligne, vocabulaire commun |
+| `agent-security` clôture | 1 MOYEN, 2 FAIBLE | Un terminal qui s'ouvre tard ne vole plus le focus (onglet créé et activé à l'action) ; REC ne reste plus figé après une resynchronisation ; une lecture ouverte pendant un rechargement est refusée (époque) ; collage limité au panneau actif |
+| `agent-design-review` clôture | 1 BLOQUANT, 10 IMPORTANT | Texte de consentement exact (« les commandes tapées sont renvoyées en écho, donc enregistrées ») ; seul `y` confirme dans les deux UIs ; « Recording saved » à l'arrêt ; suppression d'un enregistrement en cours refusée d'emblée ; dates locales et durées en horloge communes ; lecteur : rejouer, −5 s, début, statut visible ; REC sur l'onglet dès qu'un panneau enregistre ; tokens `--size-bar`, `--accent-selection` |
 
 ## Revues de la phase 5 (2026-10-22)
 
