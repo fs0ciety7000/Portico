@@ -1,4 +1,5 @@
-//! Embedded terminal model: one [`TerminalView`] per tab.
+//! Embedded terminal model: one [`TerminalView`] per pane (see
+//! [`crate::app_panes`]).
 //!
 //! The `alacritty_terminal::Term` (grid + scrollback + VT state) is shared
 //! with a reader task that parses PTY output off the UI loop. The UI is woken
@@ -9,6 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -24,6 +26,9 @@ use crate::action::Action;
 
 /// Lines of scrollback kept per terminal.
 const SCROLLBACK: usize = 10_000;
+/// A new size reaches the remote PTY once the geometry has been still this
+/// long (a burst of pane resizes sends one `window-change`).
+pub(crate) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(50);
 
 /// Grid size in cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +110,9 @@ pub(crate) struct TerminalView {
     title: Arc<Mutex<Option<String>>>,
     input: TerminalInputs,
     pub(crate) size: GridSize,
+    /// The grid already has `size`; the PTY gets it at this instant plus
+    /// [`RESIZE_DEBOUNCE`] (see [`Self::flush_resize`]).
+    resize_since: Option<Instant>,
     pub(crate) dirty: Arc<AtomicBool>,
     /// Why the remote shell ended, once it did.
     pub(crate) ended: Option<Ended>,
@@ -173,6 +181,7 @@ impl TerminalView {
             title,
             input,
             size,
+            resize_since: None,
             dirty,
             ended: None,
             closed: false,
@@ -211,6 +220,8 @@ impl TerminalView {
             .scroll_display(scroll);
     }
 
+    /// The local grid follows `size` at once (drawing stays exact); the
+    /// remote PTY follows after [`RESIZE_DEBOUNCE`] of stillness.
     pub(crate) fn resize(&mut self, size: GridSize) {
         if size == self.size || size.cols == 0 || size.rows == 0 {
             return;
@@ -220,8 +231,24 @@ impl TerminalView {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .resize(size);
-        // A `watch` under the hood: the latest size can never be lost.
-        self.input.resize(size.pty());
+        self.resize_since = Some(Instant::now());
+    }
+
+    /// A size is waiting for the PTY.
+    pub(crate) fn resize_pending(&self) -> bool {
+        self.resize_since.is_some()
+    }
+
+    /// Sends the pending size once the geometry has been still long enough.
+    pub(crate) fn flush_resize(&mut self, now: Instant) {
+        if self
+            .resize_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= RESIZE_DEBOUNCE)
+        {
+            self.resize_since = None;
+            // A `watch` under the hood: the latest size can never be lost.
+            self.input.resize(self.size.pty());
+        }
     }
 
     pub(crate) fn paste(&self, text: &str) {

@@ -19,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::Action;
 use crate::app::{Focus, Overlay};
+use crate::panes::{Dir, Split};
 
 /// Where a binding applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,8 +294,120 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["w"],
         "close",
-        "Fermer l'onglet (le dernier onglet d'un hôte le déconnecte)",
+        "Fermer l'onglet et tous ses panneaux (un hôte qui n'a plus aucun panneau est déconnecté)",
         Action::CloseTab
+    ),
+    bind!(
+        "prefix.split_horizontal",
+        Prefix,
+        ["\"", "-"],
+        "split below",
+        "Diviser le panneau : nouveau panneau dessous, même hôte (même session si elle est vivante)",
+        Action::SplitPane(Split::Horizontal)
+    ),
+    bind!(
+        "prefix.split_vertical",
+        Prefix,
+        ["%", "|"],
+        "split right",
+        "Diviser le panneau : nouveau panneau à droite, même hôte",
+        Action::SplitPane(Split::Vertical)
+    ),
+    bind!(
+        "prefix.split_host",
+        Prefix,
+        ["S"],
+        "split host",
+        "Diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre)",
+        Action::SplitPaneHost
+    ),
+    bind!(
+        "prefix.pane_left",
+        Prefix,
+        ["left"],
+        "pane left",
+        "Focus au panneau de gauche",
+        Action::FocusPane(Dir::Left)
+    ),
+    bind!(
+        "prefix.pane_down",
+        Prefix,
+        ["down"],
+        "pane below",
+        "Focus au panneau du dessous",
+        Action::FocusPane(Dir::Down)
+    ),
+    bind!(
+        "prefix.pane_up",
+        Prefix,
+        ["up"],
+        "pane above",
+        "Focus au panneau du dessus",
+        Action::FocusPane(Dir::Up)
+    ),
+    bind!(
+        "prefix.pane_right",
+        Prefix,
+        ["right"],
+        "pane right",
+        "Focus au panneau de droite",
+        Action::FocusPane(Dir::Right)
+    ),
+    bind!(
+        "prefix.next_pane",
+        Prefix,
+        ["o"],
+        "next pane",
+        "Panneau suivant (ordre de lecture, boucle)",
+        Action::NextPane
+    ),
+    bind!(
+        "prefix.resize_left",
+        Prefix,
+        ["shift-left"],
+        "resize ←",
+        "Déplacer la séparation verticale vers la gauche (4 colonnes)",
+        Action::ResizePane(Dir::Left)
+    ),
+    bind!(
+        "prefix.resize_down",
+        Prefix,
+        ["shift-down"],
+        "resize ↓",
+        "Déplacer la séparation horizontale vers le bas (2 lignes)",
+        Action::ResizePane(Dir::Down)
+    ),
+    bind!(
+        "prefix.resize_up",
+        Prefix,
+        ["shift-up"],
+        "resize ↑",
+        "Déplacer la séparation horizontale vers le haut (2 lignes)",
+        Action::ResizePane(Dir::Up)
+    ),
+    bind!(
+        "prefix.resize_right",
+        Prefix,
+        ["shift-right"],
+        "resize →",
+        "Déplacer la séparation verticale vers la droite (4 colonnes)",
+        Action::ResizePane(Dir::Right)
+    ),
+    bind!(
+        "prefix.close_pane",
+        Prefix,
+        ["x"],
+        "close pane",
+        "Fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte)",
+        Action::ClosePane
+    ),
+    bind!(
+        "prefix.zoom_pane",
+        Prefix,
+        ["z"],
+        "zoom",
+        "Zoom : le panneau seul dans l'onglet, ou retour à la division",
+        Action::ZoomPane
     ),
     bind!(
         "prefix.disconnect",
@@ -666,6 +779,40 @@ impl Keymap {
             .join(" ")
     }
 
+    /// The first key of each of `ids`, run together when each is one
+    /// character after a shared modifier (`←↓↑→`, `Shift-←↓↑→`), else
+    /// separated by spaces.
+    pub(crate) fn joined(&self, ids: &[&str]) -> String {
+        let keys: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.keys(id).first().map(|k| k.display()))
+            .collect();
+        let Some(first) = keys.first() else {
+            return String::new();
+        };
+        // The longest modifier prefix (`Shift-`, `Ctrl-Alt-`) all share.
+        let shared = first
+            .match_indices('-')
+            .map(|(i, _)| i + 1)
+            .rev()
+            .find(|&end| {
+                keys.iter()
+                    .all(|k| k.get(..end) == first.get(..end) && k.chars().count() == end + 1)
+            })
+            .unwrap_or(0);
+        let tails: Option<Vec<&str>> = keys.iter().map(|k| k.get(shared..)).collect();
+        match tails {
+            Some(tails) if tails.iter().all(|t| t.chars().count() == 1) => {
+                format!(
+                    "{}{}",
+                    first.get(..shared).unwrap_or_default(),
+                    tails.concat()
+                )
+            }
+            _ => keys.join(" "),
+        }
+    }
+
     /// Status-bar hint: first key and label of `id` (`None` if unbound).
     pub(crate) fn hint(&self, id: &str) -> Option<(String, &'static str)> {
         let label = BINDINGS.iter().find(|b| b.id == id)?.label;
@@ -674,11 +821,15 @@ impl Keymap {
     }
 
     fn lookup(&self, context: Context, key: &KeyEvent) -> Option<Action> {
+        self.binding(context, key).map(|b| (b.action)())
+    }
+
+    fn binding(&self, context: Context, key: &KeyEvent) -> Option<&'static Binding> {
         BINDINGS
             .iter()
             .zip(&self.keys)
             .find(|(b, keys)| b.context == context && keys.iter().any(|k| k.matches(key)))
-            .map(|(b, _)| (b.action)())
+            .map(|(b, _)| b)
     }
 }
 
@@ -689,10 +840,13 @@ impl Keymap {
 enum HelpKey {
     /// The first `n` effective keys of an action.
     Id(&'static str, usize),
+    /// The first key of each action, run together when every one is a
+    /// single character (`←↓↑→`, `HJKL`), else space-separated.
+    Joined(&'static [&'static str]),
     Fixed(&'static str),
 }
 
-use HelpKey::{Fixed, Id};
+use HelpKey::{Fixed, Id, Joined};
 
 type HelpRows = &'static [(&'static [HelpKey], &'static str)];
 
@@ -845,6 +999,45 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         ],
     ),
     (
+        "Panes (Ctrl-Space)",
+        1,
+        &[
+            (
+                &[
+                    Id("prefix.split_horizontal", 1),
+                    Id("prefix.split_vertical", 1),
+                ],
+                "Split below · right",
+            ),
+            (&[Id("prefix.split_host", 1)], "Split onto a host"),
+            (
+                &[
+                    Joined(&[
+                        "prefix.pane_left",
+                        "prefix.pane_down",
+                        "prefix.pane_up",
+                        "prefix.pane_right",
+                    ]),
+                    Id("prefix.next_pane", 1),
+                ],
+                "Focus · next pane",
+            ),
+            (
+                &[Joined(&[
+                    "prefix.resize_left",
+                    "prefix.resize_down",
+                    "prefix.resize_up",
+                    "prefix.resize_right",
+                ])],
+                "Resize",
+            ),
+            (
+                &[Id("prefix.close_pane", 1), Id("prefix.zoom_pane", 1)],
+                "Close · zoom",
+            ),
+        ],
+    ),
+    (
         "Import from Termius (shell)",
         1,
         &[
@@ -877,6 +1070,7 @@ pub(crate) fn help(keymap: &Keymap) -> Vec<HelpSection> {
                         .iter()
                         .map(|k| match k {
                             Id(id, n) => keymap.shown(id, *n),
+                            Joined(ids) => keymap.joined(ids),
                             Fixed(text) => (*text).to_owned(),
                         })
                         .filter(|c| !c.is_empty())
@@ -897,8 +1091,22 @@ pub(crate) struct KeyContext<'a> {
     pub(crate) overlay: Option<Overlay>,
     pub(crate) dialog_open: bool,
     pub(crate) prefix: bool,
+    /// The host list picks the host of a new pane (`Ctrl-Space S`).
+    pub(crate) picking: bool,
     pub(crate) keymap: &'a Keymap,
 }
+
+/// While picking a pane's host, the list only moves, searches and chooses.
+const PICKING_KEYS: &[&str] = &[
+    "hosts.down",
+    "hosts.up",
+    "hosts.first",
+    "hosts.last",
+    "hosts.search",
+    "hosts.clear_search",
+    "hosts.connect",
+    "hosts.help",
+];
 
 pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     let KeyContext {
@@ -906,6 +1114,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         overlay,
         dialog_open,
         prefix,
+        picking,
         keymap,
     } = cx;
     let overlay_open = overlay.is_some();
@@ -964,7 +1173,12 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         );
     }
     if ctrl && key.code == KeyCode::Char('c') {
-        return Some(Action::Quit);
+        // Picking a pane's host: Ctrl-C cancels the pick, not Portico.
+        return Some(if picking && !overlay_open {
+            Action::CancelPanePick
+        } else {
+            Action::Quit
+        });
     }
     if overlay_open {
         return match key.code {
@@ -975,6 +1189,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     match focus {
         // Text entry: fixed keys, every other character is typed.
         Focus::Search => match key.code {
+            KeyCode::Esc if picking => Some(Action::CancelPanePick),
             KeyCode::Esc => Some(Action::BlurSearch),
             KeyCode::Enter => Some(Action::Connect),
             KeyCode::Down => Some(Action::SelectNext),
@@ -986,6 +1201,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
             KeyCode::Char(c) if !ctrl => Some(Action::SearchInput(c)),
             _ => None,
         },
+        Focus::Hosts if picking => pick_key(key, is_prefix_key, keymap),
         Focus::Hosts | Focus::Terminal | Focus::Files => match key.code {
             _ if is_prefix_key => Some(Action::Prefix),
             KeyCode::Esc => Some(Action::SearchClear),
@@ -994,6 +1210,21 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
             }
             _ => keymap.lookup(Context::Hosts, &key),
         },
+    }
+}
+
+/// The host list while it picks a new pane's host: `Esc` cancels, the
+/// list only moves, searches and chooses (`↵`).
+fn pick_key(key: KeyEvent, is_prefix_key: bool, keymap: &Keymap) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        _ if is_prefix_key => Some(Action::Prefix),
+        KeyCode::Esc => Some(Action::CancelPanePick),
+        KeyCode::Char(c @ '1'..='9') if !ctrl => Some(Action::GoTab(usize::from(c as u8 - b'1'))),
+        _ => keymap
+            .binding(Context::Hosts, &key)
+            .filter(|b| PICKING_KEYS.contains(&b.id))
+            .map(|b| (b.action)()),
     }
 }
 
@@ -1065,6 +1296,7 @@ mod tests {
             overlay,
             dialog_open: dialog,
             prefix,
+            picking: false,
             keymap,
         }
     }
@@ -1277,7 +1509,7 @@ mod tests {
             Some(Action::CancelPrefix)
         ));
         assert!(matches!(
-            map(KeyCode::Char('z'), KeyModifiers::NONE, Focus::Hosts, true),
+            map(KeyCode::Char('y'), KeyModifiers::NONE, Focus::Hosts, true),
             Some(Action::CancelPrefix)
         ));
     }
@@ -1415,6 +1647,151 @@ mod tests {
                 assert!(keys.chars().count() <= 12, "{keys}");
                 assert!(label.chars().count() <= 19, "{label}");
             }
+        }
+        let panes = defaults
+            .iter()
+            .find(|s| s.title == "Panes (Ctrl-Space)")
+            .map(|s| s.rows.clone())
+            .unwrap_or_default();
+        assert!(panes.contains(&("\" · %".to_owned(), "Split below · right")));
+        assert!(panes.contains(&("←↓↑→ · o".to_owned(), "Focus · next pane")));
+        assert!(panes.contains(&("Shift-←↓↑→".to_owned(), "Resize")));
+        assert!(panes.contains(&("x · z".to_owned(), "Close · zoom")));
+    }
+
+    #[test]
+    fn pane_commands_follow_the_prefix() {
+        type Case = (KeyCode, KeyModifiers, fn(&Action) -> bool);
+        let cases: [Case; 12] = [
+            (KeyCode::Char('"'), KeyModifiers::SHIFT, |a| {
+                matches!(a, Action::SplitPane(Split::Horizontal))
+            }),
+            (KeyCode::Char('-'), KeyModifiers::NONE, |a| {
+                matches!(a, Action::SplitPane(Split::Horizontal))
+            }),
+            (KeyCode::Char('%'), KeyModifiers::SHIFT, |a| {
+                matches!(a, Action::SplitPane(Split::Vertical))
+            }),
+            (KeyCode::Char('|'), KeyModifiers::SHIFT, |a| {
+                matches!(a, Action::SplitPane(Split::Vertical))
+            }),
+            (KeyCode::Char('S'), KeyModifiers::SHIFT, |a| {
+                matches!(a, Action::SplitPaneHost)
+            }),
+            (KeyCode::Left, KeyModifiers::NONE, |a| {
+                matches!(a, Action::FocusPane(Dir::Left))
+            }),
+            (KeyCode::Down, KeyModifiers::NONE, |a| {
+                matches!(a, Action::FocusPane(Dir::Down))
+            }),
+            (KeyCode::Right, KeyModifiers::SHIFT, |a| {
+                matches!(a, Action::ResizePane(Dir::Right))
+            }),
+            (KeyCode::Up, KeyModifiers::SHIFT, |a| {
+                matches!(a, Action::ResizePane(Dir::Up))
+            }),
+            (KeyCode::Char('x'), KeyModifiers::NONE, |a| {
+                matches!(a, Action::ClosePane)
+            }),
+            (KeyCode::Char('z'), KeyModifiers::NONE, |a| {
+                matches!(a, Action::ZoomPane)
+            }),
+            (KeyCode::Char('o'), KeyModifiers::NONE, |a| {
+                matches!(a, Action::NextPane)
+            }),
+        ];
+        for (code, m, expected) in cases {
+            let action = map(code, m, Focus::Terminal, true);
+            assert!(
+                action.as_ref().is_some_and(expected),
+                "{code:?}: {action:?}"
+            );
+            // Without the prefix, the same keys go to the remote program.
+            let plain = map(code, m, Focus::Terminal, false);
+            assert!(matches!(plain, Some(Action::TerminalKey(_))), "{code:?}");
+        }
+        // `h` and `l` keep their meaning (home, logs).
+        assert!(matches!(
+            map(
+                KeyCode::Char('h'),
+                KeyModifiers::NONE,
+                Focus::Terminal,
+                true
+            ),
+            Some(Action::GoHome)
+        ));
+        // Vim-style moves, as documented: no conflict once home and logs move.
+        let (map, ignored) = overrides(&[
+            ("prefix.home", "0"),
+            ("prefix.debug", "g"),
+            ("prefix.pane_left", "h"),
+            ("prefix.pane_down", "j"),
+            ("prefix.pane_up", "k"),
+            ("prefix.pane_right", "l"),
+        ]);
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert_eq!(
+            map.joined(&[
+                "prefix.pane_left",
+                "prefix.pane_down",
+                "prefix.pane_up",
+                "prefix.pane_right"
+            ]),
+            "hjkl"
+        );
+        let cx = KeyContext {
+            prefix: true,
+            ..cx(Focus::Terminal, None, false, true, &map)
+        };
+        assert!(matches!(
+            map_key(key(KeyCode::Char('l'), KeyModifiers::NONE), cx),
+            Some(Action::FocusPane(Dir::Right))
+        ));
+    }
+
+    #[test]
+    fn picking_a_host_only_moves_searches_and_chooses() {
+        let keymap = Keymap::defaults();
+        let picking = |focus| KeyContext {
+            picking: true,
+            ..cx(focus, None, false, false, &keymap)
+        };
+        let at = |code, m, focus| map_key(key(code, m), picking(focus));
+        assert!(matches!(
+            at(KeyCode::Esc, KeyModifiers::NONE, Focus::Hosts),
+            Some(Action::CancelPanePick)
+        ));
+        assert!(matches!(
+            at(KeyCode::Esc, KeyModifiers::NONE, Focus::Search),
+            Some(Action::CancelPanePick)
+        ));
+        assert!(matches!(
+            at(KeyCode::Char('c'), KeyModifiers::CONTROL, Focus::Hosts),
+            Some(Action::CancelPanePick)
+        ));
+        assert!(matches!(
+            at(KeyCode::Enter, KeyModifiers::NONE, Focus::Hosts),
+            Some(Action::Connect)
+        ));
+        assert!(matches!(
+            at(KeyCode::Char('j'), KeyModifiers::NONE, Focus::Hosts),
+            Some(Action::SelectNext)
+        ));
+        assert!(matches!(
+            at(KeyCode::Char('/'), KeyModifiers::NONE, Focus::Hosts),
+            Some(Action::FocusSearch)
+        ));
+        // Typing in the search field still types.
+        assert!(matches!(
+            at(KeyCode::Char('w'), KeyModifiers::NONE, Focus::Search),
+            Some(Action::SearchInput('w'))
+        ));
+        // Everything else waits: no panel, no quit, no disconnect.
+        for code in ['f', 'p', 'q', 'd', 'e', 't'] {
+            assert!(
+                at(KeyCode::Char(code), KeyModifiers::NONE, Focus::Hosts).is_none(),
+                "{code}"
+            );
         }
     }
 }

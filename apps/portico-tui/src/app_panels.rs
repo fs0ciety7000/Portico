@@ -101,9 +101,9 @@ impl App {
     /// Host the user is looking at: the active tab's, else the selected one.
     fn current_alias(&self) -> Option<String> {
         if matches!(self.focus, Focus::Terminal | Focus::Files)
-            && let Some(view) = self.active_terminal()
+            && let Some(slot) = self.focused_slot()
         {
-            return Some(view.alias.clone());
+            return Some(slot.alias().to_owned());
         }
         self.selected_host().map(|h| h.alias.clone())
     }
@@ -730,10 +730,7 @@ impl App {
             .filter(live)
             .or_else(|| {
                 let alias = self.selected_host()?.alias.clone();
-                self.terminals
-                    .iter()
-                    .filter(live)
-                    .find(|t| t.alias == alias)
+                self.views().filter(live).find(|t| t.alias == alias)
             })
             .map(|t| (t.id, t.alias.clone()));
         let (alias, cannot_run) = if let Some((_, alias)) = &target {
@@ -805,12 +802,12 @@ impl App {
 
     /// Types a rendered snippet into the target tab, then shows that tab.
     fn send_snippet(&mut self, rendered: &str, run: bool) {
-        let index = self.snippet_target.and_then(|id| {
-            self.terminals
-                .iter()
-                .position(|t| t.id == id && !t.closed && t.ended.is_none())
+        let live = self.snippet_target.and_then(|id| {
+            self.views()
+                .find(|t| t.id == id && !t.closed && t.ended.is_none())
         });
-        let Some(view) = index.and_then(|i| self.terminals.get(i)) else {
+        let target = live.and_then(|view| self.pane_of_terminal(view.id));
+        let Some(view) = live else {
             if let Some(panel) = &mut self.snippets_panel {
                 panel.notice = Some(Notice {
                     ok: false,
@@ -826,9 +823,9 @@ impl App {
                 view.send(bytes);
                 self.overlay = None;
                 self.snippets_panel = None;
-                if let Some(i) = index {
-                    self.active = Some(i);
-                    self.focus = Focus::Terminal;
+                // The pane typed into is shown and focused.
+                if let Some((tab, pane)) = target {
+                    self.show_pane(tab, pane);
                 }
             }
             Err(error) => {

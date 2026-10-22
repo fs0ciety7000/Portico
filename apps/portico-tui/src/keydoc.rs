@@ -207,6 +207,23 @@ const SNIPPETS: Panel = Panel {
     outro: "Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante : `Esc`, puis `↵` pour se connecter.\n\nFormulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien), `Esc` annule.",
 };
 
+const PANES: Panel = Panel {
+    title: "TUI : panneaux",
+    intro: "Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 cellules. Les commandes sont dans la table du préfixe (`prefix.split_*`, `prefix.pane_*`, `prefix.next_pane`, `prefix.resize_*`, `prefix.close_pane`, `prefix.zoom_pane`). Seul le panneau actif reçoit les frappes, le collage et le défilement (aucune diffusion).",
+    rows: &[
+        (
+            "Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split onto… », recherche vide et active, rendue ensuite)",
+            "saisie pour filtrer, `↓` / `↑`, `↵` pour diviser",
+        ),
+        ("Annuler le choix d'hôte", "`Esc`, `Ctrl-C`"),
+        (
+            "Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte)",
+            "`↵` (dans le panneau)",
+        ),
+    ],
+    outro: "Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin. Une division impossible est refusée avec un message (« A tab holds at most 8 panes », « Not enough room to split this pane »).",
+};
+
 /// Fixed keys of the configurable contexts (not rebindable).
 const FIXED: &[(Context, &str, &str)] = &[
     (Context::Hosts, "Aller à l'onglet n", "`1`-`9`"),
@@ -251,7 +268,7 @@ fn context_section(out: &mut String, context: Context, title: &str, intro: &str)
         let keys: Vec<String> = defaults
             .keys(b.id)
             .iter()
-            .map(|k| format!("`{}`", k.display()))
+            .map(|k| format!("`{}`", k.display().replace('|', "\\|")))
             .collect();
         let _ = writeln!(out, "| {} | {} | `{}` |", b.doc, keys.join(", "), b.id);
     }
@@ -300,7 +317,7 @@ pub(crate) fn block() -> String {
         "TUI : terminal",
         "Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.",
     );
-    for panel in [&EDIT, &DEBUG, &FILES, &TUNNELS, &KEYS, &SNIPPETS] {
+    for panel in [&PANES, &EDIT, &DEBUG, &FILES, &TUNNELS, &KEYS, &SNIPPETS] {
         panel_section(&mut out, panel);
     }
     // One trailing newline before the end marker.

@@ -20,6 +20,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
 
 use crate::action::Action;
+use crate::app_panes::{PanePick, PaneSlot, Tab};
 use crate::copy_job::CopyJob;
 use crate::debug::DebugPanel;
 use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
@@ -134,10 +135,12 @@ pub(crate) struct App {
     pub(crate) toast: Option<Toast>,
     /// Latest session per host alias.
     pub(crate) sessions: HashMap<String, SessionView>,
-    /// Terminal tabs, in display order.
-    pub(crate) terminals: Vec<TerminalView>,
-    /// `None` = Home (host list), `Some(i)` = `terminals[i]`.
+    /// Terminal tabs, in display order; each one is a tree of panes.
+    pub(crate) tabs: Vec<Tab>,
+    /// `None` = Home (host list), `Some(i)` = `tabs[i]`.
     pub(crate) active: Option<usize>,
+    /// `Ctrl-Space S`: the host list picks the host of a new pane.
+    pub(crate) pane_pick: Option<PanePick>,
     /// `Ctrl-Space` was pressed: the next key is a Portico command.
     pub(crate) prefix: bool,
     /// Pending dialogs; the front one is shown and receives keys.
@@ -206,8 +209,9 @@ impl App {
             debug_panel: None,
             toast: None,
             sessions: HashMap::new(),
-            terminals: Vec::new(),
+            tabs: Vec::new(),
             active: None,
+            pane_pick: None,
             prefix: false,
             dialogs: VecDeque::new(),
             term_size: GridSize {
@@ -247,8 +251,9 @@ impl App {
         self.inventory.is_none() && self.load_error.is_none()
     }
 
+    /// The focused pane's terminal, when it has one.
     pub(crate) fn active_terminal(&self) -> Option<&TerminalView> {
-        self.active.and_then(|i| self.terminals.get(i))
+        self.focused_slot().and_then(PaneSlot::view)
     }
 
     /// Main loop: multiplexes terminal input, internal actions and ticks.
@@ -286,7 +291,7 @@ impl App {
                 self.sync_terminal_sizes();
             }
         }
-        for view in &mut self.terminals {
+        for view in self.views_mut() {
             view.close();
         }
         self.engine.shutdown();
@@ -309,6 +314,7 @@ impl App {
                             overlay: self.overlay,
                             dialog_open: !self.dialogs.is_empty(),
                             prefix: self.prefix,
+                            picking: self.pane_pick.is_some(),
                             keymap: &self.keymap,
                         },
                     )
@@ -336,6 +342,7 @@ impl App {
                 .iter()
                 .any(|t| t.status == TunnelStatus::Starting)
             || self.copy_job.as_ref().is_some_and(CopyJob::running)
+            || self.resizes_pending()
             || self.keys_panel.as_ref().is_some_and(KeysPanel::busy)
             || self
                 .snippets_panel
@@ -362,6 +369,7 @@ impl App {
             Action::Quit => self.running = false,
             Action::Tick => {
                 self.tick = self.tick.wrapping_add(1);
+                self.flush_resizes();
                 if let Some(t) = &mut self.toast {
                     t.ttl = t.ttl.saturating_sub(1);
                     if t.ttl == 0 {
@@ -430,6 +438,7 @@ impl App {
                 }
             }
             Action::HostsLoaded(Err(e)) => self.load_error = Some(e),
+            Action::Connect if self.pane_pick.is_some() => self.pick_host(),
             Action::Connect => self.connect_selected(),
             Action::Disconnect => self.disconnect_current(),
             Action::Engine(event) => self.on_engine_event(event),
@@ -448,9 +457,15 @@ impl App {
             Action::PrevTab => self.cycle_tab(-1),
             Action::NewTab => {
                 self.prefix = false;
-                if let Some(view) = self.active_terminal() {
-                    let (alias, session) = (view.alias.clone(), view.session);
-                    self.open_terminal(alias, session);
+                if let Some(slot) = self.focused_slot() {
+                    let (alias, current) = (slot.alias().to_owned(), slot.session());
+                    let session = match current {
+                        Some(id) if self.session_alive(id) => Some(id),
+                        _ => self.session_or_connect(&alias),
+                    };
+                    if let Some(session) = session {
+                        self.open_terminal(alias, session);
+                    }
                 }
             }
             Action::CloseTab => {
@@ -466,10 +481,18 @@ impl App {
             Action::ScrollUp => self.scroll(Scroll::PageUp),
             Action::ScrollDown => self.scroll(Scroll::PageDown),
             Action::TerminalDirty(id) => {
-                if let Some(view) = self.terminals.iter().find(|t| t.id == id) {
+                if let Some(view) = self.views().find(|t| t.id == id) {
                     view.dirty.store(false, Ordering::Release);
                 }
             }
+            Action::SplitPane(split) => self.split_pane(split),
+            Action::SplitPaneHost => self.split_pane_host(),
+            Action::CancelPanePick => self.cancel_pick(),
+            Action::FocusPane(dir) => self.focus_pane(dir),
+            Action::NextPane => self.next_pane(),
+            Action::ResizePane(dir) => self.resize_pane(dir),
+            Action::ClosePane => self.close_pane(),
+            Action::ZoomPane => self.zoom_pane(),
             Action::OpenFiles => {
                 self.prefix = false;
                 self.open_files();
@@ -524,16 +547,11 @@ impl App {
                     }
                 }
             },
-            Action::TerminalOpened { alias, result } => match result {
-                Ok(handle) => {
-                    let view = TerminalView::spawn(*handle, alias, self.term_size, self.tx.clone());
-                    self.terminals.push(view);
-                    self.activate(self.terminals.len() - 1);
-                }
-                // The session's own failure is already reported.
-                Err(error) if error.code == "session_ended" => {}
-                Err(error) => self.notify_error(error),
-            },
+            Action::TerminalOpened {
+                alias,
+                pane,
+                result,
+            } => self.terminal_opened(alias, pane, result),
             other => self.update_panels(other),
         }
     }
@@ -576,51 +594,32 @@ impl App {
 
     // ── tabs ───────────────────────────────────────────────────────────────
 
-    fn go_home(&mut self) {
+    pub(crate) fn go_home(&mut self) {
         self.active = None;
         if self.focus == Focus::Terminal {
             self.focus = Focus::Hosts;
         }
     }
 
-    fn activate(&mut self, index: usize) {
-        if index < self.terminals.len() {
+    pub(crate) fn activate(&mut self, index: usize) {
+        if index < self.tabs.len() {
             self.active = Some(index);
             self.focus = Focus::Terminal;
+            // Back in a tab: no host is being picked for a new pane.
+            self.end_pick();
         }
     }
 
     fn cycle_tab(&mut self, delta: isize) {
         self.prefix = false;
         // Positions: 0 = Home, 1..=n = terminals.
-        let n = self.terminals.len() + 1;
+        let n = self.tabs.len() + 1;
         let current = self.active.map_or(0, |i| i + 1);
         let next = (current + n).saturating_add_signed(delta) % n;
         if next == 0 {
             self.go_home();
         } else {
             self.activate(next - 1);
-        }
-    }
-
-    fn close_active_tab(&mut self) {
-        let Some(index) = self.active else { return };
-        if index >= self.terminals.len() {
-            return;
-        }
-        let mut view = self.terminals.remove(index);
-        view.close();
-        // Closing the last tab of a session disconnects it.
-        if !self.terminals.iter().any(|t| t.session == view.session) {
-            let engine = self.engine.clone();
-            tokio::spawn(async move {
-                let _ = engine.disconnect(view.session).await;
-            });
-        }
-        if self.terminals.is_empty() {
-            self.go_home();
-        } else {
-            self.activate(index.min(self.terminals.len() - 1));
         }
     }
 
@@ -664,24 +663,26 @@ impl App {
         }
     }
 
+    /// A key for the focused pane only (never broadcast). A pane whose
+    /// connection is down takes `↵` as "retry".
     fn terminal_key(&mut self, key: KeyEvent) {
         self.prefix = false;
-        let Some(view) = self.active_terminal() else {
+        let Some(slot) = self.focused_slot() else {
             return;
         };
-        if view.closed || view.ended.is_some() {
-            return;
-        }
-        if let Some(bytes) = encode_key(key, view.mode()) {
-            view.send(bytes);
-        }
-    }
-
-    /// Keeps PTY sizes in sync with the drawn terminal area.
-    fn sync_terminal_sizes(&mut self) {
-        let size = self.term_size;
-        for view in &mut self.terminals {
-            view.resize(size);
+        match slot.view() {
+            Some(view) if slot.live() => {
+                if let Some(bytes) = encode_key(key, view.mode()) {
+                    view.send(bytes);
+                }
+            }
+            _ if key.code == crossterm::event::KeyCode::Enter
+                && key.kind == crossterm::event::KeyEventKind::Press
+                && key.modifiers.is_empty() =>
+            {
+                self.retry_pane();
+            }
+            _ => {}
         }
     }
 
@@ -690,11 +691,11 @@ impl App {
     /// The session the user is looking at: the active terminal's, else the
     /// selected host's live one. `connect` starts a session if there is none.
     fn current_session(&mut self, connect: bool) -> Option<(SessionId, String)> {
-        if let Some(view) = self
-            .active_terminal()
-            .filter(|_| self.focus != Focus::Hosts)
+        if self.focus != Focus::Hosts
+            && let Some(slot) = self.focused_slot()
+            && let Some(session) = slot.session()
         {
-            return Some((view.session, view.alias.clone()));
+            return Some((session, slot.alias().to_owned()));
         }
         if self.focus == Focus::Files
             && let Some(files) = &self.files
@@ -789,7 +790,7 @@ impl App {
     }
 
     fn leave_files(&mut self) {
-        self.focus = if self.active_terminal().is_some() {
+        self.focus = if self.active_tab().is_some() {
             Focus::Terminal
         } else {
             Focus::Hosts
@@ -901,13 +902,15 @@ impl App {
         let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
             return;
         };
-        // Existing live tab for this host: just switch to it.
-        if let Some(index) = self
-            .terminals
-            .iter()
-            .position(|t| t.alias == alias && !t.closed && t.ended.is_none())
-        {
-            self.activate(index);
+        // Existing live pane for this host: just switch to it.
+        let live = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            tab.items()
+                .into_iter()
+                .find(|(_, slot)| slot.live() && slot.alias() == alias)
+                .map(|(pane, _)| (index, pane))
+        });
+        if let Some((index, pane)) = live {
+            self.show_pane(index, pane);
             return;
         }
         let session = match self
@@ -937,25 +940,16 @@ impl App {
         self.open_terminal(alias, session);
     }
 
-    /// Requests a shell; served once the session is connected.
+    /// Requests a shell for a new tab; served once the session is
+    /// connected.
     fn open_terminal(&self, alias: String, session: SessionId) {
-        let engine = self.engine.clone();
-        let tx = self.tx.clone();
-        let size = self.term_size.pty();
-        tokio::spawn(async move {
-            let result = engine
-                .open_terminal(session, size)
-                .await
-                .map(Box::new)
-                .map_err(|e| e.summary());
-            let _ = tx.send(Action::TerminalOpened { alias, result });
-        });
+        self.request_terminal(alias, session, None, self.term_size);
     }
 
     fn disconnect_current(&mut self) {
         self.prefix = false;
-        let id = match (self.focus, self.active_terminal()) {
-            (Focus::Terminal, Some(view)) => Some(view.session),
+        let id = match (self.focus, self.focused_slot().and_then(PaneSlot::session)) {
+            (Focus::Terminal, Some(session)) => Some(session),
             _ => self
                 .selected_host()
                 .and_then(|h| self.session_for(&h.alias))
@@ -972,7 +966,7 @@ impl App {
         match event {
             EngineEvent::Session { id, event } => self.on_session_event(id, event),
             EngineEvent::Terminal { id, event, .. } => {
-                if let Some(view) = self.terminals.iter_mut().find(|t| t.id == id) {
+                if let Some(view) = self.views_mut().find(|t| t.id == id) {
                     match event {
                         TerminalEvent::Exited { status, signal } => {
                             view.ended = Some(match (status, signal) {
@@ -1075,7 +1069,8 @@ impl App {
                         let shown = (self.focus == Focus::Files
                             && self.files.as_ref().is_some_and(|f| f.session == id))
                             || self.copy_view_shows(id)
-                            || self.details_show(id);
+                            || self.details_show(id)
+                            || self.panes_show(id);
                         if !shown {
                             self.notify_error(error);
                         }
@@ -1144,7 +1139,7 @@ impl App {
     }
 
     fn end_terminals(&mut self, session: SessionId) {
-        for view in self.terminals.iter_mut().filter(|t| t.session == session) {
+        for view in self.views_mut().filter(|t| t.session == session) {
             view.closed = true;
             view.ended.get_or_insert(Ended::Closed);
         }
@@ -1212,7 +1207,7 @@ impl App {
     }
 
     /// New search results: the first host is selected.
-    fn refilter(&mut self) {
+    pub(crate) fn refilter(&mut self) {
         let Some(inv) = &self.inventory else { return };
         self.hits = self.search.search(&inv.hosts, &self.query);
         self.entries = crate::host_list::build(&inv.hosts, &self.hits, &self.query, &self.recent);
@@ -1280,6 +1275,32 @@ impl App {
             }
         }
         self.select_entry(Some(current));
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Applies queued actions and engine `events` (with a tick every 20 ms)
+    /// until `done` holds; fails after 20 s (tests only).
+    pub(crate) async fn pump_until(
+        &mut self,
+        events: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
+        mut done: impl FnMut(&App) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !done(self) {
+            let action = tokio::select! {
+                Some(action) = self.rx.recv() => Some(action),
+                event = events.recv() => event.ok().map(Action::Engine),
+                () = tokio::time::sleep_until(deadline) => {
+                    panic!("not reached in 20 s: {:?} {:?}", self.tabs, self.sessions)
+                }
+                () = tokio::time::sleep(Duration::from_millis(20)) => Some(Action::Tick),
+            };
+            if let Some(action) = action {
+                self.update(action);
+            }
+        }
     }
 }
 

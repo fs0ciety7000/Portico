@@ -16,6 +16,7 @@ use portico_core::vault::VaultStatus;
 use portico_core::{AgentKey, CopyIdOutcome, EngineEvent, ErrorSummary};
 
 use crate::files::FilesEvent;
+use crate::panes::{Dir, PaneId, Split};
 
 #[derive(Debug)]
 pub(crate) enum Action {
@@ -65,8 +66,22 @@ pub(crate) enum Action {
     TerminalDirty(TerminalId),
     TerminalOpened {
         alias: String,
+        /// The pane waiting for this shell; `None` opens a new tab.
+        pane: Option<PaneId>,
         result: Result<Box<TerminalHandle>, ErrorSummary>,
     },
+    // Split panes (Ctrl-Space prefix)
+    /// A new pane on the focused pane's host.
+    SplitPane(Split),
+    /// Pick a host in the list, then split onto it.
+    SplitPaneHost,
+    /// Leave the host picker, nothing split.
+    CancelPanePick,
+    FocusPane(Dir),
+    NextPane,
+    ResizePane(Dir),
+    ClosePane,
+    ZoomPane,
     // SFTP explorer
     OpenFiles,
     FilesKey(KeyEvent),
