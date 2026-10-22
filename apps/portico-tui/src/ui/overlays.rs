@@ -162,6 +162,10 @@ fn render_help(app: &App, frame: &mut Frame<'_>) {
         .border_type(BorderType::Rounded)
         .border_style(s.border_focus())
         .title(Line::from(Span::styled(" Keyboard shortcuts ", s.title())))
+        .title_bottom(Line::from(Span::styled(
+            concat!(" Portico ", env!("CARGO_PKG_VERSION"), " "),
+            s.muted(),
+        )))
         .title_bottom(Line::from(Span::styled(footer, s.muted())).right_aligned())
         .padding(Padding::new(2, 2, 0, 0))
         .style(s.overlay());
