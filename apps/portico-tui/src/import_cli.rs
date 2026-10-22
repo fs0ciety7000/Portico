@@ -402,6 +402,9 @@ pub(crate) async fn run_with<P: SecretPrompt>(
         prefix: args.prefix,
         keys: selected,
         key_passphrase,
+        // Destination changes are listed by the plan and never applied from
+        // the CLI for now (the review UI comes with the next change).
+        allow_redirect: std::collections::BTreeSet::new(),
     };
     let report = engine
         .apply_import(plan, options)

@@ -311,6 +311,9 @@ impl ImportApplyDto {
             prefix: self.prefix,
             keys,
             key_passphrase,
+            // Destination changes are skipped until the dialog offers a
+            // per-host choice.
+            allow_redirect: std::collections::BTreeSet::new(),
         })
     }
 }
@@ -432,6 +435,7 @@ mod tests {
                     encrypted: false,
                     aliases: vec!["web".into()],
                     local: Some(dir.join(".ssh/id_ed25519")),
+                    fingerprint_verified: true,
                 })
                 .collect(),
             key_material: portico_core::import::KeyMaterial::default(),
