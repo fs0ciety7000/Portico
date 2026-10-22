@@ -117,10 +117,12 @@ async fn two_panes_show_titles_divider_and_focus() {
     for row in &lines[1..23] {
         assert_eq!(row.chars().nth(39), Some('│'), "{all}");
     }
-    // The failed pane: message, hint, retry and close keys.
+    // The failed pane: message, hint and close key. Not focused, it says
+    // how to get there rather than `↵ retry` (`↵` goes to the focused pane).
     assert!(all.contains("Connection refused by 10.0.0.7:22"), "{all}");
     assert!(all.contains("Is sshd running on the host?"), "{all}");
-    assert!(all.contains("↵  retry"), "{all}");
+    assert!(all.contains("focus to retry (Ctrl-Space ←↓↑→)"), "{all}");
+    assert!(!all.contains("↵  retry"), "{all}");
     assert!(all.contains("Ctrl-Space x  close"), "{all}");
     // The opening pane says what it waits for.
     assert!(all.contains("Opening a shell on web-01"), "{all}");
@@ -132,12 +134,156 @@ async fn two_panes_show_titles_divider_and_focus() {
     let lines = screen(&mut app, 80, 24);
     assert!(lines[1].starts_with("▍db-primary"), "{}", text(&lines));
     assert!(!lines[1].contains("▍web-01"), "{}", text(&lines));
-    // A failed focused pane offers ↵ retry in the status bar too.
+    // Focused, the failed pane offers ↵ retry, in the status bar too.
+    assert!(text(&lines[1..23]).contains("↵  retry"), "{}", text(&lines));
+    assert!(!text(&lines).contains("focus to retry"), "{}", text(&lines));
     assert!(lines[23].contains("↵  retry"), "{}", text(&lines));
     // The prefix bar lists the pane commands first.
     app.update(Action::Prefix);
     let lines = screen(&mut app, 80, 24);
-    assert!(lines[23].contains("%  split right"), "{}", text(&lines));
+    assert!(lines[23].contains("% \"  split"), "{}", text(&lines));
+}
+
+fn buffer(app: &mut App, cols: u16, rows: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+    terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+#[tokio::test]
+async fn dividers_are_drawn_in_border_subtle() {
+    let mut app = test_app();
+    tab_of(&mut app, 80, 24, vec![failed("a"), failed("b")]);
+    let buf = buffer(&mut app, 80, 24);
+    let palette = app.styles().theme.palette;
+    for y in 1..23 {
+        let cell = buf.cell((39, y)).unwrap();
+        assert_eq!(cell.symbol(), "│");
+        // The stroke colour, on the base surface (not the text colour).
+        assert_eq!(cell.fg, crate::theme::c(palette.border_subtle), "row {y}");
+        assert_eq!(cell.bg, crate::theme::c(palette.bg_base), "row {y}");
+        assert_ne!(cell.fg, crate::theme::c(palette.text_primary));
+    }
+    // Same for a horizontal divider and where they join.
+    let mut app = test_app();
+    let slots = vec![failed("a"), failed("b"), failed("c")];
+    tab_of(&mut app, 80, 24, slots);
+    let buf = buffer(&mut app, 80, 24);
+    let row = (1..23)
+        .find(|&y| buf.cell((0, y)).unwrap().symbol() == "─")
+        .unwrap();
+    for x in 0..40 {
+        let cell = buf.cell((x, row)).unwrap();
+        assert_eq!(cell.fg, crate::theme::c(palette.border_subtle), "col {x}");
+    }
+    assert_eq!(buf.cell((39, row)).unwrap().symbol(), "┤");
+}
+
+#[tokio::test]
+async fn a_failed_pane_reads_the_same_in_its_title_and_its_tab() {
+    let mut app = test_app();
+    let web = opening(&mut app, "web", SessionPhase::Connected);
+    tab_of(&mut app, 80, 24, vec![web, failed("db")]);
+    let error = crate::theme::c(app.styles().theme.status.error);
+    let buf = buffer(&mut app, 80, 24);
+    let lines = screen(&mut app, 80, 24);
+    // The focused pane is the failed one (the last split): its title has a
+    // filled dot and "Failed", both in status-error.
+    let title = &lines[1];
+    let at = |needle: &str| {
+        let byte = title.find(needle).unwrap();
+        u16::try_from(title[..byte].chars().count()).unwrap()
+    };
+    let dot = at("db  ●") + 4;
+    assert_eq!(buf.cell((dot, 1)).unwrap().symbol(), "●");
+    assert_eq!(buf.cell((dot, 1)).unwrap().fg, error);
+    let label = at("Failed");
+    assert_eq!(buf.cell((label, 1)).unwrap().fg, error);
+    // The tab: the same filled dot, in the same colour (never the hollow
+    // one, kept for "no shell attached").
+    let header = &lines[0];
+    assert!(header.contains("1 db (2) ●"), "{header}");
+    assert!(!header.contains('○'), "{header}");
+    let byte = header.find("1 db (2) ●").unwrap();
+    let x = u16::try_from(header[..byte].chars().count()).unwrap() + 9;
+    assert_eq!(buf.cell((x, 0)).unwrap().fg, error);
+    // An unfocused failed pane: the same dot and colour in its title.
+    app.update(Action::FocusPane(Dir::Left));
+    let buf = buffer(&mut app, 80, 24);
+    let lines = screen(&mut app, 80, 24);
+    let title = &lines[1];
+    let byte = title.find("Failed").unwrap();
+    let x = u16::try_from(title[..byte].chars().count()).unwrap();
+    assert_eq!(buf.cell((x, 1)).unwrap().fg, error);
+}
+
+#[tokio::test]
+async fn a_long_alias_keeps_the_counter_clear_of_the_latency() {
+    let mut app = test_app();
+    let slots = vec![
+        opening(&mut app, "alpha", SessionPhase::Connected),
+        opening(
+            &mut app,
+            "analytics-warehouse-replica-02",
+            SessionPhase::Connected,
+        ),
+    ];
+    tab_of(&mut app, 60, 24, slots);
+    let lines = screen(&mut app, 60, 24);
+    let title = &lines[1];
+    assert!(title.contains("12 ms 2/2"), "{title}");
+    assert!(!title.contains("ms2/2"), "{title}");
+    assert!(title.contains('…'), "the alias gives way: {title}");
+}
+
+#[tokio::test]
+async fn help_from_a_split_tab_opens_on_the_panes_page() {
+    let mut app = test_app();
+    tab_of(&mut app, 80, 24, vec![failed("a"), failed("b")]);
+    app.update(Action::Prefix);
+    app.update(Action::ToggleHelp);
+    let lines = screen(&mut app, 80, 24);
+    let all = text(&lines);
+    assert!(all.contains("Panes (Ctrl-Space)"), "{all}");
+    assert!(
+        all.contains("Split right") && all.contains("Move divider"),
+        "{all}"
+    );
+    assert!(all.contains("Tab page 2/2"), "{all}");
+    app.update(Action::CloseHelp);
+    // A tab with one pane: the first page, as before.
+    let mut app = test_app();
+    tab_of(&mut app, 80, 24, vec![failed("a")]);
+    app.update(Action::ToggleHelp);
+    let lines = screen(&mut app, 80, 24);
+    assert!(text(&lines).contains("Tab page 1/2"), "{}", text(&lines));
+}
+
+#[tokio::test]
+async fn the_prefix_bar_of_a_split_tab_lists_pane_commands_first() {
+    let mut app = test_app();
+    tab_of(&mut app, 80, 24, vec![failed("a"), failed("b")]);
+    app.update(Action::Prefix);
+    let lines = screen(&mut app, 80, 24);
+    let bar = &lines[23];
+    let order = [
+        "% \"  split",
+        "←↓↑→  pane",
+        "x  close pane",
+        "z  zoom",
+        "?  help",
+        "h  hosts",
+    ];
+    let mut last = 0;
+    for hint in order {
+        let at = bar.find(hint).unwrap_or_else(|| panic!("{hint}: {bar}"));
+        assert!(at >= last, "{hint} out of order: {bar}");
+        last = at;
+    }
+    // At 120 columns, more fits (tabs, then the host split).
+    let lines = screen(&mut app, 120, 24);
+    assert!(lines[23].contains("1-9  tab"), "{}", lines[23]);
+    assert!(lines[23].contains("S  split with host…"), "{}", lines[23]);
 }
 
 #[tokio::test]
@@ -217,13 +363,46 @@ async fn a_failure_shown_in_a_pane_needs_no_toast() {
 async fn refused_splits_say_why() {
     let mut app = test_app();
     tab_of(&mut app, 80, 24, vec![failed("a"), failed("b")]);
+    let before = screen(&mut app, 80, 24);
     // The focused pane is 40 columns wide: two halves of 20 and a divider
     // do not fit.
     app.update(Action::SplitPane(Split::Vertical));
-    let toast = app.toast.clone().unwrap();
-    assert_eq!(toast.message, "Not enough room to split this pane");
-    assert!(toast.hint.unwrap().contains("20×5"));
+    assert!(app.toast.is_none(), "no toast over the panes");
+    let note = app.note.clone().unwrap();
+    assert_eq!(note.message, "Each pane needs at least 20 columns × 5 rows");
+    assert_eq!(note.hint, "Enlarge the window, or close a pane.");
     assert_eq!(app.active_tab().map(Tab::len), Some(2));
+    // One line in the status bar, in status-warning; the panes (and their
+    // prompt lines) are exactly as before.
+    let lines = screen(&mut app, 80, 24);
+    assert_eq!(lines[..23], before[..23], "{}", text(&lines));
+    assert!(
+        lines[23].contains("▲ Each pane needs at least 20 columns × 5 rows · Enlarge"),
+        "{}",
+        lines[23]
+    );
+    let buf = buffer(&mut app, 80, 24);
+    let x = u16::try_from(lines[23].find('▲').unwrap()).unwrap();
+    let warning = crate::theme::c(app.styles().theme.status.warning);
+    assert_eq!(buf.cell((x, 23)).unwrap().fg, warning);
+    assert_eq!(buf.cell((x + 2, 23)).unwrap().fg, warning);
+    // Wide enough, the whole hint shows.
+    let lines = screen(&mut app, 120, 24);
+    assert!(
+        lines[23].contains("· Enlarge the window, or close a pane."),
+        "{}",
+        lines[23]
+    );
+    // It goes after about 4 s (one wake-up at the deadline, no ticking).
+    assert_eq!(app.next_deadline(), Some(note.until));
+    assert!(note.until > Instant::now() + Duration::from_secs(3));
+    app.expire(note.until.checked_sub(Duration::from_millis(1)).unwrap());
+    assert!(app.note.is_some());
+    app.expire(note.until);
+    assert!(app.note.is_none());
+    assert_eq!(app.next_deadline(), None);
+    let lines = screen(&mut app, 80, 24);
+    assert!(lines[23].contains("TERMINAL") && !lines[23].contains('▲'));
 
     // Eight panes on a big screen, then a ninth is refused.
     let mut app = test_app();
@@ -246,13 +425,49 @@ async fn refused_splits_say_why() {
     app.active = Some(0);
     app.focus = Focus::Terminal;
     app.update(Action::SplitPane(Split::Horizontal));
-    assert_eq!(
-        app.toast.clone().unwrap().message,
-        "A tab holds at most 8 panes"
-    );
-    app.toast = None;
+    let note = app.note.clone().unwrap();
+    assert_eq!(note.message, "This tab already has 8 panes");
+    assert_eq!(note.hint, "Close a pane first.");
+    assert!(app.toast.is_none());
+    app.note = None;
     app.update(Action::SplitPaneHost);
-    assert!(app.toast.is_some() && app.pane_pick.is_none());
+    assert!(app.note.is_some() && app.pane_pick.is_none());
+}
+
+#[tokio::test]
+async fn splitting_a_zoomed_pane_unzooms_then_splits() {
+    let mut app = test_app();
+    tab_of(&mut app, 120, 40, vec![failed("a"), failed("b")]);
+    app.update(Action::ZoomPane);
+    assert!(app.active_tab().unwrap().zoomed());
+    // Room in the split layout: unzoomed, then split.
+    let session = opening(&mut app, "c", SessionPhase::Connected);
+    let PaneSlot::Opening { session, .. } = session else {
+        unreachable!()
+    };
+    let index = app.active.unwrap();
+    app.split_with(index, Split::Horizontal, "c".into(), session);
+    let tab = app.active_tab().unwrap();
+    assert_eq!(tab.len(), 3);
+    assert!(!tab.zoomed());
+    assert!(app.note.is_none());
+    // No room in the split layout: refused, and the zoom stays.
+    let mut app = test_app();
+    tab_of(
+        &mut app,
+        80,
+        24,
+        vec![failed("a"), failed("b"), failed("c"), failed("d")],
+    );
+    app.update(Action::ZoomPane);
+    app.update(Action::SplitPane(Split::Vertical));
+    let tab = app.active_tab().unwrap();
+    assert_eq!(tab.len(), 4);
+    assert!(tab.zoomed(), "a refusal keeps the zoom");
+    assert_eq!(
+        app.note.as_ref().map(|n| n.message.as_str()),
+        Some("Each pane needs at least 20 columns × 5 rows")
+    );
 }
 
 #[test]
@@ -289,7 +504,7 @@ fn picking_a_host_can_be_cancelled() {
     assert_eq!(app.active, None, "the host list is shown");
     let lines = screen(&mut app, 80, 24);
     let all = text(&lines);
-    assert!(all.contains("Split onto…"), "{all}");
+    assert!(all.contains("Split with host…"), "{all}");
     assert!(
         lines[23].contains("SPLIT") && lines[23].contains("Esc  cancel"),
         "{all}"
@@ -415,6 +630,11 @@ async fn keys_reach_only_the_focused_pane() {
     lab.app.update(Action::SplitPaneHost);
     assert!(lab.app.pane_pick.is_some());
     lab.select("beta");
+    // The details say what `↵` does now.
+    let all = text(&screen(&mut lab.app, 110, 28));
+    assert!(all.contains("↵  split with beta"), "{all}");
+    assert!(!all.contains("↵  connect"), "{all}");
+    assert!(all.contains("Split with host…"), "{all}");
     lab.app.update(Action::Connect);
     assert!(lab.app.pane_pick.is_none());
     lab.until(|app| app.active_tab().is_some_and(|t| t.len() == 2) && all_live(app))
@@ -551,4 +771,98 @@ async fn a_pane_whose_connection_closed_reopens_on_enter() {
     assert_eq!(lab.app.tabs.len(), 1);
     let second = lab.app.active_terminal().map(|v| v.session).unwrap();
     assert_ne!(first, second, "a new session");
+}
+
+/// A key as the terminal delivers it: through the dispatcher, then applied.
+fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let event = crossterm::event::Event::Key(KeyEvent::new(code, modifiers));
+    if let Some(action) = app.map_event(event) {
+        app.update(action);
+    }
+}
+
+#[tokio::test]
+async fn pane_mode_repeats_arrows_then_hands_keys_back() {
+    let mut lab = lab().await;
+    lab.select("alpha");
+    lab.app.update(Action::Connect);
+    lab.until(|app| app.tabs.len() == 1 && all_live(app)).await;
+    lab.app.update(Action::SplitPaneHost);
+    lab.select("beta");
+    lab.app.update(Action::Connect);
+    lab.until(|app| app.active_tab().is_some_and(|t| t.len() == 2) && all_live(app))
+        .await;
+    let focused = |app: &App| app.focused_slot().map(|s| s.alias().to_owned());
+    assert_eq!(focused(&lab.app).as_deref(), Some("beta"));
+    let none = KeyModifiers::NONE;
+
+    // Ctrl-Space ←: the focus moves and pane mode starts.
+    press(&mut lab.app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    press(&mut lab.app, KeyCode::Left, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("alpha"));
+    let window = lab.app.pane_repeat.unwrap();
+    assert!(window > Instant::now() + Duration::from_millis(400));
+    assert!(window <= Instant::now() + PANE_REPEAT);
+    let lines = screen(&mut lab.app, 110, 28);
+    assert!(lines[27].contains(" PANE "), "{}", lines[27]);
+    assert!(lines[27].contains("←↓↑→  pane"), "{}", lines[27]);
+    assert!(
+        lines[27].contains("Shift-←↓↑→  move divider"),
+        "{}",
+        lines[27]
+    );
+
+    // Within the window, arrows and Shift+arrows need no prefix.
+    press(&mut lab.app, KeyCode::Right, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("beta"));
+    press(&mut lab.app, KeyCode::Left, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("alpha"));
+    let area = lab.app.body_area();
+    let width = |app: &App| {
+        app.active_tab()
+            .unwrap()
+            .layout(area)
+            .panes
+            .first()
+            .map(|p| p.grid.width)
+    };
+    let before = width(&lab.app);
+    press(&mut lab.app, KeyCode::Right, KeyModifiers::SHIFT);
+    assert_ne!(width(&lab.app), before, "the divider moved");
+    assert!(lab.app.pane_repeat.is_some());
+
+    // Any other key ends the mode and reaches the focused pane's program.
+    press(&mut lab.app, KeyCode::Char('q'), none);
+    assert!(lab.app.pane_repeat.is_none());
+    let alpha = &lab.alpha;
+    eventually(|| received(alpha).contains('q')).await;
+    assert!(!received(&lab.beta).contains('q'));
+    // None of the arrows of the mode went to a remote program.
+    assert!(!received(&lab.alpha).contains('\u{1b}'));
+    assert!(!received(&lab.beta).contains('\u{1b}'));
+    let lines = screen(&mut lab.app, 110, 28);
+    assert!(lines[27].contains(" TERMINAL "), "{}", lines[27]);
+
+    // Out of the mode, an arrow is the program's again.
+    press(&mut lab.app, KeyCode::Left, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("alpha"));
+    let alpha = &lab.alpha;
+    eventually(|| received(alpha).contains('\u{1b}')).await;
+
+    // The window runs out: the next arrow goes to the program as well.
+    press(&mut lab.app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    press(&mut lab.app, KeyCode::Right, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("beta"));
+    let until = lab.app.pane_repeat.unwrap();
+    assert_eq!(lab.app.next_deadline(), Some(until));
+    lab.app.expire(until);
+    assert!(lab.app.pane_repeat.is_none());
+    press(&mut lab.app, KeyCode::Left, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("beta"));
+    let beta = &lab.beta;
+    eventually(|| received(beta).contains('\u{1b}')).await;
+    // A stale window (its wake-up not handled yet) does not count either.
+    lab.app.pane_repeat = Instant::now().checked_sub(Duration::from_millis(1));
+    press(&mut lab.app, KeyCode::Left, none);
+    assert_eq!(focused(&lab.app).as_deref(), Some("beta"));
 }

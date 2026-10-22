@@ -114,20 +114,20 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Onglet précédent | `[`, `Shift-Tab` | `prefix.prev_tab` |
 | Nouvel onglet sur le même hôte | `n` | `prefix.new_tab` |
 | Fermer l'onglet et tous ses panneaux (un hôte qui n'a plus aucun panneau est déconnecté) | `w` | `prefix.close_tab` |
-| Diviser le panneau : nouveau panneau dessous, même hôte (même session si elle est vivante) | `"`, `-` | `prefix.split_horizontal` |
-| Diviser le panneau : nouveau panneau à droite, même hôte | `%`, `\|` | `prefix.split_vertical` |
-| Diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre) | `S` | `prefix.split_host` |
-| Focus au panneau de gauche | `←` | `prefix.pane_left` |
-| Focus au panneau du dessous | `↓` | `prefix.pane_down` |
-| Focus au panneau du dessus | `↑` | `prefix.pane_up` |
-| Focus au panneau de droite | `→` | `prefix.pane_right` |
-| Panneau suivant (ordre de lecture, boucle) | `o` | `prefix.next_pane` |
-| Déplacer la séparation verticale vers la gauche (4 colonnes) | `Shift-←` | `prefix.resize_left` |
-| Déplacer la séparation horizontale vers le bas (2 lignes) | `Shift-↓` | `prefix.resize_down` |
-| Déplacer la séparation horizontale vers le haut (2 lignes) | `Shift-↑` | `prefix.resize_up` |
-| Déplacer la séparation verticale vers la droite (4 colonnes) | `Shift-→` | `prefix.resize_right` |
-| Fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte) | `x` | `prefix.close_pane` |
-| Zoom : le panneau seul dans l'onglet, ou retour à la division | `z` | `prefix.zoom_pane` |
+| « Split down » : nouveau panneau dessous, même hôte (même session si elle est vivante) | `"`, `-` | `prefix.split_horizontal` |
+| « Split right » : nouveau panneau à droite, même hôte | `%`, `\|` | `prefix.split_vertical` |
+| « Split with host… » : diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre) | `S` | `prefix.split_host` |
+| Focus au panneau de gauche (puis les flèches seules pendant 600 ms : mode `PANE`) | `←` | `prefix.pane_left` |
+| Focus au panneau du dessous (mode `PANE`) | `↓` | `prefix.pane_down` |
+| Focus au panneau du dessus (mode `PANE`) | `↑` | `prefix.pane_up` |
+| Focus au panneau de droite (mode `PANE`) | `→` | `prefix.pane_right` |
+| « Next pane » : panneau suivant (ordre de lecture, boucle) | `o` | `prefix.next_pane` |
+| « Move divider » : séparation verticale vers la gauche, 4 colonnes (puis `Shift` + flèche seul pendant 600 ms : mode `PANE`) | `Shift-←` | `prefix.resize_left` |
+| « Move divider » : séparation horizontale vers le bas, 2 lignes (mode `PANE`) | `Shift-↓` | `prefix.resize_down` |
+| « Move divider » : séparation horizontale vers le haut, 2 lignes (mode `PANE`) | `Shift-↑` | `prefix.resize_up` |
+| « Move divider » : séparation verticale vers la droite, 4 colonnes (mode `PANE`) | `Shift-→` | `prefix.resize_right` |
+| « Close pane » : fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte) | `x` | `prefix.close_pane` |
+| « Zoom pane » : le panneau seul dans l'onglet, ou retour à la division | `z` | `prefix.zoom_pane` |
 | Déconnecter cet hôte | `d` | `prefix.disconnect` |
 | Explorateur de fichiers (SFTP) | `f` | `prefix.files` |
 | Tunnels | `p` | `prefix.tunnels` |
@@ -156,11 +156,12 @@ Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 ce
 
 | Action | Touches |
 |---|---|
-| Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split onto… », recherche vide et active, rendue ensuite) | saisie pour filtrer, `↓` / `↑`, `↵` pour diviser |
+| Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split with host… », recherche vide et active, rendue ensuite) | saisie pour filtrer, `↓` / `↑`, `↵` pour diviser |
 | Annuler le choix d'hôte | `Esc`, `Ctrl-C` |
-| Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte) | `↵` (dans le panneau) |
+| Mode `PANE` : après `Ctrl-Space` + flèche ou `Shift` + flèche, les flèches (focus) et `Shift` + flèches (« Move divider ») restent actives 600 ms sans le préfixe ; toute autre touche quitte le mode et part au panneau | `←` `↓` `↑` `→`, `Shift` + flèche |
+| Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte) | `↵` (dans le panneau actif ; un autre panneau en échec indique « focus to retry (Ctrl-Space ←↓↑→) ») |
 
-Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin. Une division impossible est refusée avec un message (« A tab holds at most 8 panes », « Not enough room to split this pane »).
+Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Un panneau en échec a un point plein et sa phase en couleur d'erreur, dans son titre comme dans l'onglet ; le point creux est réservé à un panneau sans shell (sorti, fermé). Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin, et diviser un panneau zoomé dézoome puis divise. Une division impossible est refusée sur une ligne de la barre de statut, pendant 4 s, sans couvrir aucun panneau (« This tab already has 8 panes · Close a pane first. », « Each pane needs at least 20 columns × 5 rows · Enlarge the window, or close a pane. »). Depuis un onglet divisé, `?` ouvre l'aide sur la page « Panes ».
 
 ### TUI : édition d'un hôte
 
@@ -201,7 +202,7 @@ Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet 
 
 | Action | Touches |
 |---|---|
-| Changer de panneau | `Tab` / `Shift-Tab` |
+| « Switch side (local/remote) » : changer de côté | `Tab` / `Shift-Tab` |
 | Se déplacer | `j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G` |
 | Ouvrir le dossier / remonter | `↵`, `→`, `l` / `Backspace`, `←`, `h` |
 | Copier la sélection vers l'autre panneau (download ou upload) | `c` ou `F5` |
@@ -272,17 +273,29 @@ Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, ap
 ### Panneaux de la TUI, en pratique
 
 Un onglet terminal se partage en panneaux, comme dans tmux, mais chaque panneau est un canal PTY de Portico :
-`Ctrl-Space %` (ou `|`) ouvre un panneau à droite, `Ctrl-Space "` (ou `-`) un panneau dessous, tous deux sur la
-session du panneau actif, donc sans nouvelle authentification. `Ctrl-Space S` ouvre la liste des hôtes
-(« Split onto… ») pour diviser vers un autre hôte : on tape son nom, `↵` choisit, `Esc` revient au panneau ; une session
-vivante vers cet hôte est réutilisée, sinon Portico s'y connecte. Le focus se déplace avec `Ctrl-Space` puis
-les flèches (`o` pour le panneau suivant), la séparation avec `Ctrl-Space` puis `Shift` + flèche, `z` zoome le
-panneau actif et `x` le ferme. Les lettres `h` et `l` du préfixe restant « Retour aux hôtes » et « Logs », les
-déplacements à la vim s'obtiennent en les réassignant dans `settings.toml` (par exemple `"prefix.home" = "0"`,
-`"prefix.debug" = "g"`, puis `"prefix.pane_left" = "h"`, `"prefix.pane_right" = "l"`, `"prefix.pane_down" = "j"`,
+`Ctrl-Space %` (ou `|`, « Split right ») ouvre un panneau à droite, `Ctrl-Space "` (ou `-`, « Split down ») un
+panneau dessous, tous deux sur la session du panneau actif, donc sans nouvelle authentification.
+`Ctrl-Space S` (« Split with host… ») ouvre la liste des hôtes pour diviser vers un autre hôte : on tape son nom,
+le panneau de détails annonce `↵ split with <hôte>`, `↵` choisit, `Esc` revient au panneau ; une session vivante
+vers cet hôte est réutilisée, sinon Portico s'y connecte. Le focus se déplace avec `Ctrl-Space` puis les flèches
+(`o`, « Next pane », pour le panneau suivant), la séparation avec `Ctrl-Space` puis `Shift` + flèche
+(« Move divider »), `z` zoome le panneau actif (« Zoom pane ») et `x` le ferme (« Close pane »).
+
+Comme le `repeat-time` de tmux, un déplacement ouvre le **mode `PANE`** : pendant 600 ms après `Ctrl-Space` + flèche
+(ou `Shift` + flèche), les flèches et `Shift` + flèches agissent sans repasser par le préfixe, et chaque nouveau
+déplacement relance le délai ; la barre de statut affiche `PANE`. Toute autre touche quitte le mode et part au
+panneau actif comme d'habitude : aucune frappe n'est avalée. Seules les flèches se répètent (pas les touches
+réassignées).
+
+Les lettres `h` et `l` du préfixe restant « Retour aux hôtes » et « Logs », les déplacements à la vim
+s'obtiennent en les réassignant dans `settings.toml` (par exemple `"prefix.home" = "0"`, `"prefix.debug" = "g"`,
+puis `"prefix.pane_left" = "h"`, `"prefix.pane_right" = "l"`, `"prefix.pane_down" = "j"`,
 `"prefix.pane_up" = "k"`). Seul le panneau actif reçoit le clavier ; fermer le dernier panneau d'une session la
 déconnecte, comme fermer le dernier onglet. Un panneau dont la connexion échoue affiche l'erreur, son hint et
-`↵ retry`.
+`↵ retry` quand il a le focus ; les autres indiquent « focus to retry (Ctrl-Space ←↓↑→) », puisque `↵` va au
+panneau actif. Une division refusée s'affiche sur une ligne de la barre de statut (4 s), jamais par-dessus un
+panneau ; diviser un panneau zoomé dézoome puis divise. Depuis un onglet divisé, `Ctrl-Space ?` ouvre l'aide sur
+la page « Panes ».
 
 ## Dialogues
 

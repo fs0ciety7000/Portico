@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Scroll;
 use color_eyre::Result;
@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
 
 use crate::action::Action;
-use crate::app_panes::{PanePick, PaneSlot, Tab};
+use crate::app_panes::{PanePick, PaneSlot, StatusNote, Tab};
 use crate::copy_job::CopyJob;
 use crate::debug::DebugPanel;
 use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
@@ -143,6 +143,12 @@ pub(crate) struct App {
     pub(crate) pane_pick: Option<PanePick>,
     /// `Ctrl-Space` was pressed: the next key is a Portico command.
     pub(crate) prefix: bool,
+    /// Pane mode (like tmux's repeat-time): after `Ctrl-Space` + an arrow
+    /// or `Shift`+arrow, until this instant the arrows and `Shift`+arrows
+    /// keep moving the focus / the divider without the prefix.
+    pub(crate) pane_repeat: Option<Instant>,
+    /// A refusal on one line of the status bar (never over a pane).
+    pub(crate) note: Option<StatusNote>,
     /// Pending dialogs; the front one is shown and receives keys.
     pub(crate) dialogs: VecDeque<Dialog>,
     /// Size of the terminal area, updated on every render.
@@ -182,6 +188,14 @@ pub(crate) struct App {
     rx: mpsc::UnboundedReceiver<Action>,
 }
 
+/// Sleeps until `deadline` (forever without one).
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Animation frame interval. Only drives spinners/toasts; idle UI does not redraw.
 const TICK: Duration = Duration::from_millis(80);
 /// Header + status bar.
@@ -213,6 +227,8 @@ impl App {
             active: None,
             pane_pick: None,
             prefix: false,
+            pane_repeat: None,
+            note: None,
             dialogs: VecDeque::new(),
             term_size: GridSize {
                 cols,
@@ -275,11 +291,15 @@ impl App {
 
         terminal.draw(|f| ui::render(&mut self, f))?;
         while self.running {
+            // Timed states wake the loop once, when they run out (no
+            // ticking, so no redraw, in between).
+            let deadline = self.next_deadline();
             let action = tokio::select! {
                 Some(Ok(event)) = input.next() => self.map_event(event),
                 Some(action) = self.rx.recv() => Some(action),
                 event = engine_events.recv() => event.ok().map(Action::Engine),
                 _ = ticker.tick(), if self.needs_animation() => Some(Action::Tick),
+                () = sleep_until(deadline), if deadline.is_some() => Some(Action::Expire),
             };
             if let Some(action) = action {
                 self.update(action);
@@ -298,9 +318,10 @@ impl App {
         Ok(())
     }
 
-    fn map_event(&mut self, event: Event) -> Option<Action> {
+    pub(crate) fn map_event(&mut self, event: Event) -> Option<Action> {
         match event {
             Event::Key(key) => {
+                let now = Instant::now();
                 // Help over a panel: its keys only, the panel waits below.
                 let action = if self.help.over_panel && self.dialogs.is_empty() {
                     (key.kind == crossterm::event::KeyEventKind::Press)
@@ -314,6 +335,7 @@ impl App {
                             overlay: self.overlay,
                             dialog_open: !self.dialogs.is_empty(),
                             prefix: self.prefix,
+                            pane_repeat: self.pane_repeat_active(now),
                             picking: self.pane_pick.is_some(),
                             keymap: &self.keymap,
                         },
@@ -323,6 +345,7 @@ impl App {
                 if action.is_some() && !matches!(action, Some(Action::Prefix)) {
                     self.prefix = false;
                 }
+                self.track_pane_repeat(action.as_ref(), key, now);
                 action
             }
             Event::Paste(text) => Some(Action::Paste(text)),
@@ -404,8 +427,11 @@ impl App {
             Action::ToggleHelp => {
                 self.prefix = false;
                 self.close_panels();
-                // From the explorer, its page first.
-                self.help.page = usize::from(self.focus == Focus::Files);
+                // From the explorer, or a split tab, the page with its
+                // keys ("Files", "Panes") first.
+                let split =
+                    self.focus == Focus::Terminal && self.active_tab().is_some_and(|t| t.len() > 1);
+                self.help.page = usize::from(self.focus == Focus::Files || split);
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     _ => Some(Overlay::Help),
@@ -493,6 +519,7 @@ impl App {
             Action::ResizePane(dir) => self.resize_pane(dir),
             Action::ClosePane => self.close_pane(),
             Action::ZoomPane => self.zoom_pane(),
+            Action::Expire => self.expire(Instant::now()),
             Action::OpenFiles => {
                 self.prefix = false;
                 self.open_files();
@@ -1427,8 +1454,9 @@ mod render_tests {
                 );
             }
         }
-        // The only ellipsis is the one in "Ctrl-Space, then…": nothing cut.
-        for (lines, expected) in [(&first, 1), (&second, 0)] {
+        // The only ellipses are the ones in "Ctrl-Space, then…" and "Split
+        // with host…": nothing cut.
+        for (lines, expected) in [(&first, 1), (&second, 1)] {
             let ellipses = lines.iter().map(|l| l.matches('…').count()).sum::<usize>();
             assert_eq!(ellipses, expected, "{}", lines.join("\n"));
         }

@@ -13,12 +13,31 @@ use crate::ui::{fmt, status};
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
     let (mode, hints) = mode_and_hints(app, frame.area());
-    let pill = if app.prefix && app.dialogs.is_empty() {
+    let pill = if (app.prefix || pane_mode(app)) && app.dialogs.is_empty() {
         s.prefix_pill()
     } else {
         s.mode_pill()
     };
     let mut spans = vec![Span::styled(mode, pill), Span::raw(" ")];
+    // A refusal takes the hints' place for a few seconds: one line, never
+    // over a pane (the next keys still go to the focused one).
+    if let Some(note) = app.note.as_ref().filter(|_| app.dialogs.is_empty()) {
+        let warning = s.status(s.theme.status.warning);
+        let width = usize::from(area.width);
+        let used: usize = spans.iter().map(Span::width).sum();
+        let message = fmt::truncate(&note.message, width.saturating_sub(used + 3));
+        spans.push(Span::styled("▲ ", warning));
+        spans.push(Span::styled(message, warning));
+        let used: usize = spans.iter().map(Span::width).sum();
+        // ` · hint`, cut when the bar is narrow (the message comes first).
+        let room = width.saturating_sub(used + 3 + 1);
+        if room >= 8 {
+            spans.push(Span::styled(" · ", s.muted()));
+            spans.push(Span::styled(fmt::truncate(&note.hint, room), s.secondary()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
+        return;
+    }
     // Hints are listed by importance: drop the tail rather than overflow.
     // `quit` is the exception: always last, and its room is kept.
     let mut hints = hints;
@@ -85,6 +104,26 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
 type Hints = Vec<(String, &'static str)>;
 
+/// Pane mode is on (the arrows move between panes without the prefix);
+/// it ends with the window (`Action::Expire`) or the next other key.
+fn pane_mode(app: &App) -> bool {
+    app.pane_repeat.is_some()
+        && app.focus == Focus::Terminal
+        && app.overlay.is_none()
+        && app.dialogs.is_empty()
+        && app.active_tab().is_some()
+}
+
+/// `←↓↑→` (the effective keys of the four pane moves).
+fn pane_arrows(app: &App) -> String {
+    app.keymap.joined(&[
+        "prefix.pane_left",
+        "prefix.pane_down",
+        "prefix.pane_up",
+        "prefix.pane_right",
+    ])
+}
+
 fn owned(hints: Vec<(&'static str, &'static str)>) -> Hints {
     hints.into_iter().map(|(k, l)| (k.to_owned(), l)).collect()
 }
@@ -120,6 +159,44 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             );
         }
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
+        _ if app.prefix && app.active_tab().is_some_and(|t| t.len() > 1) => {
+            // A split tab: the pane commands first, then help, then the
+            // way out (what does not fit at 80 columns is in `?`).
+            let mut hints = Vec::new();
+            let splits = [
+                app.keymap.shown("prefix.split_vertical", 1),
+                app.keymap.shown("prefix.split_horizontal", 1),
+            ]
+            .into_iter()
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            if !splits.is_empty() {
+                hints.push((splits, "split"));
+            }
+            let arrows = pane_arrows(app);
+            if !arrows.is_empty() {
+                hints.push((arrows, "pane"));
+            }
+            hints.extend(keyed(app, &["prefix.close_pane", "prefix.zoom_pane"]));
+            hints.extend(keyed(app, &["prefix.help", "prefix.home"]));
+            hints.push(("1-9".into(), "tab"));
+            hints.extend(keyed(
+                app,
+                &[
+                    "prefix.split_host",
+                    "prefix.next_pane",
+                    "prefix.files",
+                    "prefix.tunnels",
+                    "prefix.debug",
+                    "prefix.new_tab",
+                    "prefix.close_tab",
+                    "prefix.disconnect",
+                ],
+            ));
+            hints.push(("Esc".into(), "cancel"));
+            return (" PREFIX ", hints);
+        }
         _ if app.prefix => {
             let mut hints = keyed(app, &["prefix.home"]);
             hints.push(("1-9".into(), "tab"));
@@ -129,19 +206,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                     app,
                     &["prefix.split_vertical", "prefix.split_horizontal"],
                 ));
-                let arrows = app.keymap.joined(&[
-                    "prefix.pane_left",
-                    "prefix.pane_down",
-                    "prefix.pane_up",
-                    "prefix.pane_right",
-                ]);
-                if !arrows.is_empty() {
-                    hints.push((arrows, "pane"));
-                }
-                hints.extend(keyed(
-                    app,
-                    &["prefix.close_pane", "prefix.zoom_pane", "prefix.split_host"],
-                ));
+                hints.extend(keyed(app, &["prefix.split_host"]));
             }
             hints.extend(keyed(
                 app,
@@ -156,6 +221,24 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             ));
             hints.push(("Esc".into(), "cancel"));
             return (" PREFIX ", hints);
+        }
+        _ if pane_mode(app) => {
+            let mut hints = Vec::new();
+            let arrows = pane_arrows(app);
+            if !arrows.is_empty() {
+                hints.push((arrows, "pane"));
+            }
+            let resize = app.keymap.joined(&[
+                "prefix.resize_left",
+                "prefix.resize_down",
+                "prefix.resize_up",
+                "prefix.resize_right",
+            ]);
+            if !resize.is_empty() {
+                hints.push((resize, "move divider"));
+            }
+            hints.push(("any key".into(), "back to the pane"));
+            return (" PANE ", hints);
         }
         _ if app.overlay == Some(crate::app::Overlay::Keys) => {
             let hints = app.keys_panel.as_ref().map_or_else(
@@ -211,7 +294,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         {
             (
                 " FILES ",
-                &[("Tab", "local pane"), ("?", "help"), ("Esc", "back")],
+                &[("Tab", "local side"), ("?", "help"), ("Esc", "back")],
             )
         }
         Focus::Files
@@ -223,7 +306,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 " FILES ",
                 &[
                     ("↵", "reconnect"),
-                    ("Tab", "local pane"),
+                    ("Tab", "local side"),
                     ("?", "help"),
                     ("Esc", "back"),
                 ],
@@ -232,7 +315,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         Focus::Files => (
             " FILES ",
             &[
-                ("Tab", "pane"),
+                ("Tab", "switch side"),
                 ("↵", "open"),
                 ("c", "copy"),
                 ("n", "folder"),
@@ -257,7 +340,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         // `Ctrl-Space S`: choosing the host of a new pane.
         Focus::Hosts | Focus::Search if app.pane_pick.is_some() => {
             let hints = vec![
-                ("↵".to_owned(), "split onto host"),
+                ("↵".to_owned(), "split with host"),
                 ("↑↓".to_owned(), "move"),
                 ("Esc".to_owned(), "cancel"),
             ];

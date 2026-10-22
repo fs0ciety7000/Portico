@@ -234,31 +234,17 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// `1 web-01` (`1 web-01 (3)` with three panes) and its status dot: the
-/// tab shows its focused pane.
+/// tab shows its focused pane, with the same dot as the pane's title.
 fn tab_label(
     app: &App,
     index: usize,
     tab: &crate::app_panes::Tab,
 ) -> (String, (&'static str, portico_theme::Rgb)) {
-    use crate::app_panes::PaneSlot;
     let s = app.styles();
     let Some(slot) = tab.focused() else {
         return (format!("{}", index + 1), ("○", s.theme.status.idle));
     };
-    let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
-    let dead = match slot {
-        PaneSlot::Live(view) => view.closed || view.ended.is_some(),
-        PaneSlot::Opening { .. } => false,
-        PaneSlot::Failed { .. } => true,
-    };
-    let dot = if dead {
-        "○"
-    } else if st.busy {
-        spinner(app.tick)
-    } else {
-        "●"
-    };
-    let color = if dead { s.theme.status.idle } else { st.color };
+    let panes::PaneStatus { dot, color, .. } = panes::pane_status(app, slot);
     let alias = fmt::truncate(slot.alias(), 16);
     let label = if tab.len() > 1 {
         format!("{} {alias} ({})", index + 1, tab.len())

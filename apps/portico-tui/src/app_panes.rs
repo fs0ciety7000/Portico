@@ -9,8 +9,9 @@
 //! more, the session is disconnected (as closing a host's last tab always
 //! did).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyEvent, KeyEventKind};
 use portico_core::ErrorSummary;
 use portico_core::engine::{ConnectRequest, TerminalHandle};
 use portico_core::events::SessionPhase;
@@ -86,6 +87,21 @@ pub(crate) struct PanePick {
     /// The list's search before the pick (it starts empty, and comes back
     /// once the pick ends).
     pub(crate) query: String,
+}
+
+/// How long the arrows keep working without the prefix after
+/// `Ctrl-Space` + arrow (tmux's repeat-time).
+pub(crate) const PANE_REPEAT: Duration = Duration::from_millis(600);
+/// How long a refusal stays in the status bar.
+pub(crate) const NOTE_TTL: Duration = Duration::from_secs(4);
+
+/// A refusal shown on one line of the status bar, in `status-warning`:
+/// compact, it never covers a pane (nor its prompt line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusNote {
+    pub(crate) message: String,
+    pub(crate) hint: String,
+    pub(crate) until: Instant,
 }
 
 /// The error a dead pane shows, and whether `↵` may retry it.
@@ -334,8 +350,65 @@ impl App {
 
     // ── pane commands ──────────────────────────────────────────────────────
 
-    fn refuse(&mut self, refusal: Refusal) {
-        self.notify_warning(refusal.message(), Some(refusal.hint()));
+    /// A refused split: one line in the status bar, for [`NOTE_TTL`]. Not a
+    /// toast, which would cover the pane the next keys go to.
+    pub(crate) fn refuse(&mut self, refusal: Refusal) {
+        self.note = Some(StatusNote {
+            message: refusal.message(),
+            hint: refusal.hint(),
+            until: Instant::now() + NOTE_TTL,
+        });
+    }
+
+    // ── timed states ───────────────────────────────────────────────────────
+
+    /// Pane mode is on at `now` (in a terminal, nothing over it).
+    pub(crate) fn pane_repeat_active(&self, now: Instant) -> bool {
+        self.pane_repeat.is_some_and(|until| now < until)
+            && self.focus == Focus::Terminal
+            && self.overlay.is_none()
+            && self.dialogs.is_empty()
+            && self.active_tab().is_some()
+    }
+
+    /// After a key: a pane move (with the prefix, or in pane mode) opens or
+    /// extends the window; any other key ends it (and goes where it would
+    /// have gone anyway).
+    pub(crate) fn track_pane_repeat(
+        &mut self,
+        action: Option<&Action>,
+        key: KeyEvent,
+        now: Instant,
+    ) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        match action {
+            Some(Action::FocusPane(_) | Action::ResizePane(_)) => {
+                self.pane_repeat = Some(now + PANE_REPEAT);
+            }
+            Some(_) => self.pane_repeat = None,
+            None => {}
+        }
+    }
+
+    /// The next instant a timed state runs out.
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        let note = self.note.as_ref().map(|n| n.until);
+        match (self.pane_repeat, note) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Ends what ran out at `now`.
+    pub(crate) fn expire(&mut self, now: Instant) {
+        if self.pane_repeat.is_some_and(|until| until <= now) {
+            self.pane_repeat = None;
+        }
+        if self.note.as_ref().is_some_and(|n| n.until <= now) {
+            self.note = None;
+        }
     }
 
     /// The session a new pane on the focused pane's host uses: the focused
@@ -364,12 +437,15 @@ impl App {
             self.release_session(session);
             return;
         }
+        // An older refusal no longer applies.
+        self.note = None;
         let size = self.pane_size(index, id);
         self.focus = Focus::Terminal;
         self.request_terminal(alias, session, Some(id), size);
     }
 
-    /// `"` / `%`: a new pane on the focused pane's host.
+    /// `"` / `%`: a new pane on the focused pane's host. A zoomed tab is
+    /// unzoomed, then split (the split is judged on the unzoomed layout).
     pub(crate) fn split_pane(&mut self, split: Split) {
         self.prefix = false;
         let Some(index) = self.active else { return };

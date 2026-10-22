@@ -191,7 +191,10 @@ fn status_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
     }
     let phase = view.map(|v| &v.phase);
     let logs = app.keymap.shown("hosts.debug", 1);
+    // Picking the host of a new pane: `↵` splits (the only action then).
+    let split_with = format!("split with {}", crate::ui::fmt::truncate(&host.alias, 24));
     let hint: Vec<(&str, &str)> = match phase {
+        _ if app.pane_pick.is_some() => vec![("↵", split_with.as_str())],
         Some(SessionPhase::Connected) => vec![("↵", "open terminal"), ("d", "disconnect")],
         Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => vec![("d", "cancel")],
         // What went wrong is in the session's records.
