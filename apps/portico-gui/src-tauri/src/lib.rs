@@ -6,8 +6,14 @@
 //! terminal (ordered, binary, flow-controlled), never the global event bus.
 
 mod commands;
+mod debug;
 mod dto;
 mod files;
+mod import;
+mod keys;
+mod meta;
+mod settings;
+mod snippets;
 mod terminals;
 
 use std::sync::Arc;
@@ -18,6 +24,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::files::Files;
+use crate::import::Imports;
 use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
@@ -32,13 +39,26 @@ const EXIT_GRACE: Duration = Duration::from_millis(500);
 
 #[allow(clippy::missing_panics_doc)] // Tauri's builder reports fatal startup errors itself
 pub fn run() {
+    // First, before any secret can be in memory: no core dumps, no ptrace
+    // (logged once tracing is up).
+    let hardening = portico_core::hardening::harden_process();
+    init_tracing();
+    hardening.log();
+    run_app();
+}
+
+fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("PORTICO_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+}
 
+// One builder chain: its length is the list of IPC commands.
+#[allow(clippy::too_many_lines)]
+fn run_app() {
     let app = tauri::Builder::default()
         // Rust-side dialogs only: no `dialog:` permission is granted to the
         // webview (see capabilities/default.json).
@@ -49,6 +69,7 @@ pub fn run() {
             app.manage(engine);
             app.manage(Arc::new(Terminals::default()));
             app.manage(Files::default());
+            app.manage(Imports::default());
             Ok(())
         })
         // Dropped files become upload tokens; their paths stay in Rust.
@@ -58,15 +79,7 @@ pub fn run() {
         // with no UI.
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
-                if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
-                    terminals.close_all();
-                }
-                if let Some(files) = webview.try_state::<Files>() {
-                    files.clear();
-                }
-                if let Some(engine) = webview.try_state::<Engine>() {
-                    engine.disconnect_all();
-                }
+                release_page(webview);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -97,6 +110,43 @@ pub fn run() {
             files::list_tunnels,
             files::start_tunnel,
             files::stop_tunnel,
+            keys::list_keys,
+            keys::key_defaults,
+            keys::generate_key,
+            keys::public_key_text,
+            keys::list_agent_keys,
+            keys::agent_add,
+            keys::agent_remove,
+            keys::copy_id,
+            keys::verify_key_login,
+            keys::vault_status,
+            keys::vault_create,
+            keys::vault_unlock,
+            keys::vault_lock,
+            keys::vault_change_passphrase,
+            snippets::list_snippets,
+            snippets::snippets_for,
+            snippets::save_snippet,
+            snippets::delete_snippet,
+            snippets::run_snippet,
+            meta::set_favorite,
+            meta::set_tags,
+            meta::check_tags,
+            meta::set_group,
+            meta::set_notes,
+            meta::recent_hosts,
+            meta::clear_recent,
+            meta::forget_recent,
+            debug::sessions_with_logs,
+            debug::session_logs,
+            debug::session_logs_text,
+            debug::effective_config,
+            settings::get_settings,
+            settings::save_theme,
+            import::import_termius_pick,
+            import::import_termius_replan,
+            import::import_apply,
+            import::import_cancel,
         ])
         .build(tauri::generate_context!());
 
@@ -132,7 +182,25 @@ pub fn run() {
     });
 }
 
-/// Dropped files become upload tokens; their paths stay in Rust.
+/// Closes what a (re)loading page opened: terminals, upload tokens, a
+/// pending import, sessions.
+fn release_page(webview: &tauri::Webview) {
+    if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
+        terminals.close_all();
+    }
+    if let Some(files) = webview.try_state::<Files>() {
+        files.clear();
+    }
+    if let Some(imports) = webview.try_state::<Imports>() {
+        imports.clear();
+    }
+    if let Some(engine) = webview.try_state::<Engine>() {
+        engine.disconnect_all();
+    }
+}
+
+/// Dropped files become upload tokens. Tauri also tells the page their paths
+/// (`tauri://drag-drop`): names leak, but no command takes a path (see `files`).
 fn forward_drag_drop(window: &tauri::Window, event: &WindowEvent) {
     let WindowEvent::DragDrop(drag) = event else {
         return;

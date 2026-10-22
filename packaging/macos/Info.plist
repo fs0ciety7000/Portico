@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged by the Tauri bundler into Portico.app/Contents/Info.plist. -->
+<plist version="1.0">
+<dict>
+  <!-- macOS 15+ asks before an app reaches hosts on the local network (LAN SSH servers). -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Portico connects to the SSH servers you choose, including those on your local network.</string>
+</dict>
+</plist>

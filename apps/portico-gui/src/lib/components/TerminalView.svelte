@@ -11,9 +11,11 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { WebglAddon } from "@xterm/addon-webgl";
   import "@xterm/xterm/css/xterm.css";
-  import { asError, describe } from "../api";
+  import { asError, describe, sentence } from "../api";
   import { backend } from "../backend";
-  import { appShortcut, chunks, kbd, sanitizePaste, sanitizeTitle } from "../keys";
+  import { chunks, sanitizePaste, sanitizeTitle } from "../keys";
+  import { keymap } from "../state/keymap.svelte";
+  import { logs } from "../state/logs.svelte";
   import { dur } from "../motion";
   import { isLive, workspace, type Tab } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
@@ -30,6 +32,8 @@
     /** False while another panel (files) owns the keyboard: no automatic focus. */
     autofocus?: boolean;
   } = $props();
+  const closeKey = $derived(keymap.label("tab.close"));
+  const logsKey = $derived(keymap.label("app.logs"));
 
   /** Acknowledge parsed output at least this often (bytes). */
   const ACK_EVERY = 128 * 1024;
@@ -141,8 +145,24 @@
     }
   }
 
+  // The cursor blinks while something happens and goes solid after a few
+  // quiet seconds: a blinking cursor repaints forever, which costs real CPU
+  // with software rendering (docs/PERF.md) for no information.
+  const BLINK_WHILE_ACTIVE_MS = 5000;
+  let blinkTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function wake() {
+    if (!term) return;
+    if (!term.options.cursorBlink) term.options.cursorBlink = true;
+    clearTimeout(blinkTimer);
+    blinkTimer = setTimeout(() => {
+      if (term) term.options.cursorBlink = false;
+    }, BLINK_WHILE_ACTIVE_MS);
+  }
+
   function write(flow: Flow, bytes: Uint8Array) {
     if (!term || flow.generation !== tab.generation) return;
+    wake();
     term.write(bytes, () => {
       if (flow.generation !== tab.generation) return;
       flow.parsed += bytes.length;
@@ -238,6 +258,7 @@
       destroyed = true;
       observer.disconnect();
       clearTimeout(resizeTimer);
+      clearTimeout(blinkTimer);
       term?.dispose();
       term = undefined;
     };
@@ -273,7 +294,7 @@
     }
 
     term.attachCustomKeyEventHandler((e) => {
-      if (appShortcut(e, true)) return false; // handled by the app (bubbles to window)
+      if (e.type === "keydown" && keymap.match(e, "terminal")) return false; // handled by the app (bubbles to window)
       // A hidden view never takes input (focus may linger after switching).
       if (!active) {
         e.preventDefault();
@@ -292,7 +313,10 @@
       }
       return false;
     });
-    term.onData((d) => send(d, false));
+    term.onData((d) => {
+      wake();
+      send(d, false);
+    });
     term.onBinary((d) => send(d, true));
     term.onTitleChange((t) => (tab.title = sanitizeTitle(t)));
 
@@ -306,6 +330,7 @@
     host.addEventListener("paste", onPaste, true);
 
     void open();
+    wake();
     if (active && autofocus) requestAnimationFrame(() => term?.focus());
   }
 
@@ -336,6 +361,10 @@
   export function pasteText(text: string) {
     paste(text);
   }
+  /** DECSET 2004 as tracked by xterm.js (snippets are wrapped when on). */
+  export function bracketedPaste(): boolean {
+    return term?.modes.bracketedPasteMode ?? false;
+  }
   export function focus() {
     term?.focus();
   }
@@ -350,7 +379,7 @@
   const endIsError = $derived(!!tab.end && tab.end.kind === "exited" && (!!tab.end.signal || !!tab.end.status));
 </script>
 
-<section class="terminal" class:hidden={!active} aria-hidden={!active}>
+<section class="terminal" class:hidden={!active} aria-hidden={!active} aria-busy={waiting}>
   <div class="xterm-host" class:dimmed={!!tab.end || !!failed} bind:this={host}></div>
 
   {#if waiting || cancelled}
@@ -359,10 +388,10 @@
         <h2>{tab.alias}</h2>
         <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
         {#if waiting}
-          <p class="muted">Press <kbd>Esc</kbd> or <kbd>{kbd("W")}</kbd> to cancel</p>
+          <p class="muted">Press <kbd>Esc</kbd>{#if closeKey} or <kbd>{closeKey}</kbd>{/if} to cancel</p>
         {:else}
           <div class="actions">
-            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
             <button class="primary" onclick={() => workspace.reconnect(tab.key)}>Connect <kbd>↵</kbd></button>
           </div>
         {/if}
@@ -380,19 +409,23 @@
             Portico refused to connect. Fix <code>known_hosts</code> only once the administrator confirms the new key.
           </p>
         {:else}
-          <p class="message">{error.message}</p>
+          <p class="message">{sentence(error.message)}</p>
           {#if error.hint}<p class="hint">{error.hint}</p>{/if}
         {/if}
+        <!-- Same entry point as the host details: the connection records. -->
+        <button class="link" onclick={() => void logs.show(tab.session)}>
+          Show session logs{#if logsKey} <kbd>{logsKey}</kbd>{/if}
+        </button>
         <div class="actions">
           {#if keyChanged}
             <button class="secondary" onclick={() => workspace.reconnect(tab.key)}>Retry</button>
             {#if workspace.hasAlert(tab.session)}
               <button class="secondary" onclick={() => workspace.showAlert(tab.session)}>Show details</button>
             {/if}
-            <button class="primary" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+            <button class="primary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
           {:else}
             <button class="secondary" onclick={() => (workspace.active = null)}>Hosts <kbd>Esc</kbd></button>
-            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
             <button class="primary" onclick={() => workspace.reconnect(tab.key)}>Retry <kbd>↵</kbd></button>
           {/if}
         </div>
@@ -405,7 +438,7 @@
       {#if isLive(session)}<span class="muted-inline">· session still connected</span>{/if}
       <span class="spacer"></span>
       <button class="link" onclick={() => workspace.reconnect(tab.key)}>Reconnect <kbd>↵</kbd></button>
-      <button class="link" onclick={() => workspace.close(tab.key)}>Close <kbd>{kbd("W")}</kbd></button>
+      <button class="link" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
     </div>
   {/if}
 </section>

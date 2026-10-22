@@ -1,0 +1,779 @@
+name: Release
+
+# Builds every distributable and publishes them in a *draft* GitHub Release.
+# - push of a tag `v<version>` (must match the workspace version): build + sign + draft release
+# - workflow_dispatch: build only (dry run, unsigned), artifacts attached to the run
+# - release *published* (never a draft, never a pre-release), or workflow_dispatch
+#   with `distribute: vX.Y.Z`: render the Homebrew tap and AUR files from that
+#   release's SHA256SUMS, open a PR on the tap and push to the AUR. Nothing is
+#   built; each target is skipped (with a warning) when its secret is missing.
+# Procedure, secrets and verification: docs/RELEASE.md.
+#
+# Supply chain rules (docs/RELEASE.md, "Chaîne d'approvisionnement"):
+# - every action is pinned to a full commit SHA (version in the comment);
+# - no cache is restored (no rust-cache, no package-manager cache): a release
+#   is built from the lockfiles only, never from state a PR run could poison;
+# - Apple secrets live in the `release` environment and are only exposed to
+#   `gui-macos-sign`, which runs on tags, after the builds, and runs no
+#   third-party tool;
+# - AppImage tooling is pinned and checked by SHA-256 before the build;
+# - distribution secrets (HOMEBREW_TAP_TOKEN, AUR_SSH_PRIVATE_KEY) live in the
+#   `distribution` environment, each one exposed only to the job that pushes
+#   to its target; those jobs run system tools only (no action but
+#   download-artifact, no package manager, no repository script).
+
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      distribute:
+        description: "Tag of a PUBLISHED release to (re)send to Homebrew and the AUR, e.g. v0.2.0. Empty: dry-run build."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  PNPM_VERSION: "10.28.0"
+  NODE_VERSION: "22"
+
+jobs:
+  version:
+    name: version check
+    # Builds run on a tag push or a plain dry run, never for distribution
+    # (every build job needs this one, so they are skipped with it).
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.distribute == '')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: v
+        name: Workspace, GUI and tag versions agree
+        run: |
+          set -eu
+          cargo_v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          tauri_v=$(jq -r .version apps/portico-gui/src-tauri/tauri.conf.json)
+          npm_v=$(jq -r .version apps/portico-gui/package.json)
+          echo "Cargo.toml=$cargo_v tauri.conf.json=$tauri_v package.json=$npm_v"
+          test -n "$cargo_v"
+          test "$cargo_v" = "$tauri_v"
+          test "$cargo_v" = "$npm_v"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "$GITHUB_REF_NAME" = "v$cargo_v" || {
+              echo "::error::tag $GITHUB_REF_NAME does not match workspace version $cargo_v"; exit 1; }
+          fi
+          echo "version=$cargo_v" >> "$GITHUB_OUTPUT"
+
+  tui:
+    name: tui (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc builds: oldest supported Ubuntu runner sets the glibc floor (2.35).
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          # Fully static builds (no NSS: see docs/RELEASE.md, "Limites").
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, musl: true }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master 2026-10-01
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: musl toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked -p portico-tui --target "$TARGET"
+      - name: Smoke test (renders under a pty, quits on q)
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          bin="target/$TARGET/release/portico"
+          file "$bin"
+          mkdir -p "$RUNNER_TEMP/home"
+          (sleep 2; printf q) | HOME="$RUNNER_TEMP/home" TERM=xterm-256color \
+            timeout 20 script -qfec "stty cols 120 rows 36; $bin" /dev/null > "$RUNNER_TEMP/tui.out"
+          grep -q PORTICO "$RUNNER_TEMP/tui.out"
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="portico-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/portico" "dist/$name/"
+          cp README.md "dist/$name/"
+          for f in LICENSE LICENSE-MIT LICENSE-APACHE; do
+            if [ -f "$f" ]; then cp "$f" "dist/$name/"; fi
+          done
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ls -l "dist/$name/portico" "dist/$name.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tui-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  gui-linux:
+    name: gui linux (${{ matrix.arch }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-22.04 }
+          - { arch: aarch64, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      # linuxdeploy is itself an AppImage: run it without FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      # The Tauri CLI whose bundler the AppImage pins below were checked
+      # against (tauri-bundler 2.10.3: tool names, cache dir, URLs).
+      EXPECTED_TAURI_CLI: "2.12.3"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev file
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master 2026-10-01
+        with:
+          toolchain: stable
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install frontend dependencies
+        working-directory: apps/portico-gui
+        run: pnpm install --frozen-lockfile
+      - name: Tauri CLI matches the pinned AppImage tooling
+        working-directory: apps/portico-gui
+        run: |
+          set -eu
+          cli=$(node -p "require('@tauri-apps/cli/package.json').version")
+          test "$cli" = "$EXPECTED_TAURI_CLI" || {
+            echo "::error::@tauri-apps/cli is $cli, AppImage pins were checked for $EXPECTED_TAURI_CLI: re-check tool names and hashes (docs/RELEASE.md)"; exit 1; }
+      - name: AppImage tooling (pinned, SHA-256 verified)
+        # The Tauri bundler only downloads a tool when its file is missing
+        # from `${XDG_CACHE_HOME:-~/.cache}/tauri/`; pre-filling it with
+        # verified copies means nothing is fetched at bundle time. The type 2
+        # runtime is handed to appimagetool through LDAI_RUNTIME_FILE.
+        run: |
+          set -euo pipefail
+          tools="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+          mkdir -p "$tools" "$RUNNER_TEMP/appimage-tools"
+          cd "$RUNNER_TEMP/appimage-tools"
+          rel=https://github.com
+          curl -fsSL --proto '=https' -o "AppRun-$ARCH" \
+            "$rel/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-$ARCH"
+          curl -fsSL --proto '=https' -o "linuxdeploy-07333c6-$ARCH.AppImage" \
+            "$rel/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-$ARCH.AppImage"
+          curl -fsSL --proto '=https' -o linuxdeploy-plugin-appimage.AppImage \
+            "$rel/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-$ARCH.AppImage"
+          curl -fsSL --proto '=https' -o "runtime-$ARCH" \
+            "$rel/AppImage/type2-runtime/releases/download/20251108/runtime-$ARCH"
+          case "$ARCH" in
+            x86_64)
+              cat > SHA256SUMS <<'EOF'
+          f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f  AppRun-x86_64
+          36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62  linuxdeploy-07333c6-x86_64.AppImage
+          992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3  linuxdeploy-plugin-appimage.AppImage
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime-x86_64
+          EOF
+              ;;
+            aarch64)
+              cat > SHA256SUMS <<'EOF'
+          072f17c0895a85c490282fe5395c5007e5fc75da727e553b3b8fb680feb11578  AppRun-aarch64
+          556ab80baa98e600aa80f0dcedfb70bca0e1ce7e9f147fb345be3fcc3e91b2b1  linuxdeploy-07333c6-aarch64.AppImage
+          83c292149274965a865dcd44c135cfca8ba28c6b7de3eb628d4b8b5f248af17c  linuxdeploy-plugin-appimage.AppImage
+          00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444  runtime-aarch64
+          EOF
+              ;;
+            *) echo "::error::no pinned AppImage tooling for $ARCH"; exit 1 ;;
+          esac
+          sed -i 's/^ *//' SHA256SUMS
+          sha256sum --strict -c SHA256SUMS
+          chmod 0755 "AppRun-$ARCH" "linuxdeploy-07333c6-$ARCH.AppImage" linuxdeploy-plugin-appimage.AppImage
+          cp "AppRun-$ARCH" "linuxdeploy-07333c6-$ARCH.AppImage" linuxdeploy-plugin-appimage.AppImage "$tools/"
+          echo "LDAI_RUNTIME_FILE=$RUNNER_TEMP/appimage-tools/runtime-$ARCH" >> "$GITHUB_ENV"
+          ls -l "$tools"
+      - name: Fetch crates (the bundle step then runs cargo offline)
+        run: cargo fetch --locked
+      - name: Bundle (deb + AppImage)
+        working-directory: apps/portico-gui
+        env:
+          CARGO_NET_OFFLINE: "true"
+        # --verbose: the bundler logs linuxdeploy/appimagetool output at
+        # debug level only; the next step needs it.
+        run: |
+          set -euo pipefail
+          pnpm tauri build --ci --verbose --bundles deb,appimage -- --locked 2>&1 | tee "$RUNNER_TEMP/bundle.log"
+      - name: Nothing was downloaded while bundling
+        # Matches the bundler's own downloads ("Downloading https://…", the
+        # plugin fallback message), appimagetool's runtime download and any
+        # URL of a `continuous` release. appimagetool's version banner
+        # ("continuous build (git version …)") names its build channel, not a
+        # download, and is not matched.
+        run: |
+          set -eu
+          if grep -inE 'releases/download/continuous|downloading (runtime|https?://)|downloaded runtime|download of appimage plugin' "$RUNNER_TEMP/bundle.log"; then
+            echo "::error::the AppImage build fetched tooling at bundle time (see the lines above): the pinned cache was not used"
+            exit 1
+          fi
+          grep -q 'runtime-file' "$RUNNER_TEMP/bundle.log" || {
+            echo "::error::appimagetool did not receive the pinned runtime (--runtime-file missing from the log)"; exit 1; }
+      - name: Inspect
+        run: |
+          set -eu
+          b=target/release/bundle
+          dpkg-deb -I "$b"/deb/*.deb
+          dpkg-deb -c "$b"/deb/*.deb
+          ls -l "$b"/deb/*.deb "$b"/appimage/*.AppImage
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-linux-${{ matrix.arch }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  gui-macos-build:
+    name: gui macos build (universal, ad hoc)
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master 2026-10-01
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install frontend dependencies
+        working-directory: apps/portico-gui
+        run: pnpm install --frozen-lockfile
+      - name: Bundle (ad hoc signature, no secret in this job)
+        working-directory: apps/portico-gui
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg -- --locked
+      - name: Verify and package
+        run: |
+          set -eu
+          b=target/universal-apple-darwin/release/bundle
+          app="$b/macos/Portico.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --entitlements - --xml "$app"
+          lipo -archs "$app/Contents/MacOS/"*
+          mkdir -p dist app
+          cp "$b"/dmg/*.dmg "dist/Portico_${VERSION}_universal-unsigned.dmg"
+          # tar keeps symlinks, modes and the bundle layout (an artifact zip does not).
+          tar -C "$b/macos" -cf app/Portico.app.tar Portico.app
+          ls -l dist app
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-macos-unsigned
+          path: dist/*.dmg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-macos-app
+          path: app/Portico.app.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  gui-macos-sign:
+    name: gui macos sign + notarize
+    needs: [version, gui-macos-build]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: macos-latest
+    # Secrets live in this environment only (restricted to `v*` tags, with
+    # required reviewers): see docs/RELEASE.md. This job runs Apple tools
+    # only (security, codesign, hdiutil, notarytool, stapler, spctl).
+    environment: release
+    outputs:
+      signed: ${{ steps.mode.outputs.signed }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging/macos
+      - id: mode
+        name: Signing mode
+        env:
+          HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+          HAS_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          set -eu
+          if [ "$HAS_CERT" = "true" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            if [ "$HAS_NOTARY" = "true" ]; then
+              echo "notarized=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "notarized=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID missing: the app is signed but NOT notarized"
+            fi
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "notarized=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Apple signing secrets missing in the release environment: the release keeps the UNSIGNED (ad hoc) dmg"
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.mode.outputs.signed == 'true'
+        with:
+          name: gui-macos-app
+          path: ${{ runner.temp }}/app
+      - name: Temporary keychain
+        if: steps.mode.outputs.signed == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -eu
+          keychain="$RUNNER_TEMP/portico-signing.keychain-db"
+          keychain_password=$(openssl rand -base64 32)
+          umask 077
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -f pkcs12 \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          # Search list: the temporary keychain first, then the existing ones.
+          existing=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+          # shellcheck disable=SC2086 # one keychain path per word
+          security list-keychains -d user -s "$keychain" $existing
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Sign the app (Developer ID, hardened runtime)
+        if: steps.mode.outputs.signed == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/sign"
+          mkdir -p "$work"
+          tar -C "$work" -xf "$RUNNER_TEMP/app/Portico.app.tar"
+          app="$work/Portico.app"
+          main=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          sign() {
+            codesign --force --options runtime --timestamp --keychain "$KEYCHAIN" \
+              --sign "$APPLE_SIGNING_IDENTITY" "$@"
+          }
+          # Nested code first (inside out), then the bundle with its entitlements.
+          while IFS= read -r -d '' f; do
+            if [ "$f" != "$app/Contents/MacOS/$main" ] && file -b "$f" | grep -q 'Mach-O'; then
+              sign "$f"
+            fi
+          done < <(find "$app/Contents" -type f -print0)
+          sign --entitlements packaging/macos/Entitlements.plist "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --entitlements - --xml "$app"
+          lipo -archs "$app/Contents/MacOS/$main"
+          echo "APP=$app" >> "$GITHUB_ENV"
+      - name: Notarize and staple the app
+        if: steps.mode.outputs.notarized == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eu
+          notarize() {
+            xcrun notarytool submit "$1" --wait --timeout 1h --output-format plist \
+              --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              > "$RUNNER_TEMP/notary.plist"
+            status=$(/usr/libexec/PlistBuddy -c 'Print :status' "$RUNNER_TEMP/notary.plist")
+            id=$(/usr/libexec/PlistBuddy -c 'Print :id' "$RUNNER_TEMP/notary.plist")
+            echo "notarization $id: $status"
+            if [ "$status" != "Accepted" ]; then
+              xcrun notarytool log "$id" \
+                --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+              exit 1
+            fi
+          }
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Portico.zip"
+          notarize "$RUNNER_TEMP/Portico.zip"
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+      - name: Build, sign and notarize the dmg
+        if: steps.mode.outputs.signed == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARIZED: ${{ steps.mode.outputs.notarized }}
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/dmg"
+          mkdir -p "$stage" dist
+          ditto "$APP" "$stage/Portico.app"
+          ln -s /Applications "$stage/Applications"
+          if [ "$NOTARIZED" = "true" ]; then
+            out="dist/Portico_${VERSION}_universal.dmg"
+          else
+            out="dist/Portico_${VERSION}_universal-not-notarized.dmg"
+          fi
+          hdiutil create -volname Portico -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$out"
+          codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$out"
+          codesign --verify --strict --verbose=2 "$out"
+          if [ "$NOTARIZED" = "true" ]; then
+            xcrun notarytool submit "$out" --wait --timeout 1h --output-format plist \
+              --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              > "$RUNNER_TEMP/notary-dmg.plist"
+            status=$(/usr/libexec/PlistBuddy -c 'Print :status' "$RUNNER_TEMP/notary-dmg.plist")
+            echo "dmg notarization: $status"
+            test "$status" = "Accepted"
+            xcrun stapler staple "$out"
+            xcrun stapler validate "$out"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$out"
+          fi
+          ls -l "$out"
+          echo "macOS: signed=true notarized=$NOTARIZED -> $(basename "$out")" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.mode.outputs.signed == 'true'
+        with:
+          name: gui-macos-signed
+          path: dist/*.dmg
+          if-no-files-found: error
+      - name: Delete the temporary keychain
+        if: always()
+        run: |
+          keychain="$RUNNER_TEMP/portico-signing.keychain-db"
+          if [ -f "$keychain" ]; then security delete-keychain "$keychain" || true; fi
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/Portico.zip"
+
+  publish:
+    name: draft release
+    needs: [version, tui, gui-linux, gui-macos-build, gui-macos-sign]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release and upload its assets
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Keep one dmg (signed when available)
+        env:
+          SIGNED: ${{ needs.gui-macos-sign.outputs.signed }}
+        working-directory: dist
+        run: |
+          set -eu
+          # The .app tarball only feeds the signing job.
+          rm -f Portico.app.tar
+          if [ "$SIGNED" = "true" ]; then
+            rm -f ./*-unsigned.dmg
+          fi
+          ls -l
+          test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -eu
+          for f in *; do sha256sum "$f" > "$f.sha256"; done
+          find . -maxdepth 1 -type f ! -name '*.sha256' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --verify-tag \
+            --title "Portico $VERSION" \
+            --notes "Draft built by the Release workflow from $GITHUB_SHA. Verify downloads with SHA256SUMS (see docs/RELEASE.md)."
+
+  # ---- Distribution: Homebrew tap and AUR, from a PUBLISHED release --------
+  # Runs on `release: published` (a draft never triggers it, a pre-release is
+  # skipped) or by hand with `distribute: vX.Y.Z` to retry. This job holds no
+  # secret: it checks the release's assets against its SHA256SUMS, renders the
+  # files and hands them over as an artifact. The jobs that hold a secret run
+  # no repository code: they only copy that artifact into their target.
+  dist-render:
+    name: distribution files (Homebrew, AUR)
+    if: >-
+      (github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease)
+      || (github.event_name == 'workflow_dispatch' && inputs.distribute != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # read the published release and download its assets
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.distribute }}
+    steps:
+      - id: release
+        name: The release is published and final
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::the tag to distribute must be a final release tag (vX.Y.Z)"; exit 1; }
+          # A draft is invisible to a read-only token: `view` fails on it.
+          state=$(gh release view "$TAG" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
+          test "$state" = "false false" || {
+            echo "::error::$TAG is a draft or a pre-release (draft, prerelease = $state): not distributed"; exit 1; }
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging
+      - name: License files as they are at the tag (AUR checksums)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.TAG }}
+          path: at-tag
+          sparse-checkout: |
+            LICENSE-MIT
+            LICENSE-APACHE
+          sparse-checkout-cone-mode: false
+      - name: Download the assets and check them against SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/assets"
+          mkdir -p "$assets"
+          gh release download "$TAG" --dir "$assets" --pattern SHA256SUMS \
+            --pattern "portico-$VERSION-*-unknown-linux-gnu.tar.gz" \
+            --pattern "portico-$VERSION-*-apple-darwin.tar.gz" \
+            --pattern "Portico_${VERSION}_*.deb" \
+            --pattern "Portico_${VERSION}_universal*.dmg"
+          cd "$assets"
+          ls -l
+          # 4 TUI tarballs (gnu, darwin), 2 .deb, 1 dmg: every one must be
+          # listed in SHA256SUMS and match it.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort > "$RUNNER_TEMP/names"
+          awk 'NR == FNR { want[$0] = 1; next } { n = $2; sub(/^\*/, "", n) } n in want' \
+            "$RUNNER_TEMP/names" SHA256SUMS > "$RUNNER_TEMP/subset"
+          test "$(wc -l < "$RUNNER_TEMP/names")" -eq 7
+          test "$(wc -l < "$RUNNER_TEMP/subset")" -eq 7
+          sha256sum --strict -c "$RUNNER_TEMP/subset"
+      - name: Render the tap and AUR files
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          PORTICO_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          AUR_MAINTAINER: ${{ vars.AUR_MAINTAINER }}
+        run: |
+          set -euo pipefail
+          sums="$RUNNER_TEMP/assets/SHA256SUMS"
+          packaging/homebrew/render.sh "$VERSION" "$sums" dist/homebrew
+          LICENSE_DIR=at-tag packaging/aur/render.sh "$VERSION" "$sums" dist/aur
+          ruby -c dist/homebrew/Formula/portico.rb
+          ruby -c dist/homebrew/Casks/portico.rb
+          if grep -qE '_universal-(unsigned|not-notarized)\.dmg' dist/homebrew/Casks/portico.rb; then
+            echo "::warning::the cask points to a dmg that is not notarized: a Gatekeeper caveat was added"
+          fi
+          # A tarball keeps .SRCINFO (an artifact upload drops hidden files).
+          tar -C dist -cf distribution.tar homebrew aur
+          {
+            echo "### Distribution files for $TAG"
+            echo '```'
+            tar -tf distribution.tar | grep -v '/$'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distribution
+          path: distribution.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  homebrew:
+    name: homebrew tap (pull request)
+    needs: dist-render
+    runs-on: ubuntu-latest
+    # HOMEBREW_TAP_TOKEN lives in this environment only: a fine-grained token
+    # restricted to the tap repository (Contents and Pull requests: write).
+    environment: distribution
+    permissions: {}
+    env:
+      VERSION: ${{ needs.dist-render.outputs.version }}
+      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || format('{0}/homebrew-portico', github.repository_owner) }}
+    steps:
+      - id: mode
+        name: Token present
+        env:
+          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set in the distribution environment: the Homebrew tap is not updated"
+            echo "Homebrew: skipped (no HOMEBREW_TAP_TOKEN)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/dist
+      - name: Open or update the pull request on the tap
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          tar -C "$dist" -xf "$dist/distribution.tar"
+          # The token goes in a per-command header, never in a remote URL or
+          # in .git/config.
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          tapgit() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+          work="$RUNNER_TEMP/tap"
+          tapgit clone --quiet --depth 1 "https://github.com/$TAP_REPO.git" "$work"
+          cd "$work"
+          branch="portico-$VERSION"
+          git switch --quiet -c "$branch"
+          mkdir -p Formula Casks
+          cp "$dist/homebrew/Formula/portico.rb" Formula/portico.rb
+          cp "$dist/homebrew/Casks/portico.rb" Casks/portico.rb
+          git add Formula/portico.rb Casks/portico.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew: $TAP_REPO already at $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898333+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "portico $VERSION"
+          tapgit push --quiet --force origin "HEAD:refs/heads/$branch"
+          export GH_TOKEN="$TOKEN"
+          pr=$(gh pr list --repo "$TAP_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --repo "$TAP_REPO" --head "$branch" --title "portico $VERSION" \
+              --body "Formula and cask for Portico $VERSION, rendered by the Release workflow of $GITHUB_SERVER_URL/$GITHUB_REPOSITORY (run $GITHUB_RUN_ID) from the release's SHA256SUMS.")
+          fi
+          echo "Homebrew: $pr" >> "$GITHUB_STEP_SUMMARY"
+
+  aur:
+    name: aur (portico-bin, portico-gui-bin)
+    needs: dist-render
+    runs-on: ubuntu-latest
+    # AUR_SSH_PRIVATE_KEY lives in this environment only: a key dedicated to
+    # the AUR account that maintains the two packages.
+    environment: distribution
+    permissions: {}
+    env:
+      VERSION: ${{ needs.dist-render.outputs.version }}
+      # Published on https://aur.archlinux.org (home page, "SSH fingerprints").
+      AUR_ED25519_FINGERPRINT: "SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
+    steps:
+      - id: mode
+        name: Key present
+        env:
+          HAS_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AUR_SSH_PRIVATE_KEY is not set in the distribution environment: the AUR is not updated"
+            echo "AUR: skipped (no AUR_SSH_PRIVATE_KEY)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/dist
+      - name: SSH key and pinned AUR host key
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          ssh_dir="$RUNNER_TEMP/aur-ssh"
+          umask 077
+          mkdir -p "$ssh_dir"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/id"
+          # Trust the scanned key only if it is the published one.
+          ssh-keyscan -t ed25519 aur.archlinux.org > "$ssh_dir/scanned" 2> /dev/null
+          fingerprints=$(ssh-keygen -l -E sha256 -f "$ssh_dir/scanned" | awk '{ print $2 }' | sort -u)
+          test "$fingerprints" = "$AUR_ED25519_FINGERPRINT" || {
+            echo "::error::the host key of aur.archlinux.org does not match its published fingerprint"; exit 1; }
+          mv "$ssh_dir/scanned" "$ssh_dir/known_hosts"
+          echo "GIT_SSH_COMMAND=ssh -i $ssh_dir/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts" >> "$GITHUB_ENV"
+      - name: Push portico-bin and portico-gui-bin
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          GIT_NAME: ${{ vars.AUR_GIT_NAME || 'Portico release workflow' }}
+          GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL || '41898333+github-actions[bot]@users.noreply.github.com' }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          tar -C "$dist" -xf "$dist/distribution.tar"
+          for pkg in portico-bin portico-gui-bin; do
+            work="$RUNNER_TEMP/aur-$pkg"
+            # Cloning a package that does not exist yet gives an empty
+            # repository; the first push creates the package.
+            git clone --quiet "ssh://aur@aur.archlinux.org/$pkg.git" "$work"
+            cp "$dist/aur/$pkg/PKGBUILD" "$dist/aur/$pkg/.SRCINFO" "$work/"
+            git -C "$work" add PKGBUILD .SRCINFO
+            if git -C "$work" diff --cached --quiet; then
+              echo "AUR $pkg: already at $VERSION" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            pkgrel=$(sed -n 's/^pkgrel=//p' "$work/PKGBUILD")
+            git -C "$work" -c user.name="$GIT_NAME" -c user.email="$GIT_EMAIL" \
+              commit --quiet -m "Update to $VERSION-$pkgrel"
+            git -C "$work" push --quiet origin HEAD:master
+            echo "AUR $pkg: $VERSION-$pkgrel pushed" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Delete the SSH key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/aur-ssh"

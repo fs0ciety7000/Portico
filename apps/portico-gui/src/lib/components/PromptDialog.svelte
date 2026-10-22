@@ -4,10 +4,21 @@
   // sent, then the fields are cleared.
   import { displayPath, type Prompt, type PromptAnswer } from "../api";
   import { sanitizeRemote } from "../keys";
+  import { vault } from "../state/vault.svelte";
   import Modal from "./Modal.svelte";
 
-  let { prompt, alias, onanswer }: { prompt: Prompt; alias: string | undefined; onanswer: (a: PromptAnswer) => void } =
-    $props();
+  let {
+    prompt,
+    alias,
+    context = null,
+    onanswer,
+  }: {
+    prompt: Prompt;
+    alias: string | undefined;
+    /** What asked for it when it is not a terminal (`Copy id_ed25519 to web-01 · Verifying`). */
+    context?: string | null;
+    onanswer: (a: PromptAnswer) => void;
+  } = $props();
 
   let armed = $state(false);
   let armedAt = $state(0);
@@ -71,10 +82,11 @@
     {:else if kind.kind === "password"}Password
     {:else if kind.kind === "key_passphrase"}Key passphrase
     {:else}Authentication{/if}
-    {#if alias}<span class="title-host"> · {alias}</span>{/if}
+    {#if alias}<span class="title-host">· {alias}</span>{/if}
   {/snippet}
 
   <div class="content" role="presentation" {onkeydown}>
+    {#if context}<p class="context">{context}</p>{/if}
     {#if kind.kind === "unknown_host_key"}
       <p class="lead">First connection to <span class="mono">{target}</span>.</p>
       <p>Verify this fingerprint with the server's administrator before trusting it.</p>
@@ -111,8 +123,13 @@
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={remember} />
-        <span>Remember in the system keyring</span>
+        <span>{vault.inUse ? "Remember in Portico's encrypted vault" : "Remember in the system keyring"}</span>
       </label>
+      {#if remember && vault.status === "absent"}
+        <p class="remember-note">There is no vault yet: Portico will offer to create one, and remembers secrets from then on.</p>
+      {:else if remember && vault.status === "locked"}
+        <p class="remember-note">The vault is locked: Portico will offer to unlock it so this can be remembered next time.</p>
+      {/if}
     {:else}
       {@const message = [kind.name, kind.instructions].map((t) => sanitizeRemote(t, 512, true)).filter(Boolean)}
       {#if message.length}
@@ -156,6 +173,11 @@
 <style>
   .content { display: grid; gap: var(--space-3); }
   .lead { color: var(--text-primary); }
+  .context {
+    margin-top: calc(-1 * var(--space-2));
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
   .fingerprint { font-weight: 600; letter-spacing: 0.01em; }
   .warning { color: var(--status-warning); }
   .retry { color: var(--status-error); font-size: var(--text-sm); }
@@ -185,14 +207,7 @@
     overflow-wrap: anywhere;
   }
   .server-label { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: 0.04em; }
-  .check {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    color: var(--text-secondary);
-    font-size: var(--text-sm);
-  }
-  .check input { accent-color: var(--accent); }
+  .remember-note { color: var(--text-muted); font-size: var(--text-xs); }
   .focus-sink {
     position: absolute;
     width: 1px;

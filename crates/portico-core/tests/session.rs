@@ -1181,3 +1181,121 @@ async fn exit_signal_then_eof_without_close_is_handled() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+// ── Phase 4: recent sessions and debug logs ────────────────────────────────
+
+/// Polls `sessions_with_logs` until `id` is listed as ended.
+async fn ended_info(
+    env: &Env,
+    id: portico_core::ids::SessionId,
+) -> portico_core::logs::SessionLogInfo {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(info) = env
+            .engine
+            .sessions_with_logs()
+            .into_iter()
+            .find(|i| i.id == id && i.ended.is_some())
+        {
+            return info;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn connected_sessions_are_recent_and_logs_outlive_them() {
+    use portico_core::logs::SessionOutcome;
+
+    let key = new_key();
+    let server = TestServer::start(key_server(&key)).await;
+    let mut env = Env::new(&format!(
+        "{}{}",
+        target_config("t", server.port, "  IdentityFile ~/.ssh/id_test\n"),
+        target_config("nokey", server.port, "  IdentityFile ~/.ssh/missing\n"),
+    ));
+    env.write_key("id_test", &key, None);
+    env.trust(&server);
+
+    let (id, out) = env.connect("t", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    // Recorded in the background, then announced.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), env.events.recv())
+            .await
+            .expect("recent never recorded")
+            .unwrap();
+        if matches!(event, EngineEvent::RecentChanged) {
+            break;
+        }
+    }
+    let recent = env.engine.recent(10).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!((recent[0].alias.as_str(), recent[0].count), ("t", 1));
+    assert!(
+        env.dir.path().join("data/state/recent.toml").exists(),
+        "state file in the data dir"
+    );
+
+    // Live sessions are listed too.
+    let live = env.engine.sessions_with_logs();
+    assert!(
+        live.iter()
+            .any(|i| i.id == id && i.ended.is_none() && !i.probe)
+    );
+
+    env.engine.disconnect(id).await.unwrap();
+    let info = ended_info(&env, id).await;
+    assert_eq!(info.alias, "t");
+    assert_eq!(
+        info.outcome,
+        Some(SessionOutcome::Closed {
+            reason: CloseReason::UserRequested
+        })
+    );
+    let logs = env.engine.session_logs(id).unwrap();
+    assert!(logs.iter().any(|r| r.target == "auth"), "{logs:?}");
+    assert!(logs.iter().all(|r| !r.to_line().contains('\n')));
+
+    // A failed session keeps its logs and is not a recent host.
+    let (failed, out) = env.connect("nokey", |_| PromptResponse::Cancel).await;
+    assert!(!out.connected(), "{:?}", out.phases);
+    let info = ended_info(&env, failed).await;
+    assert!(info.outcome.is_some());
+    assert!(!env.engine.session_logs(failed).unwrap().is_empty());
+    let recent = env.engine.recent(10).await.unwrap();
+    assert_eq!(recent.len(), 1, "{recent:?}");
+
+    assert!(env.engine.forget_recent("t").await.unwrap());
+    assert!(env.engine.recent(10).await.unwrap().is_empty());
+    env.engine.clear_recent().await.unwrap();
+}
+
+#[tokio::test]
+async fn only_the_last_ended_sessions_keep_their_logs() {
+    use portico_core::engine::ENDED_SESSIONS_KEPT;
+
+    // Nothing listens there: every session fails fast.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let mut env = Env::new(&target_config("down", port, ""));
+    let mut ids = Vec::new();
+    for _ in 0..ENDED_SESSIONS_KEPT + 3 {
+        let (id, out) = env.connect("down", never).await;
+        assert_eq!(out.failure_code(), Some("connect"), "{:?}", out.phases);
+        ended_info(&env, id).await;
+        ids.push(id);
+    }
+    let listed = env.engine.sessions_with_logs();
+    assert_eq!(listed.len(), ENDED_SESSIONS_KEPT);
+    assert_eq!(listed.first().map(|i| i.id), ids.get(3).copied());
+    assert!(env.engine.session_logs(ids[0]).is_err());
+    assert!(!env.engine.session_logs(ids[3]).unwrap().is_empty());
+    assert!(env.engine.recent(10).await.unwrap().is_empty());
+}

@@ -1,11 +1,16 @@
 //! Pure rendering: `render(&App) -> Frame`. No I/O here.
 
+mod debug;
 mod details;
 mod dialog;
+mod edit_host;
 mod files;
 pub(crate) mod fmt;
+mod form;
 mod hosts;
+mod keys;
 mod overlays;
+mod snippets;
 mod status;
 mod statusbar;
 mod terminal;
@@ -16,7 +21,30 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::app::App;
+use crate::app::{App, Overlay};
+
+/// An overlay panel of at most `width` × `height`: centred between the
+/// header and the status bar, its bottom clear of the toast `band` (the
+/// rows just above the status bar). Only the bottom moves when the band
+/// appears, so the content does not jump.
+pub(crate) fn panel_rect(screen: Rect, width: u16, height: u16, band: u16) -> Rect {
+    let region = Rect {
+        y: screen.y.saturating_add(1),
+        height: screen.height.saturating_sub(2),
+        ..screen
+    };
+    let [v] = Layout::vertical([Constraint::Length(height.min(region.height))])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(region);
+    let [mut area] = Layout::horizontal([Constraint::Length(width.min(region.width))])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(v);
+    let limit = region.bottom().saturating_sub(band);
+    if area.bottom() > limit {
+        area.height = limit.saturating_sub(area.y);
+    }
+    area
+}
 
 /// Braille spinner, advanced by `App::tick`.
 pub(crate) const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -46,11 +74,19 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         rows: body.height.max(1),
     };
     let tick = app.tick;
+    // Where toasts go: inside the right-hand panel, clear of its borders.
+    let toast_zone;
+    let link = app
+        .files
+        .as_ref()
+        .map(|f| files::RemoteLink::of(app.session_by_id(f.session), s));
     if app.focus == crate::app::Focus::Files
         && let Some(view) = &mut app.files
     {
-        files::render(
+        let link = link.unwrap_or(files::RemoteLink::Up);
+        toast_zone = files::render(
             view,
+            &link,
             s,
             tick,
             frame,
@@ -59,6 +95,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     } else if let Some(view) = app.active_terminal() {
         let focused = app.dialogs.is_empty() && app.overlay.is_none();
         terminal::render(view, focused, s, frame, body);
+        toast_zone = body.inner(ratatui::layout::Margin::new(1, 1));
     } else {
         let [sidebar, main] =
             Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
@@ -66,16 +103,48 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
                 .areas(body.inner(ratatui::layout::Margin::new(1, 0)));
         hosts::render(app, frame, sidebar);
         details::render(app, frame, main);
+        toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
     }
-    statusbar::render(app, frame, status);
-    overlays::render(app, frame);
-    if app.overlay == Some(crate::app::Overlay::Tunnels)
+    // Over a panel, the toast sits between the panel and the status bar,
+    // never on the panel's frame or hints: the panel gives way if needed.
+    let panel_open = matches!(
+        app.overlay,
+        Some(Overlay::Keys | Overlay::Snippets | Overlay::Tunnels | Overlay::Edit | Overlay::Debug)
+    );
+    let band = match &app.toast {
+        Some(t) if panel_open => {
+            overlays::ToastBox::new(s, t.kind, &t.message, t.hint.as_deref(), status.width).height
+        }
+        _ => 0,
+    };
+    let toast_zone = if band > 0 {
+        Rect {
+            y: status.y.saturating_sub(band),
+            height: band,
+            ..status
+        }
+    } else {
+        toast_zone
+    };
+    if app.overlay == Some(Overlay::Tunnels)
         && let Some(panel) = &mut app.tunnels_panel
     {
-        tunnels::render(panel, &app.tunnels, s, tick, frame);
+        tunnels::render(panel, &app.tunnels, s, tick, frame, band);
     }
+    match app.overlay {
+        Some(Overlay::Keys) => keys::render(app, frame, band),
+        Some(Overlay::Snippets) => snippets::render(app, frame, band),
+        Some(Overlay::Edit) => edit_host::render(app, frame, band),
+        Some(Overlay::Debug) => debug::render(app, frame, band),
+        _ => {}
+    }
+    // After the panels: their scroll is clamped to what they show, so the
+    // bar's keys (`G follow`) match the screen.
+    statusbar::render(app, frame, status);
+    // Help, then toasts: above the panels, so a result is never hidden.
+    overlays::render(app, frame, toast_zone);
     if let Some(d) = app.dialogs.front() {
-        dialog::render(d, s, frame);
+        dialog::render(d, s, tick, frame);
     }
 }
 

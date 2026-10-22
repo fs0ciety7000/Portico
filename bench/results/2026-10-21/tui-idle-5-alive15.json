@@ -1,0 +1,40 @@
+{
+  "sessions": 5,
+  "seconds": 30.0,
+  "strace": true,
+  "mem_list": {
+    "rss_kib": 10280,
+    "pss_kib": 8289,
+    "uss_kib": 7904
+  },
+  "connect_to_prompt_ms": {
+    "n": 5,
+    "median": 93.25,
+    "p95": 95.36,
+    "min": 89.23,
+    "max": 95.36,
+    "runs": [
+      95.4,
+      93.2,
+      94.2,
+      89.2,
+      91.1
+    ]
+  },
+  "view": "terminal tab",
+  "strace_idle": "% time     seconds  usecs/call     calls    errors syscall\n------ ----------- ----------- --------- --------- ----------------\n 71.67    0.019630         230        85        63 futex\n 16.13    0.004417         122        36           epoll_wait\n  8.97    0.002457         491         5         5 restart_syscall\n  0.84    0.000230           2        98           sched_yield\n  0.67    0.000184          18        10           sendto\n  0.37    0.000102           3        30        10 recvfrom\n  0.30    0.000082           8        10           openat\n  0.28    0.000076           7        10           write\n  0.16    0.000045           4        10           close\n  0.14    0.000039          39         1           timerfd_settime\n  0.14    0.000037           3        10           ioctl\n  0.10    0.000027           6         4           munmap\n  0.07    0.000019           4         4           madvise\n  0.05    0.000015          15         1           epoll_ctl\n  0.05    0.000014           3         4           rt_sigprocmask\n  0.05    0.000014           3         4           sigaltstack\n------ ----------- ----------- --------- --------- ----------------\n100.00    0.027388          85       322        78 total\n",
+  "idle": {
+    "cpu_ticks": 2,
+    "cpu_ms": 20.0,
+    "cpu_pct": 0.067,
+    "pty_bytes": 250,
+    "pty_reads": 10,
+    "wall_s": 30.0
+  },
+  "mem_end": {
+    "rss_kib": 14908,
+    "pss_kib": 12612,
+    "uss_kib": 12404
+  },
+  "threads": 8
+}

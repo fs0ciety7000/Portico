@@ -38,7 +38,7 @@
 <Modal tone="danger" bind:armed onescape={close} labelledBy="host-key-alert">
   {#snippet title()}
     <span class="banner">Host key changed</span>
-    <span class="title-host"> · {alert.alias}</span>
+    <span class="title-host">· {alert.alias}</span>
   {/snippet}
 
   <p class="lead">The key presented by <span class="mono">{target}</span> does not match <span class="mono">known_hosts</span>.</p>

@@ -1,0 +1,76 @@
+{
+  "sessions": 5,
+  "seconds": 30.0,
+  "mem_list": {
+    "total": {
+      "rss_kib": 582776,
+      "pss_kib": 408602,
+      "uss_kib": 302688
+    },
+    "procs": [
+      {
+        "pid": 27003,
+        "comm": "portico-gui",
+        "rss_kib": 180804,
+        "pss_kib": 105799,
+        "uss_kib": 57832
+      },
+      {
+        "pid": 27042,
+        "comm": "WebKitWebProces",
+        "rss_kib": 353640,
+        "pss_kib": 280767,
+        "uss_kib": 234820
+      },
+      {
+        "pid": 27014,
+        "comm": "WebKitNetworkPr",
+        "rss_kib": 48332,
+        "pss_kib": 22036,
+        "uss_kib": 10036
+      }
+    ]
+  },
+  "view": "terminal tab",
+  "idle": {
+    "cpu_ms_by_proc": {
+      "portico-gui:27003": 210.0,
+      "WebKitWebProces:27042": 3440.0,
+      "WebKitNetworkPr:27014": 0.0
+    },
+    "cpu_ms": 3650.0,
+    "cpu_pct": 12.165,
+    "wall_s": 30.0
+  },
+  "mem_end": {
+    "total": {
+      "rss_kib": 736056,
+      "pss_kib": 560610,
+      "uss_kib": 454772
+    },
+    "procs": [
+      {
+        "pid": 27003,
+        "comm": "portico-gui",
+        "rss_kib": 184672,
+        "pss_kib": 109206,
+        "uss_kib": 61208
+      },
+      {
+        "pid": 27042,
+        "comm": "WebKitWebProces",
+        "rss_kib": 502860,
+        "pss_kib": 429504,
+        "uss_kib": 383528
+      },
+      {
+        "pid": 27014,
+        "comm": "WebKitNetworkPr",
+        "rss_kib": 48524,
+        "pss_kib": 21900,
+        "uss_kib": 10036
+      }
+    ]
+  },
+  "ssh_connections": 5
+}

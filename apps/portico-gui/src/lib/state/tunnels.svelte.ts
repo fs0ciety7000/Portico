@@ -26,6 +26,16 @@ class Tunnels {
   async sync() {
     try {
       const known = await backend.listTunnels();
+      // A row made from an event that came before the start reply (the
+      // usual order with a real engine) gets its spec here.
+      for (const row of this.list) {
+        const k = known.find((k) => k.id === row.id);
+        if (k && !row.display) {
+          row.display = k.display;
+          row.exposed = k.exposed;
+          row.alias ||= workspace.aliasOf(k.session) ?? "";
+        }
+      }
       this.list = [
         ...this.list.filter((t) => t.status === "failed" || known.some((k) => k.id === t.id)),
         ...known
@@ -56,7 +66,13 @@ class Tunnels {
     try {
       const check = await backend.checkForward(spec);
       const id = await backend.startTunnel(session, spec, allowExposed);
-      if (!this.list.some((t) => t.id === id)) this.list.push(this.#row(id, session, check.display, check.exposed));
+      const row = this.list.find((t) => t.id === id);
+      if (!row) this.list.push(this.#row(id, session, check.display, check.exposed));
+      else if (!row.display) {
+        // Its "listening" event came first and made a placeholder row.
+        row.display = check.display;
+        row.exposed = check.exposed;
+      }
       return true;
     } catch (e) {
       workspace.notify(e);

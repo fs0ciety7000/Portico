@@ -1,8 +1,9 @@
 //! Tunnels panel state: running tunnels (all sessions), forwards declared in
 //! `ssh_config` for the current host (offered, never started on their own),
-//! and a one-line form to add `-L` / `-R` specs.
+//! and a one-line form to add `-L` / `-R` / `-D` specs.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use portico_core::ErrorSummary;
 use portico_core::events::TunnelEvent;
 use portico_core::forward::{ForwardSpec, TunnelInfo};
 use portico_core::ids::{SessionId, TunnelId};
@@ -12,10 +13,7 @@ use ratatui::widgets::ListState;
 pub(crate) enum TunnelStatus {
     Starting,
     Listening(String),
-    Failed {
-        message: String,
-        hint: Option<String>,
-    },
+    Failed(ErrorSummary),
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +36,8 @@ pub(crate) enum Item {
 
 #[derive(Debug, Default)]
 pub(crate) struct TunnelsPanel {
-    /// Session the panel adds tunnels to.
+    /// Live session (connected or connecting) the panel adds tunnels to;
+    /// `None` when there is none, and then only `Esc` is offered.
     pub(crate) session: Option<(SessionId, String)>,
     pub(crate) items: Vec<Item>,
     pub(crate) list: ListState,
@@ -46,7 +45,8 @@ pub(crate) struct TunnelsPanel {
     pub(crate) input: Option<String>,
     /// Exposed spec waiting for an explicit `y` (listens beyond loopback).
     pub(crate) confirm: Option<ForwardSpec>,
-    pub(crate) error: Option<String>,
+    /// Last error (bad spec, refused start), cleared by the next key.
+    pub(crate) error: Option<ErrorSummary>,
 }
 
 /// What the app should do after a key in the panel.
@@ -95,7 +95,41 @@ impl TunnelsPanel {
         }
     }
 
+    /// The item under the cursor.
+    pub(crate) fn selected(&self) -> Option<&Item> {
+        self.items.get(self.list.selected()?)
+    }
+
+    /// Keys that do something right now (no inert hints). `Esc` is listed
+    /// last; the panel shows it in its border instead.
+    pub(crate) fn hints(&self, rows: &[TunnelRow]) -> Vec<(&'static str, &'static str)> {
+        if self.confirm.is_some() {
+            return vec![("y", "expose"), ("Esc", "cancel")];
+        }
+        if self.input.is_some() {
+            return vec![("↵", "start"), ("Esc", "cancel")];
+        }
+        let mut hints = Vec::new();
+        if self.session.is_some() {
+            hints.push(("a", "add"));
+        }
+        match self.selected() {
+            Some(Item::Suggested(_)) => hints.push(("↵", "start")),
+            Some(Item::Running(id)) => {
+                let failed = rows
+                    .iter()
+                    .any(|r| r.id == *id && matches!(r.status, TunnelStatus::Failed(_)));
+                hints.push(("x", if failed { "dismiss" } else { "stop" }));
+            }
+            None => {}
+        }
+        hints.push(("Esc", "close"));
+        hints
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> PanelOutcome {
+        // An error stays until the next key.
+        self.error = None;
         if let Some(spec) = self.confirm.take() {
             return match key.code {
                 KeyCode::Char('y' | 'Y') => PanelOutcome::Start(spec, true),
@@ -108,7 +142,6 @@ impl TunnelsPanel {
                 KeyCode::Enter => match parse(input) {
                     Ok(spec) => {
                         self.input = None;
-                        self.error = None;
                         return self.request_start(spec);
                     }
                     Err(e) => self.error = Some(e),
@@ -121,7 +154,6 @@ impl TunnelsPanel {
             }
             return PanelOutcome::None;
         }
-        self.error = None;
         let len = self.items.len();
         let current = self.list.selected();
         match key.code {
@@ -134,12 +166,8 @@ impl TunnelsPanel {
                 self.list
                     .select(Some(current.map_or(0, |i| i.saturating_sub(1))));
             }
-            KeyCode::Char('a' | 'n') => {
-                if self.session.is_some() {
-                    self.input = Some(String::from("-L "));
-                } else {
-                    self.error = Some("connect to a host first".into());
-                }
+            KeyCode::Char('a' | 'n') if self.session.is_some() => {
+                self.input = Some(String::from("-L "));
             }
             KeyCode::Enter => {
                 if let Some(Item::Suggested(spec)) = current.and_then(|i| self.items.get(i)) {
@@ -158,9 +186,16 @@ impl TunnelsPanel {
     }
 }
 
-/// `-L 8080:db:5432`, `L 8080 db:5432`, `-R 9000:localhost:3000`.
-pub(crate) fn parse(input: &str) -> Result<ForwardSpec, String> {
-    ForwardSpec::parse_cli(input).map_err(|e| e.to_string())
+/// `-L 8080:db:5432`, `L 8080 db:5432`, `-R 9000:localhost:3000`, `-D 1080`.
+pub(crate) fn parse(input: &str) -> Result<ForwardSpec, ErrorSummary> {
+    ForwardSpec::parse_cli(input).map_err(|e| ErrorSummary {
+        code: "invalid_forward".into(),
+        message: e.to_string(),
+        hint: Some(
+            "Type -L [bind:]port:host:port, -R [bind:]port:host:port or -D [bind:]port (SOCKS)."
+                .into(),
+        ),
+    })
 }
 
 /// Applies an engine event to the rows; returns true when something changed.
@@ -172,12 +207,7 @@ pub(crate) fn apply(rows: &mut Vec<TunnelRow>, id: TunnelId, event: &TunnelEvent
         TunnelEvent::Listening { bind } => row.status = TunnelStatus::Listening(bind.clone()),
         TunnelEvent::ConnectionOpened { .. } => row.connections = row.connections.saturating_add(1),
         TunnelEvent::ConnectionClosed { .. } => row.connections = row.connections.saturating_sub(1),
-        TunnelEvent::Failed { error } => {
-            row.status = TunnelStatus::Failed {
-                message: error.message.clone(),
-                hint: error.hint.clone(),
-            };
-        }
+        TunnelEvent::Failed { error } => row.status = TunnelStatus::Failed(error.clone()),
         TunnelEvent::Stopped => rows.retain(|r| r.id != id),
         _ => return false,
     }
@@ -192,7 +222,7 @@ pub(crate) fn sync(
     alias_of: impl Fn(SessionId) -> String,
 ) {
     rows.retain(|r| {
-        known.iter().any(|k| k.id == r.id) || matches!(r.status, TunnelStatus::Failed { .. })
+        known.iter().any(|k| k.id == r.id) || matches!(r.status, TunnelStatus::Failed(_))
     });
     for k in known {
         if !rows.iter().any(|r| r.id == k.id) {
@@ -226,8 +256,9 @@ mod tests {
             parse("-R 9000:localhost:3000"),
             Ok(ForwardSpec::Remote { .. })
         ));
+        assert!(matches!(parse("-D 1080"), Ok(ForwardSpec::Dynamic { .. })));
         assert!(parse("8080:db:5432").is_err());
-        assert!(parse("-D 1080").is_err());
+        assert!(parse("-D nope").is_err());
         assert!(parse("-L nope").is_err());
     }
 
@@ -261,5 +292,45 @@ mod tests {
             press(&mut panel, KeyCode::Enter),
             PanelOutcome::Start(_, false)
         ));
+        // A SOCKS proxy on every interface asks first too.
+        panel.input = Some("-D 0.0.0.0:1080".into());
+        press(&mut panel, KeyCode::Enter);
+        assert!(matches!(panel.confirm, Some(ForwardSpec::Dynamic { .. })));
+        assert!(matches!(
+            press(&mut panel, KeyCode::Char('y')),
+            PanelOutcome::Start(ForwardSpec::Dynamic { .. }, true)
+        ));
+        panel.input = Some("-D 1080".into());
+        assert!(matches!(
+            press(&mut panel, KeyCode::Enter),
+            PanelOutcome::Start(ForwardSpec::Dynamic { .. }, false)
+        ));
+    }
+
+    #[test]
+    fn errors_clear_on_the_next_key() {
+        let mut panel = TunnelsPanel::new(Some((SessionId::next(), "web".into())));
+        panel.input = Some("-L nope".into());
+        press(&mut panel, KeyCode::Enter);
+        let error = panel.error.clone().map(|e| e.code);
+        assert_eq!(error.as_deref(), Some("invalid_forward"));
+        assert!(panel.input.is_some(), "the spec stays editable");
+        press(&mut panel, KeyCode::Backspace);
+        assert!(panel.error.is_none());
+    }
+
+    #[test]
+    fn without_a_live_session_only_close_is_offered() {
+        let mut panel = TunnelsPanel::new(None);
+        panel.rebuild(&[], &[]);
+        assert_eq!(panel.hints(&[]), vec![("Esc", "close")]);
+        // `a` is not an inert key that pretends to work.
+        assert!(matches!(
+            press(&mut panel, KeyCode::Char('a')),
+            PanelOutcome::None
+        ));
+        assert!(panel.input.is_none());
+        let live = TunnelsPanel::new(Some((SessionId::next(), "web".into())));
+        assert_eq!(live.hints(&[]), vec![("a", "add"), ("Esc", "close")]);
     }
 }

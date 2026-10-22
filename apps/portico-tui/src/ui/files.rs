@@ -1,7 +1,13 @@
 //! SFTP explorer: local | remote panes, the transfer queue, and one line for
 //! the current question or the last error. Server-provided names go through
 //! `display_safe` (no control or bidi characters reach the terminal).
+//!
+//! The remote pane mirrors its session ([`RemoteLink`]): connection phase
+//! while it connects, the connection's error and `↵ reconnect` once it is
+//! down (never a `Ctrl-R retry` that cannot succeed).
 
+use portico_core::ErrorSummary;
+use portico_core::events::SessionPhase;
 use portico_core::sftp::{Direction, EntryKind, RemoteEntry, display_safe};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -9,22 +15,70 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Padding, Paragraph};
 use time::OffsetDateTime;
 
+use crate::app::SessionView;
 use crate::files::{FilesPrompt, FilesView, Pane, Side, TransferRow, TransferStatus, human_size};
 use crate::theme::Styles;
-use crate::ui::fmt;
+use crate::ui::{fmt, status};
 
 /// Transfers listed at most (most recent last).
 const QUEUE_ROWS: usize = 4;
 /// Width of the text progress bar.
 const BAR: u16 = 14;
+/// Inner pane width from which dates show in full (`12 Mar 14:05`).
+const FULL_DATE_FROM: usize = 52;
+/// Inner pane width from which dates show compact (`12 Mar`).
+const COMPACT_DATE_FROM: usize = 30;
 
+/// State of the session behind the remote pane.
+#[derive(Debug, Clone)]
+pub(crate) enum RemoteLink {
+    Up,
+    /// Connecting or authenticating: phase label and status colour.
+    Pending {
+        label: String,
+        color: portico_theme::Rgb,
+    },
+    /// Failed or closed: why, and how to recover.
+    Down(ErrorSummary),
+}
+
+impl RemoteLink {
+    pub(crate) fn of(session: Option<&SessionView>, s: Styles) -> Self {
+        let closed = || {
+            Self::Down(ErrorSummary {
+                code: "session_closed".into(),
+                message: "the connection to this host is closed".into(),
+                hint: Some("Reconnect to browse its files again.".into()),
+            })
+        };
+        let Some(view) = session else {
+            return closed();
+        };
+        match &view.phase {
+            SessionPhase::Connected => Self::Up,
+            SessionPhase::Failed { error } => Self::Down(error.clone()),
+            _ if view.in_flight() => {
+                let st = status::status(Some(view), s);
+                Self::Pending {
+                    label: st.label,
+                    color: st.color,
+                }
+            }
+            _ => closed(),
+        }
+    }
+}
+
+/// Draws the explorer; returns the remote pane's inside (where toasts go,
+/// clear of every border).
 pub(crate) fn render(
     view: &mut FilesView,
+    link: &RemoteLink,
     s: Styles,
     tick: u64,
     frame: &mut Frame<'_>,
     area: Rect,
-) {
+) -> Rect {
     let shown = view.transfers.len().min(QUEUE_ROWS);
     let queue_height = if shown == 0 {
         0
@@ -44,7 +98,12 @@ pub(crate) fn render(
 
     let hidden = view.hidden;
     let local_title = fmt::display_path(&view.local.cwd);
-    let remote_title = format!("{}:{}", view.alias, view.remote.cwd);
+    // No `alias:` with an empty path while nothing is open yet.
+    let remote_title = if view.remote.cwd.is_empty() {
+        view.alias.clone()
+    } else {
+        format!("{}:{}", view.alias, view.remote.cwd)
+    };
     let active = view.side;
     render_pane(
         &mut view.local,
@@ -54,6 +113,7 @@ pub(crate) fn render(
             focused: active == Side::Local,
             hidden,
             loading_text: "Reading folder…",
+            link: &RemoteLink::Up,
         },
         s,
         tick,
@@ -68,6 +128,7 @@ pub(crate) fn render(
             focused: active == Side::Remote,
             hidden,
             loading_text: "Opening SFTP…",
+            link,
         },
         s,
         tick,
@@ -78,6 +139,7 @@ pub(crate) fn render(
         render_queue(view, s, tick, frame, queue);
     }
     render_footer(view, s, frame, footer);
+    right.inner(ratatui::layout::Margin::new(1, 1))
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +149,7 @@ struct PaneLook<'a> {
     focused: bool,
     hidden: bool,
     loading_text: &'a str,
+    link: &'a RemoteLink,
 }
 
 fn render_pane(
@@ -126,16 +189,23 @@ fn render_pane(
     if let Some(lines) = placeholder(pane, look, s, tick, inner_width) {
         frame.render_widget(
             Paragraph::new(lines)
-                .wrap(ratatui::widgets::Wrap { trim: true })
+                .wrap(ratatui::widgets::Wrap { trim: false })
                 .block(block),
             area,
         );
         return;
     }
     let entries: Vec<&RemoteEntry> = pane.visible(look.hidden).collect();
-    let show_date = inner_width >= 52;
+    // Full date, compact date (`21 Oct`, `Oct 2024`), or none when narrow.
+    let date_w = if inner_width >= FULL_DATE_FROM {
+        13
+    } else if inner_width >= COMPACT_DATE_FROM {
+        9
+    } else {
+        0
+    };
+    let show_date = date_w > 0;
     let size_w = 9;
-    let date_w = if show_date { 13 } else { 0 };
     // Marker (2) + name + size + date.
     let name_w = inner_width.saturating_sub(2 + size_w + date_w).max(4);
     let selected = pane.list.selected();
@@ -144,7 +214,12 @@ fn render_pane(
         .enumerate()
         .map(|(i, e)| {
             let is_sel = selected == Some(i);
-            let marker = if is_sel && look.focused { "▍ " } else { "  " };
+            // The other pane keeps a visible, quieter selection.
+            let marker = match (is_sel, look.focused) {
+                (true, true) => Span::styled("▍ ", s.accent()),
+                (true, false) => Span::styled("▍ ", s.muted()),
+                (false, _) => Span::raw("  "),
+            };
             let (suffix, name_style) = match e.kind {
                 EntryKind::Dir => ("/", s.title()),
                 EntryKind::Symlink => ("@", s.secondary()),
@@ -158,7 +233,7 @@ fn render_pane(
                 human_size(e.size)
             };
             let mut spans = vec![
-                Span::styled(marker, s.accent()),
+                marker,
                 Span::styled(format!("{name:<name_w$}"), name_style),
                 Span::styled(format!("{size:>size_w$}"), s.muted()),
             ];
@@ -166,7 +241,13 @@ fn render_pane(
                 spans.push(Span::styled(
                     format!(
                         "{:>date_w$}",
-                        e.modified.map(short_date).unwrap_or_default()
+                        e.modified
+                            .map(|at| if date_w == 13 {
+                                short_date(at)
+                            } else {
+                                compact_date(at)
+                            })
+                            .unwrap_or_default()
                     ),
                     s.muted(),
                 ));
@@ -177,7 +258,7 @@ fn render_pane(
     let highlight = if look.focused {
         s.selected()
     } else {
-        ratatui::style::Style::new()
+        s.elevated()
     };
     frame.render_stateful_widget(
         List::new(items).block(block).highlight_style(highlight),
@@ -186,7 +267,24 @@ fn render_pane(
     );
 }
 
-/// Error, loading and empty states; `None` when there are rows to show.
+/// Message (error colour) and hint (secondary) on their own wrapped lines.
+fn error_lines(err: &ErrorSummary, s: Styles, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = fmt::wrap(&fmt::sentence(&err.message), width)
+        .into_iter()
+        .map(|l| Line::from(Span::styled(l, s.status(s.theme.status.error))))
+        .collect();
+    if let Some(hint) = &err.hint {
+        lines.extend(
+            fmt::wrap(hint, width)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, s.secondary()))),
+        );
+    }
+    lines
+}
+
+/// Session, error, loading and empty states; `None` when there are rows to
+/// show.
 fn placeholder(
     pane: &Pane,
     look: PaneLook<'_>,
@@ -194,17 +292,41 @@ fn placeholder(
     tick: u64,
     width: usize,
 ) -> Option<Vec<Line<'static>>> {
-    if let Some(err) = &pane.error {
-        let mut lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                fmt::truncate(&err.message, width.saturating_mul(2)),
-                s.status(s.theme.status.error),
-            )),
-        ];
-        if let Some(hint) = &err.hint {
-            lines.push(Line::from(Span::styled(hint.clone(), s.secondary())));
+    match look.link {
+        RemoteLink::Up => {}
+        RemoteLink::Pending { label, color } => {
+            return Some(vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(super::spinner(tick), s.status(*color)),
+                    Span::styled(format!("  {label}"), s.status(*color)),
+                ]),
+                Line::from(Span::styled("Files open once connected.", s.muted())),
+            ]);
         }
+        RemoteLink::Down(err) => {
+            let mut lines = vec![Line::from("")];
+            lines.extend(error_lines(err, s, width));
+            lines.push(Line::from(""));
+            if crate::files::refuses_reconnect(err) {
+                // A changed host key is a hard refusal: nothing to retry here.
+                return Some(lines);
+            }
+            let key = if look.focused {
+                s.key_primary()
+            } else {
+                s.key_hint()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(" ↵ ", key),
+                Span::styled(" reconnect", s.muted()),
+            ]));
+            return Some(lines);
+        }
+    }
+    if let Some(err) = &pane.error {
+        let mut lines = vec![Line::from("")];
+        lines.extend(error_lines(err, s, width));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(" Ctrl-R ", s.key_hint()),
@@ -264,6 +386,17 @@ fn short_date(at: OffsetDateTime) -> String {
         )
     } else {
         format!("{:>2} {month} {}", at.day(), at.year())
+    }
+}
+
+/// `12 Mar` this year, `Mar 2023` otherwise (narrow panes; UTC).
+fn compact_date(at: OffsetDateTime) -> String {
+    let month = at.month().to_string();
+    let month = month.get(..3).unwrap_or(&month).to_owned();
+    if at.year() == OffsetDateTime::now_utc().year() {
+        format!("{:>2} {month}", at.day())
+    } else {
+        format!("{month} {}", at.year())
     }
 }
 
@@ -455,7 +588,7 @@ fn render_footer(view: &FilesView, s: Styles, frame: &mut Frame<'_>, area: Rect)
             Some(err) => {
                 let mut spans = vec![
                     Span::styled(" ✕ ", s.status(s.theme.status.error)),
-                    Span::styled(err.message.clone(), s.status(s.theme.status.error)),
+                    Span::styled(fmt::sentence(&err.message), s.status(s.theme.status.error)),
                 ];
                 if let Some(hint) = &err.hint {
                     spans.push(Span::styled(format!("  {hint}"), s.secondary()));

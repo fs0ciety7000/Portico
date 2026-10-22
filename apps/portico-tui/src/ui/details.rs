@@ -1,16 +1,35 @@
 //! Main pane: effective configuration of the selected host.
+//!
+//! Sensitive values (commands that run locally or remotely, see
+//! [`SENSITIVE_KEYWORDS`]) are masked here as everywhere: they can be
+//! revealed in the session logs' Effective config tab, never copied.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 
+use portico_core::effective::SENSITIVE_KEYWORDS;
 use portico_core::events::SessionPhase;
 use portico_core::hosts::HostEntry;
 
 use crate::app::App;
 use crate::theme::Styles;
-use crate::ui::fmt::display_path;
+use crate::ui::fmt::{display_path, sentence};
+
+/// Label column of the rows.
+const LABEL: usize = 14;
+
+/// How `ssh_config` spells a sensitive keyword (the core keeps them lowercase).
+fn keyword_label(keyword: &str) -> &str {
+    match keyword {
+        "proxycommand" => "ProxyCommand",
+        "localcommand" => "LocalCommand",
+        "remotecommand" => "RemoteCommand",
+        "knownhostscommand" => "KnownHostsCommand",
+        other => other,
+    }
+}
 
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
@@ -35,8 +54,12 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
     let r = &host.resolved;
     let user = r.user.as_deref().unwrap_or("(local user)");
+    let mut title = vec![Span::styled(host.alias.clone(), s.title())];
+    if host.meta.favorite {
+        title.push(Span::styled(" ★", s.accent()));
+    }
     let mut lines = vec![
-        Line::from(Span::styled(host.alias.clone(), s.title())),
+        Line::from(title),
         Line::from(vec![
             Span::styled(format!("{user}@{}", r.hostname), s.secondary()),
             Span::styled(format!(":{}", r.port), s.muted()),
@@ -45,20 +68,14 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     ];
     lines.extend(status_lines(app, host, s));
     lines.push(Line::from(""));
+    lines.extend(route_lines(app, host, s));
 
     let mut row = |label: &str, value: String| {
         lines.push(Line::from(vec![
-            Span::styled(format!("{label:<14}"), s.muted()),
+            Span::styled(format!("{label:<LABEL$} "), s.muted()),
             Span::styled(value, s.secondary()),
         ]));
     };
-    if !r.proxy_jump.is_empty() {
-        let chain: Vec<String> = r.proxy_jump.iter().map(|j| j.host.clone()).collect();
-        row("Jump", format!("{} → {}", chain.join(" → "), host.alias));
-    }
-    if let Some(cmd) = &r.proxy_command {
-        row("ProxyCommand", cmd.clone());
-    }
     for f in &r.identity_files {
         row("Identity", display_path(&f.to_string_lossy()));
     }
@@ -82,6 +99,9 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 .join(" "),
         );
     }
+    if let Some(group) = &host.meta.group {
+        row("Group", crate::form::display_safe(group));
+    }
     row(
         "Defined in",
         format!(
@@ -90,9 +110,19 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             host.source.line
         ),
     );
+    if let Some(notes) = &host.meta.notes {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Notes", s.muted())));
+        for line in notes.lines() {
+            lines.push(Line::from(Span::styled(
+                crate::form::display_safe(line),
+                s.secondary(),
+            )));
+        }
+    }
     for w in &r.warnings {
         lines.push(Line::from(Span::styled(
-            format!("⚠ {}", w.message),
+            format!("⚠ {}", sentence(&w.message)),
             s.status(s.theme.status.warning),
         )));
     }
@@ -105,8 +135,39 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// `Jump  You → bastion → web`, then the sensitive commands, masked (the
+/// Effective config tab of the logs reveals them).
+fn route_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
+    let r = &host.resolved;
+    let mut lines = Vec::new();
+    if !r.proxy_jump.is_empty() {
+        let chain: Vec<String> = r.proxy_jump.iter().map(|j| j.host.clone()).collect();
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<LABEL$} ", "Jump"), s.muted()),
+            Span::styled(
+                format!("You → {} → {}", chain.join(" → "), host.alias),
+                s.secondary(),
+            ),
+        ]));
+    }
+    let reveal = format!(
+        "  hidden · {} reveals in logs",
+        app.keymap.shown("hosts.debug", 1)
+    );
+    for keyword in SENSITIVE_KEYWORDS {
+        if r.options.contains_key(keyword) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<LABEL$} ", keyword_label(keyword)), s.muted()),
+                Span::styled("•••", s.muted()),
+                Span::styled(reveal.clone(), s.muted()),
+            ]));
+        }
+    }
+    lines
+}
+
 /// Status, latency and what can be done next; a failure gets its message,
-/// hint and remedy on their own lines.
+/// hint and remedies (retry, logs) on their own lines.
 fn status_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
     let view = app.session_for(&host.alias);
     let st = super::status::status(view, s);
@@ -129,11 +190,13 @@ fn status_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
         spans.push(Span::styled(rtt, style));
     }
     let phase = view.map(|v| &v.phase);
-    let hint: &[(&str, &str)] = match phase {
-        Some(SessionPhase::Connected) => &[("↵", "open terminal"), ("d", "disconnect")],
-        Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => &[("d", "cancel")],
-        Some(SessionPhase::Failed { .. }) => &[("↵", "retry")],
-        _ => &[("↵", "connect")],
+    let logs = app.keymap.shown("hosts.debug", 1);
+    let hint: Vec<(&str, &str)> = match phase {
+        Some(SessionPhase::Connected) => vec![("↵", "open terminal"), ("d", "disconnect")],
+        Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => vec![("d", "cancel")],
+        // What went wrong is in the session's records.
+        Some(SessionPhase::Failed { .. }) => vec![("↵", "retry"), (logs.as_str(), "logs")],
+        _ => vec![("↵", "connect")],
     };
     let mut lines = vec![Line::from(spans)];
 
@@ -148,11 +211,14 @@ fn status_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
             ))),
             // A refusal the user chose is not shown as an error.
             "host_key_rejected" => lines.push(Line::from(Span::styled(
-                error.message.clone(),
+                sentence(&error.message),
                 s.secondary(),
             ))),
             _ => {
-                lines.push(Line::from(Span::styled(error.message.clone(), error_style)));
+                lines.push(Line::from(Span::styled(
+                    sentence(&error.message),
+                    error_style,
+                )));
                 if let Some(hint) = &error.hint {
                     lines.push(Line::from(Span::styled(hint.clone(), s.secondary())));
                 }

@@ -7,18 +7,39 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Focus};
+use crate::dialog::{Dialog, SecretPurpose};
 use crate::ui::{fmt, status};
 
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
-    let (mode, hints) = mode_and_hints(app);
+    let (mode, hints) = mode_and_hints(app, frame.area());
     let pill = if app.prefix && app.dialogs.is_empty() {
         s.prefix_pill()
     } else {
         s.mode_pill()
     };
     let mut spans = vec![Span::styled(mode, pill), Span::raw(" ")];
-    for (key, label) in hints {
+    // Hints are listed by importance: drop the tail rather than overflow.
+    // `quit` is the exception: always last, and its room is kept.
+    let mut hints = hints;
+    let pinned = if hints.last().is_some_and(|(_, label)| *label == "quit") {
+        hints.pop()
+    } else {
+        None
+    };
+    let need = |(key, label): &(String, &str)| key.chars().count() + label.chars().count() + 4;
+    let mut used: usize =
+        spans.iter().map(Span::width).sum::<usize>() + pinned.as_ref().map_or(0, need);
+    let mut shown: Vec<&(String, &str)> = Vec::new();
+    for hint in &hints {
+        if used + need(hint) > usize::from(area.width) {
+            break;
+        }
+        used += need(hint);
+        shown.push(hint);
+    }
+    shown.extend(pinned.iter());
+    for (key, label) in shown {
         spans.push(Span::styled(format!(" {key} "), s.key_hint()));
         spans.push(Span::styled(format!(" {label} "), s.muted()));
     }
@@ -59,30 +80,132 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
 }
 
-/// Mode pill and the key hints that fit 80 columns (the rest is in `?`).
-fn mode_and_hints(app: &App) -> (&'static str, &'static [(&'static str, &'static str)]) {
-    match app.focus {
+type Hints = Vec<(String, &'static str)>;
+
+fn owned(hints: Vec<(&'static str, &'static str)>) -> Hints {
+    hints.into_iter().map(|(k, l)| (k.to_owned(), l)).collect()
+}
+
+/// Effective keys of `ids`, in order (unbound actions are left out).
+fn keyed(app: &App, ids: &[&str]) -> Hints {
+    ids.iter().filter_map(|id| app.keymap.hint(id)).collect()
+}
+
+/// Mode pill and the key hints, most important first (what does not fit is
+/// in `?`). Only keys that work right now are listed.
+// A flat table of modes; splitting it would hide which one wins.
+#[allow(clippy::too_many_lines)]
+fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
+    let (mode, hints): (&'static str, &[(&'static str, &'static str)]) = match app.focus {
+        // At launch, Esc is not a cancel: Portico goes on without the vault.
+        _ if matches!(
+            app.dialogs.front(),
+            Some(Dialog::Secret(d)) if matches!(d.purpose, SecretPurpose::VaultUnlock { startup: true })
+        ) =>
+        {
+            (" DIALOG ", &[("↵", "unlock"), ("Esc", "continue without")])
+        }
+        // The same words as the dialog's own footer (`n / Esc keep`, `y clear`).
+        _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => {
+            let confirm = match app.dialogs.front() {
+                Some(Dialog::Confirm(c)) => c.confirm,
+                _ => "confirm",
+            };
+            return (
+                " CONFIRM ",
+                owned(vec![("n / Esc", "keep"), ("y", confirm)]),
+            );
+        }
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
-        _ if app.prefix => (
-            " PREFIX ",
+        _ if app.prefix => {
+            let mut hints = keyed(app, &["prefix.home"]);
+            hints.push(("1-9".into(), "tab"));
+            hints.extend(keyed(
+                app,
+                &[
+                    "prefix.files",
+                    "prefix.tunnels",
+                    "prefix.debug",
+                    "prefix.new_tab",
+                    "prefix.close_tab",
+                    "prefix.disconnect",
+                ],
+            ));
+            hints.push(("Esc".into(), "cancel"));
+            return (" PREFIX ", hints);
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Keys) => {
+            let hints = app.keys_panel.as_ref().map_or_else(
+                || vec![("Esc", "close")],
+                |p| p.hints(app.vault, app.copy_state()),
+            );
+            return (" KEYS ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Snippets) => {
+            let hints = app.snippets_panel.as_ref().map_or_else(
+                || vec![("Esc", "close")],
+                crate::snippets::SnippetsPanel::hints,
+            );
+            return (" SNIPPETS ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Tunnels) => {
+            let hints = app
+                .tunnels_panel
+                .as_ref()
+                .map_or_else(|| vec![("Esc", "close")], |p| p.hints(&app.tunnels));
+            return (" TUNNELS ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Edit) => (
+            " EDIT ",
             &[
-                ("h", "hosts"),
-                ("1-9", "tab"),
-                ("n", "new"),
-                ("w", "close"),
-                ("d", "disconnect"),
+                ("Tab", "next field"),
+                ("Ctrl-S", "save"),
+                ("Ctrl-U", "clear"),
                 ("Esc", "cancel"),
             ],
         ),
-        _ if app.overlay == Some(crate::app::Overlay::Tunnels) => (
-            " TUNNELS ",
-            &[
-                ("a", "add"),
-                ("↵", "start"),
-                ("x", "stop"),
-                ("Esc", "close"),
-            ],
-        ),
+        _ if app.help.over_panel || app.overlay == Some(crate::app::Overlay::Help) => {
+            if super::overlays::help_paged(app, screen.height) {
+                (" HELP ", &[("Tab", "page"), ("Esc", "close")])
+            } else {
+                (" HELP ", &[("Esc", "close")])
+            }
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Debug) => {
+            let narrow = screen.width < crate::debug::NARROW;
+            let hints = app
+                .debug_panel
+                .as_ref()
+                .map_or_else(|| vec![("Esc", "close")], |p| p.hints(narrow));
+            return (" LOGS ", owned(hints));
+        }
+        Focus::Files
+            if app.files_refused()
+                && app
+                    .files
+                    .as_ref()
+                    .is_some_and(|f| f.side == crate::files::Side::Remote) =>
+        {
+            (
+                " FILES ",
+                &[("Tab", "local pane"), ("?", "help"), ("Esc", "back")],
+            )
+        }
+        Focus::Files
+            if app.files.as_ref().is_some_and(|f| {
+                f.side == crate::files::Side::Remote && !app.session_alive(f.session)
+            }) =>
+        {
+            (
+                " FILES ",
+                &[
+                    ("↵", "reconnect"),
+                    ("Tab", "local pane"),
+                    ("?", "help"),
+                    ("Esc", "back"),
+                ],
+            )
+        }
         Focus::Files => (
             " FILES ",
             &[
@@ -95,20 +218,30 @@ fn mode_and_hints(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("Esc", "back"),
             ],
         ),
-        Focus::Terminal => (
-            " TERMINAL ",
-            &[("Ctrl-Space", "commands"), ("Shift-PgUp", "scroll")],
-        ),
-        Focus::Hosts => (
-            " HOSTS ",
-            &[
-                ("↵", "connect"),
-                ("/", "search"),
-                ("t", "theme"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
-        ),
+        Focus::Terminal => {
+            let mut hints = vec![("Ctrl-Space".to_owned(), "commands")];
+            hints.extend(keyed(app, &["terminal.scroll_up"]));
+            return (" TERMINAL ", hints);
+        }
+        Focus::Hosts => {
+            let mut ids = vec!["hosts.connect"];
+            if app.selected_is_recent() {
+                ids.push("hosts.forget_recent");
+            }
+            ids.extend([
+                "hosts.search",
+                "hosts.edit",
+                "hosts.favorite",
+                "hosts.debug",
+                "hosts.help",
+                "hosts.keys",
+                "hosts.snippets",
+                "hosts.theme",
+                // Always last, and always shown (see `render`).
+                "hosts.quit",
+            ]);
+            return (" HOSTS ", keyed(app, &ids));
+        }
         Focus::Search => (
             " SEARCH ",
             &[
@@ -118,5 +251,6 @@ fn mode_and_hints(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("Esc", "done"),
             ],
         ),
-    }
+    };
+    (mode, owned(hints.to_vec()))
 }

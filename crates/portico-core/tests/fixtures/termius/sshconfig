@@ -1,0 +1,10 @@
+host prod one
+    hostname 203.0.113.40
+    user admin
+    port 22
+    identityfile ~/.termius/ssh_keys/prod one
+
+host db
+    hostname 203.0.113.41
+    port 2201
+    identityfile ~/.termius/ssh_keys/db

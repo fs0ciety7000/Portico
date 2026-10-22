@@ -2,6 +2,10 @@
 //! a transfer queue and small inline prompts (new folder, rename, delete,
 //! conflict). Engine calls run in spawned tasks and come back as
 //! [`Action::Files`]; nothing here blocks the UI.
+//!
+//! The remote pane follows its session: while it connects the pane shows the
+//! phase, and once the session is down `↵` asks the app to reconnect (then
+//! [`FilesView::rebind`] reopens SFTP on the new session).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -116,11 +120,28 @@ pub(crate) enum FilesPrompt {
     },
 }
 
+impl FilesPrompt {
+    /// The pane the question is about (`None` for a transfer conflict).
+    fn side(&self) -> Option<Side> {
+        match self {
+            Self::NewFolder { side, .. }
+            | Self::Rename { side, .. }
+            | Self::Delete { side, .. } => Some(*side),
+            Self::Conflict { .. } => None,
+        }
+    }
+}
+
 /// Results of background work.
 #[derive(Debug)]
 pub(crate) enum FilesEvent {
-    Home(Result<String, ErrorSummary>),
+    Home {
+        /// Answers for a previous session (before a reconnect) are dropped.
+        session: SessionId,
+        result: Result<String, ErrorSummary>,
+    },
     Listed {
+        session: SessionId,
         side: Side,
         path: String,
         result: Result<Vec<RemoteEntry>, ErrorSummary>,
@@ -157,6 +178,8 @@ pub(crate) enum KeyOutcome {
     Handled,
     /// Leave the explorer (back to the terminal or the host list).
     Leave,
+    /// The remote session is down and the user asked to reconnect.
+    Reconnect,
 }
 
 fn send(tx: &mpsc::UnboundedSender<Action>, event: FilesEvent) {
@@ -191,12 +214,36 @@ impl FilesView {
             tx,
         };
         view.load(Side::Local, view.local.cwd.clone());
-        let (engine, tx) = (view.engine.clone(), view.tx.clone());
+        view.open_home();
+        view
+    }
+
+    /// Asks for the remote home folder (served once the session is up).
+    fn open_home(&self) {
+        let (engine, tx, session) = (self.engine.clone(), self.tx.clone(), self.session);
         tokio::spawn(async move {
             let result = engine.sftp_home(session).await.map_err(|e| e.summary());
-            send(&tx, FilesEvent::Home(result));
+            send(&tx, FilesEvent::Home { session, result });
         });
-        view
+    }
+
+    /// Moves the remote pane to a new session of the same host (after a
+    /// reconnect). The local pane and the transfer history stay.
+    pub(crate) fn rebind(&mut self, session: SessionId) {
+        self.session = session;
+        self.remote = Pane {
+            loading: true,
+            ..Pane::default()
+        };
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(|p| p.side() != Some(Side::Local))
+        {
+            self.prompt = None;
+        }
+        self.notice = None;
+        self.open_home();
     }
 
     pub(crate) fn pane(&self, side: Side) -> &Pane {
@@ -232,7 +279,15 @@ impl FilesView {
                 Side::Remote => engine.sftp_list(session, &path).await,
             }
             .map_err(|e| e.summary());
-            send(&tx, FilesEvent::Listed { side, path, result });
+            send(
+                &tx,
+                FilesEvent::Listed {
+                    session,
+                    side,
+                    path,
+                    result,
+                },
+            );
         });
     }
 
@@ -243,12 +298,22 @@ impl FilesView {
 
     pub(crate) fn on_event(&mut self, event: FilesEvent) {
         match event {
-            FilesEvent::Home(Ok(home)) => self.load(Side::Remote, home),
-            FilesEvent::Home(Err(e)) => {
+            FilesEvent::Home { session, .. } if session != self.session => {}
+            FilesEvent::Listed {
+                session,
+                side: Side::Remote,
+                ..
+            } if session != self.session => {}
+            FilesEvent::Home {
+                result: Ok(home), ..
+            } => self.load(Side::Remote, home),
+            FilesEvent::Home { result: Err(e), .. } => {
                 self.remote.loading = false;
                 self.remote.error = Some(e);
             }
-            FilesEvent::Listed { side, path, result } => {
+            FilesEvent::Listed {
+                side, path, result, ..
+            } => {
                 let hidden = self.hidden;
                 let pane = self.pane_mut(side);
                 pane.loading = false;
@@ -344,13 +409,24 @@ impl FilesView {
 
     // ── Keys ────────────────────────────────────────────────────────────
 
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> KeyOutcome {
+    /// `remote_down`: the session is failed or closed, so the remote pane
+    /// offers `↵ reconnect` instead of browsing.
+    pub(crate) fn handle_key(&mut self, key: KeyEvent, remote_down: bool) -> KeyOutcome {
         if self.prompt.is_some() {
             self.prompt_key(key);
             return KeyOutcome::Handled;
         }
         self.notice = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if remote_down && self.side == Side::Remote {
+            match key.code {
+                KeyCode::Enter => return KeyOutcome::Reconnect,
+                KeyCode::Esc | KeyCode::Char('q') => return KeyOutcome::Leave,
+                KeyCode::Tab | KeyCode::BackTab => self.side = Side::Local,
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return KeyOutcome::Leave,
             KeyCode::Tab | KeyCode::BackTab => self.side = self.side.other(),
@@ -371,7 +447,9 @@ impl FilesView {
             }
             KeyCode::Char('r') if ctrl => {
                 self.refresh(Side::Local);
-                self.refresh(Side::Remote);
+                if !remote_down {
+                    self.refresh(Side::Remote);
+                }
             }
             KeyCode::F(5) | KeyCode::Char('c') => self.copy_selected(),
             KeyCode::F(7) | KeyCode::Char('n') => {
@@ -700,6 +778,12 @@ pub(crate) fn human_size(bytes: u64) -> String {
     } else {
         format!("{value:.0} {label}")
     }
+}
+
+/// A changed host key blocks the host: the explorer never offers to
+/// connect again (the terminal tab carries the alert and its remedy).
+pub(crate) fn refuses_reconnect(err: &portico_core::ErrorSummary) -> bool {
+    err.code == "host_key_changed"
 }
 
 #[cfg(test)]

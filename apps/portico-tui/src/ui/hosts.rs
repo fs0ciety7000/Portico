@@ -6,6 +6,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Padding, Paragraph};
 
 use crate::app::{App, Focus};
+use crate::host_list::{Entry, section_title};
+
+/// Hosts listed under the section header at `header`.
+fn section_size(entries: &[Entry], header: usize) -> usize {
+    entries
+        .iter()
+        .skip(header.saturating_add(1))
+        .take_while(|e| e.host().is_some())
+        .count()
+}
 
 #[allow(clippy::too_many_lines)] // will split into SearchField + HostList widgets
 pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
@@ -72,21 +82,35 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled("Could not load hosts", s.status(status.error))),
-                Line::from(Span::styled(err.clone(), s.secondary())),
+                Line::from(Span::styled(super::fmt::sentence(err), s.secondary())),
             ])
             .block(block),
             list,
         );
         return;
     }
-    if app.hits.is_empty() {
-        let msg = if app.query.is_empty() {
-            "No hosts in ~/.ssh/config yet."
+    if app.entries.is_empty() {
+        let lines = if app.query.is_empty() {
+            vec![
+                Line::from(Span::styled(
+                    "No hosts in ~/.ssh/config yet.",
+                    s.secondary(),
+                )),
+                Line::from(Span::styled("Add a Host block, then r reloads.", s.muted())),
+            ]
         } else {
-            "No host matches this search."
+            vec![
+                Line::from(Span::styled("No host matches this search.", s.secondary())),
+                Line::from(Span::styled(
+                    "Esc clears it · #tag * @group filter",
+                    s.muted(),
+                )),
+            ]
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, s.muted()))).block(block),
+            Paragraph::new(lines)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(block),
             list,
         );
         return;
@@ -95,11 +119,32 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     let Some(inv) = &app.inventory else { return };
     // Leave room for the dot, a favourite star and some of the target.
     let alias_max = usize::from(area.width).saturating_sub(10).max(8);
+    // A section row: borders and padding (4), the selection symbol column
+    // and the space after it (2), then the title and its count on the right.
+    let row_width = usize::from(list.width).saturating_sub(6);
     let items: Vec<ListItem<'_>> = app
-        .hits
+        .entries
         .iter()
-        .filter_map(|hit| inv.hosts.get(hit.index))
-        .map(|h| {
+        .enumerate()
+        .filter_map(|(i, entry)| match entry {
+            Entry::Header(title) => Some(Err((title, section_size(&app.entries, i)))),
+            Entry::Host { index, .. } => inv.hosts.get(*index).map(Ok),
+        })
+        .map(|row| {
+            let h = match row {
+                Ok(h) => h,
+                Err((title, count)) => {
+                    let count = count.to_string();
+                    let title_max = row_width.saturating_sub(count.len() + 2);
+                    let title = section_title(title, title_max);
+                    let pad = row_width.saturating_sub(title.chars().count() + count.len());
+                    return ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {title}"), s.muted()),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(count, s.muted()),
+                    ]));
+                }
+            };
             let st = super::status::status(app.session_for(&h.alias), s);
             let dot = if st.busy {
                 super::spinner(app.tick)

@@ -1,0 +1,70 @@
+{
+  "hosts": 2002,
+  "includes": 8,
+  "first_frame_ms": {
+    "n": 10,
+    "median": 8.1,
+    "p95": 14.61,
+    "min": 6.43,
+    "max": 14.61,
+    "runs": [
+      6.4,
+      7.6,
+      14.6,
+      9.7,
+      9.8,
+      8.2,
+      11.0,
+      8.0,
+      7.9,
+      7.5
+    ]
+  },
+  "list_ready_ms": {
+    "n": 10,
+    "median": 1541.2,
+    "p95": 1861.65,
+    "min": 1408.38,
+    "max": 1861.65,
+    "runs": [
+      1606.9,
+      1543.0,
+      1408.4,
+      1454.3,
+      1610.4,
+      1508.0,
+      1539.5,
+      1552.4,
+      1451.7,
+      1861.7
+    ]
+  },
+  "loading_placeholder_seen": "10/10",
+  "input_during_load": [
+    {
+      "theme_change_ms": 24.3,
+      "still_loading": true,
+      "list_after_key_ms": 1214.8
+    },
+    {
+      "theme_change_ms": 22.6,
+      "still_loading": true,
+      "list_after_key_ms": 1269.6
+    },
+    {
+      "theme_change_ms": 23.7,
+      "still_loading": true,
+      "list_after_key_ms": 1286.7
+    },
+    {
+      "theme_change_ms": 27.3,
+      "still_loading": true,
+      "list_after_key_ms": 1363.9
+    },
+    {
+      "theme_change_ms": 22.7,
+      "still_loading": true,
+      "list_after_key_ms": 1287.8
+    }
+  ]
+}

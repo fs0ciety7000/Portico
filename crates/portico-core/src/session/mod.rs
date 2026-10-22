@@ -13,7 +13,7 @@
 
 mod auth;
 mod handler;
-mod route;
+pub(crate) mod route;
 mod signer;
 mod stream;
 mod terminal;
@@ -33,7 +33,7 @@ use crate::engine::{ConnectRequest, DEFAULT_KEEPALIVE_MAX, Engine, PromptRespons
 use crate::error::{Error, Result};
 use crate::events::{CloseReason, EngineEvent, PromptKind, SessionEvent, SessionPhase};
 use crate::ids::SessionId;
-use crate::logs::{LogLevel, LogRecord, LogRing};
+use crate::logs::{LogLevel, LogRecord, LogRing, SessionOutcome};
 use crate::ssh_config::SshConfig;
 
 use handler::ClientHandler;
@@ -100,6 +100,12 @@ pub(crate) struct SessionCtx {
     /// How long a tunnel peer may stall before it is cut, in milliseconds
     /// (kept below the keepalive budget once the connection is up).
     stall_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Time allowed to open one tunnel channel, in milliseconds (the target's
+    /// `ConnectTimeout`, set once the connection is up).
+    open_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Bytes buffered towards local tunnel peers, shared by every tunnel of
+    /// the session.
+    pub(crate) forward_budget: crate::forward::ForwardBudget,
 }
 
 impl SessionCtx {
@@ -121,7 +127,17 @@ impl SessionCtx {
             stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(duration_ms(
                 crate::forward::STALL_TIMEOUT,
             ))),
+            open_ms: Arc::new(std::sync::atomic::AtomicU64::new(duration_ms(
+                crate::engine::DEFAULT_CONNECT_TIMEOUT,
+            ))),
+            forward_budget: crate::forward::ForwardBudget::default(),
         }
+    }
+
+    /// Time allowed to open one tunnel channel: the target's
+    /// `ConnectTimeout` (engine default otherwise).
+    pub(crate) fn channel_open_timeout(&self) -> Duration {
+        Duration::from_millis(self.open_ms.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// See [`crate::forward::stall_limit`].
@@ -198,14 +214,16 @@ impl SessionCtx {
     }
 }
 
-/// Session actor entry point (spawned by [`Engine::connect`]).
+/// Session actor entry point (spawned by [`Engine::connect`]). Returns how
+/// the session ended (kept with its logs for the debug panel).
 pub(crate) async fn run(
     ctx: SessionCtx,
     request: ConnectRequest,
     mut commands: mpsc::Receiver<SessionCommand>,
-) {
+) -> SessionOutcome {
     ctx.event(SessionEvent::Started {
         alias: request.alias.clone(),
+        probe: request.only_identity.is_some(),
     });
     let established = tokio::select! {
         biased;
@@ -222,21 +240,32 @@ pub(crate) async fn run(
                 ctx.phase(SessionPhase::Closed {
                     reason: CloseReason::UserRequested,
                 });
-            } else {
-                ctx.log(LogLevel::Error, "session", e.to_string());
-                ctx.phase(SessionPhase::Failed { error: e.summary() });
+                return SessionOutcome::Closed {
+                    reason: CloseReason::UserRequested,
+                };
             }
-            return;
+            ctx.log(LogLevel::Error, "session", e.to_string());
+            let error = e.summary();
+            ctx.phase(SessionPhase::Failed {
+                error: error.clone(),
+            });
+            return SessionOutcome::Failed { error };
         }
     };
 
     ctx.phase(SessionPhase::Connected);
+    if request.only_identity.is_none() {
+        ctx.engine.note_recent(&ctx, &request.alias);
+    }
     let reason = conn.supervise(&ctx, &mut commands).await;
     ctx.phase(SessionPhase::Disconnecting);
     conn.close().await;
     ctx.abort.cancel();
     ctx.log(LogLevel::Info, "session", format!("closed ({reason:?})"));
-    ctx.phase(SessionPhase::Closed { reason });
+    ctx.phase(SessionPhase::Closed {
+        reason: reason.clone(),
+    });
+    SessionOutcome::Closed { reason }
 }
 
 /// One authenticated transport and its "closed by peer" signal.
@@ -253,6 +282,8 @@ struct Connection {
     keepalive_max: u32,
     /// `ServerAliveInterval 0`: probe for latency, never disconnect.
     disconnect_on_silence: bool,
+    /// The target's `ConnectTimeout`, also used to open tunnel channels.
+    connect_timeout: Duration,
 }
 
 async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connection> {
@@ -260,12 +291,20 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
     let config = ctx.engine.config().clone();
     let alias = request.alias.clone();
     let user = request.user_override.clone();
-    let hops = tokio::task::spawn_blocking(move || {
+    let mut hops = tokio::task::spawn_blocking(move || {
         let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
         route::plan(&ssh, &config, &alias, user)
     })
     .await
     .map_err(|_| Error::EngineClosed)??;
+    if let (Some(key), Some(target)) = (&request.only_identity, hops.last_mut()) {
+        target.only_identity(key.clone());
+        ctx.log(
+            LogLevel::Info,
+            "auth",
+            format!("logging in with {} only", key.display()),
+        );
+    }
 
     let route: Vec<String> = hops.iter().map(Hop::describe).collect();
     ctx.log(LogLevel::Info, "route", route.join(" → "));
@@ -315,8 +354,10 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
 
     let target = hops.last();
     let interval = target.and_then(|h| h.option_u32("serveraliveinterval"));
+    let default_timeout = ctx.engine.config().connect_timeout;
     Ok(Connection {
         links,
+        connect_timeout: target.map_or(default_timeout, |h| h.connect_timeout(default_timeout)),
         keepalive: interval
             .filter(|s| *s > 0)
             .map_or(ctx.engine.config().keepalive, |s| {
@@ -495,6 +536,10 @@ impl Connection {
         );
         ctx.stall_ms
             .store(duration_ms(stall), std::sync::atomic::Ordering::Relaxed);
+        ctx.open_ms.store(
+            duration_ms(self.connect_timeout),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // First probe slightly after login: right after authentication the
         // peer may delay its ACKs, which would inflate the first RTT sample.
         let mut ticker = tokio::time::interval_at(

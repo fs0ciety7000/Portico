@@ -20,7 +20,7 @@
 
 **Sortie** : `cargo test` vert (35 tests), clippy propre, les deux UIs affichent les hôtes réels.
 
-## Phase 1 : connexion interactive (cœur du produit) 🔜
+## Phase 1 : connexion interactive (cœur du produit) ✅
 
 ### 1a. Transport et authentification ✅ *(Opus ; revues `agent-ssh-protocols` et `agent-security`)*
 - [x] `session/` : un acteur par session, machine d'états `SessionPhase` émise à chaque transition, registre de sessions dans l'`Engine`
@@ -62,51 +62,156 @@
 
 **Sortie** : connexion réelle à `localhost` et via un bastion, depuis les deux UIs. `vim` et `htop` sont utilisables. Statut et latence sont visibles.
 
-## Phase 2 : SFTP et forwarding ⏳ *(Opus pour le core, Sonnet pour l'UI)*
-- `sftp/` : ouverture du sous-système sur la session, `list`, `stat`, `mkdir`, `rename`, `remove`, et transferts streamés
-  (chunks de 256 Kio, progression, annulation, `OnConflict`)
-- Explorateur TUI (deux panneaux local/distant, style Midnight Commander) et GUI (liste, fil d'Ariane, glisser-déposer)
-- `forward/` : `-L` (listener tokio, puis `direct-tcpip` par connexion) et `-R` (`tcpip-forward` + `server_channel_open_forwarded_tcpip`).
-  Bind par défaut sur `localhost`. Les forwards de `ssh_config` sont proposés et non démarrés automatiquement (opt-in par hôte).
-- Panneau « Tunnels » : état, connexions actives, arrêt
+## Phase 2 : SFTP et forwarding ✅ *(Opus)*
+- [x] `sftp/` : un client par session, `list`, `stat`, `mkdir`, `rename`, `remove`, transferts streamés
+  (progression, annulation, `OnConflict`), fichier partiel exclusif puis finalisation atomique, noms hostiles neutralisés
+- [x] Explorateur TUI (deux panneaux local/distant, style Midnight Commander) et GUI (liste, fil d'Ariane, glisser-déposer,
+  jetons d'upload émis par Rust, dossier de téléchargement tenu par Rust)
+- [x] `forward/` : `-L` (toutes les adresses du bind) et `-R`, bind par défaut sur `localhost`, écoute exposée sur confirmation armée.
+  Les forwards de `ssh_config` sont proposés, jamais démarrés d'office
+- [x] Panneau « Tunnels » dans les deux UIs : état, connexions actives, arrêt, erreurs avec hint
+- [x] Les deux UIs suivent la session (phase pendant la connexion, erreur + hint + reconnexion, jamais après une clé changée)
+  et partagent la même grammaire clavier
+- Reporté : transferts récursifs (dossiers), restauration du dossier distant après reconnexion, `posix-rename@openssh.com`
 
-**Sortie** : upload et download d'un fichier de 1 Gio avec progression et annulation, et un tunnel `-L` vers une base distante fonctionnel.
+**Sortie** ✅ : 1 Gio envoyé en 4,1 s et rapatrié en 4,8 s contre OpenSSH réel (contenu identique, progression continue),
+annulation à 25 % sans fichier résiduel des deux côtés (`PORTICO_INTEROP_BIG=1`) ; tunnels `-L`/`-R` vérifiés contre OpenSSH
+(service écho, scénarios 10 et 11) et en TUI réelle (`nc` sur une écoute exposée). Le tunnel vers une vraie base de données
+reste à démontrer manuellement.
 
-## Phase 3 : clés, secrets et snippets ⏳ *(Opus ; revue `agent-security` obligatoire)*
-- Génération : ed25519 (défaut), RSA ≥ 3072, ECDSA P-256/384/521, passphrase (bcrypt-pbkdf, OpenSSH),
-  écriture en `0600` et `.pub` en `0644`, **refus d'écraser** une clé existante
-- Copy-id : auth initiale (mot de passe ou keyboard-interactive), puis `mkdir -p ~/.ssh && chmod 700`, ajout **idempotent**
-  à `authorized_keys` (pas de doublon), `chmod 600`, et vérification par reconnexion avec la clé
-- Agent : liste des identités, ajout et suppression (`ssh-add`) ; certificats affichés avec leur validité et une alerte d'expiration
-- Vault chiffré de repli (Argon2id + XChaCha20-Poly1305) avec déverrouillage au démarrage
-- Snippets : CRUD dans les deux UIs, portée (global, hôtes, tags), placeholders, exécution dans l'onglet actif (palette `⌘K`)
+## Phase 3 : clés, secrets et snippets ✅ *(Opus ; revues `agent-security`, `agent-ssh-protocols`, `agent-design-review`)*
+- [x] Génération : ed25519 (défaut), RSA 3072–8192, ECDSA P-256/384/521, passphrase (format OpenSSH, bcrypt-pbkdf),
+  privée créée en exclusif `0600`, `.pub` `0644`, **jamais d'écrasement**, aléa système, `~/.ssh` partagé refusé
+- [x] Copy-id : sur la session authentifiée (mot de passe, keyboard-interactive…), script POSIX d'une ligne (sh, dash, bash, fish,
+  tcsh, csh), clé sur stdin, ajout **idempotent** (blob, lignes commentées ignorées), aucune réécriture ni `chmod` de l'existant,
+  vérification par reconnexion avec **cette clé seule** (ni certificat, ni `none`), même compte
+- [x] Agent : liste, ajout (passphrase, durée de vie) et retrait vérifié ; certificats avec validité et alerte d'expiration (7 jours)
+- [x] Vault chiffré de repli `vault.toml` v2 (Argon2id 64 Mio/t=3 + XChaCha20-Poly1305, AAD d'en-tête, verrou de fichier,
+  compteur anti-retour), déverrouillage au démarrage, création proposée depuis « remember »
+- [x] Snippets : CRUD dans les deux UIs, portée (global, hôtes, tags), placeholders validés, rendu sûr (aucun contrôle, refus du
+  collage multi-ligne sans bracketed paste), exécution dans l'onglet actif (palette GUI « Run: … »)
+- Reporté : ajout d'un certificat à l'agent et retrait d'un certificat (limite russh), commentaire des clés ajoutées à l'agent,
+  expiration restante des identités de l'agent, copy-id par SFTP (comptes sans shell) et Windows, couleur du point de statut du vault
 
-**Sortie** : générer une clé, la copier sur un serveur et se reconnecter sans mot de passe, le tout sans quitter Portico.
+**Sortie** ✅ : en TUI contre OpenSSH réel, clé générée dans Portico (avec passphrase), installée par copy-id, vérifiée (prompt de
+passphrase de la sonde), puis reconnexion avec cette clé seule acceptée par sshd, ajout à l'agent et reconnexion depuis Portico.
+Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié dans l'app de bureau réelle par l'E2E (`pnpm e2e`, 2026-10-22).
 
-## Phase 4 : finition MVP ⏳ *(Sonnet, revues Opus)*
-- Sessions récentes (`state/recent.toml`), favoris, édition des tags et groupes
-- Panneau debug : logs par session, filtrables et copiables, avec la vue « config effective » (`ssh -G`)
-- Raccourcis configurables (`settings.toml`) et doc `KEYBINDINGS.md` générée depuis la keymap
-- Packaging : `.dmg` (signature et notarisation), `.deb`, AppImage, binaire TUI (cargo-dist ou équivalent)
-- Mesures : démarrage à froid, RAM au repos et avec 5 sessions, comparées aux objectifs de `CLAUDE.md` §2
+## Phase 4 : finition MVP ✅ *(Opus ; revues `agent-security` ×2 et `agent-design-review`)*
+- [x] Sessions récentes (`state/recent.toml`, 50 entrées), favoris (`*` / `⌘D`), édition des tags, groupes et notes (`e`) dans
+  `hosts.toml` (verrou, clés et commentaires conservés, validation identique en lecture), sections Recent / groupes / Other, filtre `@groupe`
+- [x] Panneau de logs de session (`l` / `⌘⇧L`) : sessions colorées par issue, logs filtrables (texte, niveau), suivi en direct,
+  copie en texte borné ; onglet « Effective config » (`ssh -G` avec origines `file:line`, route ProxyJump, options sensibles masquées
+  et jamais copiées) ; logs conservés pour les 20 dernières sessions terminées
+- [x] Raccourcis configurables (`settings.toml`, `[keymap.tui]` / `[keymap.gui]`, entrées invalides signalées), thème mémorisé,
+  tables de `KEYBINDINGS.md` **générées** depuis chaque keymap avec test de fraîcheur
+- [x] Packaging : `.deb` et AppImage construits et lancés ici, tarballs TUI (glibc et musl statique) ; workflow de release (tag `v*`,
+  6 cibles TUI, bundles GUI, `SHA256SUMS`, Release brouillon) ; signature et notarisation macOS isolées dans un environnement `release`
+  (secrets du propriétaire requis, voir `docs/RELEASE.md`) ; outillage AppImage et actions épinglés
+- [x] Mesures (`docs/PERF.md`, `bench/`) : objectifs TUI tenus, fenêtre GUI tenue ; chargement des gros `ssh_config` rendu linéaire
+- [x] Durcissement du processus (pas de core dump, pas de `ptrace` sous Linux), CLI TUI (`--help`, `--version`, sans terminal)
+- [x] Audit sécurité final, `SECURITY.md`, licences MIT et Apache 2.0, `cargo deny` vert
 
-**Sortie MVP** : les 14 fonctionnalités de `CLAUDE.md` §7 sont démontrables dans les deux UIs. Audit sécurité final.
+**Sortie MVP** ✅ : les 14 fonctionnalités de `CLAUDE.md` §7 dans les deux UIs (matrice ci-dessous). Audit sécurité final passé.
+
+### Matrice de sortie du MVP
+
+| # | Fonctionnalité | TUI | GUI | Preuve |
+|---|---|---|---|---|
+| 1 | Parsing de `~/.ssh/config` (ProxyJump, wildcards, héritage, Include, Match) | ✅ | ✅ | 23 tests du parser, interop OpenSSH, index linéaire |
+| 2 | Recherche floue, tags et groupes | ✅ | ✅ | `#tag`, `@groupe`, `*` ; édition `e` ; tests core et UI |
+| 3 | Connexion SSH interactive (PTY) | ✅ | ✅ | Vérifiée en réel (vim, top, resize, ProxyJump) en 1b/1c |
+| 4 | SFTP : explorateur, upload, download | ✅ | ✅ | 1 Gio dans chaque sens contre OpenSSH, annulation sans résidu |
+| 5 | Clés locales, ssh-agent, certificats | ✅ | ✅ | Interop scénario 12 (agent réel), badges de validité |
+| 6 | Génération de clés (ed25519 / rsa ≥ 3072 / ecdsa) avec passphrase | ✅ | ✅ | Tests par algorithme, relecture par `ssh-keygen` |
+| 7 | Copie de clé publique (`ssh-copy-id`) | ✅ | ✅ | Réel en TUI, en interop et dans l'E2E de l'app de bureau |
+| 8 | Port forwarding local et distant | ✅ | ✅ | Interop scénarios 10 et 11, `nc` sur un tunnel exposé |
+| 9 | Sessions récentes et favorites, onglets multi-sessions | ✅ | ✅ | Tests d'intégration (récents), rendu 80×24, captures |
+| 10 | Snippets (CRUD, portée, placeholders, exécution) | ✅ | ✅ | Tests de rendu sûr, exécution réelle sous `sh` en TUI |
+| 11 | Statut de connexion et latence | ✅ | ✅ | Barre de statut vérifiée de 880 à 1400 px, tmux 80×24 |
+| 12 | 3 thèmes sombres et raccourcis documentés | ✅ | ✅ | Tests de contraste WCAG, `KEYBINDINGS.md` généré et testé |
+| 13 | Secrets dans le keyring (vault chiffré en repli) | ✅ | ✅ | Vault v2 testé (verrou, anti-retour), déverrouillage au démarrage |
+| 14 | Mode debug : logs de connexion par session | ✅ | ✅ | Panneau de logs, sessions terminées conservées |
+
+**Vérifié dans l'app de bureau réelle** (2026-10-22) : les parcours des phases 3 et 4 de la GUI (vault, clés, agent, copy-id
+et sa vérification, connexion par la seule clé, snippets et refus du collage sous `sh`, favoris et édition, récents, logs et
+configuration effective, thème, SFTP, tunnel `-L`, redémarrage avec déverrouillage) ont été parcourus dans l'app Tauri sous
+WebKitGTK contre un `sshd` OpenSSH, et un E2E rejouable les couvre (`pnpm e2e`, voir [TESTING.md](TESTING.md)). Reste à faire
+avant la première release publique : la re-mesure du CPU au repos de la GUI (`bench/run-all.sh`).
 
 ---
 
-## Roadmap post-MVP
+## Après le MVP : phases 5 à 8 (ordre validé le 2026-10-21)
+
+Mêmes règles que pour le MVP : une phase n'est close qu'après `agent-security` (et `agent-design-review` si elle
+touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
+
+### Phase 5 : gains rapides et distribution ✅ *(code livré ; sortie à confirmer sur une vraie release et un vrai export)* *(Opus pour le core, Sonnet pour l'UI)*
+- `-D` (SOCKS5) dans `forward/` : SOCKS5 sans authentification (CONNECT, IPv4/IPv6/domaine), écoute sur `localhost`
+  par défaut, écoute exposée sur confirmation armée, panneau Tunnels des deux UIs ; `DynamicForward` de `ssh_config` proposé
+  ✅ *(livré : core, TUI, GUI ; `curl --socks5-hostname` vérifié contre OpenSSH, interop scénario 13 ; GUI vérifiée en mode démo
+  seulement)*
+- Distribution : tap **Homebrew** (formula TUI, cask GUI) et paquet **AUR** `-bin`, générés depuis les artefacts et
+  checksums de la release, mis à jour par le workflow de release
+  ✅ *(gabarits et scripts de rendu dans `packaging/`, job sur release publiée, voir `docs/RELEASE.md` ; à exercer sur une
+  vraie release : dépôt du tap, compte AUR et secrets du propriétaire)*
+- Import **Termius** (après vérification du format d'export réel) : génère un fichier de config dans le dossier de Portico
+  (jamais dans `~/.ssh`) et indique la ligne `Include` à ajouter soi-même ; tags et groupes importés dans `hosts.toml`.
+  Aucun secret importé en clair
+  ✅ *(livré : core `import`, `portico import termius FILE [--prefix] [--apply]`, palette GUI « Import from Termius… »
+  avec aperçu, voir `docs/IMPORT.md`. Termius n'a pas d'export officiel des hôtes : formats lus = CSV du modèle d'import
+  (en-tête vu dans des sources non officielles, lu avec tolérance), `hosts.json`/`credentials.csv` de
+  `termius-local-export`, sortie de `termius export-ssh-config`. Vérifié sur fixtures synthétiques seulement ; à
+  confirmer sur un vrai export. GUI vérifiée en mode démo seulement)*
+
+**Sortie** : `curl --socks5-hostname localhost:1080` passe par un hôte via Portico (les deux UIs) ; `brew install` et
+l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Termius de test donne les mêmes hôtes dans Portico.
+
+État de la sortie (2026-10-22) : `curl --socks5-hostname` ✅ (interop OpenSSH, TUI ; GUI en mode démo). En attente du
+propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première release taguée) ; import d'un vrai export Termius
+(fixtures synthétiques seulement à ce jour).
+
+### Phase 6 : terminal ⏳
+- **Split panes** : divisions horizontales et verticales dans un onglet, focus et redimensionnement au clavier, chaque
+  panneau étant un terminal indépendant (même session ou autre hôte) ; TUI et GUI
+- **Enregistrement asciicast v2** (ADR préalable : exception encadrée à l'interdit « contenu de terminal en clair ») :
+  opt-in explicite par session, indicateur « REC » toujours visible, sortie seulement (les saisies, donc les mots de passe,
+  ne sont pas enregistrées), fichiers `0600`, avertissement, chiffrement optionnel ; relecture dans les deux UIs
+
+**Sortie** : quatre panneaux sur deux hôtes utilisables au clavier seul ; une session enregistrée se relit à l'identique.
+
+### Phase 7 : synchronisation locale optionnelle ⏳
+- Sync de `hosts.toml`, des snippets et des réglages via un dossier choisi (Syncthing, git…) : **jamais de cloud imposé,
+  jamais de secret** (le vault reste local, ou s'exporte chiffré à part) ; fusion par entrée, conflits montrés à
+  l'utilisateur et jamais résolus en silence
+
+**Sortie** : deux machines partagent métadonnées et snippets via un dossier synchronisé, conflit d'édition compris.
+
+### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
+- Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
+- **Modèle de sécurité des fichiers refait avec des ACL** (équivalents de `0600`/`0700`, refus des liens), durcissement du
+  processus côté Windows
+- Distribution **Scoop** et **Winget**, installeur signé
+
+**Sortie** : les 14 fonctionnalités du MVP sur Windows 11 dans les deux UIs ; audit sécurité Windows.
+
+### À évaluer séparément (ADR et prototype avant toute décision)
+| Sujet | Question à trancher |
+|---|---|
+| Mosh | Piloter `mosh-client` à travers un PTY local (pragmatique) ou réimplémenter SSP/UDP en Rust (gros chantier, crypto à revoir) ; revue `agent-ssh-protocols` |
+| Snap / Flatpak | Le confinement strict bloque `~/.ssh` (interface `ssh-keys` à connecter à la main, mode classic soumis au Store) : publier ou non, et sous quelle forme |
+
+## Roadmap au-delà
 
 | Thème | Contenu |
 |---|---|
 | Multi-hop avancé | `ProxyCommand` arbitraire (process stdio comme transport), repli « system ssh » pour `Match exec`, visualisation du chemin de hops avec latence par hop |
-| Forwarding | `-D` (SOCKS5), forwards persistants avec redémarrage auto, forwarding d'agent (opt-in et averti) |
+| Forwarding | Forwards persistants avec redémarrage auto, forwarding d'agent (opt-in et averti) |
 | Vault enrichi | Plusieurs coffres, export et import chiffrés, déverrouillage biométrique (Touch ID via Keychain `protected`) |
-| Enregistrement de session | Format asciicast v2, rejouable, avec masquage des saisies de mot de passe |
-| Synchronisation locale optionnelle | Sync des métadonnées et snippets via un dossier (Syncthing, git) ou un fichier chiffré : **jamais de cloud imposé** |
-| Terminal | Split panes, broadcast d'input multi-hôtes (avec garde-fou), recherche dans le scrollback, liens cliquables |
-| Plateformes | Windows (Credential Manager, ConPTY non requis côté remote), thème clair |
+| Terminal | Broadcast d'input multi-hôtes (avec garde-fou), recherche dans le scrollback, liens cliquables |
+| Plateformes | Thème clair |
 | GUI native | Réévaluation de `gpui` si la GUI web atteint ses limites de performance |
-| Intégrations | Mosh, Teleport ou certificats éphémères (CA SSH d'entreprise), import depuis Termius |
+| Intégrations | Teleport ou certificats éphémères (CA SSH d'entreprise) |
 
 ## Tableau de bord
 
@@ -116,9 +221,83 @@
 | 1a Transport et auth | ✅ | 82 + interop OpenSSH (8 scénarios) | ✅ (voir ci-dessous) | statut live vérifié (tmux) |
 | 1b Terminal TUI | ✅ | 103 + interop (shell réel) | ✅ (voir ci-dessous) | ✅ (tmux 80×24 et 110×28) |
 | 1c Terminal GUI | ✅ | 106 + 3 GUI + interop | ✅ (voir ci-dessous) | ✅ (captures démo 3 thèmes + app réelle WebKitGTK) |
-| 2 SFTP / tunnels | ⏳ | | | |
-| 3 Clés / secrets / snippets | ⏳ | | | |
-| 4 Finition | ⏳ | | | |
+| 2 SFTP / tunnels | ✅ | 146 + 12 GUI + interop (11 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, tmux 80×24 et 110×28, re-vérifiée) |
+| 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
+| 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
+| 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
+| 6 Split panes, asciicast | ⏳ | | | |
+| 7 Sync locale | ⏳ | | | |
+| 8 Windows | ⏳ | | | |
+
+## Revues de la phase 5 (2026-10-22)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les autres ont été traités, sauf mention.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-ssh-protocols` `-D` | 4 IMPORTANT, 4 MINOR | Canaux `direct-tcpip` confirmés en retard ou orphelins toujours fermés (`-L` et `-D`), budget d'octets de 64 Mio par session au lieu d'une coupure à 2 s (un flux en pause survit), refus SOCKS explicite quand le tunnel est plein, IPv6 entre crochets dans les logs, syntaxe `bind/port`, interop scénario 13 renforcé (SOCKS4a, ATYP IPv4, pipelining, arrêt) |
+| `agent-security` phase 5 | 2 MOYEN, 5 FAIBLE | E2E : `tauri-driver` sur ports aléatoires (RCE cross-origin reproduite sur 4444), reviewers obligatoires et tags `v*` protégés pour `distribution`, confirmation « open proxy » pour un `-D` exposé, logs limités en rafale, destinations SOCKS réussies non journalisées, `SECURITY.md` risques 11 et 12. Non fait : attestation de provenance des artefacts (couverte par l'approbation obligatoire) |
+| `agent-security` import Termius | 3 MOYEN, 4 FAIBLE | Copie utilisateur après l'`Include` détectée au réimport, ligne CSV décalée sautée (aucun mot de passe déplacé), alias en forme de nom d'hôte préfixé `termius-`, ligne `Include` recalculée à l'application, avis bornés, application tout-ou-rien, hygiène `Zeroizing` |
+| `agent-design-review` import Termius | 2 BLOQUANT, 6 IMPORTANT | Import vide refusé et remplacement annoncé (« Replaces the N hosts »), `Include` détecté par directive, `↵` et focus dans le dialogue, colonnes alignées, option de préfixe visible, étape `Include` mise en avant, kbd dans les boutons, état vide, aide TUI, CLI plus lisible |
+
+## Revues de la phase 4 (2026-10-21)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les autres ont été traités, sauf mention.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` core 4a et release | 3 MOYEN, 5 FAIBLE | Signature macOS isolée (environnement `release`, outils Apple seulement), aucun cache en release, outillage AppImage épinglé et vérifié, actions épinglées par SHA, métadonnées validées en lecture, options sensibles (`SetEnv` masqué, commandes signalées), écritures plafonnées, liens et FIFO refusés |
+| `agent-security` audit final MVP | 1 MOYEN, 1 FAIBLE | `cargo deny` remis au vert (apps `publish = false`, 5 avis triés par ID), log TUI hors de `/tmp` (`0600`, lien refusé), `SECURITY.md` avec les risques résiduels ; aucun interdit de `CLAUDE.md` §11 violé |
+| `agent-design-review` | 1 BLOQUANT, 10 IMPORTANT | Barre de statut GUI qui perdait statut et latence au-delà de 1100 px ; couleurs des niveaux de log (INFO neutre), même grammaire du panneau de logs dans les deux UIs, aide `?` complète, avertissement `settings.toml` commun, « voir les logs » dans les états d'erreur, alias longs, chips de tags au clavier, `*` et `Shift-X` partagés |
+| Mesures (`docs/PERF.md`) | 3 écarts | Chargement des gros `ssh_config` : 564 ms → 12 ms pour 2 000 hôtes ; curseur GUI fixe au repos (à re-mesurer) ; premier rendu GUI à ~1,1 s sous Xvfb sans GPU (environnement défavorable, à mesurer sur un vrai poste) |
+
+Restent mineurs : un `draw` TUI à chaque sonde keepalive (invisible), « ↵ connect » dans la barre de statut alors que les détails
+d'un hôte en échec disent « ↵ retry », l'aide TUI en 80×24 qui recouvre la barre de statut.
+
+## Revues de la phase 3 (2026-10-21)
+
+Aucun constat CRITIQUE ni ÉLEVÉ dans les cinq revues ; tous les autres ont été traités.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` clés/copy-id/agent | 2 MOYEN, 6 FAIBLE | Vérification sans certificat ni `none`, clés commentées ignorées, même compte, sonde fermée si abandonnée, codes d'erreur d'origine, `SysRng`, `~/.ssh` partagé refusé, bidi refusé |
+| `agent-ssh-protocols` | 1 BLOQUANT, 10 IMPORTANT, 9 MINEUR | Certificats exclus de la preuve, script d'une ligne compatible csh, marqueur de résultat (rc bavards, forced command), canal toujours fermé, données après acceptation d'`exec`, retrait agent vérifié, `publickey` forcé |
+| `agent-security` vault/snippets | 2 MOYEN, 6 FAIBLE | Verrou inter-processus, refus du collage multi-ligne sans bracketed paste, vault v2 (génération anti-retour, secrets en base64), bornes KDF 64–256 Mio, temporaires aléatoires, dossiers `0700`, snippets.toml borné et assaini, caractères invisibles refusés |
+| `agent-security` UIs | 1 MOYEN, 4 FAIBLE | « Run it » sur `r` seulement après armement, passphrase redemandée après un refus de génération, `Debug` caviardé (TUI), durée d'agent hors bornes refusée, démo exclue du build de production |
+| `agent-design-review` | 2 BLOQUANT, 8 IMPORTANT | Exception au déverrouillage du vault et toasts vides corrigés ; défilement TUI, sélection pendant les questions, vault toujours visible, pied sur une ligne, copy-id « Hide » + contexte dans les prompts, glossaire et raccourcis communs |
+
+Restent mineurs : le toast en haut à droite recouvre l'indication « Ctrl-R » du titre de la vue Clés à 900 px, couleur
+du point de statut du vault, libellé « Esc, then ↵ to connect » exact seulement depuis la liste d'hôtes.
+
+## Revues de la phase 2 (2026-10-21)
+
+Core revu par `agent-security` et `agent-ssh-protocols` (corrigé au commit `8385021` : fichiers partiels exclusifs,
+noms hostiles, binds exposés, canaux non sollicités refusés, pair local lent coupé avant de geler la session).
+Les UIs ont ensuite été revues séparément.
+
+### `agent-security` (UIs) : 0 CRITIQUE/ÉLEVÉ, 2 MOYEN, 3 FAIBLE, tous traités
+| Gravité | Constat | Suite donnée |
+|---|---|---|
+| MOYEN | GUI : la confirmation d'un bind exposé, déjà armée, se validait par un double-clic sur « Start » | Réarmement à l'apparition et après chaque frappe ou clic ailleurs, focus sur Cancel, liste inerte ; vérifié (double-clic, clic, clavier) |
+| MOYEN | Dossier de téléchargement replié sur `$HOME` : un `.bashrc` du serveur pouvait remplacer le vrai | Jamais le home (`~/Downloads` créé en `0700`), aucun download n'écrase un fichier caché |
+| FAIBLE | Jetons d'upload réutilisables vers n'importe quelle session | Liés au premier envoi, consommés par la réponse finale, expirés après 10 min |
+| FAIBLE | Tauri annonce au webview les chemins déposés | Fuite de noms seulement ; test qui interdit `protocol-asset` et `tauri-plugin-fs`, ADR |
+| FAIBLE | Chemins distants affichés bruts (bidi) dans le fil d'Ariane et la cible de dépôt | Assainis et isolés, renommage sans pré-remplissage d'un nom nettoyé |
+
+### `agent-design-review` : 2 BLOQUANT, 7 IMPORTANT, tous traités (re-vérification : 1 régression, corrigée)
+| Constat | Suite donnée |
+|---|---|
+| **BLOQUANT** : confirmation d'exposition GUI non réarmée, Tab menant à « Stop » | Voir la ligne sécurité ; la re-vérification a trouvé que le réarmement bloquait la validation elle-même : corrigé (`aria-disabled`, garde dans `expose()`) |
+| **BLOQUANT** : session morte = erreur interne sans hint, « retry » inutile | Phase pendant la connexion, erreur + hint + `↵` reconnexion (deux UIs), message `session_ended` sans id, tunnels ciblant une session vivante |
+| Suppression GUI : focus sur le bouton destructif | Focus sur « Keep », `y` / `n` |
+| Actions de ligne focusables mais invisibles | Hors tabulation, visibles au focus |
+| Clavier GUI incomplet, parité TUI/GUI | `r` `d` `x` `Ctrl-R` `k/o/s` « Overwrite » partout, palette complète, tunnels `↑↓` `↵` `Suppr` |
+| Hints d'erreur des tunnels perdus ou tronqués | Message et hint séparés et repliés, effacés à la frappe suivante (deux UIs) |
+| Aide `?` TUI tronquée à 80×24 | Notation unique, libellés courts, test de rendu 80×24 |
+| Colonnes taille/date GUI désalignées | Grille en chiffres tabulaires |
+| Re-vérification : reconnexion proposée après « clé changée » | Retirée dans les deux UIs (refus bloquant) |
+| MINEUR traités | Accent réservé, cible de dépôt opaque, sélection du panneau inactif, dates compactes, PREFIX `f`/`p`, toasts dans le panneau, marqueur « exposed » TUI |
+| MINEUR ouverts | Tailles en px dans FilesPanel/TunnelsDialog (tokens `--size-*` à créer), pulse en `box-shadow`, accent Travertine proche de l'erreur, message de parse pour `-L` vide, dossier distant non restauré après reconnexion |
 
 ## Revues de la phase 1c (2026-10-20)
 

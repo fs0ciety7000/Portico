@@ -11,9 +11,13 @@ export interface Host {
   identityFiles: string[];
   localForwards: string[];
   remoteForwards: string[];
+  /** `DynamicForward` values (`-D`, SOCKS5). */
+  dynamicForwards: string[];
   tags: string[];
   group: string | null;
   favorite: boolean;
+  /** Free text from hosts.toml (`\n` allowed, nothing else invisible). */
+  notes: string | null;
   source: string;
   warnings: string[];
 }
@@ -29,6 +33,18 @@ export interface ErrorSummary {
   code: string;
   message: string;
   hint: string | null;
+}
+
+/** Mirrors `meta::TagsErrorDto`: a refused tag list, with the 1-based
+ * position of the offending tag when the core names one. */
+export interface TagsError extends ErrorSummary {
+  position: number | null;
+}
+
+/** The offending tag's 1-based position carried by a tags error, if any. */
+export function tagPosition(e: unknown): number | null {
+  const p = e && typeof e === "object" && "position" in e ? (e as { position: unknown }).position : null;
+  return typeof p === "number" && Number.isInteger(p) && p > 0 ? p : null;
 }
 
 export type Phase =
@@ -73,7 +89,9 @@ export interface HostKeyChanged {
 export type SessionEvent =
   | ({ kind: "phase" } & Phase)
   | { kind: "latency"; rtt: Duration }
-  | { kind: "started"; alias: string }
+  /** `probe`: a short-lived check (copy-id verification), not a session the
+   * user opened: never listed as the host's session. */
+  | { kind: "started"; alias: string; probe?: boolean }
   | { kind: "banner"; text: string }
   | ({ kind: "host_key_changed" } & HostKeyChanged);
 
@@ -111,7 +129,75 @@ export type EngineEvent =
   | { type: "prompt_resolved"; id: number }
   | { type: "sftp"; id: number; session: number; event: SftpEvent }
   | { type: "tunnel"; id: number; session: number; event: TunnelEvent }
-  | { type: "log" };
+  /** A log record was added to `session` (display it via `sessionLogs`, which is sanitized). */
+  | { type: "log"; session: number | null }
+  /** `hosts.toml` changed for `alias`: update the host in place. */
+  | { type: "host_meta"; alias: string; meta: HostMeta }
+  /** The recent-sessions list changed: fetch it again if shown. */
+  | { type: "recent_changed" };
+
+/** Mirrors `portico_core::hosts::HostMeta` (as serialized in events). */
+export interface HostMeta {
+  tags: string[];
+  group: string | null;
+  favorite: boolean;
+  notes: string | null;
+}
+
+/** Mirrors `meta::RecentDto`; `last` in Unix ms. */
+export interface RecentHost {
+  alias: string;
+  last: number;
+  count: number;
+}
+
+export type CloseReason = "user_requested" | "remote_closed" | "timeout";
+
+/** Mirrors `debug::SessionLogDto` (times in Unix ms; texts escaped in Rust). */
+export interface SessionLogInfo {
+  id: number;
+  alias: string;
+  probe: boolean;
+  started: number;
+  ended: number | null;
+  outcome: { kind: "closed"; reason: CloseReason } | { kind: "failed"; error: ErrorSummary } | null;
+}
+
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
+
+/** Mirrors `debug::LogLineDto`: one line, controls and bidi escaped. */
+export interface LogLine {
+  at: number;
+  level: LogLevel;
+  target: string;
+  message: string;
+}
+
+/** Mirrors `debug::EffectiveOptionDto`. `origin` null = Portico's default. */
+export interface EffectiveOption {
+  key: string;
+  values: string[];
+  origin: string | null;
+  command: boolean;
+  /** Runs commands (ProxyCommand…): values withheld by Rust, never shown or copied. */
+  sensitive: boolean;
+}
+
+/** Mirrors `debug::EffectiveConfigDto` (the `ssh -G` view). */
+export interface EffectiveConfig {
+  alias: string;
+  options: EffectiveOption[];
+  route: { alias: string; user: string; hostname: string; port: number }[];
+  routeError: ErrorSummary | null;
+  warnings: { origin: string; message: string }[];
+}
+
+/** Mirrors `settings::SettingsDto` (GUI part of settings.toml). */
+export interface Settings {
+  theme: string | null;
+  keymap: Record<string, string>;
+  error: ErrorSummary | null;
+}
 
 export type EntryKind = "file" | "dir" | "symlink" | "other";
 
@@ -140,6 +226,8 @@ export type OnConflict = "ask" | "overwrite" | "skip" | "rename";
 export interface ForwardCheck {
   display: string;
   exposed: boolean;
+  /** A SOCKS proxy (`-D`): exposed, it is an open relay. */
+  dynamic: boolean;
 }
 
 /** Mirrors `files::TunnelDto`. */
@@ -164,7 +252,146 @@ export type PromptAnswer =
   | { kind: "answers"; values: string[] }
   | { kind: "cancel" };
 
+/** Mirrors `portico_core::keys::CertValidity`. */
+export type CertValidity =
+  | { state: "not_yet_valid"; starts_in_secs: number }
+  | { state: "valid"; expires_in_secs: number | null }
+  | { state: "expires_soon"; expires_in_secs: number }
+  | { state: "expired"; since_secs: number };
+
+/** Mirrors `keys::CertificateDto`. */
+export interface Certificate {
+  keyId: string;
+  principals: string[];
+  /** Unix seconds. */
+  validAfter: number;
+  /** Unix seconds; null = forever. */
+  validBefore: number | null;
+  validity: CertValidity;
+}
+
+/** Mirrors `keys::LocalKeyDto`. `id` (the file name) designates the key. */
+export interface LocalKey {
+  id: string;
+  privateDisplay: string;
+  publicDisplay: string;
+  algorithm: string;
+  fingerprint: string;
+  comment: string;
+  hasPrivate: boolean;
+  certificate: Certificate | null;
+}
+
+/** Mirrors `keys::AgentKeyDto`. */
+export interface AgentKey {
+  algorithm: string;
+  fingerprint: string;
+  comment: string;
+  certificate: Certificate | null;
+}
+
+/** Mirrors `portico_core::keys::KeyAlgorithm`. */
+export type KeyAlgorithm =
+  | { kind: "ed25519" }
+  | { kind: "rsa"; bits: number }
+  | { kind: "ecdsa"; curve: "p256" | "p384" | "p521" };
+
+/** Sent once and forgotten: the passphrase becomes a SecretString in Rust. */
+export interface KeyGenRequest {
+  name: string;
+  algorithm: KeyAlgorithm;
+  comment: string;
+  passphrase: string | null;
+}
+
+export type CopyIdOutcome = "added" | "already_present";
+
+/** Mirrors `portico_core::vault::VaultStatus`. */
+export type VaultStatus = "not_in_use" | "absent" | "locked" | "unlocked";
+
+/** Mirrors `portico_core::snippets::SnippetScope`. */
+export type SnippetScope = { kind: "global" } | { kind: "hosts"; values: string[] } | { kind: "tags"; values: string[] };
+
+/** Mirrors `snippets::SnippetDto` (`placeholders` is read-only, from Rust). */
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  description: string | null;
+  scope: SnippetScope;
+  run: boolean;
+  placeholders: string[];
+}
+
+/** What `save_snippet` takes (an empty id creates). */
+export type SnippetDraft = Omit<Snippet, "placeholders">;
+
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
+
+/** Mirrors `portico_core::import::ImportNotice` (never a secret). */
+export interface ImportNotice {
+  /** `unsupported_protocol`, `missing_hostname`, `invalid_hostname`, `alias_collision`, `tag_normalized`… */
+  code: string;
+  record: number | null;
+  label: string | null;
+  message: string;
+}
+
+/** Mirrors `portico_core::import::PlannedHost`. */
+export interface PlannedHost {
+  alias: string;
+  label: string;
+  hostname: string;
+  user: string | null;
+  /** `null` for 22. */
+  port: number | null;
+  group: string | null;
+  tags: string[];
+  notes: string | null;
+  record: number;
+}
+
+/** Secrets found in the export and ignored (counts only). */
+export interface IgnoredSecrets {
+  passwords: number;
+  keys: number;
+}
+
+/** Mirrors `import::ImportPreviewDto`: a plan kept in Rust under `token`. */
+export interface ImportPreview {
+  token: number;
+  /** File name only: the path stays in Rust. */
+  fileName: string;
+  format: string;
+  records: number;
+  prefix: boolean;
+  hosts: PlannedHost[];
+  skipped: ImportNotice[];
+  warnings: ImportNotice[];
+  secrets: IgnoredSecrets;
+  secretsAdvice: string | null;
+  identityFiles: string[];
+  target: string;
+  includeLine: string;
+  /** `Host` blocks already in `target` (a previous import) that this one replaces. */
+  replaces: number | null;
+}
+
+/** Mirrors `import::ImportReportDto` (`portico_core::import::ImportReport`). */
+export interface ImportReport {
+  formatLabel: string;
+  target: string;
+  unchanged: boolean;
+  imported: string[];
+  skipped: ImportNotice[];
+  warnings: ImportNotice[];
+  secrets: IgnoredSecrets;
+  secretsAdvice: string | null;
+  identityFiles: string[];
+  metaUpdated: number;
+  includeLine: string;
+  includeActive: boolean;
+}
 
 export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),
@@ -206,6 +433,48 @@ export const api = {
   startTunnel: (session: number, spec: string, allowExposed: boolean) =>
     invoke<number>("start_tunnel", { session, spec, allowExposed }),
   stopTunnel: (id: number) => invoke<void>("stop_tunnel", { id }),
+  listKeys: () => invoke<LocalKey[]>("list_keys"),
+  keyDefaults: () => invoke<{ comment: string }>("key_defaults"),
+  generateKey: (request: KeyGenRequest) => invoke<LocalKey>("generate_key", { request }),
+  publicKeyText: (key: string) => invoke<string>("public_key_text", { key }),
+  listAgentKeys: () => invoke<AgentKey[]>("list_agent_keys"),
+  agentAdd: (key: string, passphrase: string | null, lifetimeSecs: number | null) =>
+    invoke<AgentKey>("agent_add", { key, passphrase, lifetimeSecs }),
+  agentRemove: (fingerprint: string) => invoke<void>("agent_remove", { fingerprint }),
+  copyId: (session: number, key: string) => invoke<CopyIdOutcome>("copy_id", { session, key }),
+  verifyKeyLogin: (session: number, key: string) => invoke<void>("verify_key_login", { session, key }),
+  vaultStatus: () => invoke<VaultStatus>("vault_status"),
+  vaultCreate: (passphrase: string) => invoke<void>("vault_create", { passphrase }),
+  vaultUnlock: (passphrase: string) => invoke<void>("vault_unlock", { passphrase }),
+  vaultLock: () => invoke<void>("vault_lock"),
+  vaultChangePassphrase: (old: string, next: string) => invoke<void>("vault_change_passphrase", { old, new: next }),
+  listSnippets: () => invoke<Snippet[]>("list_snippets"),
+  snippetsFor: (alias: string) => invoke<Snippet[]>("snippets_for", { alias }),
+  saveSnippet: (snippet: SnippetDraft) => invoke<Snippet>("save_snippet", { snippet }),
+  deleteSnippet: (id: string) => invoke<void>("delete_snippet", { id }),
+  /** Rendered and checked in Rust; `run` overrides the snippet's flag. */
+  runSnippet: (terminal: number, id: string, values: Record<string, string>, bracketedPaste: boolean, run: boolean | null) =>
+    invoke<void>("run_snippet", { terminal, id, values, bracketedPaste, run }),
+  setFavorite: (alias: string, favorite: boolean) => invoke<HostMeta>("set_favorite", { alias, favorite }),
+  setTags: (alias: string, tags: string[]) => invoke<HostMeta>("set_tags", { alias, tags }),
+  checkTags: (tags: string[]) => invoke<string[]>("check_tags", { tags }),
+  setGroup: (alias: string, group: string | null) => invoke<HostMeta>("set_group", { alias, group }),
+  setNotes: (alias: string, notes: string | null) => invoke<HostMeta>("set_notes", { alias, notes }),
+  recentHosts: (limit: number) => invoke<RecentHost[]>("recent_hosts", { limit }),
+  clearRecent: () => invoke<void>("clear_recent"),
+  forgetRecent: (alias: string) => invoke<boolean>("forget_recent", { alias }),
+  sessionsWithLogs: () => invoke<SessionLogInfo[]>("sessions_with_logs"),
+  sessionLogs: (session: number) => invoke<LogLine[]>("session_logs", { session }),
+  /** "Copy all": `LogRecord::to_line`, one record per line. */
+  sessionLogsText: (session: number) => invoke<string>("session_logs_text", { session }),
+  effectiveConfig: (alias: string) => invoke<EffectiveConfig>("effective_config", { alias }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
+  /** Native file picker (Rust side), then the plan; `null` when cancelled. */
+  importTermiusPick: (prefix: boolean) => invoke<ImportPreview | null>("import_termius_pick", { prefix }),
+  importTermiusReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_termius_replan", { token, prefix }),
+  importApply: (token: number) => invoke<ImportReport>("import_apply", { token }),
+  importCancel: () => invoke<void>("import_cancel"),
   /** Files dropped on the window, already registered as upload tokens. */
   onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
     listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),
@@ -229,8 +498,32 @@ export function durationMs(d: Duration): number {
 }
 
 export function asError(e: unknown): ErrorSummary {
-  if (e && typeof e === "object" && "message" in e) return e as ErrorSummary;
+  // A native `Error` / `DOMException` (clipboard, IPC) keeps `name` and
+  // `message` on its prototype chain: a spread would lose them.
+  if (e instanceof Error || (typeof DOMException !== "undefined" && e instanceof DOMException)) {
+    return { code: e.name || "error", message: e.message || String(e), hint: null };
+  }
+  if (e && typeof e === "object" && "message" in e) {
+    const { code, message, hint } = e as Partial<ErrorSummary>;
+    return { code: typeof code === "string" ? code : "unknown", message: String(message ?? ""), hint: typeof hint === "string" ? hint : null };
+  }
   return { code: "unknown", message: String(e), hint: null };
+}
+
+/** Core messages are lowercase sentences (`wrong vault passphrase`): the UI
+ * capitalizes the first word for display, unless it is a name, a path or an
+ * identifier (`id_ed25519 …`, `~/.ssh/…`, `ssh-agent …`), left as written. */
+export function sentence(text: string): string {
+  return /^[a-z]+(?:\s|$)/.test(text) ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
+/** A core message cut at its backticks: `code` parts are shown in mono
+ * (`tag \`Web Serveur\` imported as \`web-serveur\``). An unpaired
+ * backtick is kept as text. */
+export function codeSpans(text: string): { text: string; code: boolean }[] {
+  const parts = text.split("`");
+  if (parts.length % 2 === 0) return [{ text, code: false }];
+  return parts.map((part, i) => ({ text: part, code: i % 2 === 1 })).filter((p) => p.text !== "");
 }
 
 export type Status = "idle" | "connecting" | "authenticating" | "connected" | "warning" | "error";

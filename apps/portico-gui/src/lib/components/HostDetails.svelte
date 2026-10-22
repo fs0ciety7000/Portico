@@ -4,18 +4,28 @@
   import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
   import Mark from "./Mark.svelte";
-  import { kbd } from "../keys";
+  import { keymap } from "../state/keymap.svelte";
 
   let {
     host,
     session,
+    section = null,
     onconnect,
     ondisconnect,
+    onfavorite,
+    onedit,
+    onlogs,
   }: {
     host: Host | undefined;
     session: SessionView | undefined;
+    /** A section header is selected instead of a host. */
+    section?: { title: string; count: number; collapsed: boolean } | null;
     onconnect: (host: Host) => void;
     ondisconnect: (host: Host) => void;
+    onfavorite: (host: Host) => void;
+    onedit: (host: Host) => void;
+    /** Session logs of this host's latest session. */
+    onlogs: () => void;
   } = $props();
 
   const status = $derived(describe(session));
@@ -27,30 +37,50 @@
     {#key host.alias}
       <div class="content" in:fly={{ y: 6, duration: dur("base") }}>
         <header>
-          <div>
-            <h1>{host.alias}</h1>
+          <div class="identity">
+            <div class="title-row">
+              <h1 title={host.alias}>{host.alias}</h1>
+              <button
+                class="star"
+                class:on={host.favorite}
+                aria-pressed={host.favorite}
+                title={keymap.tip(host.favorite ? "Remove from favorites" : "Add to favorites", "app.favorite")}
+                aria-label={host.favorite ? "Remove from favorites" : "Add to favorites"}
+                onclick={() => onfavorite(host)}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m8 1.9 1.8 3.8 4.1.5-3 2.8.8 4.1L8 11.1l-3.7 2 .8-4.1-3-2.8 4.1-.5Z" /></svg>
+              </button>
+            </div>
             <p class="target mono">
               {host.user ?? "(local user)"}@{host.hostname}<span class="port">:{host.port}</span>
             </p>
           </div>
           <div class="actions">
             <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
+            <button class="secondary" onclick={() => onedit(host)} title={keymap.tip("Edit tags, group and notes", "hosts.edit")}>
+              Edit{#if keymap.label("hosts.edit")} <kbd>{keymap.label("hosts.edit")}</kbd>{/if}
+            </button>
             {#if live}
               <button class="secondary" onclick={() => ondisconnect(host)}>
-                Disconnect <kbd>D</kbd>
+                Disconnect{#if keymap.label("hosts.disconnect")} <kbd>{keymap.label("hosts.disconnect")}</kbd>{/if}
               </button>
             {:else}
               <button class="primary" onclick={() => onconnect(host)}>
-                Connect <kbd>↵</kbd>
+                Connect{#if keymap.label("hosts.connect")} <kbd>{keymap.label("hosts.connect")}</kbd>{/if}
               </button>
             {/if}
           </div>
         </header>
 
-        {#if host.tags.length}
+        {#if host.tags.length || host.group}
           <div class="tags">
+            {#if host.group}<span class="group">{host.group}</span>{/if}
             {#each host.tags as tag (tag)}<span class="tag">#{tag}</span>{/each}
           </div>
+        {/if}
+
+        {#if host.notes}
+          <p class="notes">{host.notes}</p>
         {/if}
 
         <dl>
@@ -74,8 +104,11 @@
           <dt>Defined in</dt><dd class="mono muted">{host.source}</dd>
         </dl>
 
-        {#if session?.phase.phase === "failed" && session.phase.error.hint}
-          <p class="hint">{session.phase.error.hint}</p>
+        {#if session?.phase.phase === "failed"}
+          <div class="hint">
+            {#if session.phase.error.hint}<p>{session.phase.error.hint}</p>{/if}
+            <button class="link" onclick={onlogs}>Show session logs{#if keymap.label("app.logs")} <kbd>{keymap.label("app.logs")}</kbd>{/if}</button>
+          </div>
         {/if}
 
         {#each host.warnings as w (w)}
@@ -83,11 +116,17 @@
         {/each}
       </div>
     {/key}
+  {:else if section}
+    <div class="placeholder">
+      <p class="section-name">{section.title}</p>
+      <p>{section.count} {section.count === 1 ? "host" : "hosts"}{section.collapsed ? " · folded" : ""}</p>
+      <p class="muted"><kbd>↵</kbd> {section.collapsed ? "unfold" : "fold"} · <kbd>←</kbd> <kbd>→</kbd> fold, unfold · <kbd>↓</kbd> next host</p>
+    </div>
   {:else}
     <div class="placeholder">
       <Mark size={56} />
       <p>Select a host to see its effective configuration.</p>
-      <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect · <kbd>{kbd("K")}</kbd> commands</p>
+      <p class="muted"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to connect{#if keymap.label("app.palette")}{" · "}<kbd>{keymap.label("app.palette")}</kbd> commands{/if}</p>
     </div>
   {/if}
 </section>
@@ -108,8 +147,16 @@
   @media (max-width: 1100px) {
     .details { padding: var(--space-5); }
   }
+  /* Long aliases wrap anywhere, two lines at most (full name in the tooltip). */
   h1 {
+    display: -webkit-box;
+    min-width: 0;
     margin: 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     font-family: var(--font-display);
     font-weight: 600;
     font-size: var(--text-display);
@@ -164,7 +211,69 @@
     color: inherit;
   }
 
-  .tags { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
+  .identity { flex: 1 1 auto; min-width: 0; }
+  .title-row { display: flex; align-items: center; gap: var(--space-2); }
+  .title-row button.star { flex: 0 0 auto; }
+  .target { overflow-wrap: anywhere; }
+  button.star {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-muted);
+    transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard),
+      transform var(--motion-fast) var(--ease-standard);
+  }
+  button.star:hover { background: var(--bg-elevated); color: var(--text-secondary); }
+  button.star:active { transform: scale(0.92); }
+  button.star svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
+  button.star.on { color: var(--accent); }
+  button.star.on svg { fill: currentColor; }
+  .tags { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+  .group {
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .notes {
+    margin: var(--space-4) 0 0;
+    max-width: 72ch;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+  .hint p { margin: 0 0 var(--space-2); }
+  button.link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 28px;
+    padding: 0 var(--space-2);
+    margin-left: calc(-1 * var(--space-2));
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+  }
+  button.link:hover { background: var(--bg-elevated); }
+  .section-name {
+    margin: 0;
+    font-size: var(--text-xs);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .placeholder p { margin: 0; }
   .tag {
     padding: 2px var(--space-2);
     border-radius: var(--radius-pill);

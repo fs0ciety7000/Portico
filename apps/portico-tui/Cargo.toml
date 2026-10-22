@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Applications, never published to crates.io (path dependencies on the core).
+publish = false
 
 [[bin]]
 name = "portico"
@@ -27,6 +29,9 @@ bytes.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
 time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

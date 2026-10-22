@@ -1,0 +1,40 @@
+{
+  "sessions": 5,
+  "seconds": 30.0,
+  "strace": true,
+  "mem_list": {
+    "rss_kib": 9968,
+    "pss_kib": 8047,
+    "uss_kib": 7700
+  },
+  "connect_to_prompt_ms": {
+    "n": 5,
+    "median": 98.01,
+    "p95": 109.85,
+    "min": 92.7,
+    "max": 109.85,
+    "runs": [
+      92.7,
+      100.4,
+      109.9,
+      98.0,
+      94.1
+    ]
+  },
+  "view": "terminal tab",
+  "strace_idle": "% time     seconds  usecs/call     calls    errors syscall\n------ ----------- ----------- --------- --------- ----------------\n 84.25    0.005359          82        65        63 futex\n 12.89    0.000820         164         5         5 restart_syscall\n  1.08    0.000069          69         1           timerfd_settime\n  0.60    0.000038           9         4           munmap\n  0.38    0.000024           6         4           sigaltstack\n  0.33    0.000021           5         4           madvise\n  0.30    0.000019           4         4           rt_sigprocmask\n  0.17    0.000011          11         1           epoll_ctl\n------ ----------- ----------- --------- --------- ----------------\n100.00    0.006361          72        88        68 total\n",
+  "idle": {
+    "cpu_ticks": 1,
+    "cpu_ms": 10.0,
+    "cpu_pct": 0.033,
+    "pty_bytes": 0,
+    "pty_reads": 0,
+    "wall_s": 30.01
+  },
+  "mem_end": {
+    "rss_kib": 14772,
+    "pss_kib": 12633,
+    "uss_kib": 12376
+  },
+  "threads": 8
+}

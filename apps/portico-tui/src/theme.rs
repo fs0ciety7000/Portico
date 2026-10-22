@@ -36,6 +36,10 @@ impl Styles {
     pub(crate) fn border_focus(self) -> Style {
         Style::new().fg(c(self.theme.palette.accent))
     }
+    /// Body text: the primary colour without weight (titles add bold).
+    pub(crate) fn primary(self) -> Style {
+        Style::new().fg(c(self.theme.palette.text_primary))
+    }
     pub(crate) fn secondary(self) -> Style {
         Style::new().fg(c(self.theme.palette.text_secondary))
     }
@@ -54,6 +58,11 @@ impl Styles {
     /// favourite star, muted metadata) on the selected row.
     pub(crate) fn selected(self) -> Style {
         Style::new().bg(c(self.theme.palette.bg_selected))
+    }
+    /// Selection of a pane that does not have the focus: visible, but
+    /// quieter than [`Self::selected`].
+    pub(crate) fn elevated(self) -> Style {
+        Style::new().bg(c(self.theme.palette.bg_elevated))
     }
     /// Header / chrome surface.
     pub(crate) fn chrome(self) -> Style {

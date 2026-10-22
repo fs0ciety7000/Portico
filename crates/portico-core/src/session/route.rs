@@ -20,14 +20,14 @@ pub(crate) struct Hop {
     pub(crate) alias: String,
     pub(crate) user: String,
     pub(crate) resolved: ResolvedHost,
+    /// Only the `publickey` method (copy-id verification).
+    pub(crate) pubkey_only: bool,
 }
 
 /// Refuses hops Portico cannot reach faithfully (never silently go direct).
 fn reachable(resolved: &ResolvedHost) -> Result<()> {
     if resolved.proxy_command.is_some() {
-        return Err(Error::Unsupported(
-            "ProxyCommand (not supported yet; use ProxyJump for this host)",
-        ));
+        return Err(Error::Unsupported("ProxyCommand"));
     }
     Ok(())
 }
@@ -41,7 +41,17 @@ impl Hop {
                 .clone()
                 .unwrap_or_else(|| config.local_user.clone()),
             resolved,
+            pubkey_only: false,
         }
+    }
+
+    /// Restricts this hop to one private key (see
+    /// `ConnectRequest::only_identity`).
+    pub(crate) fn only_identity(&mut self, private_key: std::path::PathBuf) {
+        self.resolved.identity_files = vec![private_key];
+        self.resolved.certificate_files.clear();
+        self.resolved.identities_only = true;
+        self.pubkey_only = true;
     }
 
     pub(crate) fn describe(&self) -> String {

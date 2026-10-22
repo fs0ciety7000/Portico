@@ -3,16 +3,21 @@
 //! Backends, in order of preference:
 //! 1. [`KeyringStore`]: macOS Keychain / Linux Secret Service (GNOME Keyring,
 //!    `KWallet` via Secret Service) through the `keyring` crate.
-//! 2. `VaultStore` (Phase 3): local file encrypted with XChaCha20-Poly1305,
-//!    key derived from a master passphrase with Argon2id. Used when no system
-//!    keyring is available (headless Linux, SSH sessions).
+//! 2. [`VaultStore`]: local file encrypted with XChaCha20-Poly1305, key
+//!    derived from a master passphrase with Argon2id (see [`crate::vault`]).
+//!    Used when no system keyring is available (headless Linux, SSH
+//!    sessions). [`default_store`] picks the backend.
 //!
 //! Secrets are passed around as [`SecretString`] (redacted `Debug`, zeroized
 //! on drop) and must never reach logs, events or error messages.
 
+use std::sync::Arc;
+
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{Error, Result};
+use crate::store::Paths;
+use crate::vault::VaultStore;
 
 /// Keyring "service" name for every Portico entry.
 pub const SERVICE: &str = "dev.portico";
@@ -54,6 +59,23 @@ pub trait SecretStore: Send + Sync + std::fmt::Debug {
     fn get(&self, key: &SecretKey) -> Result<Option<SecretString>>;
     fn set(&self, key: &SecretKey, secret: &SecretString) -> Result<()>;
     fn delete(&self, key: &SecretKey) -> Result<()>;
+
+    /// The vault behind this store, when it is one (lock / unlock from the
+    /// [`crate::Engine`]).
+    fn vault(&self) -> Option<&VaultStore> {
+        None
+    }
+}
+
+/// The platform secret store: the system keyring when it initialized,
+/// otherwise the encrypted vault at [`Paths::vault`] (locked until the user
+/// unlocks or creates it). Blocking (may probe the keyring service).
+pub fn default_store(paths: &Paths) -> Arc<dyn SecretStore> {
+    if KeyringStore::is_available() {
+        Arc::new(KeyringStore)
+    } else {
+        Arc::new(VaultStore::open(paths.vault()))
+    }
 }
 
 /// System keyring backend.

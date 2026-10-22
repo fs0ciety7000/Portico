@@ -37,6 +37,8 @@ bytes = "1"
 # SSH / SFTP / keys
 russh = "0.64"
 russh-sftp = "3"
+# CSPRNG for key generation (same version russh and ssh-key use).
+rand = "0.10"
 
 # known_hosts hashing (HMAC-SHA1, OpenSSH format)
 hmac = "0.13"
@@ -53,6 +55,8 @@ color-eyre = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
+# Format-preserving edits of hand-editable files (hosts.toml, settings.toml).
+toml_edit = "0.25"
 directories = "6"
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
 
@@ -62,6 +66,9 @@ secrecy = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.6"
 chacha20poly1305 = "0.11"
+
+# Process hardening (safe wrappers: setrlimit, prctl).
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 # Search
 nucleo-matcher = "0.3"

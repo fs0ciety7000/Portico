@@ -1,0 +1,35 @@
+{
+  "sessions": 1,
+  "seconds": 30.0,
+  "strace": false,
+  "mem_list": {
+    "rss_kib": 10148,
+    "pss_kib": 8223,
+    "uss_kib": 7872
+  },
+  "connect_to_prompt_ms": {
+    "n": 1,
+    "median": 107.97,
+    "p95": 107.97,
+    "min": 107.97,
+    "max": 107.97,
+    "runs": [
+      108.0
+    ]
+  },
+  "view": "terminal tab",
+  "idle": {
+    "cpu_ticks": 1,
+    "cpu_ms": 10.0,
+    "cpu_pct": 0.033,
+    "pty_bytes": 0,
+    "pty_reads": 0,
+    "wall_s": 30.03
+  },
+  "mem_end": {
+    "rss_kib": 13388,
+    "pss_kib": 11319,
+    "uss_kib": 10984
+  },
+  "threads": 8
+}

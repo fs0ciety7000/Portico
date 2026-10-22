@@ -7,14 +7,40 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
+import { demoKeys } from "./demo-keys";
+import { demoMeta } from "./demo-meta";
+import { demoImport } from "./demo-import";
 
-const base = { identityFiles: [], localForwards: [], remoteForwards: [], warnings: [], group: null };
+const base = { identityFiles: [], localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [], group: null as string | null, notes: null as string | null };
+
+// `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).
+const grouped = new URLSearchParams(location.search).get("groups") !== "none";
+const group = (name: string) => (grouped ? name : null);
 
 export const demoHosts: Host[] = [
-  { ...base, alias: "db-prod", hostname: "10.0.4.12", user: "postgres", port: 22, proxyJump: ["bastion"], tags: ["prod", "db"], favorite: true, source: "~/.ssh/config:12" },
-  { ...base, alias: "bastion", hostname: "bastion.example.com", user: "ops", port: 2222, proxyJump: [], tags: ["infra"], favorite: false, source: "~/.ssh/config:1" },
-  { ...base, alias: "web-01", hostname: "web-01.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, source: "~/.ssh/config:5", localForwards: ["8080 localhost:80"] },
+  {
+    ...base,
+    alias: "db-prod",
+    hostname: "10.0.4.12",
+    user: "postgres",
+    port: 22,
+    proxyJump: ["bastion"],
+    tags: ["prod", "db"],
+    favorite: true,
+    group: group("Production"),
+    notes: "Primary PostgreSQL 16. Maintenance window: Sunday 02:00–04:00 UTC.\nPage the DBA on call before any restart.",
+    source: "~/.ssh/config:12",
+  },
+  { ...base, alias: "bastion", hostname: "bastion.example.com", user: "ops", port: 2222, proxyJump: [], tags: ["infra"], favorite: false, group: group("Infrastructure"), source: "~/.ssh/config:1", dynamicForwards: ["1080"] },
+  { ...base, alias: "web-01", hostname: "web-01.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, group: group("Production"), source: "~/.ssh/config:5", localForwards: ["8080 localhost:80"] },
+  { ...base, alias: "web-02", hostname: "web-02.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, group: group("Production"), source: "~/.ssh/config:8" },
+  { ...base, alias: "grafana", hostname: "grafana.internal", user: "ops", port: 22, proxyJump: ["bastion"], tags: ["monitoring"], favorite: true, group: group("Infrastructure"), source: "~/.ssh/config:20" },
   { ...base, alias: "staging", hostname: "staging.example.com", user: "deploy", port: 22, proxyJump: [], tags: ["staging"], favorite: false, source: "~/.ssh/conf.d/staging:1" },
+  { ...base, alias: "lab-pi", hostname: "192.168.1.40", user: "pi", port: 22, proxyJump: [], tags: ["home"], favorite: false, source: "~/.ssh/config:30" },
+  // `?long=1`: a host with a long alias (ellipsis in the list, wrapped title).
+  ...(new URLSearchParams(location.search).get("long") === "1"
+    ? [{ ...base, alias: "analytics-warehouse-replica-eu-west-3-standby", hostname: "10.0.7.31", user: "analyst", port: 22, proxyJump: ["bastion"], tags: ["analytics"], favorite: true, group: group("Production"), source: "~/.ssh/config:44" }]
+    : []),
 ];
 
 export const demoThemes: ThemeInfo[] = [
@@ -50,6 +76,8 @@ const enc = new TextEncoder();
 
 function phase(id: number, p: Phase) {
   emit({ type: "session", id, event: { kind: "phase", ...p } });
+  if (p.phase === "failed") meta.sessionEnded(id, { kind: "failed", error: p.error });
+  else if (p.phase === "closed") meta.sessionEnded(id, { kind: "closed", reason: p.reason as "user_requested" });
 }
 
 function ask(session: number, kind: PromptKind): Promise<PromptAnswer> {
@@ -71,15 +99,20 @@ async function run(id: number, host: Host) {
   const s = sessions.get(id);
   if (!s) return;
   phase(id, { phase: "resolving" });
+  meta.log(id, "info", "config", `resolved ${host.hostname}:${host.port} as ${host.user ?? "user"} (${host.source})`);
   await sleep(250);
   const hops = host.proxyJump.length + 1;
   for (let hop = 1; hop <= hops; hop++) {
-    phase(id, { phase: "connecting", hop, hops, target: hop < hops ? (host.proxyJump[hop - 1] ?? "") : host.alias });
+    const target = hop < hops ? (host.proxyJump[hop - 1] ?? "") : host.alias;
+    phase(id, { phase: "connecting", hop, hops, target });
+    meta.log(id, "debug", hops > 1 ? "jump" : "tcp", hops > 1 ? `hop ${hop}/${hops}: opening ${target}` : `connecting to ${host.hostname}:${host.port}`);
     await sleep(450);
   }
   phase(id, { phase: "handshake" });
+  meta.log(id, "info", "kex", "kex curve25519-sha256 · host key ssh-ed25519 · cipher chacha20-poly1305@openssh.com");
   await sleep(250);
   phase(id, { phase: "verifying_host_key" });
+  meta.log(id, "debug", "known_hosts", `checking ${host.hostname} in ~/.ssh/known_hosts`);
   await sleep(300);
   if (host.alias === "staging") {
     emit({
@@ -135,10 +168,15 @@ async function run(id: number, host: Host) {
     }
   } else {
     phase(id, { phase: "authenticating", method: "agent" });
+    meta.log(id, "debug", "auth", "offering agent key SHA256:q2Xn8kD0bT1sV9cXr4mJ7yPwZ3aLhE5uGfN6oKiRtYs (id_ed25519_work)");
     await sleep(400);
   }
+  meta.log(id, "info", "auth", host.alias === "db-prod" ? "authenticated with password" : "authenticated with publickey (agent)");
+  meta.log(id, "warn", "banner", "server banner: \\r\\nAuthorized use only\\u{202e}");
   s.connected = true;
   phase(id, { phase: "connected" });
+  meta.connected(host.alias);
+  meta.log(id, "info", "session", "connected");
   s.waiters.splice(0).forEach((w) => w(true));
   const rtt = host.alias === "db-prod" ? 312 : 18;
   emit({ type: "session", id, event: { kind: "latency", rtt: { secs: 0, nanos: rtt * 1e6 } } });
@@ -160,6 +198,9 @@ function exec(id: number, t: DemoTerminal, cmd: string) {
     case "colors":
       for (let i = 0; i < 16; i++) out(`\x1b[48;5;${i}m  ${String(i).padStart(2)}  \x1b[0m${i === 7 ? "\r\n" : ""}`);
       out("\r\n");
+      break;
+    case "df":
+      out("Filesystem      Size  Used Avail Use% Mounted on\r\n/dev/vda1        78G   31G   44G  42% /\r\ntmpfs           3.9G     0  3.9G   0% /dev/shm\r\n");
       break;
     case "uptime":
       out(" 17:42:08 up 41 days,  3:12,  1 user,  load average: 0.08, 0.11, 0.09\r\n");
@@ -258,29 +299,69 @@ let downloadDir = "/home/demo/Downloads";
 const tunnels = new Map<number, TunnelInfo>();
 let dropListener: ((files: Upload[]) => void) | null = null;
 let dragListener: ((dragging: boolean) => void) | null = null;
-// Browser preview: an HTML5 drop stands in for the native one.
-window.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dragListener?.(true);
-});
-window.addEventListener("dragleave", (e) => {
-  if (!e.relatedTarget) dragListener?.(false);
-});
-window.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dragListener?.(false);
-  const files = [...(e.dataTransfer?.files ?? [])].map((f) => {
-    const token = nextId++;
-    uploads.set(token, { name: f.name, size: f.size });
-    return { token, display: f.name, size: f.size };
+let installed = false;
+
+/** Starts the simulation (once): the only side effects of this module.
+ * Called by `backend.ts` in development or a `--mode demo` build only. */
+export function installDemo(): Backend {
+  if (installed) return demoBackend;
+  installed = true;
+  // Browser preview: an HTML5 drop stands in for the native one.
+  window.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dragListener?.(true);
   });
-  if (files.length) dropListener?.(files);
+  window.addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget) dragListener?.(false);
+  });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragListener?.(false);
+    const files = [...(e.dataTransfer?.files ?? [])].map((f) => {
+      const token = nextId++;
+      uploads.set(token, { name: f.name, size: f.size });
+      return { token, display: f.name, size: f.size };
+    });
+    if (files.length) dropListener?.(files);
+  });
+  return demoBackend;
+}
+
+const keyDemo = demoKeys({
+  emit,
+  ask,
+  sleep: (ms) => sleep(ms).then(() => {}),
+  nextId: () => nextId++,
+  aliasOf: (session) => sessions.get(session)?.alias,
+  tagsOf: (alias) => demoHosts.find((h) => h.alias === alias)?.tags ?? [],
+  type(terminal, data) {
+    if (!terminals.has(terminal)) return false;
+    void demoBackend.terminalInput(terminal, data, false);
+    return true;
+  },
 });
 
+const meta = demoMeta({ emit, hosts: demoHosts });
+
+/** Rough stand-in for portico-core's search: words, `#tag`, `@group`, `*`. */
+function demoSearch(q: string): Host[] {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return demoHosts.filter((h) =>
+    words.every((w) => {
+      if (w === "*") return h.favorite;
+      if (w.startsWith("#")) return h.tags.some((t) => t.toLowerCase().startsWith(w.slice(1)));
+      if (w.startsWith("@")) return (h.group ?? "").toLowerCase().includes(w.slice(1));
+      return `${h.alias} ${h.hostname} ${h.user ?? ""}`.toLowerCase().includes(w);
+    }),
+  );
+}
+
 export const demoBackend: Backend = {
+  ...keyDemo,
+  ...meta.backend,
+  ...demoImport,
   listHosts: async () => demoHosts,
-  searchHosts: async (q) =>
-    demoHosts.filter((h) => `${h.alias} ${h.hostname} ${h.tags.map((t) => "#" + t).join(" ")}`.includes(q)),
+  searchHosts: async (q) => demoSearch(q),
   listThemes: async () => demoThemes,
   homeDir: async () => "/home/demo",
   async connect(alias) {
@@ -288,6 +369,7 @@ export const demoBackend: Backend = {
     if (!host) throw { code: "unknown_host", message: `no host named ${alias}`, hint: null } satisfies ErrorSummary;
     const id = nextId++;
     sessions.set(id, { alias, connected: false, closed: false, waiters: [] });
+    meta.sessionStarted(id, alias);
     emit({ type: "session", id, event: { kind: "started", alias } });
     void run(id, host);
     return id;
@@ -423,12 +505,19 @@ export const demoBackend: Backend = {
     return downloadDir;
   },
   async checkForward(spec) {
+    // -D [bind:]port: a SOCKS5 proxy (same exposure rule as -L).
+    const d = /^\s*-?D\s+(?:([^\s:]*):)?(\d+)\s*$/i.exec(spec);
+    if (d) {
+      const bind = d[1] === undefined ? "localhost" : d[1] === "" || d[1] === "*" ? "0.0.0.0" : d[1];
+      return { display: `SOCKS · ${bind}:${d[2]}`, exposed: !["localhost", "127.0.0.1", "::1"].includes(bind), dynamic: true };
+    }
     const m = /^\s*-?([LR])\s+(?:([^\s:]+):)?(\d+)[:\s]([^\s:]+):(\d+)\s*$/i.exec(spec);
-    if (!m) throw { code: "invalid_forward", message: "expected [bind:]port:host:hostport", hint: "For example -L 8080:db.internal:5432 or -R 9000:localhost:3000." } satisfies ErrorSummary;
+    if (!m) throw { code: "invalid_forward", message: "expected [bind:]port:host:hostport", hint: "For example -L 8080:db.internal:5432, -R 9000:localhost:3000 or -D 1080 (SOCKS)." } satisfies ErrorSummary;
     const bind = m[2] ?? "localhost";
     return {
       display: `-${(m[1] ?? "L").toUpperCase()} ${bind}:${m[3]} → ${m[4]}:${m[5]}`,
       exposed: !["localhost", "127.0.0.1", "::1"].includes(bind),
+      dynamic: false,
     };
   },
   listTunnels: async () => [...tunnels.values()],
@@ -443,7 +532,7 @@ export const demoBackend: Backend = {
         tunnels.delete(id);
         return emit({ type: "tunnel", id, session, event: { kind: "failed", error: { code: "port_in_use", message: "127.0.0.1:5433 is already in use", hint: "Pick another local port." } } });
       }
-      const bind = check.display.split(" ")[1]?.replace("localhost", "127.0.0.1") ?? "";
+      const bind = (check.display.startsWith("SOCKS · ") ? check.display.slice(8) : check.display.split(" ")[1] ?? "").replace("localhost", "127.0.0.1");
       emit({ type: "tunnel", id, session, event: { kind: "listening", bind } });
       await sleep(900);
       emit({ type: "tunnel", id, session, event: { kind: "connection_opened", peer: "127.0.0.1:53412" } });

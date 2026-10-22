@@ -46,7 +46,7 @@ pub enum Error {
     #[error("the engine has shut down")]
     EngineClosed,
 
-    #[error("not supported yet: {0}")]
+    #[error("{0} is not supported yet")]
     Unsupported(&'static str),
 
     #[error("cannot resolve {host}: {source}")]
@@ -88,7 +88,7 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
-    #[error("session {0} ended before the request could be served")]
+    #[error("the session ended before the request could be served")]
     SessionEnded(SessionId),
 
     #[error("the server refused to open a {what}")]
@@ -105,6 +105,41 @@ pub enum Error {
 
     #[error(transparent)]
     Tunnel(#[from] crate::forward::TunnelError),
+
+    #[error(transparent)]
+    Key(#[from] crate::keys::KeyError),
+
+    // ── Phase 3: vault and snippets ─────────────────────────────────────
+    #[error(transparent)]
+    Vault(#[from] crate::vault::VaultError),
+
+    #[error(transparent)]
+    Snippet(#[from] crate::snippets::SnippetError),
+    // ── end Phase 3 ─────────────────────────────────────────────────────
+
+    // ── Phase 4: metadata, settings, recent sessions ────────────────────
+    #[error("{} is larger than {max} bytes", path.display())]
+    FileTooLarge { path: PathBuf, max: u64 },
+
+    /// A write was refused before touching the disk: the new content would
+    /// exceed what the reader accepts (`file_too_large`).
+    #[error("{} would grow larger than {max} bytes; the change was not saved", path.display())]
+    WriteTooLarge { path: PathBuf, max: u64 },
+
+    /// A Portico file is a symlink (writes only), a FIFO, a directory or a
+    /// device: it is neither replaced nor opened.
+    #[error("{} is not a regular file", path.display())]
+    NotRegularFile { path: PathBuf },
+
+    #[error(transparent)]
+    HostMeta(#[from] crate::hosts::HostMetaError),
+
+    #[error(transparent)]
+    Settings(#[from] crate::settings::SettingsError),
+
+    // ── Phase 5: imports ────────────────────────────────────────────────
+    #[error(transparent)]
+    Import(#[from] crate::import::ImportError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -151,7 +186,12 @@ impl Error {
     }
 
     /// Stable, serializable view of the error for UIs and event streams.
+    // One arm per error variant: splitting the table would scatter the codes.
+    #[allow(clippy::too_many_lines)]
     pub fn summary(&self) -> ErrorSummary {
+        if let Self::Key(crate::keys::KeyError::ProbeFailed { summary }) = self {
+            return summary.clone();
+        }
         let (code, hint) = match self {
             Self::Config(_) => (
                 "config",
@@ -169,7 +209,9 @@ impl Error {
             Self::EngineClosed => ("engine_closed", None),
             Self::Unsupported(_) => (
                 "unsupported",
-                Some("Portico refuses rather than connecting differently from ssh."),
+                Some(
+                    "Portico refuses rather than connect differently from ssh. Use ProxyJump for this host if you can.",
+                ),
             ),
             Self::Resolve { .. } => ("dns", Some("Check the HostName and your network/DNS.")),
             Self::Connect { source, .. } => (
@@ -225,7 +267,10 @@ impl Error {
             Self::ProxyJumpTooDeep { .. } => ("proxy_jump_too_deep", None),
             Self::Transport { .. } => ("ssh", None),
             Self::Cancelled => ("cancelled", None),
-            Self::SessionEnded(_) => ("session_ended", None),
+            Self::SessionEnded(_) => (
+                "session_ended",
+                Some("Reconnect to the host, then try again."),
+            ),
             Self::TerminalRefused { .. } => (
                 "terminal_refused",
                 Some("The account may have no shell, or the server forbids PTYs (PermitTTY no)."),
@@ -242,13 +287,60 @@ impl Error {
             ),
             Self::Sftp(e) => e.code_and_hint(),
             Self::Tunnel(e) => e.code_and_hint(),
+            Self::Key(e) => e.code_and_hint(),
+
+            // ── Phase 3: vault and snippets ──
+            Self::Vault(e) => e.code_and_hint(),
+            Self::Snippet(e) => e.code_and_hint(),
+
+            // ── Phase 4 ──
+            Self::FileTooLarge { .. } => (
+                "file_too_large",
+                Some("This Portico file was edited by hand and is too large: trim it."),
+            ),
+            Self::WriteTooLarge { .. } => (
+                "file_too_large",
+                Some(
+                    "Portico would not be able to read this file back: remove entries you no longer need (long notes, old hosts) and retry.",
+                ),
+            ),
+            Self::NotRegularFile { .. } => (
+                "not_regular_file",
+                Some(
+                    "Portico does not replace a symlinked hosts.toml or settings.toml: edit the target directly or replace the link with a regular file.",
+                ),
+            ),
+            Self::HostMeta(e) => e.code_and_hint(),
+            Self::Settings(e) => e.code_and_hint(),
+
+            // ── Phase 5 ──
+            Self::Import(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),
-            message: self.to_string(),
+            message: without_os_codes(&self.to_string()),
             hint: hint.map(str::to_owned),
         }
     }
+}
+
+/// `Connection refused (os error 111)` → `Connection refused`: the errno
+/// says nothing more to a user (it stays in `Debug` for logs).
+fn without_os_codes(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(" (os error ") {
+        let after = rest.get(start..).unwrap_or_default();
+        let Some(end) = after.find(')') else { break };
+        let code = after.get(" (os error ".len()..end).unwrap_or_default();
+        out.push_str(rest.get(..start).unwrap_or_default());
+        if code.is_empty() || !code.chars().all(|c| c.is_ascii_digit()) {
+            out.push_str(after.get(..=end).unwrap_or_default());
+        }
+        rest = after.get(end + 1..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
 }
 
 /// UI-facing description of an error. Cheap to clone, safe to display and log
@@ -261,4 +353,19 @@ pub struct ErrorSummary {
     pub message: String,
     /// Optional actionable advice shown under the message.
     pub hint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn os_error_codes_are_dropped_from_summaries() {
+        assert_eq!(
+            without_os_codes("cannot connect to db:22: Connection refused (os error 111)"),
+            "cannot connect to db:22: Connection refused"
+        );
+        assert_eq!(without_os_codes("a (os error x) b"), "a (os error x) b");
+        assert_eq!(without_os_codes("plain"), "plain");
+    }
 }

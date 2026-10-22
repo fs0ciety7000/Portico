@@ -46,6 +46,15 @@ pub enum EngineEvent {
         id: PromptId,
     },
     Log(LogRecord),
+    /// The metadata of `alias` changed in `hosts.toml` (Phase 4): UIs update
+    /// the host in place, without reloading the inventory.
+    HostMeta {
+        alias: String,
+        meta: crate::hosts::HostMeta,
+    },
+    /// The recent-sessions list changed (recorded, forgotten, cleared): UIs
+    /// that show it call [`crate::Engine::recent`] again.
+    RecentChanged,
 }
 
 /// Lifecycle of an SSH connection. UIs render this as the status badge.
@@ -111,6 +120,10 @@ pub enum SessionEvent {
     /// A session was created for `alias` (first event of every session).
     Started {
         alias: String,
+        /// A short-lived check (copy-id verification), not a session the
+        /// user opened: UIs do not list it as the host's session.
+        #[serde(default)]
+        probe: bool,
     },
     Phase(SessionPhase),
     /// Pre-authentication banner sent by the server.

@@ -1,22 +1,43 @@
 <script lang="ts">
   // SFTP explorer docked beside the terminal of the active session.
-  // Keyboard: j/k ↑↓ move · ↵ open folder / download file · ⌫ parent ·
-  // n new folder · F2 rename · Del delete · u upload · . hidden · r refresh ·
+  // Keyboard (same grammar as the TUI): j/k ↑↓ move · ↵ open folder /
+  // download file · ⌫ parent · n new folder · r F2 rename · d Del F8 delete ·
+  // u upload · . hidden · Ctrl-R refresh · x cancel the latest transfer ·
   // Esc back to the terminal. Names shown are `display` (made safe in Rust).
+  // Until the session is connected the panel shows its status instead.
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
   import { flip } from "svelte/animate";
-  import { formatEta, formatSize, displayPath, type RemoteEntry } from "../api";
+  import { describe, formatEta, formatSize, displayPath, sentence, type RemoteEntry } from "../api";
   import { dur } from "../motion";
-  import { crumbs, files, type Transfer } from "../state/files.svelte";
-  import { workspace } from "../state/workspace.svelte";
+  import { crumbs, displaySafe, files, type Transfer } from "../state/files.svelte";
+  import { isLive, workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
 
-  let { session, alias, onclose }: { session: number; alias: string; onclose: () => void } = $props();
+  let {
+    session,
+    alias,
+    onclose,
+    onreconnect,
+  }: { session: number; alias: string; onclose: () => void; onreconnect: () => void } = $props();
 
-  // Opening mutates state: never inside a $derived.
+  const info = $derived(workspace.sessions[session]);
+  const connected = $derived(info?.phase.phase === "connected");
+  const status = $derived(describe(info));
+  /** Why the session is not usable (failed, closed), with what to do. */
+  const ended = $derived.by(() => {
+    if (!info || isLive(info)) return null;
+    if (info.phase.phase === "failed") return info.phase.error;
+    return { code: "session_closed", message: "The connection to this host is closed", hint: "Reconnect to browse its files again." };
+  });
+
+  /** A changed host key is a hard refusal: never offer to connect again. */
+  const refused = $derived(ended?.code === "host_key_changed");
+
+  // Opening mutates state: never inside a $derived. Only a connected
+  // session is asked for its files.
   $effect(() => {
-    files.open(session, alias);
+    if (connected) files.open(session, alias);
   });
   const ex = $derived(files.explorers[session]);
   const shown = $derived(ex ? files.visible(ex) : []);
@@ -25,6 +46,12 @@
   const running = $derived(queue.filter((t) => t.status === "queued" || t.status === "running").length);
 
   let list: HTMLDivElement | undefined = $state();
+  let crumbsEl: HTMLElement | undefined = $state();
+  // A deep path overflows the bar: keep its end (the current folder) in view.
+  $effect(() => {
+    void path;
+    if (crumbsEl) crumbsEl.scrollLeft = crumbsEl.scrollWidth;
+  });
   /** Inline editor: new folder, or rename of `target`. */
   let editing: { kind: "mkdir" } | { kind: "rename"; target: RemoteEntry } | null = $state(null);
   let draft = $state("");
@@ -32,6 +59,25 @@
 
   export function focus() {
     list?.focus();
+  }
+
+  /** Palette entry points (same as the panel's keys). */
+  export function run(action: "upload" | "mkdir" | "rename" | "delete" | "refresh" | "hidden" | "cancel") {
+    if (!ex?.cwd && action !== "hidden" && action !== "cancel") return;
+    if (action === "upload") void files.pickAndUpload(session);
+    else if (action === "mkdir") startEdit("mkdir");
+    else if (action === "rename") startEdit("rename");
+    else if (action === "delete") {
+      if (selectedEntry) confirmDelete = selectedEntry;
+    } else if (action === "refresh") files.refresh(session);
+    else if (action === "hidden") files.showHidden = !files.showHidden;
+    else cancelLatest();
+  }
+
+  /** The most recent transfer still moving. */
+  function cancelLatest() {
+    const t = [...queue].reverse().find((x) => x.status === "running" || x.status === "queued");
+    if (t) files.cancel(t.id);
   }
 
   // The panel takes the keyboard when it appears.
@@ -60,7 +106,8 @@
     if (kind === "rename") {
       if (!selectedEntry) return;
       editing = { kind, target: selectedEntry };
-      draft = selectedEntry.name;
+      // A name that needed cleaning for display is not offered for editing.
+      draft = selectedEntry.display === selectedEntry.name ? selectedEntry.name : "";
     } else {
       editing = { kind };
       draft = "";
@@ -100,12 +147,19 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const key = e.key;
     const handled = () => {
       e.preventDefault();
       e.stopPropagation();
     };
+    // Ctrl-R refreshes the panel here (elsewhere it reloads ssh_config).
+    if (e.ctrlKey && !e.metaKey && !e.altKey && key.toLowerCase() === "r") return (handled(), files.refresh(session));
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!connected) {
+      if (key === "Enter" && ended && !refused) (handled(), onreconnect());
+      else if (key === "Escape") (handled(), onclose());
+      return;
+    }
     if (key === "j" || key === "ArrowDown") (handled(), files.move(session, 1));
     else if (key === "k" || key === "ArrowUp") (handled(), files.move(session, -1));
     else if (key === "Home") (handled(), files.move(session, -1e9));
@@ -115,14 +169,20 @@
       if (selectedEntry) files.activate(session, selectedEntry);
     } else if (key === "Backspace" || key === "ArrowLeft") (handled(), files.up(session));
     else if (key === "n") (handled(), startEdit("mkdir"));
-    else if (key === "F2") (handled(), startEdit("rename"));
-    else if (key === "Delete" || key === "F8") {
+    else if (key === "F2" || key === "r") (handled(), startEdit("rename"));
+    else if (key === "Delete" || key === "F8" || key === "d") {
       handled();
       if (selectedEntry) confirmDelete = selectedEntry;
     } else if (key === "u") (handled(), void files.pickAndUpload(session));
     else if (key === ".") (handled(), (files.showHidden = !files.showHidden));
-    else if (key === "r") (handled(), files.refresh(session));
+    else if (key === "x") (handled(), cancelLatest());
     else if (key === "Escape") (handled(), onclose());
+  }
+
+  async function deleteConfirmed(target: RemoteEntry) {
+    confirmDelete = null;
+    await files.remove(session, target);
+    list?.focus();
   }
 
   const DAY = 86_400_000;
@@ -170,7 +230,7 @@
       <button class="icon" title="New folder (n)" aria-label="New folder" onclick={() => startEdit("mkdir")} disabled={!ex?.cwd}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h4l1.5 1.5H14v6.5H2zM8 8v3M6.5 9.5h3" /></svg>
       </button>
-      <button class="icon" title="Refresh (r)" aria-label="Refresh" onclick={() => files.refresh(session)}>
+      <button class="icon" title="Refresh (Ctrl-R)" aria-label="Refresh" onclick={() => files.refresh(session)} disabled={!ex?.cwd}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.55M13 3v3h-3" /></svg>
       </button>
       <button class="icon" title="Close (Esc)" aria-label="Close files" onclick={onclose}>
@@ -179,7 +239,7 @@
     </div>
   </header>
 
-  <nav class="crumbs mono" aria-label="Path">
+  <nav class="crumbs mono" aria-label="Path" bind:this={crumbsEl}>
     {#each path as c, i (c.path)}
       {#if i > 1}<span class="sep">/</span>{/if}
       <button class:current={i === path.length - 1} onclick={() => (files.go(session, c.path), list?.focus())}>{c.label}</button>
@@ -202,13 +262,30 @@
       </div>
     {/if}
 
-    {#if ex?.error}
+    {#if ended || ex?.error?.code === "session_ended"}
+      {@const err = ended ?? ex?.error}
       <div class="state error" role="alert">
-        <strong>{ex.error.message}</strong>
+        <strong>{sentence(err?.message ?? "")}</strong>
+        {#if err?.hint}<span>{err.hint}</span>{/if}
+        {#if !refused}
+          <div class="actions">
+            <button class="secondary" onclick={onreconnect}>Reconnect <kbd>↵</kbd></button>
+          </div>
+        {/if}
+      </div>
+    {:else if !connected}
+      <div class="state connecting" data-status={status.status} aria-live="polite">
+        <span class="dot" class:busy={status.busy}></span>
+        <strong>{status.label}</strong>
+        <span>Files appear once the session is ready.</span>
+      </div>
+    {:else if ex?.error}
+      <div class="state error" role="alert">
+        <strong>{sentence(ex.error.message)}</strong>
         {#if ex.error.hint}<span>{ex.error.hint}</span>{/if}
         <div class="actions">
-          <button class="secondary" onclick={() => files.refresh(session)}>Retry</button>
-          {#if ex.cwd && ex.cwd !== "/"}<button class="secondary" onclick={() => files.up(session)}>Parent folder</button>{/if}
+          <button class="secondary" onclick={() => files.refresh(session)}>Retry <kbd>Ctrl-R</kbd></button>
+          {#if ex.cwd && ex.cwd !== "/"}<button class="secondary" onclick={() => files.up(session)}>Parent folder <kbd>⌫</kbd></button>{/if}
         </div>
       </div>
     {:else if ex?.loading && !ex.entries.length}
@@ -230,7 +307,7 @@
       {#each shown as entry (entry.path)}
         <div
           class="row"
-          class:selected={entry.path === ex?.selected}
+          class:selected={entry.path === ex?.selected && editing?.kind !== "mkdir"}
           role="option"
           aria-selected={entry.path === ex?.selected}
           tabindex="-1"
@@ -258,14 +335,14 @@
             </span>
             <span class="row-actions">
               {#if entry.kind === "file"}
-                <button class="icon small" title="Download (↵)" aria-label="Download {entry.display}" onclick={(e) => (e.stopPropagation(), files.download(session, entry))}>
+                <button class="icon small" tabindex="-1" title="Download (↵)" aria-label="Download {entry.display}" onclick={(e) => (e.stopPropagation(), files.download(session, entry))}>
                   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v8M4.5 7.5 8 11l3.5-3.5M3 13h10" /></svg>
                 </button>
               {/if}
-              <button class="icon small" title="Rename (F2)" aria-label="Rename {entry.display}" onclick={(e) => (e.stopPropagation(), ex && (ex.selected = entry.path), startEdit("rename"))}>
+              <button class="icon small" tabindex="-1" title="Rename (r)" aria-label="Rename {entry.display}" onclick={(e) => (e.stopPropagation(), ex && (ex.selected = entry.path), startEdit("rename"))}>
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13h2.5L12.5 6 10 3.5 3 10.5zM9 4.5 11.5 7" /></svg>
               </button>
-              <button class="icon small" title="Delete (Del)" aria-label="Delete {entry.display}" onclick={(e) => (e.stopPropagation(), (confirmDelete = entry))}>
+              <button class="icon small" tabindex="-1" title="Delete (d)" aria-label="Delete {entry.display}" onclick={(e) => (e.stopPropagation(), (confirmDelete = entry))}>
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.5 8.5h6l.5-8.5" /></svg>
               </button>
             </span>
@@ -278,7 +355,7 @@
       <div class="drop" transition:fly={{ y: 6, duration: dur("fast") }}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V3M4.5 6.5 8 3l3.5 3.5M3 13h10" /></svg>
         <strong>Drop to upload</strong>
-        <span class="mono">{ex.cwd}</span>
+        <span class="mono">{displaySafe(ex.cwd)}</span>
       </div>
     {/if}
   </div>
@@ -306,7 +383,7 @@
               <span class="t-detail">{detail(t)}</span>
             </div>
             {#if t.status === "running" || t.status === "queued"}
-              <button class="icon small" title="Cancel" aria-label="Cancel {t.name}" onclick={() => files.cancel(t.id)}>
+              <button class="icon small" title="Cancel (x)" aria-label="Cancel {t.name}" onclick={() => files.cancel(t.id)}>
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg>
               </button>
             {/if}
@@ -323,17 +400,22 @@
 
 {#if confirmDelete}
   {@const target = confirmDelete}
-  <Modal tone="danger" onescape={() => ((confirmDelete = null), list?.focus())}>
+  <Modal
+    tone="danger"
+    onescape={() => ((confirmDelete = null), list?.focus())}
+    onkey={(k) => {
+      if (k === "y") void deleteConfirmed(target);
+      else if (k === "n") (confirmDelete = null), list?.focus();
+      return k === "y" || k === "n";
+    }}
+  >
     {#snippet title()}Delete {target.kind === "dir" ? "folder" : "file"}?{/snippet}
     <p><span class="mono">{target.display}</span> will be removed from <strong>{alias}</strong>. This cannot be undone.</p>
     {#if target.kind === "dir"}<p>Only empty folders can be deleted.</p>{/if}
     {#snippet footer()}
-      <button class="secondary" onclick={() => ((confirmDelete = null), list?.focus())}>Keep</button>
-      <button class="danger" data-autofocus onclick={async () => {
-        confirmDelete = null;
-        await files.remove(session, target);
-        list?.focus();
-      }}>Delete</button>
+      <!-- Focus on Keep: Enter never deletes, `y` does. -->
+      <button class="secondary" data-autofocus onclick={() => ((confirmDelete = null), list?.focus())}>Keep <kbd>Esc</kbd></button>
+      <button class="danger" onclick={() => deleteConfirmed(target)}>Delete <kbd>y</kbd></button>
     {/snippet}
   </Modal>
 {/if}
@@ -393,6 +475,7 @@
     white-space: nowrap;
   }
   .crumbs button {
+    unicode-bidi: isolate;
     padding: 2px var(--space-1);
     border: 0;
     border-radius: var(--radius-sm);
@@ -419,7 +502,12 @@
     outline: none;
     scrollbar-width: thin;
   }
-  .list:focus-visible { box-shadow: inset 0 0 0 1px var(--border-strong); border-radius: 0; }
+  /* With rows, focus shows as the selection's accent bar; without, on the
+     action the keyboard would trigger (Reconnect, Retry, Upload). */
+  .list:focus-visible .state .actions button:first-child,
+  .list:focus-visible .state.empty button {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
   .row {
     position: relative;
     display: grid;
@@ -446,12 +534,19 @@
     background: var(--accent);
   }
   .kind { color: var(--text-muted); }
-  .kind.dir { color: var(--accent); }
+  .kind.dir { color: var(--text-secondary); }
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row:has(.kind.dir) .name { color: var(--text-primary); font-weight: 550; }
-  .meta { display: flex; gap: var(--space-3); color: var(--text-muted); font-size: var(--text-xs); }
-  .size { min-width: 7ch; text-align: right; }
-  .date { min-width: 9ch; text-align: right; }
+  .meta {
+    display: grid;
+    grid-template-columns: 8ch 11ch;
+    gap: var(--space-3);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .size { grid-column: 1; text-align: right; }
+  .date { grid-column: 2; text-align: right; }
   .row-actions {
     position: absolute;
     right: var(--space-2);
@@ -462,7 +557,7 @@
     opacity: 0;
     transition: opacity var(--motion-fast) var(--ease-standard);
   }
-  .row:hover .row-actions { opacity: 1; }
+  .row:hover .row-actions, .row:focus-within .row-actions { opacity: 1; }
   /* The actions take the place of size and date. */
   .meta { transition: opacity var(--motion-fast) var(--ease-standard); }
   .row:hover .meta { opacity: 0; }
@@ -490,6 +585,12 @@
   .state svg { width: 32px; height: 32px; stroke-width: 1.25; color: var(--border-strong); }
   .state.error { justify-items: start; text-align: left; padding: var(--space-5) var(--space-3); }
   .state.error strong { color: var(--status-error); }
+  .state.connecting { --c: var(--status-connecting); }
+  .state.connecting[data-status="authenticating"] { --c: var(--status-authenticating); }
+  .state.connecting[data-status="idle"] { --c: var(--status-idle); }
+  .state.connecting strong { color: var(--text-primary); }
+  .state .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  .state .dot.busy { animation: breathe var(--motion-loop) var(--ease-standard) infinite; }
   .state .actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
   button.secondary {
     display: inline-flex;
@@ -533,12 +634,12 @@
     gap: var(--space-2);
     border: 1px dashed var(--accent);
     border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+    background: var(--bg-overlay);
     color: var(--accent);
     pointer-events: none;
   }
   .drop strong { color: var(--text-primary); font-weight: 550; }
-  .drop .mono { color: var(--text-muted); font-size: var(--text-sm); }
+  .drop .mono { color: var(--text-muted); font-size: var(--text-sm); unicode-bidi: isolate; }
   footer {
     display: grid;
     gap: var(--space-2);
@@ -549,7 +650,7 @@
   .queue-head { display: flex; justify-content: space-between; color: var(--text-secondary); font-weight: 550; }
   .queue { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
   .queue li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: start; gap: var(--space-2); }
-  .queue .dir { color: var(--accent); text-align: center; }
+  .queue .dir { color: var(--text-muted); text-align: center; }
   .t-main { display: grid; gap: 4px; min-width: 0; }
   .t-line { display: flex; justify-content: space-between; gap: var(--space-2); }
   .t-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }

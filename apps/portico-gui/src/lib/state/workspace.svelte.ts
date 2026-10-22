@@ -3,6 +3,7 @@
 // methods below, which call the backend.
 import { asError, durationMs, type EngineEvent, type ErrorSummary, type HostKeyChanged, type Phase, type Prompt, type SessionView } from "../api";
 import { backend } from "../backend";
+import { vault } from "./vault.svelte";
 
 export interface SessionInfo extends SessionView {
   alias: string;
@@ -36,6 +37,12 @@ export const isLive = (s: SessionInfo | undefined): boolean => !!s && LIVE.inclu
 
 let nextKey = 1;
 
+/** Severity of a notice: icon and border colour. */
+export type ToastTone = "error" | "warning" | "info";
+
+/** How long a notice stays (design system: 4 s). */
+const TOAST_MS = 4000;
+
 class Workspace {
   sessions: Record<number, SessionInfo> = $state({});
   tabs: Tab[] = $state([]);
@@ -43,13 +50,18 @@ class Workspace {
   active: number | null = $state(null);
   prompts: Prompt[] = $state([]);
   alerts: Alert[] = $state([]);
-  toast: (ErrorSummary & { tone: "error" | "info" }) | null = $state(null);
+  toast: (ErrorSummary & { tone: ToastTone }) | null = $state(null);
   #toastTimer: ReturnType<typeof setTimeout> | undefined;
   /** Last changed-key alert per session ("Show details" on the failure card). */
   #alertBySession = new Map<number, Alert>();
   /** End of terminals whose id the view does not know yet (the event can
    * overtake the `open_terminal` reply). */
   #earlyEnds = new Map<number, TabEnd>();
+  /** Probe sessions (copy-id verification) by id → alias: never listed as
+   * the host's session, but their prompts and alerts name the host. */
+  #probes = new Map<number, string>();
+  /** Callers waiting for a session to settle (connected / failed / closed). */
+  #settle = new Map<number, ((error: ErrorSummary | null) => void)[]>();
 
   /** Latest session per host alias (host list, details). */
   byAlias: Record<string, SessionInfo> = $derived.by(() => {
@@ -63,10 +75,16 @@ class Workspace {
 
   activeTab: Tab | undefined = $derived(this.tabs.find((t) => t.key === this.active));
 
-  notify(e: unknown, tone: "error" | "info" = "error") {
+  /** `ms`: longer for a notice that lists things (ignored settings). */
+  notify(e: unknown, tone: ToastTone = "error", ms = TOAST_MS) {
     this.toast = { ...asError(e), tone };
     clearTimeout(this.#toastTimer);
-    this.#toastTimer = setTimeout(() => (this.toast = null), 5000);
+    this.#toastTimer = setTimeout(() => (this.toast = null), ms);
+  }
+
+  dismissToast() {
+    clearTimeout(this.#toastTimer);
+    this.toast = null;
   }
 
   // ── Tabs ────────────────────────────────────────────────────────────
@@ -94,6 +112,38 @@ class Workspace {
     const tab: Tab = { key: nextKey++, alias, session, terminal: null, title: "", end: null, error: null, generation: 0 };
     this.tabs.push(tab);
     this.active = tab.key;
+  }
+
+  /** Opens a session without a tab (copy-id); prompts show as usual. */
+  connectQuiet(alias: string): Promise<number | null> {
+    return this.#connect(alias);
+  }
+
+  /** Resolves once session `id` is connected (null) or ended (its error). */
+  settled(id: number): Promise<ErrorSummary | null> {
+    const now = this.#outcome(this.sessions[id]?.phase);
+    if (now !== undefined) return Promise.resolve(now);
+    return new Promise((resolve) => {
+      const list = this.#settle.get(id) ?? [];
+      list.push(resolve);
+      this.#settle.set(id, list);
+    });
+  }
+
+  /** undefined while still connecting. */
+  #outcome(phase: Phase | undefined): ErrorSummary | null | undefined {
+    if (!phase) return { code: "session_ended", message: "the session ended", hint: null };
+    switch (phase.phase) {
+      case "connected":
+        return null;
+      case "failed":
+        return phase.error;
+      case "closed":
+      case "disconnecting":
+        return { code: "cancelled", message: "the connection was cancelled", hint: null };
+      default:
+        return undefined;
+    }
   }
 
   async #connect(alias: string): Promise<number | null> {
@@ -126,6 +176,8 @@ class Workspace {
     tab.terminal = null;
     tab.end = null;
     tab.error = null;
+    // The title belonged to the previous shell (OSC 0/2): a new one starts untitled.
+    tab.title = "";
     tab.generation++;
   }
 
@@ -165,9 +217,19 @@ class Workspace {
 
   // ── Prompts ─────────────────────────────────────────────────────────
 
-  async answer(prompt: Prompt, answer: Parameters<typeof backend.respondPrompt>[1]) {
+  /** Sends the answer; nothing here keeps a reference to a secret after
+   * the call (JS strings cannot be wiped: the least we can do is let them
+   * be collected as soon as the IPC has serialized them). */
+  answer(prompt: Prompt, answer: Parameters<typeof backend.respondPrompt>[1]): Promise<void> {
     this.prompts = this.prompts.filter((p) => p.id !== prompt.id);
-    await backend.respondPrompt(prompt.id, answer).catch((e) => this.notify(e));
+    const remembered = answer.kind === "secret" && answer.remember;
+    return backend
+      .respondPrompt(prompt.id, answer)
+      .catch((e) => this.notify(e))
+      .then(() => {
+        // Without an unlocked vault the secret could not be remembered.
+        if (remembered) vault.afterRemember();
+      });
   }
 
   dismissAlert() {
@@ -195,7 +257,7 @@ class Workspace {
   }
 
   aliasOf(session: number | null): string | undefined {
-    return session === null ? undefined : this.sessions[session]?.alias;
+    return session === null ? undefined : (this.sessions[session]?.alias ?? this.#probes.get(session));
   }
 
   // ── Engine events ───────────────────────────────────────────────────
@@ -205,7 +267,19 @@ class Workspace {
       case "session": {
         const e = ev.event;
         if (e.kind === "started") {
-          this.sessions[ev.id] ??= { id: ev.id, alias: e.alias, phase: { phase: "resolving" }, latencyMs: null };
+          if (e.probe) this.#probes.set(ev.id, e.alias);
+          else this.sessions[ev.id] ??= { id: ev.id, alias: e.alias, phase: { phase: "resolving" }, latencyMs: null };
+          return;
+        }
+        const probe = this.#probes.get(ev.id);
+        if (probe !== undefined) {
+          // A changed host key is never filtered, whoever connected.
+          if (e.kind === "host_key_changed") {
+            const { kind: _kind, ...rest } = e;
+            this.alerts.push({ ...rest, alias: probe });
+          } else if (e.kind === "phase" && (e.phase === "closed" || e.phase === "failed")) {
+            this.#probes.delete(ev.id);
+          }
           return;
         }
         const s = this.sessions[ev.id];
@@ -214,6 +288,12 @@ class Workspace {
           const { kind: _kind, ...phase } = e;
           s.phase = phase;
           if (phase.phase !== "connected") s.latencyMs = null;
+          const outcome = this.#outcome(phase);
+          const waiting = this.#settle.get(ev.id);
+          if (outcome !== undefined && waiting) {
+            this.#settle.delete(ev.id);
+            for (const resolve of waiting) resolve(outcome);
+          }
         } else if (e.kind === "latency") {
           s.latencyMs = durationMs(e.rtt);
         } else if (e.kind === "host_key_changed") {

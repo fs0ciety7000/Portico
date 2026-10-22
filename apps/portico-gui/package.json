@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check": "svelte-check --tsconfig ./tsconfig.json && node --test scripts/test-shortcuts.ts scripts/test-hostlist.ts && node scripts/gen-keybindings.ts --check",
+    "test:shortcuts": "node --test scripts/test-shortcuts.ts",
+    "e2e": "e2e/run.sh",
+    "check:keybindings": "node scripts/gen-keybindings.ts --check",
+    "gen:keybindings": "node scripts/gen-keybindings.ts",
     "tauri": "tauri",
     "build:demo": "vite build --mode demo"
   },

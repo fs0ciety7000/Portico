@@ -31,15 +31,15 @@ use tokio_util::task::TaskTracker;
 use crate::error::{Error, Result};
 use crate::events::{EngineEvent, Prompt, PromptKind};
 use crate::forward::{ForwardSpec, TunnelInfo};
-use crate::hosts::{HostEntry, HostMetaFile, inventory};
+use crate::hosts::{HostEntry, inventory};
 use crate::ids::{PromptId, SessionId, TerminalId, TransferId, TunnelId};
 use crate::logs::LogLevel;
 use crate::logs::{LogRecord, LogRing};
-use crate::secrets::{KeyringStore, SecretStore};
+use crate::secrets::SecretStore;
 use crate::session::{self, Attached, SessionCommand, SessionCtx};
 use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
 use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
-use crate::store::{Paths, load_toml};
+use crate::store::Paths;
 
 /// Capacity of the control-plane broadcast channel. Slow subscribers get
 /// `RecvError::Lagged` and must resync from [`Engine`] queries.
@@ -57,6 +57,8 @@ pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(15);
 pub const DEFAULT_KEEPALIVE_MAX: u32 = 3;
 /// Log lines kept per session for the debug panel.
 pub const SESSION_LOG_CAPACITY: usize = 500;
+/// Ended sessions whose logs stay readable (oldest forgotten first).
+pub const ENDED_SESSIONS_KEPT: usize = 20;
 
 /// Engine construction parameters.
 #[derive(Debug, Clone)]
@@ -73,13 +75,15 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
-    /// Platform defaults.
+    /// Platform defaults. Secrets go to the system keyring, or to the
+    /// encrypted vault when no keyring is available (Phase 3).
     pub fn discover() -> Result<Self> {
+        let paths = Paths::discover()?;
         Ok(Self {
-            paths: Paths::discover()?,
+            secrets: crate::secrets::default_store(&paths),
+            paths,
             local_user: local_user(),
             event_capacity: DEFAULT_EVENT_CAPACITY,
-            secrets: Arc::new(KeyringStore),
             agent_socket: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             keepalive: DEFAULT_KEEPALIVE,
@@ -116,6 +120,10 @@ pub struct ConnectRequest {
     /// Host alias (resolved through `ssh_config`) or raw host name.
     pub alias: String,
     pub user_override: Option<String>,
+    /// Log in to the target with this private key only (copy-id
+    /// verification): `publickey` alone, `IdentitiesOnly`, no certificate.
+    /// Jump hosts authenticate as usual.
+    pub only_identity: Option<std::path::PathBuf>,
 }
 
 impl ConnectRequest {
@@ -123,6 +131,7 @@ impl ConnectRequest {
         Self {
             alias: alias.into(),
             user_override: None,
+            only_identity: None,
         }
     }
 }
@@ -240,14 +249,21 @@ struct Inner {
     shutdown: CancellationToken,
     /// Session actors, so a shutdown can wait for clean closes.
     tasks: TaskTracker,
+    // ── Phase 3: snippets ──
+    snippets: Arc<crate::snippets::SnippetStore>,
 }
 
 #[derive(Debug)]
 struct SessionEntry {
     alias: String,
+    user_override: Option<String>,
     commands: mpsc::Sender<SessionCommand>,
     cancel: CancellationToken,
     logs: Arc<Mutex<LogRing>>,
+    probe: bool,
+    started: time::OffsetDateTime,
+    /// Set when the actor returned; the entry then only serves its logs.
+    ended: Option<(time::OffsetDateTime, crate::logs::SessionOutcome)>,
 }
 
 impl Engine {
@@ -255,8 +271,10 @@ impl Engine {
     /// are implemented (they spawn tasks).
     pub fn new(config: EngineConfig) -> Self {
         let (events, _) = broadcast::channel(config.event_capacity.max(16));
+        let snippets = Arc::new(crate::snippets::SnippetStore::new(config.paths.snippets()));
         Self {
             inner: Arc::new(Inner {
+                snippets,
                 config,
                 sftp: Mutex::default(),
                 transfers: Mutex::default(),
@@ -284,9 +302,10 @@ impl Engine {
         let config = self.inner.config.clone();
         tokio::task::spawn_blocking(move || {
             let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
-            let meta: HostMetaFile = load_toml(&config.paths.config_dir.join("hosts.toml"))?;
+            let (meta, meta_warnings) = crate::hosts::load_meta(&config.paths.hosts_meta())?;
             let hosts = inventory(&ssh, &meta, &config.resolve_context(None));
             let mut warnings = ssh.warnings().to_vec();
+            warnings.extend(meta_warnings);
             warnings.extend(
                 hosts
                     .iter()
@@ -316,13 +335,21 @@ impl Engine {
                 id,
                 SessionEntry {
                     alias: request.alias.clone(),
+                    user_override: request.user_override.clone(),
                     commands: tx,
                     cancel: cancel.clone(),
                     logs: Arc::clone(&logs),
+                    probe: request.only_identity.is_some(),
+                    started: time::OffsetDateTime::now_utc(),
+                    ended: None,
                 },
             );
         let ctx = SessionCtx::new(self.clone(), id, cancel, logs);
-        self.inner.tasks.spawn(session::run(ctx, request, rx));
+        let engine = self.clone();
+        self.inner.tasks.spawn(async move {
+            let outcome = session::run(ctx, request, rx).await;
+            engine.session_finished(id, outcome);
+        });
         Ok(id)
     }
 
@@ -382,7 +409,7 @@ impl Engine {
     }
 
     /// The connected transport of `session` (waits while it connects).
-    async fn attach(&self, session: SessionId) -> Result<Attached> {
+    pub(crate) async fn attach(&self, session: SessionId) -> Result<Attached> {
         let tx = {
             let sessions = self
                 .inner
@@ -548,7 +575,7 @@ impl Engine {
 
     // ── Tunnels ─────────────────────────────────────────────────────────
 
-    /// Starts a `-L` / `-R` tunnel on `session` (waits while it connects).
+    /// Starts a `-L` / `-R` / `-D` tunnel on `session` (waits while it connects).
     /// `Listening` or `Failed` follows on the event bus.
     /// A spec reachable from other machines ([`ForwardSpec::is_exposed`])
     /// is refused unless `allow_exposed` (the UI asked the user).
@@ -559,9 +586,8 @@ impl Engine {
         allow_exposed: bool,
     ) -> Result<TunnelId> {
         if spec.is_exposed() && !allow_exposed {
-            let (ForwardSpec::Local { bind, .. } | ForwardSpec::Remote { bind, .. }) = &spec;
             return Err(crate::forward::TunnelError::ExposedNotConfirmed {
-                bind: bind.to_string(),
+                bind: spec.bind().to_string(),
             }
             .into());
         }
@@ -624,7 +650,8 @@ impl Engine {
             .remove(&id);
     }
 
-    /// Log lines recorded for a session (debug panel).
+    /// Log lines recorded for a session (debug panel), live or among the
+    /// last [`ENDED_SESSIONS_KEPT`] ended ones.
     pub fn session_logs(&self, id: SessionId) -> Result<Vec<LogRecord>> {
         let sessions = self
             .inner
@@ -637,6 +664,31 @@ impl Engine {
     }
 
     /// Alias a session was opened for.
+    /// What a session was opened for (alias and user override), to open
+    /// another one to the same account.
+    pub(crate) fn session_target(&self, id: SessionId) -> Option<ConnectRequest> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|e| {
+                let mut request = ConnectRequest::new(e.alias.clone());
+                request.user_override.clone_from(&e.user_override);
+                request
+            })
+    }
+
+    /// The token that ends a session (and everything it runs).
+    pub(crate) fn session_cancel(&self, id: SessionId) -> Option<CancellationToken> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|e| e.cancel.clone())
+    }
+
     pub fn session_alias(&self, id: SessionId) -> Option<String> {
         self.inner
             .sessions
@@ -718,6 +770,351 @@ impl Engine {
     }
 }
 
+// ════ Phase 3: vault and snippets (additive block) ═══════════════════════
+//
+// Every operation here is blocking underneath (Argon2, file I/O) and runs on
+// `spawn_blocking`, so no async task ever waits on it.
+
+impl Engine {
+    /// State of the fallback vault: [`VaultStatus::NotInUse`] when the
+    /// system keyring is the secret store.
+    ///
+    /// [`VaultStatus::NotInUse`]: crate::vault::VaultStatus::NotInUse
+    pub async fn vault_status(&self) -> Result<crate::vault::VaultStatus> {
+        let store = Arc::clone(&self.inner.config.secrets);
+        tokio::task::spawn_blocking(move || {
+            store.vault().map_or(
+                crate::vault::VaultStatus::NotInUse,
+                crate::vault::VaultStore::status,
+            )
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)
+    }
+
+    /// Creates the vault (refused if one exists) and leaves it unlocked.
+    pub async fn vault_create(&self, passphrase: SecretString) -> Result<()> {
+        self.with_vault(move |vault| vault.create_in_place(&passphrase))
+            .await
+    }
+
+    /// Unlocks the vault: remembered secrets become readable and new ones
+    /// can be remembered. While it is locked, sessions still connect; they
+    /// only skip remembering (and say so in the session log).
+    pub async fn vault_unlock(&self, passphrase: SecretString) -> Result<()> {
+        self.with_vault(move |vault| vault.unlock_in_place(&passphrase))
+            .await
+    }
+
+    /// Forgets the vault key and every decrypted secret.
+    pub async fn vault_lock(&self) -> Result<()> {
+        self.with_vault(|vault| {
+            vault.lock();
+            Ok(())
+        })
+        .await
+    }
+
+    /// Re-keys the vault under a new master passphrase.
+    pub async fn vault_change_passphrase(
+        &self,
+        old: SecretString,
+        new: SecretString,
+    ) -> Result<()> {
+        self.with_vault(move |vault| vault.change_passphrase(&old, &new))
+            .await
+    }
+
+    async fn with_vault<T, F>(&self, op: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&crate::vault::VaultStore) -> Result<T> + Send + 'static,
+    {
+        let store = Arc::clone(&self.inner.config.secrets);
+        tokio::task::spawn_blocking(move || {
+            let vault = store.vault().ok_or(crate::vault::VaultError::NotInUse)?;
+            op(vault)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Every snippet of `snippets.toml`, in file order.
+    pub async fn snippets(&self) -> Result<Vec<crate::snippets::Snippet>> {
+        let store = Arc::clone(&self.inner.snippets);
+        tokio::task::spawn_blocking(move || store.list())
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Creates or updates (by id) a snippet after validation; an empty id
+    /// is derived from the name. Returns the snippet as stored.
+    pub async fn save_snippet(
+        &self,
+        snippet: crate::snippets::Snippet,
+    ) -> Result<crate::snippets::Snippet> {
+        let store = Arc::clone(&self.inner.snippets);
+        tokio::task::spawn_blocking(move || store.save(snippet))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    pub async fn delete_snippet(&self, id: &str) -> Result<()> {
+        let store = Arc::clone(&self.inner.snippets);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || store.delete(&id))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Snippets whose scope covers `host_alias` (global ones, those naming
+    /// the alias, those sharing one of its inventory tags). An alias absent
+    /// from the inventory has no tags.
+    pub async fn snippets_for(&self, host_alias: &str) -> Result<Vec<crate::snippets::Snippet>> {
+        let inventory = self.load_hosts().await?;
+        let tags = inventory
+            .hosts
+            .iter()
+            .find(|h| h.alias == host_alias)
+            .map(|h| h.meta.tags.clone())
+            .unwrap_or_default();
+        Ok(self
+            .snippets()
+            .await?
+            .into_iter()
+            .filter(|s| s.applies_to_alias(host_alias, &tags))
+            .collect())
+    }
+}
+
+// ════ end Phase 3 ════════════════════════════════════════════════════════
+
+// ════ Phase 4: metadata, recent sessions, effective config, debug logs,
+// settings (additive block) ══════════════════════════════════════════════
+//
+// File operations run on `spawn_blocking` under an inter-process lock (see
+// `hosts`, `recent`, `settings`); none of them can block a session.
+
+impl Engine {
+    /// Marks `alias` as a favorite (or not) in `hosts.toml`.
+    pub async fn set_favorite(
+        &self,
+        alias: &str,
+        favorite: bool,
+    ) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Favorite(favorite))
+            .await
+    }
+
+    /// Replaces the tags of `alias` (normalized: see [`crate::hosts`]).
+    pub async fn set_tags(&self, alias: &str, tags: Vec<String>) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Tags(tags))
+            .await
+    }
+
+    /// Sets or clears (`None` or blank) the group of `alias`.
+    pub async fn set_group(
+        &self,
+        alias: &str,
+        group: Option<String>,
+    ) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Group(group))
+            .await
+    }
+
+    /// Sets or clears (`None` or blank) the notes of `alias`.
+    pub async fn set_notes(
+        &self,
+        alias: &str,
+        notes: Option<String>,
+    ) -> Result<crate::hosts::HostMeta> {
+        self.edit_meta(alias, crate::hosts::MetaChange::Notes(notes))
+            .await
+    }
+
+    /// One `hosts.toml` edit, then [`EngineEvent::HostMeta`].
+    async fn edit_meta(
+        &self,
+        alias: &str,
+        change: crate::hosts::MetaChange,
+    ) -> Result<crate::hosts::HostMeta> {
+        let path = self.inner.config.paths.hosts_meta();
+        let key = alias.to_owned();
+        let meta =
+            tokio::task::spawn_blocking(move || crate::hosts::update_meta(&path, &key, change))
+                .await
+                .map_err(|_| Error::EngineClosed)??;
+        self.emit(EngineEvent::HostMeta {
+            alias: alias.to_owned(),
+            meta: meta.clone(),
+        });
+        Ok(meta)
+    }
+
+    /// The `limit` most recently connected hosts, most recent first.
+    pub async fn recent(&self, limit: usize) -> Result<Vec<crate::recent::RecentHost>> {
+        let path = self.inner.config.paths.recent();
+        tokio::task::spawn_blocking(move || crate::recent::list(&path, limit))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Empties the recent-sessions list.
+    pub async fn clear_recent(&self) -> Result<()> {
+        let path = self.inner.config.paths.recent();
+        tokio::task::spawn_blocking(move || crate::recent::clear(&path))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        self.emit(EngineEvent::RecentChanged);
+        Ok(())
+    }
+
+    /// Removes `alias` from the recent sessions; `false` if it was absent.
+    pub async fn forget_recent(&self, alias: &str) -> Result<bool> {
+        let path = self.inner.config.paths.recent();
+        let alias = alias.to_owned();
+        let removed = tokio::task::spawn_blocking(move || crate::recent::forget(&path, &alias))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        if removed {
+            self.emit(EngineEvent::RecentChanged);
+        }
+        Ok(removed)
+    }
+
+    /// Records a connected session in the background: a failure is only
+    /// logged (session log + tracing), the session never waits for it.
+    pub(crate) fn note_recent(&self, ctx: &SessionCtx, alias: &str) {
+        let path = self.inner.config.paths.recent();
+        let alias = alias.to_owned();
+        let ctx = ctx.clone();
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let at = time::OffsetDateTime::now_utc();
+            let written =
+                tokio::task::spawn_blocking(move || crate::recent::record(&path, &alias, at))
+                    .await
+                    .map_err(|_| Error::EngineClosed)
+                    .and_then(|r| r);
+            match written {
+                Ok(()) => engine.emit(EngineEvent::RecentChanged),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot record the recent session");
+                    ctx.log(
+                        LogLevel::Warn,
+                        "recent",
+                        format!("not added to recent sessions: {}", e.summary().message),
+                    );
+                }
+            }
+        });
+    }
+
+    /// The `ssh -G` equivalent for `alias`: every effective option with
+    /// its origin, Portico's defaults, and the resolved `ProxyJump` route.
+    pub async fn effective_config(&self, alias: &str) -> Result<crate::effective::EffectiveConfig> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+            Ok(crate::effective::compute(&ssh, &config, &alias, None))
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Sessions whose logs [`Engine::session_logs`] can return: live ones
+    /// and the last [`ENDED_SESSIONS_KEPT`] ended ones, oldest first.
+    pub fn sessions_with_logs(&self) -> Vec<crate::logs::SessionLogInfo> {
+        let mut list: Vec<crate::logs::SessionLogInfo> = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(id, entry)| crate::logs::SessionLogInfo {
+                id: *id,
+                alias: entry.alias.clone(),
+                probe: entry.probe,
+                started: entry.started,
+                ended: entry.ended.as_ref().map(|(at, _)| *at),
+                outcome: entry.ended.as_ref().map(|(_, outcome)| outcome.clone()),
+            })
+            .collect();
+        list.sort_by_key(|info| info.id);
+        list
+    }
+
+    /// Called when a session actor returns: keeps its logs and forgets
+    /// the oldest ended sessions beyond [`ENDED_SESSIONS_KEPT`].
+    fn session_finished(&self, id: SessionId, outcome: crate::logs::SessionOutcome) {
+        let now = time::OffsetDateTime::now_utc();
+        let forgotten: Vec<SessionId> = {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = sessions.get_mut(&id) {
+                entry.ended = Some((now, outcome));
+            }
+            let mut ended: Vec<(time::OffsetDateTime, SessionId)> = sessions
+                .iter()
+                .filter_map(|(id, e)| e.ended.as_ref().map(|(at, _)| (*at, *id)))
+                .collect();
+            ended.sort();
+            let excess = ended.len().saturating_sub(ENDED_SESSIONS_KEPT);
+            let forgotten: Vec<SessionId> =
+                ended.into_iter().take(excess).map(|(_, id)| id).collect();
+            for id in &forgotten {
+                sessions.remove(id);
+            }
+            forgotten
+        };
+        let mut sftp = self
+            .inner
+            .sftp
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for id in &forgotten {
+            sftp.remove(id);
+        }
+    }
+
+    /// `settings.toml` (defaults when missing; an invalid file is an error
+    /// and the UIs fall back to their defaults).
+    pub async fn settings(&self) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::load(&path))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Validates and saves `settings` (other keys of the file are kept);
+    /// returns them as stored.
+    pub async fn save_settings(
+        &self,
+        settings: crate::settings::Settings,
+    ) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::save(&path, &settings))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Remembers the theme without touching the rest of `settings.toml`
+    /// (read and write under one lock: two UIs never lose each other's
+    /// changes).
+    pub async fn set_theme(&self, theme: Option<String>) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::set_theme(&path, theme.as_deref()))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+}
+
+// ════ end Phase 4 ════════════════════════════════════════════════════════
+
 /// Removes a pending prompt and tells the UIs, when the asking side stops
 /// waiting for any reason.
 struct WithdrawPrompt<'a> {
@@ -742,6 +1139,47 @@ impl Drop for WithdrawPrompt<'_> {
         }
     }
 }
+
+// ════ Phase 5: imports (additive block) ═══════════════════════════════════
+
+impl Engine {
+    /// Reads a Termius export and returns what importing it would do.
+    /// Nothing is written (see [`crate::import`]).
+    pub async fn plan_termius_import(
+        &self,
+        path: impl Into<PathBuf>,
+        options: crate::import::ImportOptions,
+    ) -> Result<crate::import::ImportPlan> {
+        let paths = self.inner.config.paths.clone();
+        let path = path.into();
+        tokio::task::spawn_blocking(move || crate::import::termius::plan(&paths, &path, options))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Writes `plan`: `<config_dir>/imports/termius.conf` (replaced in
+    /// full) and the metadata in `hosts.toml` (merged). Emits
+    /// [`EngineEvent::HostMeta`] for each alias whose metadata changed;
+    /// UIs reload the inventory afterwards (new aliases appear once
+    /// `~/.ssh/config` includes the file, see [`crate::import::ImportReport`]).
+    pub async fn apply_import(
+        &self,
+        plan: crate::import::ImportPlan,
+    ) -> Result<crate::import::ImportReport> {
+        let paths = self.inner.config.paths.clone();
+        let now = time::OffsetDateTime::now_utc();
+        let (report, changed) =
+            tokio::task::spawn_blocking(move || crate::import::apply(&paths, &plan, now))
+                .await
+                .map_err(|_| Error::EngineClosed)??;
+        for (alias, meta) in changed {
+            self.emit(EngineEvent::HostMeta { alias, meta });
+        }
+        Ok(report)
+    }
+}
+
+// ════ end Phase 5 ════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -795,5 +1233,269 @@ mod tests {
             engine.respond(id, PromptResponse::Cancel),
             Err(Error::UnknownPrompt(_))
         ));
+    }
+
+    // ── Phase 3: vault and snippets ──
+
+    fn vault_engine(root: &std::path::Path) -> Engine {
+        let paths = Paths::rooted(root);
+        Engine::new(EngineConfig {
+            secrets: Arc::new(crate::vault::VaultStore::open_for_tests(paths.vault())),
+            ..engine(root).config().clone()
+        })
+    }
+
+    fn secret(s: &str) -> SecretString {
+        SecretString::from(s.to_owned())
+    }
+
+    #[tokio::test]
+    async fn vault_lifecycle() {
+        use crate::secrets::SecretKey;
+        use crate::vault::VaultStatus;
+        use secrecy::ExposeSecret;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = vault_engine(dir.path());
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            VaultStatus::Absent
+        );
+        let e = engine
+            .vault_unlock(secret("correct horse"))
+            .await
+            .expect_err("missing");
+        assert_eq!(e.summary().code, "vault_missing");
+
+        engine
+            .vault_create(secret("correct horse"))
+            .await
+            .expect("create");
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            VaultStatus::Unlocked
+        );
+        let e = engine
+            .vault_create(secret("correct horse"))
+            .await
+            .expect_err("exists");
+        assert_eq!(e.summary().code, "vault_exists");
+
+        // The session code path: secrets go through `config().secrets`.
+        let key = SecretKey::KeyPassphrase {
+            fingerprint: "SHA256:k".into(),
+        };
+        let store = Arc::clone(&engine.config().secrets);
+        store.set(&key, &secret("pw")).expect("set");
+
+        engine.vault_lock().await.expect("lock");
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            VaultStatus::Locked
+        );
+        // Locked: lookups fail softly (the session treats it as "nothing
+        // remembered") and remembering is refused with a typed error.
+        assert_eq!(
+            store.get(&key).expect_err("locked").summary().code,
+            "vault_locked"
+        );
+        assert_eq!(
+            store
+                .set(&key, &secret("x"))
+                .expect_err("locked")
+                .summary()
+                .code,
+            "vault_locked"
+        );
+
+        let e = engine
+            .vault_unlock(secret("wrong horse"))
+            .await
+            .expect_err("wrong");
+        assert_eq!(e.summary().code, "vault_wrong_passphrase");
+        engine
+            .vault_unlock(secret("correct horse"))
+            .await
+            .expect("unlock");
+        assert_eq!(
+            store.get(&key).expect("get").expect("some").expose_secret(),
+            "pw"
+        );
+
+        engine
+            .vault_change_passphrase(secret("correct horse"), secret("battery staple"))
+            .await
+            .expect("rekey");
+        engine.vault_lock().await.expect("lock");
+        engine
+            .vault_unlock(secret("battery staple"))
+            .await
+            .expect("unlock");
+    }
+
+    #[tokio::test]
+    async fn vault_not_in_use_with_another_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path());
+        assert_eq!(
+            engine.vault_status().await.expect("status"),
+            crate::vault::VaultStatus::NotInUse
+        );
+        let e = engine
+            .vault_unlock(secret("correct horse"))
+            .await
+            .expect_err("n/a");
+        assert_eq!(e.summary().code, "vault_not_in_use");
+    }
+
+    #[tokio::test]
+    async fn snippet_crud_and_scope() {
+        use crate::snippets::{Snippet, SnippetScope};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+        std::fs::create_dir_all(root.join("config")).expect("mkdir");
+        std::fs::write(
+            root.join(".ssh/config"),
+            "Host prod\n  HostName 10.0.0.1\nHost dev\n",
+        )
+        .expect("w");
+        std::fs::write(
+            root.join("config/hosts.toml"),
+            "[hosts.prod]\ntags = [\"Prod\"]\n",
+        )
+        .expect("w");
+        let engine = engine(root);
+        assert!(engine.snippets().await.expect("list").is_empty());
+
+        let make = |name: &str, scope| Snippet {
+            id: String::new(),
+            name: name.into(),
+            command: "uptime".into(),
+            description: None,
+            scope,
+            run: true,
+        };
+        let global = engine
+            .save_snippet(make("Up", SnippetScope::Global))
+            .await
+            .expect("save");
+        assert_eq!(global.id, "up");
+        let tagged = engine
+            .save_snippet(make("Up", SnippetScope::Tags(vec!["prod".into()])))
+            .await
+            .expect("save");
+        assert_eq!(tagged.id, "up-2");
+        engine
+            .save_snippet(make("Dev only", SnippetScope::Hosts(vec!["dev".into()])))
+            .await
+            .expect("save");
+
+        let ids = |list: Vec<Snippet>| list.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(engine.snippets_for("prod").await.expect("for")),
+            ["up", "up-2"]
+        );
+        assert_eq!(
+            ids(engine.snippets_for("dev").await.expect("for")),
+            ["up", "dev-only"]
+        );
+        assert_eq!(
+            ids(engine.snippets_for("unknown").await.expect("for")),
+            ["up"]
+        );
+
+        engine.delete_snippet("up-2").await.expect("delete");
+        assert_eq!(engine.snippets().await.expect("list").len(), 2);
+        let e = engine.delete_snippet("up-2").await.expect_err("gone");
+        assert_eq!(e.summary().code, "snippet_not_found");
+    }
+
+    // ── Phase 4 ──
+
+    #[tokio::test]
+    async fn metadata_edits_emit_events_and_show_in_the_inventory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+        std::fs::write(root.join(".ssh/config"), "Host prod\n  HostName 10.0.0.1\n").expect("w");
+        let engine = engine(root);
+        let mut events = engine.subscribe();
+
+        let meta = engine.set_favorite("prod", true).await.expect("favorite");
+        assert!(meta.favorite);
+        match events.recv().await.expect("event") {
+            EngineEvent::HostMeta { alias, meta } => {
+                assert_eq!(alias, "prod");
+                assert!(meta.favorite);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        engine
+            .set_tags("prod", vec!["#DB".into(), "db".into()])
+            .await
+            .expect("tags");
+        engine
+            .set_group("prod", Some("Data".into()))
+            .await
+            .expect("group");
+        let meta = engine
+            .set_notes("prod", Some("on call: ops".into()))
+            .await
+            .expect("notes");
+        assert_eq!(meta.tags, ["DB"]);
+        let e = engine
+            .set_group("prod", Some("x".repeat(65)))
+            .await
+            .expect_err("long");
+        assert_eq!(e.summary().code, "host_group");
+
+        let inv = engine.load_hosts().await.expect("load");
+        let host = inv.hosts.first().expect("prod");
+        assert_eq!(host.meta.group.as_deref(), Some("Data"));
+        assert_eq!(host.meta.notes.as_deref(), Some("on call: ops"));
+        assert!(root.join("config/hosts.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".ssh/config")).expect("read"),
+            "Host prod\n  HostName 10.0.0.1\n",
+            "the ssh config is never written"
+        );
+        let json = serde_json::to_string(&EngineEvent::HostMeta {
+            alias: "prod".into(),
+            meta: host.meta.clone(),
+        })
+        .expect("json");
+        assert!(
+            json.starts_with(r#"{"type":"host_meta","alias":"prod","meta":{"#),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_and_effective_config_through_the_engine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+        std::fs::write(root.join(".ssh/config"), "Host p\n  Port 2200\n").expect("w");
+        let engine = engine(root);
+
+        assert_eq!(
+            engine.settings().await.expect("defaults"),
+            crate::settings::Settings::default()
+        );
+        let mut settings = crate::settings::Settings {
+            theme: Some("basalt".into()),
+            ..crate::settings::Settings::default()
+        };
+        settings.keymap.tui.insert("quit".into(), "q".into());
+        let stored = engine.save_settings(settings.clone()).await.expect("save");
+        assert_eq!(stored, settings);
+        assert_eq!(engine.settings().await.expect("load"), settings);
+
+        let view = engine.effective_config("p").await.expect("view");
+        let port = view.options.iter().find(|o| o.key == "port").expect("port");
+        assert_eq!(port.values, ["2200"]);
+        assert_eq!(view.route.len(), 1);
     }
 }

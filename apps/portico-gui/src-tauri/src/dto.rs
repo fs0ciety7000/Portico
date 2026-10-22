@@ -18,9 +18,14 @@ pub(crate) struct HostDto {
     pub identity_files: Vec<String>,
     pub local_forwards: Vec<String>,
     pub remote_forwards: Vec<String>,
+    /// `DynamicForward` values (`-D` SOCKS proxies), offered in Tunnels.
+    pub dynamic_forwards: Vec<String>,
     pub tags: Vec<String>,
     pub group: Option<String>,
     pub favorite: bool,
+    /// Free text from `hosts.toml` (validated by the core: `\n` is its only
+    /// control character, no bidi or invisible character).
+    pub notes: Option<String>,
     pub source: String,
     pub warnings: Vec<String>,
 }
@@ -37,9 +42,11 @@ impl From<&HostEntry> for HostDto {
             identity_files: r.identity_files.iter().map(|p| display_path(p)).collect(),
             local_forwards: r.local_forwards.clone(),
             remote_forwards: r.remote_forwards.clone(),
+            dynamic_forwards: r.dynamic_forwards.clone(),
             tags: h.meta.tags.clone(),
             group: h.meta.group.clone(),
             favorite: h.meta.favorite,
+            notes: h.meta.notes.clone(),
             source: format!("{}:{}", display_path(&h.source.file), h.source.line),
             warnings: r.warnings.iter().map(|w| w.message.clone()).collect(),
         }
@@ -48,7 +55,7 @@ impl From<&HostEntry> for HostDto {
 
 /// `~/…` for paths under the home directory (shorter, and does not expose
 /// the account's home path in screenshots).
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|home| {
@@ -57,6 +64,64 @@ fn display_path(path: &Path) -> String {
                 .map(|rest| format!("~/{}", rest.display()))
         })
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Text that may come from a server or a hand-edited file (log messages,
+/// error summaries, config values), made safe to display on one line: the
+/// same escapes as `LogRecord::to_line` (`\n`, `\r`, `\t`, then `\u{…}` for
+/// other control characters and for bidi or invisible format characters),
+/// and capped at `max_chars` characters (`…` marks a cut).
+pub(crate) fn escape_display(text: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max_chars.saturating_mul(4)));
+    for (count, c) in text.chars().enumerate() {
+        if count >= max_chars {
+            out.push('…');
+            break;
+        }
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || is_hidden_format(c) => out.extend(c.escape_unicode()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Bidi controls, invisible format characters and line or paragraph
+/// separators (the set `portico-core` refuses in single-line fields).
+fn is_hidden_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{00ad}'
+            | '\u{200b}'
+            | '\u{200c}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{feff}'
+            | '\u{e0000}'..='\u{e007f}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
+}
+
+/// An `ErrorSummary` whose texts went through [`escape_display`].
+pub(crate) fn safe_summary(e: &portico_core::ErrorSummary) -> portico_core::ErrorSummary {
+    portico_core::ErrorSummary {
+        code: escape_display(&e.code, 64),
+        message: escape_display(&e.message, 512),
+        hint: e.hint.as_deref().map(|h| escape_display(h, 512)),
+    }
+}
+
+/// Unix time in milliseconds (the webview formats it in local time).
+pub(crate) fn unix_ms(at: time::OffsetDateTime) -> i64 {
+    i64::try_from(at.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +204,27 @@ mod tests {
             display_path(Path::new("/etc/ssh/ssh_config")),
             "/etc/ssh/ssh_config"
         );
+    }
+
+    #[test]
+    fn display_text_is_escaped_like_log_lines() {
+        assert_eq!(
+            escape_display("a\nb\t\u{1b}[31m\u{202e}gpj.exe", 100),
+            "a\\nb\\t\\u{1b}[31m\\u{202e}gpj.exe"
+        );
+        assert_eq!(
+            escape_display("zero\u{200b}width", 100),
+            "zero\\u{200b}width"
+        );
+        assert_eq!(escape_display("plain text, é ü", 100), "plain text, é ü");
+        assert_eq!(escape_display("abcdef", 3), "abc…");
+        let summary = safe_summary(&portico_core::ErrorSummary {
+            code: "auth_failed".into(),
+            message: "server said\r\nfake prompt".into(),
+            hint: Some("\u{2066}hint".into()),
+        });
+        assert_eq!(summary.message, "server said\\r\\nfake prompt");
+        assert_eq!(summary.hint.as_deref(), Some("\\u{2066}hint"));
     }
 
     #[test]
