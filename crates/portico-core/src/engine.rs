@@ -1948,13 +1948,29 @@ mod tests {
     async fn cancelling_start_recording_releases_the_terminal() {
         let dir = tempfile::tempdir().expect("tempdir");
         let engine = engine(dir.path());
+        let mut events = engine.subscribe();
         let (id, tap) = fake_terminal(&engine);
-        // Dropped right after its first poll, while the file is created.
-        let cancelled = tokio::time::timeout(Duration::ZERO, engine.start_recording(id)).await;
-        assert!(cancelled.is_err(), "the start was cancelled");
-        // The terminal is released (never stuck in "starting")…
+        // Dropped right after its first poll. The detached start then either
+        // gives up (the terminal is released and its file removed) or wins
+        // the race and records: the caller learns it from `Started`, and a
+        // stop releases the terminal. Both outcomes are legitimate; neither
+        // may leave the terminal stuck in "starting".
+        let first = tokio::time::timeout(Duration::ZERO, engine.start_recording(id)).await;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut kept = Vec::new();
         let info = loop {
+            if engine.is_recording(id) {
+                let name = engine
+                    .list_recordings()
+                    .await
+                    .expect("list")
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>();
+                kept = name;
+                engine.stop_recording(id).expect("stop the start that won");
+                wait_stopped(&mut events, id).await;
+            }
             match engine.start_recording(id).await {
                 Ok(info) => break info,
                 Err(e)
@@ -1966,15 +1982,20 @@ mod tests {
                 Err(e) => panic!("the terminal stays reserved: {e}"),
             }
         };
-        // …and the abandoned file is gone: only the new recording exists.
-        let names: Vec<String> = engine
-            .list_recordings()
-            .await
-            .expect("list")
-            .into_iter()
-            .map(|entry| entry.name)
-            .collect();
-        assert_eq!(names, [info.name]);
+        assert!(
+            first.is_err() || !kept.is_empty(),
+            "a completed start is recording"
+        );
+        // No abandoned file: only the new recording and, if the first start
+        // won, its complete recording.
+        let entries = engine.list_recordings().await.expect("list");
+        assert!(entries.iter().all(|entry| entry.valid), "no torn file");
+        let mut names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+        names.sort();
+        let mut expected = kept;
+        expected.push(info.name);
+        expected.sort();
+        assert_eq!(names, expected);
         tap.close();
         assert!(engine.shutdown_and_wait(Duration::from_secs(5)).await);
     }
