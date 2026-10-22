@@ -5,6 +5,8 @@
   import StatusBadge from "./StatusBadge.svelte";
   import Mark from "./Mark.svelte";
   import { keymap } from "../state/keymap.svelte";
+  import { hosts } from "../state/hosts.svelte";
+  import OriginBadge from "./OriginBadge.svelte";
 
   let {
     host,
@@ -15,6 +17,8 @@
     onfavorite,
     onedit,
     onlogs,
+    onduplicate,
+    ondelete,
   }: {
     host: Host | undefined;
     session: SessionView | undefined;
@@ -26,13 +30,52 @@
     onedit: (host: Host) => void;
     /** Session logs of this host's latest session. */
     onlogs: () => void;
+    /** "Duplicate as Portico host…" (phase 6b). */
+    onduplicate: (host: Host) => void;
+    /** "Delete host" (a Portico host). */
+    ondelete: (host: Host) => void;
   } = $props();
 
   const status = $derived(describe(session));
   const live = $derived(status.busy || session?.phase.phase === "connected");
+  /** A Portico host: the whole host is edited, not only its metadata. */
+  const editKey = $derived(host?.origin === "portico" ? (keymap.label("hosts.edit") ?? keymap.label("host.edit")) : keymap.label("hosts.edit"));
+
+  let copied = $state(false);
+  let includeEl: HTMLInputElement | undefined = $state();
+  const COPIED_FEEDBACK_MS = 1600;
+
+  async function copyInclude(line: string) {
+    try {
+      await navigator.clipboard.writeText(line);
+      copied = true;
+      setTimeout(() => (copied = false), COPIED_FEEDBACK_MS);
+    } catch {
+      // No clipboard here: select the line for a manual copy.
+      includeEl?.focus();
+      includeEl?.select();
+    }
+  }
 </script>
 
 <section class="details">
+  {#if hosts.showBanner && hosts.include}
+    {@const line = hosts.include.line}
+    <div class="banner" role="note" aria-label="Include line for Portico hosts" transition:fly={{ y: -6, duration: dur("base") }}>
+      <svg class="info" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 7.25v4M8 4.9v.1" /></svg>
+      <div class="banner-body">
+        <p>To use your Portico hosts with ssh, scp and git, add this line at the top of <span class="mono">~/.ssh/config</span>:</p>
+        <div class="include">
+          <input class="mono" readonly value={line} bind:this={includeEl} aria-label="Include line" onfocus={(e) => e.currentTarget.select()} />
+          <button class="secondary small" onclick={() => void copyInclude(line)}>{copied ? "Copied" : "Copy"}</button>
+        </div>
+        <p class="muted small">Portico never edits that file. Your Portico hosts already work here without it.</p>
+      </div>
+      <button class="dismiss" onclick={() => hosts.dismissBanner()} aria-label="Dismiss" title="Dismiss">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
+      </button>
+    </div>
+  {/if}
   {#if host}
     {#key host.alias}
       <div class="content" in:fly={{ y: 6, duration: dur("base") }}>
@@ -50,6 +93,7 @@
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m8 1.9 1.8 3.8 4.1.5-3 2.8.8 4.1L8 11.1l-3.7 2 .8-4.1-3-2.8 4.1-.5Z" /></svg>
               </button>
+              <OriginBadge origin={host.origin} />
             </div>
             <p class="target mono">
               {host.user ?? "(local user)"}@{host.hostname}<span class="port">:{host.port}</span>
@@ -57,8 +101,12 @@
           </div>
           <div class="actions">
             <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
-            <button class="secondary" onclick={() => onedit(host)} title={keymap.tip("Edit tags, group and notes", "hosts.edit")}>
-              Edit{#if keymap.label("hosts.edit")} <kbd>{keymap.label("hosts.edit")}</kbd>{/if}
+            <button
+              class="secondary"
+              onclick={() => onedit(host)}
+              title={host.origin === "portico" ? keymap.tip("Edit host…", "host.edit") : keymap.tip("Edit tags, group and notes", "hosts.edit")}
+            >
+              Edit{#if editKey} <kbd>{editKey}</kbd>{/if}
             </button>
             {#if live}
               <button class="secondary" onclick={() => ondisconnect(host)}>
@@ -101,7 +149,19 @@
           {#each host.remoteForwards as f (f)}
             <dt>Forward −R</dt><dd class="mono">{f}</dd>
           {/each}
-          <dt>Defined in</dt><dd class="mono muted">{host.source}</dd>
+          <dt>Defined in</dt>
+          <dd class="defined">
+            <span class="mono muted">{host.source}</span>
+            {#if host.origin === "portico"}
+              <span class="origin-note">Portico's own file, editable here.</span>
+              <button class="link" onclick={() => ondelete(host)}>Delete host{#if keymap.label("host.delete")} <kbd>{keymap.label("host.delete")}</kbd>{/if}</button>
+            {:else}
+              <span class="origin-note">Read-only: Portico never edits {host.origin === "imported" ? "imported hosts" : "~/.ssh/config"}.</span>
+              <button class="link" onclick={() => onduplicate(host)}>
+                Duplicate as Portico host…{#if keymap.label("host.duplicate")} <kbd>{keymap.label("host.duplicate")}</kbd>{/if}
+              </button>
+            {/if}
+          </dd>
         </dl>
 
         {#if session?.phase.phase === "failed"}
@@ -133,10 +193,65 @@
 
 <style>
   .details {
+    display: flex;
+    flex-direction: column;
     padding: var(--space-6) var(--space-7);
     overflow-y: auto;
     min-height: 0;
   }
+  .details > .placeholder { flex: 1 1 auto; height: auto; }
+  /* The Include line (phase 6b): information, not an alarm. */
+  .banner {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: var(--space-3);
+    align-items: start;
+    margin-bottom: var(--space-5);
+    padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+    border: 1px solid var(--border-subtle);
+    border-left: 2px solid var(--accent);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+  }
+  .banner p { margin: 0; }
+  .banner-body { display: grid; gap: var(--space-2); min-width: 0; }
+  .banner .info { width: 16px; height: 16px; margin-top: 2px; fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linecap: round; }
+  .include { display: flex; gap: var(--space-2); align-items: center; max-width: 72ch; }
+  .include input {
+    flex: 1;
+    min-width: 0;
+    height: 30px;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    outline: none;
+  }
+  .include input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  button.secondary.small { height: 30px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+  .small { font-size: var(--text-xs); }
+  .dismiss {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+  }
+  .dismiss:hover { background: var(--bg-elevated); color: var(--text-primary); }
+  .dismiss svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .defined { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); word-break: normal; }
+  .defined .mono { word-break: break-all; }
+  .origin-note { color: var(--text-muted); font-size: var(--text-sm); }
+  .defined button.link { margin-left: 0; height: 24px; font-size: var(--text-sm); color: var(--text-secondary); }
+  .defined button.link:hover { color: var(--text-primary); }
   header {
     display: flex;
     flex-wrap: wrap;

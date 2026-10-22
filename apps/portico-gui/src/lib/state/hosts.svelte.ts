@@ -3,9 +3,33 @@
 // the core), recent hosts, folded sidebar sections, the editor and the
 // "clear recent" confirmation. Metadata changes arrive as `host_meta`
 // events (from this window or another UI) and update hosts in place.
-import type { EngineEvent, Host, HostMeta, RecentHost } from "../api";
+//
+// Phase 6b: hosts created in Portico (its own hosts.conf). The host dialogs
+// (create, edit, read-only notice, duplicate, delete), the Include line
+// banner, and `hosts_changed`, on which the inventory is reloaded (App
+// keeps the selection, or moves it to `pendingSelect`).
+import type { EngineEvent, Host, HostMeta, ManagedInclude, RecentHost } from "../api";
 import { backend } from "../backend";
 import { workspace } from "./workspace.svelte";
+
+export type HostDialog =
+  | { kind: "create" }
+  | { kind: "edit"; alias: string }
+  /** A host of ~/.ssh/config or of an import: never edited, duplicate offered. */
+  | { kind: "read-only"; alias: string }
+  | { kind: "duplicate"; alias: string }
+  | { kind: "delete"; alias: string };
+
+/** The Include line whose banner was dismissed (per machine, browser storage). */
+const BANNER_KEY = "portico.include.dismissed";
+
+function loadDismissed(): string | null {
+  try {
+    return localStorage.getItem(BANNER_KEY);
+  } catch {
+    return null;
+  }
+}
 
 /** Folded sections are a per-machine convenience (browser storage). */
 const COLLAPSED_KEY = "portico.sidebar.collapsed";
@@ -39,9 +63,74 @@ class Hosts {
 
   byAlias: Record<string, Host> = $derived(Object.fromEntries(this.all.map((h) => [h.alias, h])));
 
+  /** The open host dialog (phase 6b). */
+  dialog: HostDialog | null = $state(null);
+  /** The Include line for hosts.conf, and whether ~/.ssh/config has it. */
+  include: ManagedInclude | null = $state(null);
+  dismissed: string | null = $state(loadDismissed());
+  /** Alias to select once the reloaded list has it (after a create, rename, duplicate). */
+  pendingSelect: string | null = $state(null);
+  /** Reloads the inventory (set by App: the same `load` as at startup). */
+  onchanged: (() => void) | null = null;
+
+  hasPortico = $derived(this.all.some((h) => h.origin === "portico"));
+  /** "Add this line" banner: Portico hosts exist, OpenSSH does not see them yet. */
+  showBanner = $derived(this.hasPortico && !!this.include && !this.include.active && this.dismissed !== this.include.line);
+
   set(list: Host[]) {
     this.all = list;
     this.revision++;
+    if (this.hasPortico) void this.loadInclude();
+  }
+
+  async loadInclude() {
+    try {
+      this.include = await backend.managedInclude();
+    } catch (e) {
+      workspace.notify(e);
+    }
+  }
+
+  dismissBanner() {
+    if (!this.include) return;
+    this.dismissed = this.include.line;
+    try {
+      localStorage.setItem(BANNER_KEY, this.include.line);
+    } catch {
+      // Not remembered: it comes back next time.
+    }
+  }
+
+  /** "Edit host…": the host dialog for a Portico host, the read-only notice otherwise. */
+  openEdit(alias: string) {
+    const host = this.byAlias[alias];
+    if (!host) return;
+    this.dialog = host.origin === "portico" ? { kind: "edit", alias } : { kind: "read-only", alias };
+  }
+
+  /** "Delete host": only a Portico host; the others are read-only. */
+  openDelete(alias: string) {
+    const host = this.byAlias[alias];
+    if (!host) return;
+    this.dialog = host.origin === "portico" ? { kind: "delete", alias } : { kind: "read-only", alias };
+  }
+
+  /** hosts.conf changed: reload, then select `alias` when given. */
+  changed(alias?: string) {
+    if (alias) this.pendingSelect = alias;
+    this.onchanged?.();
+  }
+
+  async remove(alias: string) {
+    try {
+      await backend.deleteHost(alias);
+      this.dialog = null;
+      this.changed();
+      workspace.notify({ code: "host_deleted", message: `${alias} deleted`, hint: null }, "info");
+    } catch (e) {
+      this.dialog = null;
+      workspace.notify(e);
+    }
   }
 
   async loadRecent() {
@@ -55,6 +144,7 @@ class Hosts {
   onEvent(ev: EngineEvent) {
     if (ev.type === "host_meta") this.#apply(ev.alias, ev.meta);
     else if (ev.type === "recent_changed") void this.loadRecent();
+    else if (ev.type === "hosts_changed") this.onchanged?.();
   }
 
   #apply(alias: string, meta: HostMeta) {

@@ -35,7 +35,10 @@ SFTP ; snippet avec placeholder, puis refus du collage multi-ligne sous `sh` (sa
 exécution à la place ; favori, tags, groupe et notes (`hosts.toml`), la sélection suivant l'hôte déplacé ;
 ProxyJump ; panneau de logs et configuration effective (valeur sensible masquée, absente du DOM) ; tunnel
 `-L` (affiché avec sa spec, trafic HTTP, arrêt) ; thème mémorisé (`settings.toml`) ; redémarrage : déverrouillage
-du vault au démarrage et connexion par clé sans prompt.
+du vault au démarrage et connexion par clé sans prompt ; hôte Portico (phase 6b) : « Add host… » avec la clé
+`bootstrap` choisie parmi les clés découvertes et un mot de passe mémorisé (absent de `hosts.conf`, chiffré dans
+le vault, `~/.ssh/config` intact), badge et bandeau `Include`, connexion sans prompt, port modifié puis rétabli,
+suppression confirmée.
 
 Une capture est prise à chaque étape clé (et à chaque échec d'attente) dans `<racine>/shots/`. La racine
 jetable est supprimée à la fin, sauf avec `E2E_KEEP=1` ou si elle est donnée par `E2E_ROOT=<dossier>`.

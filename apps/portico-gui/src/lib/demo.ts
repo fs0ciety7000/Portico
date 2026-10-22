@@ -5,20 +5,35 @@
 // new host key, `db-prod` goes through a jump host and asks for a password
 // (anything but "wrong" works), `staging` presents a changed host key.
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
+import type { EngineEvent, ErrorSummary, Host, HostOrigin, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
+import { demoHostsBackend, demoPorticoHosts } from "./demo-hosts";
 import { demoKeys } from "./demo-keys";
 import { demoMeta } from "./demo-meta";
 import { demoImport } from "./demo-import";
 import { demoRecording } from "./demo-recording";
 
-const base = { identityFiles: [], localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [], group: null as string | null, notes: null as string | null };
+const base = {
+  identityFiles: [],
+  localForwards: [],
+  remoteForwards: [],
+  dynamicForwards: [] as string[],
+  warnings: [],
+  group: null as string | null,
+  notes: null as string | null,
+  origin: "ssh_config" as HostOrigin,
+  managed: null,
+};
 
 // `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).
 const grouped = new URLSearchParams(location.search).get("groups") !== "none";
 const group = (name: string) => (grouped ? name : null);
 
+const created = demoPorticoHosts();
+
 export const demoHosts: Host[] = [
+  // hosts.conf is read before ~/.ssh/config (as if included at its top).
+  ...created.filter((h) => h.origin === "portico"),
   {
     ...base,
     alias: "db-prod",
@@ -42,6 +57,8 @@ export const demoHosts: Host[] = [
   ...(new URLSearchParams(location.search).get("long") === "1"
     ? [{ ...base, alias: "analytics-warehouse-replica-eu-west-3-standby", hostname: "10.0.7.31", user: "analyst", port: 22, proxyJump: ["bastion"], tags: ["analytics"], favorite: true, group: group("Production"), source: "~/.ssh/config:44" }]
     : []),
+  // The Termius import file, included at the end of ~/.ssh/config.
+  ...created.filter((h) => h.origin === "imported"),
 ];
 
 export const demoThemes: ThemeInfo[] = [
@@ -370,12 +387,16 @@ function demoSearch(q: string): Host[] {
   );
 }
 
+const managed = demoHostsBackend({ emit, hosts: demoHosts, keys: () => keyDemo.listKeys() });
+
 export const demoBackend: Backend = {
   ...keyDemo,
   ...meta.backend,
   ...demoImport,
   ...rec.backend,
-  listHosts: async () => demoHosts,
+  ...managed,
+  // Copies: the UI's state never aliases the simulation's own objects.
+  listHosts: async () => demoHosts.map((h) => structuredClone(h)),
   searchHosts: async (q) => demoSearch(q),
   listThemes: async () => demoThemes,
   homeDir: async () => "/home/demo",

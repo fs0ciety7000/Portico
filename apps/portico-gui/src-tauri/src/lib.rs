@@ -9,6 +9,7 @@ mod commands;
 mod debug;
 mod dto;
 mod files;
+mod hosts;
 mod import;
 mod keys;
 mod meta;
@@ -135,6 +136,11 @@ fn run_app() {
             snippets::save_snippet,
             snippets::delete_snippet,
             snippets::run_snippet,
+            hosts::create_host,
+            hosts::update_host,
+            hosts::delete_host,
+            hosts::duplicate_host,
+            hosts::managed_include,
             meta::set_favorite,
             meta::set_tags,
             meta::check_tags,

@@ -213,6 +213,21 @@ async fn find_key(engine: &Engine, id: &str) -> Result<LocalKey, ErrorSummary> {
         .ok_or_else(|| unknown_key(id))
 }
 
+/// The private key file of the key named `id` in `keys` (a listing made by
+/// the engine): the only way a webview choice becomes a path. An id that
+/// is not a discovered key's file name (a path, `..`, a public-only key)
+/// is refused.
+pub(crate) fn private_key_path(
+    keys: &[LocalKey],
+    id: &str,
+) -> Result<std::path::PathBuf, ErrorSummary> {
+    let key = keys
+        .iter()
+        .find(|k| key_id(k).as_deref() == Some(id))
+        .ok_or_else(|| unknown_key(id))?;
+    private_path_of(key, id)
+}
+
 fn unknown_key(id: &str) -> ErrorSummary {
     ErrorSummary {
         code: "key_unknown".into(),
