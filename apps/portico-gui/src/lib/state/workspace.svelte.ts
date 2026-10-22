@@ -176,6 +176,8 @@ class Workspace {
     tab.terminal = null;
     tab.end = null;
     tab.error = null;
+    // The title belonged to the previous shell (OSC 0/2): a new one starts untitled.
+    tab.title = "";
     tab.generation++;
   }
 

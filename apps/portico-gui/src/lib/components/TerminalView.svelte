@@ -379,7 +379,7 @@
   const endIsError = $derived(!!tab.end && tab.end.kind === "exited" && (!!tab.end.signal || !!tab.end.status));
 </script>
 
-<section class="terminal" class:hidden={!active} aria-hidden={!active}>
+<section class="terminal" class:hidden={!active} aria-hidden={!active} aria-busy={waiting}>
   <div class="xterm-host" class:dimmed={!!tab.end || !!failed} bind:this={host}></div>
 
   {#if waiting || cancelled}

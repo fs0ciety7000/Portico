@@ -316,7 +316,36 @@
     color: var(--text-secondary);
     font-size: var(--text-sm);
   }
-  .modal :global(.check input) { accent-color: var(--accent); }
+  /* Drawn here, not native: WebKitGTK ignores `color-scheme: dark` and
+     `accent-color` for an unchecked box and paints it white. */
+  .modal :global(.check input) {
+    appearance: none;
+    display: inline-grid;
+    flex: 0 0 auto;
+    place-content: center;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    transition:
+      background var(--motion-fast) var(--ease-standard),
+      border-color var(--motion-fast) var(--ease-standard);
+  }
+  .modal :global(.check input::after) {
+    content: "";
+    width: 7px;
+    height: 4px;
+    margin-top: -2px;
+    border: solid var(--text-on-accent);
+    border-width: 0 0 1.5px 1.5px;
+    transform: rotate(-45deg) scale(0);
+    transition: transform var(--motion-fast) var(--ease-standard);
+  }
+  .modal :global(.check input:hover) { border-color: var(--accent); }
+  .modal :global(.check input:checked) { border-color: var(--accent); background: var(--accent); }
+  .modal :global(.check input:checked::after) { transform: rotate(-45deg) scale(1); }
   .modal :global(.inline-error) {
     display: grid;
     gap: 2px;

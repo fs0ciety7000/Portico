@@ -5,7 +5,7 @@
   import { backend } from "./lib/backend";
   import { isMac } from "./lib/keys";
   import { dur } from "./lib/motion";
-  import { buildRows, rowHost, type Row } from "./lib/hostlist";
+  import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
   import { isLive, workspace } from "./lib/state/workspace.svelte";
   import { files } from "./lib/state/files.svelte";
   import { tunnels } from "./lib/state/tunnels.svelte";
@@ -79,6 +79,21 @@
   const targetAlias = $derived(tab ? tab.alias : selectedHost?.alias);
   const targetHost = $derived(targetAlias ? hosts.byAlias[targetAlias] : undefined);
 
+  // The selection is an index: when the list changes under it (an edit
+  // moves the host to a group, a connection adds "Recent"), it follows its
+  // row instead of landing on whatever row took its place. A new search
+  // forgets it (`anchor = undefined`): the best match gets the selection.
+  let anchor: Row | undefined;
+  $effect.pre(() => {
+    const now = rows;
+    untrack(() => {
+      const at = relocate(now, anchor);
+      if (at >= 0) selected = at;
+    });
+  });
+  $effect(() => {
+    anchor = rows[selected];
+  });
   // Keep the selection on an existing row.
   $effect(() => {
     if (selected > rows.length - 1) selected = Math.max(0, rows.length - 1);
@@ -171,12 +186,16 @@
     lastQuery = q;
     if (!q) {
       results = [];
-      if (fresh) selected = firstHost();
+      if (fresh) {
+        anchor = undefined;
+        selected = firstHost();
+      }
       return;
     }
     backend.searchHosts(q).then(
       (r) => {
         if (q !== query.trim()) return;
+        if (fresh) anchor = undefined;
         results = r.map((h) => hosts.byAlias[h.alias] ?? h);
         if (fresh) selected = 0;
       },

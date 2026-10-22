@@ -207,14 +207,6 @@
     overflow-wrap: anywhere;
   }
   .server-label { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: 0.04em; }
-  .check {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    color: var(--text-secondary);
-    font-size: var(--text-sm);
-  }
-  .check input { accent-color: var(--accent); }
   .remember-note { color: var(--text-muted); font-size: var(--text-xs); }
   .focus-sink {
     position: absolute;

@@ -46,6 +46,12 @@
   const running = $derived(queue.filter((t) => t.status === "queued" || t.status === "running").length);
 
   let list: HTMLDivElement | undefined = $state();
+  let crumbsEl: HTMLElement | undefined = $state();
+  // A deep path overflows the bar: keep its end (the current folder) in view.
+  $effect(() => {
+    void path;
+    if (crumbsEl) crumbsEl.scrollLeft = crumbsEl.scrollWidth;
+  });
   /** Inline editor: new folder, or rename of `target`. */
   let editing: { kind: "mkdir" } | { kind: "rename"; target: RemoteEntry } | null = $state(null);
   let draft = $state("");
@@ -233,7 +239,7 @@
     </div>
   </header>
 
-  <nav class="crumbs mono" aria-label="Path">
+  <nav class="crumbs mono" aria-label="Path" bind:this={crumbsEl}>
     {#each path as c, i (c.path)}
       {#if i > 1}<span class="sep">/</span>{/if}
       <button class:current={i === path.length - 1} onclick={() => (files.go(session, c.path), list?.focus())}>{c.label}</button>
