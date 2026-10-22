@@ -188,7 +188,7 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 
 **Sortie** : deux machines partagent métadonnées et snippets via un dossier synchronisé, conflit d'édition compris.
 
-### Phase 6b : hôtes gérés par Portico 🔄 *(ADR du 2026-10-22, « Hôtes créés dans Portico »)*
+### Phase 6b : hôtes gérés par Portico ✅ *(ADR du 2026-10-22, « Hôtes créés dans Portico »)*
 - Créer, modifier, dupliquer et supprimer des hôtes depuis la TUI et la GUI : alias, `HostName`, `User`, `Port`,
   clé (`IdentityFile` choisie parmi les clés locales), `ProxyJump` (hôte existant), plus tags, groupe, favori et notes
 - Stockage dans `<config_dir>/hosts.conf` (fragment ssh_config de Portico), lu directement par Portico ; ligne `Include`
@@ -197,6 +197,14 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 
 **Sortie** : un hôte créé dans Portico s'y connecte aussitôt, sans rien éditer à la main ; une fois l'`Include` ajouté,
 `ssh <alias>` fonctionne à l'identique.
+
+Ajouté pendant la phase, à la demande du propriétaire : **import Termix** (export JSON) et **import de clés privées sur
+sélection explicite** (`~/.ssh/portico/`, jamais d'écrasement) ; les imports Termius et Termix deviennent des hôtes
+Portico modifiables (ADR « Import Termix et imports vers les hôtes Portico »).
+
+État de la sortie (2026-10-22) : vérifiée. Hôte créé puis connexion immédiate (TUI contre un vrai sshd, E2E bureau),
+`ssh -G` d'OpenSSH résout le même `HostName`/`User`/`Port` que Portico ; import Termix avec une clé cochée puis connexion
+avec cette clé (E2E bureau).
 
 ### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
 - Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
@@ -237,8 +245,18 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 | 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
 | 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
 | 6 Split panes, asciicast | ✅ | 548 + 50 GUI + interop (13 scénarios) + E2E bureau 15/15 | ✅ (moteur + clôture, voir ci-dessous) | ✅ (panneaux + enregistrement, 2 passes, 3 thèmes, 80×24 / 880–1200 px) |
+| 6b Hôtes Portico, import Termix | ✅ | 611 + 61 GUI + interop (13 scénarios) + E2E bureau 19/19 | ✅ (2 revues, voir ci-dessous) | ✅ (captures 3 thèmes, 80×24 / 880–1200 px, CLI) |
 | 7 Sync locale | ❌ abandonnée | | | |
 | 8 Windows | ⏳ | | | |
+
+## Revues de la phase 6b (2026-10-22)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les autres ont été traités, sauf mention.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` hôtes Portico, import Termix, clés | 3 MOYEN, 7 FAIBLE | Un réimport ne redirige plus un alias en silence (ancienne destination montrée, acceptation par hôte, clé non reprise) ; paramètres KDF des PEM chiffrées bornés avant tout déchiffrement (scrypt, PBKDF2, mémoire, nombre par plan) ; mot de passe mémorisé retenu quand la clé hôte est acceptée automatiquement (`accept-new`/`no`) et annoncé dans le prompt TOFU ; mot de passe refusé jamais lié et oublié ; index des empreintes liées ; empreintes non vérifiables jamais réutilisées ; noms de fichiers de clés sans suffixe OpenSSH ; retour arrière du mot de passe sur échec d'écriture ; secrets JSON décodés dans un tampon effaçable ; alias courts (`localhost`, hôtes de rebond) préfixés. Risques résiduels 13–15 dans `SECURITY.md` |
+| `agent-design-review` clôture 6b | 2 BLOQUANT, 9 IMPORTANT | Mot de passe sans vault : création ou déverrouillage enchaîné puis enregistrement relancé (`vault_missing` distinct de `vault_locked`) ; « Delete <fichier> now » en tête du rapport ; mot de passe mémorisé affiché (présence seulement) et texte exact quand la destination change ; provenance « Portico · from Termix » ; comptes de secrets cohérents ; touches, titres, textes de suppression et TOFU (`host:port`, compte nommé) identiques dans les deux UIs ; tokens de taille ajoutés |
 
 ## Revues de la phase 6 (2026-10-22)
 
