@@ -6,6 +6,7 @@ import type { ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey
 import {
   applyLabel,
   applyRequest,
+  deleteExportAdvice,
   destinationChanges,
   destinationText,
   dialogTitle,
@@ -17,15 +18,21 @@ import {
   keysToWrite,
   keyType,
   noticeExplanation,
+  PASSPHRASE_MISMATCH_NOTE,
   passphraseError,
+  redirectNote,
   reportKeysLine,
+  rowAddress,
+  shortDeleteAdvice,
   shortFingerprint,
   splitDestinationChanges,
   splitNotices,
   toggleKey,
   toggleRedirect,
   UNVERIFIED_FINGERPRINT,
+  updatesCount,
   wantsPassphrase,
+  writtenKeyLine,
 } from "../src/lib/importform.ts";
 
 const key = (id: string, extra: Partial<PlannedKey> = {}): PlannedKey => ({
@@ -71,8 +78,9 @@ const preview = (keys: PlannedKey[] = KEYS, hosts = 3): ImportPreview => ({
   })),
   skipped: [],
   warnings: [],
-  secrets: { passwords: 0, keys: 0, keysInExport: keys.length },
+  secrets: { passwords: 0, keys: 0, untickedKeys: 0, unreadableKeys: 0, keysInExport: keys.length },
   secretsAdvice: null,
+  deleteExportAdvice: null,
   identityFiles: [],
   target: "~/.config/portico/hosts.conf",
   includeLine: "Include ~/.config/portico/hosts.conf",
@@ -138,7 +146,8 @@ test("key texts", () => {
 });
 
 test("notices: new codes explained, key notices apart", () => {
-  assert.match(noticeExplanation("edited_since_import") ?? "", /changed by hand.*left as is/i);
+  // Its message says it all: no paraphrase under it.
+  assert.equal(noticeExplanation("edited_since_import"), null);
   assert.ok(noticeExplanation("key_unreadable"));
   assert.ok(noticeExplanation("key_not_used"));
   assert.ok(noticeExplanation("key_skipped"));
@@ -155,23 +164,30 @@ test("report: keys imported, reused, skipped", () => {
   const report = (keys: ImportReport["keys"]): ImportReport => ({
     formatLabel: "Termix JSON",
     source: "Termix",
+    fileName: "termix.json",
     target: "~/.config/portico/hosts.conf",
     unchanged: false,
     imported: ["web"],
     updated: [],
     skipped: [],
     warnings: [],
-    secrets: { passwords: 0, keys: 0, keysInExport: 2 },
+    secrets: { passwords: 0, keys: 0, untickedKeys: 0, unreadableKeys: 0, keysInExport: 2 },
     secretsAdvice: null,
+    deleteExportAdvice: null,
     identityFiles: [],
     metaUpdated: 0,
     includeLine: "Include x",
     includeActive: false,
     keys,
   });
-  assert.equal(reportKeysLine(report({ imported: [], reused: [], skipped: 0 })), null);
-  assert.equal(reportKeysLine(report({ imported: ["~/.ssh/portico/web"], reused: ["~/.ssh/id_ed25519"], skipped: 1 })), "1 key imported, 1 reused from ~/.ssh, 1 not imported.");
-  assert.equal(reportKeysLine(report({ imported: [], reused: [], skipped: 2 })), "2 not imported.");
+  assert.equal(reportKeysLine(report({ imported: [], written: [], reused: [], skipped: 0 })), null);
+  assert.equal(
+    reportKeysLine(
+      report({ imported: ["~/.ssh/portico/web"], written: [{ path: "~/.ssh/portico/web", encrypted: true, usedBy: ["web"] }], reused: ["~/.ssh/id_ed25519"], skipped: 1 }),
+    ),
+    "1 key imported, 1 reused from ~/.ssh, 1 not imported.",
+  );
+  assert.equal(reportKeysLine(report({ imported: [], written: [], reused: [], skipped: 2 })), "2 not imported.");
 });
 
 /** A re-import: `web` moved to another server, `db` did not. */
@@ -200,6 +216,15 @@ test("destination changes: unticked by default, only plan aliases, skipped unles
   assert.deepEqual(toggleRedirect(p.hosts, accepted, "stranger"), accepted, "not in the plan: ignored");
   assert.deepEqual(toggleRedirect(p.hosts, accepted, "mail"), ["web"], "untick");
   assert.deepEqual(hostsToWrite(p.hosts, ["web"]).map((h) => h.alias), ["web", "db"]);
+  // "Updates N": in-place updates, plus the destination changes accepted.
+  assert.equal(updatesCount(p.hosts, []), 1);
+  assert.equal(updatesCount(p.hosts, ["web"]), 2);
+  // The address column shows where a pending change points today, until ticked.
+  const web = p.hosts[0] as PlannedHost;
+  assert.equal(rowAddress(web, []), "deploy@203.0.113.10:2222");
+  assert.equal(rowAddress(web, ["web"]), "deploy@198.51.100.99");
+  assert.equal(rowAddress(p.hosts[1] as PlannedHost, []), destinationText(p.hosts[1] as PlannedHost));
+
   assert.equal(applyLabel(p, [], ["web", "mail"]), "Import 3 hosts");
   assert.deepEqual(applyRequest(p, [], "", ["mail", "db", "stranger"]).redirect, ["mail"], "only changes of the plan are sent");
   // A replan (prefix) renames the aliases: the old answers do not carry over.
@@ -218,16 +243,39 @@ test("destination and fingerprint texts", () => {
   assert.deepEqual(split.other.map((x) => x.code), ["alias_collision"]);
 });
 
-test("ignored secrets advice leaves out zero counts", () => {
-  assert.equal(ignoredSecretsAdvice({ passwords: 0, keys: 0, keysInExport: 0 }), null);
-  const both = ignoredSecretsAdvice({ passwords: 2, keys: 1, keysInExport: 0 }) ?? "";
-  assert.match(both, /^2 passwords and 1 key ignored \(never imported\)\. The export holds them in clear text: delete it/);
-  const passwords = ignoredSecretsAdvice({ passwords: 1, keys: 0, keysInExport: 0 }) ?? "";
-  assert.match(passwords, /^1 password ignored/);
-  assert.doesNotMatch(passwords, /\b0 /);
-  const keys = ignoredSecretsAdvice({ passwords: 0, keys: 3, keysInExport: 3 }) ?? "";
-  assert.match(keys, /^3 keys ignored \(never imported\)\. The export holds 3 private keys in clear text or encrypted:/);
-  const allImported = ignoredSecretsAdvice({ passwords: 0, keys: 0, keysInExport: 2 }) ?? "";
-  assert.equal(allImported, "The export holds 2 private keys in clear text or encrypted: delete it once the import is done, and keep secrets in your keychain or ssh-agent.");
-  assert.doesNotMatch(allImported, /\b0 /);
+const secrets = (passwords: number, keys: number, untickedKeys: number, unreadableKeys: number, keysInExport: number) => ({
+  passwords,
+  keys,
+  untickedKeys,
+  unreadableKeys,
+  keysInExport,
 });
+
+test("what was not imported, by cause (the engine's wording, demo)", () => {
+  assert.equal(ignoredSecretsAdvice(secrets(0, 0, 0, 0, 2)), null, "every key imported, no password");
+  assert.equal(ignoredSecretsAdvice(secrets(1, 3, 2, 1, 4)), "Not imported: 1 password, 2 unticked keys, 1 unreadable key.");
+  assert.equal(ignoredSecretsAdvice(secrets(2, 1, 0, 0, 1)), "Not imported: 2 passwords, 1 key.");
+  assert.equal(ignoredSecretsAdvice(secrets(0, 4, 1, 1, 4)), "Not imported: 1 unticked key, 1 unreadable key, 2 other keys.");
+  assert.equal(ignoredSecretsAdvice(secrets(1, 0, 0, 0, 0)), "Not imported: 1 password.");
+});
+
+test("B2: the delete action names the export, a short version for the footer", () => {
+  assert.equal(deleteExportAdvice(secrets(0, 0, 0, 0, 0), "x.json"), null);
+  assert.equal(
+    deleteExportAdvice(secrets(1, 0, 0, 0, 4), "termix.json"),
+    "Delete termix.json now: it holds 1 password and 4 private keys (in clear text or encrypted).",
+  );
+  assert.equal(deleteExportAdvice(secrets(2, 0, 0, 0, 0), "hosts.csv"), "Delete hosts.csv now: it holds 2 passwords (in clear text or encrypted).");
+  assert.equal(deleteExportAdvice(secrets(0, 1, 0, 0, 1), "a.json"), "Delete a.json now: it holds 1 private key (in clear text or encrypted).");
+  assert.equal(shortDeleteAdvice("termix.json"), "Delete termix.json now: it holds secrets.");
+});
+
+test("B12: written keys say how they were written and who uses them", () => {
+  assert.equal(writtenKeyLine({ path: "~/.ssh/portico/web", encrypted: true, usedBy: ["web", "db"] }), "written · 0600 · encrypted · used by web, db");
+  assert.equal(writtenKeyLine({ path: "~/.ssh/portico/web", encrypted: false, usedBy: ["web"] }), "written · 0600 · no passphrase · used by web");
+  assert.equal(writtenKeyLine({ path: "~/.ssh/portico/x", encrypted: null, usedBy: [] }), "written · 0600");
+  assert.equal(redirectNote({ hostname: "h", user: null, port: null, identityFile: "~/.ssh/portico/web" }), "Pointed at the new server; key ~/.ssh/portico/web no longer used.");
+  assert.equal(redirectNote({ hostname: "h", user: null, port: null, identityFile: null }), "Pointed at the new server.");
+  assert.equal(PASSPHRASE_MISMATCH_NOTE, "Passphrases differ");
+});
+

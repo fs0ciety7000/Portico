@@ -21,11 +21,16 @@ export interface Host {
   source: string;
   /** Which file declares the host: only `portico` hosts are editable. */
   origin: HostOrigin;
+  /** A Portico host created by an import: the tool it came from (`null` otherwise). */
+  importedFrom: ImportSource | null;
   warnings: string[];
 }
 
 /** Mirrors `portico_core::hosts::HostOrigin`. */
 export type HostOrigin = "ssh_config" | "portico" | "imported";
+
+/** Mirrors `portico_core::import::ImportSource` (serde snake_case). */
+export type ImportSource = "termius" | "termix";
 
 /** Mirrors `hosts::ManagedHostDto`: what hosts.conf itself holds, nothing
  * inherited and nothing hidden by an earlier value elsewhere. */
@@ -39,6 +44,11 @@ export interface ManagedHost {
   keyId: string | null;
   /** `~/…`, display only (the "(current)" choice): never sent back. */
   identityFile: string | null;
+  /** A password is remembered for its `user@host:port` (presence only;
+   * `false` also when the store cannot tell: vault locked or missing). */
+  passwordRemembered: boolean;
+  /** The import it was created by, still set once edited. */
+  importedFrom: ImportSource | null;
 }
 
 /** Mirrors `hosts::IdentityChoiceDto`: a discovered key by id, never a path. */
@@ -126,8 +136,11 @@ export type PromptKind =
   | { kind: "key_passphrase"; key_path: string; attempt: number; attempts: number }
   | { kind: "keyboard_interactive"; name: string; instructions: string; prompts: { text: string; echo: boolean }[] };
 
-/** Shown on a new host key when `sends_remembered_password` is set. */
-export const SENDS_REMEMBERED_PASSWORD = "A remembered password will be sent to this server once you accept its key.";
+/** Shown on a new host key when `sends_remembered_password` is set (same
+ * wording as the TUI): names the account, `host:port` in prose. */
+export function sendsRememberedPassword(user: string | null, host: string, port: number): string {
+  return `The password remembered for ${user ? `${user}@` : ""}${host}:${port} will be sent to this server once you accept its key.`;
+}
 
 export interface Prompt {
   id: number;
@@ -511,11 +524,16 @@ export interface PlannedKey {
   local: string | null;
 }
 
-/** Secrets found in the export and ignored (counts only). */
+/** Mirrors `portico_core::import::IgnoredSecrets` (counts only). */
 export interface IgnoredSecrets {
   passwords: number;
+  /** Keys not imported, whatever the cause. */
   keys: number;
-  /** Distinct private keys the export holds, imported or not. */
+  /** Of `keys`: offered and left unticked (always 0 in a plan). */
+  untickedKeys: number;
+  /** Of `keys`: keys Portico cannot read. */
+  unreadableKeys: number;
+  /** Private keys the export holds, imported or not. */
   keysInExport: number;
 }
 
@@ -535,11 +553,15 @@ export interface ImportPreview {
   skipped: ImportNotice[];
   warnings: ImportNotice[];
   secrets: IgnoredSecrets;
+  /** "Not imported: 1 password, 2 unticked keys." (`IgnoredSecrets::advice`). */
   secretsAdvice: string | null;
+  /** "Delete <file> now: it holds …" (`ImportPlan::delete_export_advice`). */
+  deleteExportAdvice: string | null;
   identityFiles: string[];
   target: string;
   includeLine: string;
-  /** Hosts of an earlier import that this one updates. */
+  /** Hosts of an earlier import updated in place (destination changes
+   * count once accepted: the dialog adds them). */
   replaces: number | null;
   /** Private keys found (Termix); none is ticked by default. */
   keys: PlannedKey[];
@@ -563,6 +585,8 @@ export interface ImportApplyRequest {
 export interface ImportReport {
   formatLabel: string;
   source: string;
+  /** The export's file name (never its path). */
+  fileName: string;
   /** `~/…` (computed in Rust). */
   target: string;
   unchanged: boolean;
@@ -574,13 +598,26 @@ export interface ImportReport {
   warnings: ImportNotice[];
   secrets: IgnoredSecrets;
   secretsAdvice: string | null;
+  /** "Delete <file> now: it holds …": shown first. */
+  deleteExportAdvice: string | null;
   identityFiles: string[];
   metaUpdated: number;
   includeLine: string;
   includeActive: boolean;
   /** Key files written and reused (`~/…`, computed in Rust). */
-  keys: { imported: string[]; reused: string[]; skipped: number };
+  keys: { imported: string[]; written: WrittenKey[]; reused: string[]; skipped: number };
 }
+
+/** Mirrors `import::WrittenKeyDto`: a key file the import wrote. */
+export interface WrittenKey {
+  /** `~/…`. */
+  path: string;
+  /** Encrypted on disk; `null` when unknown. */
+  encrypted: boolean | null;
+  /** Imported hosts using it, in plan order. */
+  usedBy: string[];
+}
+
 
 export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),

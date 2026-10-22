@@ -3,10 +3,37 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Host, ManagedHost } from "../src/lib/api.ts";
-import { capitalizable, emptyForm, fieldOf, FIELD_ORDER, formFromHost, isDirty, KEEP_IDENTITY, parsePort, PASSWORD_DESTINATION_NOTE, sendsPassword, suggestAlias, toDraft } from "../src/lib/hostform.ts";
+import {
+  accountText,
+  cannotDeleteTitle,
+  capitalizable,
+  deleteConfirmationText,
+  DESTINATION_CHANGED_NOTE,
+  destinationChanged,
+  emptyForm,
+  fieldOf,
+  FIELD_ORDER,
+  formFromHost,
+  IMPORTED_EDIT_HELP,
+  INCLUDE_MESSAGE,
+  isDirty,
+  KEEP_IDENTITY,
+  KEY_NONE_LABEL,
+  NO_PASSWORD_REMEMBERED,
+  originLabel,
+  parsePort,
+  PASSWORD_DESTINATION_NOTE,
+  PASSWORD_REMEMBERED,
+  READ_ONLY_IMPORTED,
+  sendsPassword,
+  suggestAlias,
+  toDraft,
+  vaultFix,
+} from "../src/lib/hostform.ts";
+import { sendsRememberedPassword } from "../src/lib/api.ts";
 
 /** What hosts.conf holds (`managed_host`): the key mapped to a discovered id in Rust. */
-const own = (identityFile: string | null, keyId: string | null): ManagedHost => ({
+const own = (identityFile: string | null, keyId: string | null, passwordRemembered = true): ManagedHost => ({
   alias: "nas",
   hostname: "nas.lan",
   user: null,
@@ -14,6 +41,8 @@ const own = (identityFile: string | null, keyId: string | null): ManagedHost => 
   proxyJump: "bastion",
   keyId,
   identityFile,
+  passwordRemembered,
+  importedFrom: null,
 });
 
 const portico = (identityFile: string | null): Host => ({
@@ -33,8 +62,10 @@ const portico = (identityFile: string | null): Host => ({
   notes: null,
   source: "~/.config/portico/hosts.conf:5",
   origin: "portico",
+  importedFrom: null,
   warnings: [],
 });
+
 
 test("engine error codes map to their field, by code only", () => {
   assert.equal(fieldOf("host_invalid_alias"), "alias");
@@ -168,4 +199,75 @@ test("the password destination note shows when a password is set or kept", () =>
   assert.equal(sendsPassword({ ...form, passwordMode: "set" }, true), false, "editing, nothing typed yet");
   assert.equal(sendsPassword({ ...form, passwordMode: "set", password: "x" }, true), true, "editing, new one typed");
   assert.equal(sendsPassword({ ...form, passwordMode: "forget" }, true), false, "editing, forgotten");
+});
+
+test("B1: a password with no vault (or a locked one) chains the vault dialog", () => {
+  assert.equal(vaultFix("vault_missing"), "create");
+  assert.equal(vaultFix("vault_locked"), "unlock");
+  for (const code of ["vault_corrupt", "vault_wrong_passphrase", "secrets", "host_invalid_port"]) assert.equal(vaultFix(code), null, code);
+  // Both still belong to the password field (shown there after "Not now").
+  assert.equal(fieldOf("vault_missing"), "password");
+  assert.equal(fieldOf("vault_locked"), "password");
+  // The draft keeps the typed password: retried as it is once the vault is ready.
+  const form = { ...emptyForm(), alias: "nas", hostname: "nas.lan", password: "hunter2" };
+  const draft = toDraft(form, false);
+  assert.ok(draft.ok);
+  assert.deepEqual(draft.ok && draft.draft.password, { kind: "set", value: "hunter2" });
+});
+
+test("B3: remembered or not, and a changed destination", () => {
+  // Nothing remembered: the form starts on Change, empty, which changes nothing.
+  const none = formFromHost(portico(null), own(null, null, false));
+  assert.equal(none.passwordMode, "set");
+  const draft = toDraft(none, true, false);
+  assert.ok(draft.ok);
+  assert.deepEqual(draft.ok && draft.draft.password, { kind: "keep" });
+  assert.equal(isDirty(none, none), false);
+  assert.equal(sendsPassword(none, true, false), false);
+  assert.equal(sendsPassword({ ...none, passwordMode: "keep" }, true, false), false, "Keep sends nothing when nothing is remembered");
+  // Remembered: Keep, and an empty Change asks for the password.
+  const kept = formFromHost(portico(null), own(null, null, true));
+  assert.equal(kept.passwordMode, "keep");
+  assert.equal(toDraft({ ...kept, passwordMode: "set" }, true, true).ok, false);
+  // HostName, User or Port changed (trimmed): the Keep note is replaced.
+  assert.equal(destinationChanged(kept, { ...kept, tags: ["x"], notes: "n" }), false);
+  assert.equal(destinationChanged(kept, { ...kept, hostname: " nas.lan " }), false);
+  assert.equal(destinationChanged(kept, { ...kept, hostname: "nas2.lan" }), true);
+  assert.equal(destinationChanged(kept, { ...kept, user: "root" }), true);
+  assert.equal(destinationChanged(kept, { ...kept, port: "22" }), true);
+  assert.equal(
+    DESTINATION_CHANGED_NOTE,
+    "Changing the server or user forgets the remembered password. Choose Change to set one for the new destination.",
+  );
+  assert.equal(PASSWORD_REMEMBERED, "A password is remembered");
+  assert.equal(NO_PASSWORD_REMEMBERED, "No password remembered");
+});
+
+test("shared texts with the TUI (phase 6b closing fixes)", () => {
+  assert.equal(KEY_NONE_LABEL, "none · agent and default keys");
+  assert.equal(INCLUDE_MESSAGE, "Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config:");
+  assert.equal(
+    READ_ONLY_IMPORTED,
+    "Imported by an earlier version of Portico (imports/termius.conf), which it never edits. Duplicate it as a Portico host to change it.",
+  );
+  assert.equal(IMPORTED_EDIT_HELP, "Editing it keeps later imports from updating it.");
+  assert.equal(originLabel("portico", "termix"), "Portico · from Termix");
+  assert.equal(originLabel("portico", "termius"), "Portico · from Termius");
+  assert.equal(originLabel("portico", null), "Portico");
+  assert.equal(originLabel("imported", null), "Imported");
+  assert.equal(cannotDeleteTitle("db-prod"), "db-prod can't be deleted here");
+  const host = { alias: "ci-runner", user: "ci", hostname: "10.0.9.4", port: 22 };
+  assert.equal(accountText(host), "ci@10.0.9.4:22");
+  assert.equal(
+    deleteConfirmationText(host),
+    "Delete ci-runner (ci@10.0.9.4:22) and its tags and notes. Its remembered password is forgotten unless another host uses the same account. Open sessions stay connected. This cannot be undone.",
+  );
+  assert.equal(
+    sendsRememberedPassword("admin", "192.168.1.20", 2222),
+    "The password remembered for admin@192.168.1.20:2222 will be sent to this server once you accept its key.",
+  );
+  assert.equal(
+    sendsRememberedPassword(null, "nas.lan", 22),
+    "The password remembered for nas.lan:22 will be sent to this server once you accept its key.",
+  );
 });

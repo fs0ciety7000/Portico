@@ -141,14 +141,24 @@ pub const TYPE_SCALE: [(&str, u16); 8] = [
 /// - `icon-sm`: small inline icons (pane count, close crosses);
 /// - `card`: the widest connection or failure card over a terminal;
 /// - `bar`: the accent bar of a selected row (and the focus ring width);
-/// - `line-gap`: between the two lines of a list row (title, then details).
-pub const SIZES: [(&str, &str); 6] = [
+/// - `line-gap`: between the two lines of a list row (title, then details);
+/// - `row`: a list row, a form control (input, select) or a checkbox line;
+/// - `control-sm`: a compact control (a small button, an inline input);
+/// - `badge`: a badge or pill (origin, count);
+/// - `badge-sm`: a compact badge, a small icon box;
+/// - `icon-xs`: the smallest inline icons (lock of an origin badge).
+pub const SIZES: [(&str, &str); 11] = [
     ("dot", "6px"),
     ("dot-ring", "1.5px"),
     ("icon-sm", "12px"),
     ("card", "540px"),
     ("bar", "2px"),
     ("line-gap", "2px"),
+    ("row", "34px"),
+    ("control-sm", "30px"),
+    ("badge", "20px"),
+    ("badge-sm", "16px"),
+    ("icon-xs", "11px"),
 ];
 
 /// Alpha of the terminal selection (`--accent-selection`): the theme's
@@ -548,6 +558,15 @@ mod tests {
         }
         assert!(css.contains("--size-bar: 2px;"));
         assert!(css.contains("--size-line-gap: 2px;"));
+        for line in [
+            "--size-row: 34px;",
+            "--size-control-sm: 30px;",
+            "--size-badge: 20px;",
+            "--size-badge-sm: 16px;",
+            "--size-icon-xs: 11px;",
+        ] {
+            assert!(css.contains(line), "missing `{line}`");
+        }
     }
 
     #[test]

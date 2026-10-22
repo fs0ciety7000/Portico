@@ -9,8 +9,9 @@
   // written only when its "Accept the new destination" box is ticked (none
   // by default; Rust checks the aliases against the plan). The
   // report ends with the Include line the user adds to ~/.ssh/config:
-  // Portico never edits it.
-  import { codeSpans, sentence, type ImportNotice, type PlannedHost, type PlannedKey } from "../api";
+  // Portico never edits it. When the export held secrets, the report says
+  // first to delete it, naming the file (and again in the footer).
+  import { codeSpans, sentence, type ImportNotice, type PlannedKey } from "../api";
   import {
     applyLabel,
     destinationText,
@@ -20,23 +21,31 @@
     keysToWrite,
     keyType,
     noticeExplanation,
+    PASSPHRASE_MISMATCH_NOTE,
     passphraseError,
     plural,
+    redirectNote,
     reportKeysLine,
-    shortFingerprint,
+    rowAddress,
+    shortDeleteAdvice,
     splitDestinationChanges,
     splitNotices,
     UNVERIFIED_FINGERPRINT,
+    updatesCount,
     wantsPassphrase,
+    writtenKeyLine,
   } from "../importform";
   import { COPIED_FEEDBACK_MS } from "../motion";
   import { importer } from "../state/importer.svelte";
   import { keymap } from "../state/keymap.svelte";
+  import Caution from "./Caution.svelte";
   import Modal from "./Modal.svelte";
 
   let armed = $state(false);
   let copied = $state(false);
   let includeEl: HTMLInputElement | undefined = $state();
+  let mismatchEl: HTMLElement | undefined = $state();
+  let confirmEl: HTMLInputElement | undefined = $state();
   /** Never kept beyond the IPC call (cleared in `apply`, `close`). */
   let passphrase = $state("");
   let confirm = $state("");
@@ -58,13 +67,14 @@
   const warnings = $derived(preview ? splitNotices(splitDestinationChanges(preview.warnings).other) : { keys: [], other: [] });
   const accepted = $derived(importer.redirect);
   const writable = $derived(preview ? hostsToWrite(preview.hosts, accepted) : []);
-  const updates = $derived(writable.filter((h) => h.update).length);
+  const updates = $derived(preview ? updatesCount(preview.hosts, accepted) : 0);
+  /** Every record skipped: the primary action picks another file. */
+  const nothing = $derived(!!preview && preview.hosts.length === 0);
   const changes = $derived(preview ? preview.hosts.filter((h) => h.previous !== null).length : 0);
   const pendingChanges = $derived(changes - accepted.length);
   /** JSON exports number records by position, the others by line. */
   const unit = $derived((preview?.format ?? (view.kind === "done" ? view.report.formatLabel : "")).toLowerCase().includes("json") ? "#" : "line ");
 
-  const address = (h: PlannedHost) => destinationText(h);
   const where = (n: ImportNotice) => [n.record !== null ? `${unit}${n.record}` : null, n.label && !n.label.startsWith("SHA256:") ? n.label : null].filter(Boolean).join(" · ");
   /** `~/…/portico/hosts.conf`: the folder that matters (already `~/…` from Rust). */
   const shortTarget = (path: string) => {
@@ -92,6 +102,16 @@
   const canApply = $derived(!!preview && !busy && armed && writable.length > 0 && !mismatch);
 
   async function apply() {
+    if (mismatch && preview && !busy) {
+      // Import waits for matching passphrases: show why, where it is.
+      mismatchEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      confirmEl?.focus();
+      return;
+    }
+    if (nothing) {
+      void importer.start();
+      return;
+    }
     if (!canApply) return;
     try {
       await importer.apply(passphrase);
@@ -176,12 +196,6 @@
   {/if}
 {/snippet}
 
-{#snippet caution(text: string, tone: "warning" | "note")}
-  <p class="caution" data-tone={tone} role="note">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.25 14.25 13.25H1.75Z" /><path d="M8 6.5v3M8 11.1v.1" /></svg>
-    <span>{text}</span>
-  </p>
-{/snippet}
 
 {#snippet keyRow(k: PlannedKey, n: number)}
   {@const on = selected.includes(k.id)}
@@ -189,15 +203,15 @@
     <label class="key">
       <input type="checkbox" checked={on} disabled={busy} onchange={() => importer.toggleKey(k.id)} onkeydown={onEnter} aria-describedby={`key-${n}-hosts`} />
       <span class="type">{keyType(k.algorithm)}</span>
-      <span class="fp mono" title={k.fingerprint}>{shortFingerprint(k.fingerprint)}</span>
-      <span class="badges">
-        {#if !k.fingerprintVerified}<span class="badge warn" title="The export only claims this fingerprint: the key is written, never matched with a local one.">{UNVERIFIED_FINGERPRINT}</span>
-        {:else if k.encrypted}<span class="badge">encrypted</span>{/if}
-        {#if k.local}<span class="badge reuse" title={k.local}>already in ~/.ssh · reused</span>{/if}
-      </span>
+      <span class="fp mono">{k.fingerprint}</span>
       {#if n <= 9}<kbd class="digit">{n}</kbd>{/if}
     </label>
     <span class="key-hosts" id={`key-${n}-hosts`}>Used by <span class="mono">{keyHosts(k.aliases)}</span></span>
+    <span class="badges">
+      {#if !k.fingerprintVerified}<span class="badge warn" title="The export only claims this fingerprint: the key is written, never matched with a local one.">{UNVERIFIED_FINGERPRINT}</span>
+      {:else if k.encrypted}<span class="badge">encrypted</span>{/if}
+      {#if k.local}<span class="badge reuse" title={k.local}>already in ~/.ssh · reused</span>{/if}
+    </span>
   </li>
 {/snippet}
 
@@ -217,7 +231,7 @@
   {:else if view.kind === "error"}
     <div class="inline-error" role="alert">
       <span>{sentence(view.error.message)}</span>
-      {#if view.error.hint}<span class="hint">{view.error.hint}</span>{/if}
+      {#if view.error.hint}<span class="hint">{#each codeSpans(view.error.hint) as part, i (i)}{#if part.code}<span class="mono code">{part.text}</span>{:else}{part.text}{/if}{/each}</span>{/if}
     </div>
   {:else if preview}
     <p class="summary">
@@ -231,7 +245,8 @@
       </label>
       {#if taken}<span class="taken">{taken} {taken === 1 ? "name" : "names"} already taken</span>{/if}
     </div>
-    {#if preview.secretsAdvice}{@render caution(preview.secretsAdvice, "warning")}{/if}
+    {#if preview.deleteExportAdvice}<Caution testid="delete-export">{preview.deleteExportAdvice}</Caution>{/if}
+    {#if preview.secretsAdvice}<Caution tone="note">{preview.secretsAdvice}</Caution>{/if}
     {#if preview.hosts.length}
       <section>
         <h3>Hosts <span class="count">{preview.hosts.length}</span></h3>
@@ -240,7 +255,7 @@
             {@const on = accepted.includes(h.alias)}
             <li class:changed={h.previous !== null} class:held={h.previous !== null && !on} data-alias={h.alias}>
               <span class="alias mono">{h.alias}</span>
-              <span class="address mono">{address(h)}</span>
+              <span class="address mono">{rowAddress(h, accepted)}</span>
               <span class="meta">
                 {#if h.previous}<span class="badge warn">destination changed</span>
                 {:else if h.update}<span class="state">update</span>{/if}
@@ -252,14 +267,14 @@
                   <span class="move mono">
                     <span class="was">{destinationText(h.previous)}</span>
                     <svg viewBox="0 0 16 16" aria-label="becomes"><path d="M3 8h10M9.5 4.5 13 8l-3.5 3.5" /></svg>
-                    <span class="now">{address(h)}</span>
+                    <span class="now">{destinationText(h)}</span>
                   </span>
                   <label class="check accept">
                     <input type="checkbox" checked={on} disabled={busy} onchange={() => importer.toggleRedirect(h.alias)} onkeydown={onEnter} />
                     Accept the new destination
                   </label>
                   <span class="redirect-help">
-                    {#if on}{h.previous.identityFile ? `Pointed at the new server; its key ${h.previous.identityFile} is not kept.` : "Pointed at the new server."}
+                    {#if on}{redirectNote(h.previous)}
                     {:else}Skipped: <span class="mono">{h.alias}</span> keeps pointing at the server it was imported for.{/if}
                   </span>
                 </div>
@@ -281,10 +296,10 @@
         <ul class="keys">
           {#each preview.keys as k, i (k.id)}{@render keyRow(k, i + 1)}{/each}
         </ul>
-        {@render caution(
-          `A ticked key is written to ${preview.keysDir}, readable only by you, and set as the IdentityFile of its hosts. A key already in ~/.ssh is reused instead.`,
-          writing.length ? "warning" : "note",
-        )}
+        <Caution tone={writing.length ? "warning" : "note"}>
+          A ticked key is written to {preview.keysDir}, readable only by you, and set as the IdentityFile of its hosts. A key already in ~/.ssh is reused
+          instead.
+        </Caution>
         {#if askPassphrase}
           <div class="passphrase">
             <label class="field">
@@ -293,12 +308,14 @@
             </label>
             <label class="field">
               <span>Confirm</span>
-              <input type="password" bind:value={confirm} autocomplete="new-password" disabled={busy} onkeydown={onEnter} aria-invalid={!!mismatch} />
+              <input type="password" bind:value={confirm} bind:this={confirmEl} autocomplete="new-password" disabled={busy} onkeydown={onEnter} aria-invalid={!!mismatch} />
             </label>
             {#if mismatch}
-              <p class="inline-error pass-help" role="alert"><span>{mismatch}</span></p>
+              <p class="inline-error pass-help" role="alert" bind:this={mismatchEl}><span>{mismatch}</span></p>
             {:else}
-              <span class="help pass-help">Encrypts the keys that are not encrypted in the export. Empty: written without one. Never stored by Portico.</span>
+              <div class="field pass-help">
+                <span class="help">Encrypts the keys that are not encrypted in the export. Empty: written without one. Never stored by Portico.</span>
+              </div>
             {/if}
           </div>
         {/if}
@@ -334,6 +351,7 @@
       {/if}
       {#if r.metaUpdated}<span class="muted">Groups, tags and notes updated for {plural(r.metaUpdated, "host")}.</span>{/if}
     </p>
+    {#if r.deleteExportAdvice}<Caution testid="delete-export">{r.deleteExportAdvice}</Caution>{/if}
     {#if r.updated.length}
       <section>
         <h3>Updated <span class="count">{r.updated.length}</span></h3>
@@ -346,7 +364,7 @@
         <p class="summary">{keysLine}</p>
         {#if r.keys.imported.length || r.keys.reused.length}
           <ul class="paths">
-            {#each r.keys.imported as path (path)}<li><span class="mono">{path}</span><span class="muted">written · 0600</span></li>{/each}
+            {#each r.keys.written as k (k.path)}<li><span class="mono">{k.path}</span><span class="muted">{writtenKeyLine(k)}</span></li>{/each}
             {#each r.keys.reused as path (path)}<li><span class="mono">{path}</span><span class="muted">reused</span></li>{/each}
           </ul>
         {/if}
@@ -359,27 +377,36 @@
       <p class="ok">~/.ssh/config already includes this file: the hosts are in your list.</p>
     {:else}
       <div class="field">
-        <p class="step"><strong>Optional:</strong> for <span class="mono">ssh</span>, <span class="mono">scp</span> and <span class="mono">git</span> to see these hosts too, add this line at the top of <span class="mono">~/.ssh/config</span>. Portico never edits that file.</p>
+        <p class="step"><strong>Optional:</strong> for <span class="mono">ssh</span>, <span class="mono">scp</span> and <span class="mono">git</span> to see these hosts too, add this line at the top of <span class="mono">~/.ssh/config</span>:</p>
         <div class="include">
           <input class="mono" readonly value={r.includeLine} bind:this={includeEl} aria-label="Include line" onfocus={(e) => e.currentTarget.select()} />
           <button class="secondary small" onclick={() => void copyInclude(r.includeLine)}>{copied ? "Copied" : "Copy"} <kbd>c</kbd></button>
         </div>
-        <span class="help">The hosts are already in Portico's list{#if reload}{" "}(reload <kbd>{reload}</kbd> if not){/if}.</span>
+        <span class="help">Portico never edits that file. The hosts are already in Portico's list{#if reload}{" "}(reload <kbd>{reload}</kbd> if not){/if}.</span>
       </div>
     {/if}
-    {#if r.secretsAdvice}{@render caution(r.secretsAdvice, "warning")}{/if}
+    {#if r.secretsAdvice}<Caution tone="note">{r.secretsAdvice}</Caution>{/if}
   {/if}
 
   {#snippet footer()}
     {#if view.kind === "done"}
+      {#if view.report.deleteExportAdvice}
+        <span class="footer-note warn-text" title={view.report.deleteExportAdvice}>{shortDeleteAdvice(view.report.fileName)}</span>
+      {/if}
       <button class="primary" data-autofocus onclick={close}>Done <kbd>↵</kbd></button>
     {:else if view.kind === "error"}
       <button class="secondary" onclick={close}>Close <kbd>Esc</kbd></button>
       <button class="primary" data-autofocus onclick={() => void importer.start()}>Choose another file <kbd>↵</kbd></button>
+    {:else if preview && nothing}
+      <span class="footer-note">Nothing to import from <span class="mono">{preview.fileName}</span></span>
+      <button class="secondary" onclick={close}>Cancel <kbd>Esc</kbd></button>
+      <button class="primary" data-autofocus disabled={busy} onclick={() => void importer.start()}>Choose another file <kbd>↵</kbd></button>
     {:else if preview}
-      <span class="footer-note" title={preview.target}>
-        {#if preview.replaces}
-          Updates {plural(preview.replaces, "host")} of an earlier import in <span class="mono">{shortTarget(preview.target)}</span>
+      <span class="footer-note" class:warn-text={!!mismatch} title={mismatch ? mismatch : preview.target}>
+        {#if mismatch}
+          {PASSPHRASE_MISMATCH_NOTE}
+        {:else if updates}
+          Updates {plural(updates, "host")} of an earlier import in <span class="mono">{shortTarget(preview.target)}</span>
         {:else}
           Writes Portico's <span class="mono">{shortTarget(preview.target)}</span> · <span class="mono">~/.ssh/config</span> is never edited
         {/if}
@@ -411,31 +438,8 @@
   .ok { color: var(--text-secondary); font-size: var(--text-sm); }
   .step { margin: 0; color: var(--text-primary); }
   .step strong { font-weight: 550; }
-  .caution {
-    display: flex;
-    gap: var(--space-2);
-    align-items: flex-start;
-    margin: 0;
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-md);
-    color: var(--text-primary);
-    font-size: var(--text-sm);
-  }
-  .caution[data-tone="warning"] { background: color-mix(in srgb, var(--status-warning) 10%, transparent); }
-  .caution[data-tone="note"] { background: var(--bg-elevated); color: var(--text-secondary); }
-  .caution svg {
-    flex: 0 0 auto;
-    width: var(--space-4);
-    /* As tall as the first line of text: the icon sits centered on it. */
-    height: 1lh;
-    fill: none;
-    stroke: var(--status-warning);
-    stroke-width: 1.5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .caution[data-tone="note"] svg { stroke: var(--text-muted); }
-  section { display: grid; gap: var(--space-1); }
+  section
+ { display: grid; gap: var(--space-1); }
   h3 {
     margin: var(--space-2) 0 0;
     color: var(--text-muted);
@@ -457,7 +461,7 @@
     display: grid;
     grid-template-columns: subgrid;
     align-items: center;
-    min-height: 34px;
+    min-height: var(--size-row);
     padding: 0 var(--space-2);
     border-radius: var(--radius-md);
   }
@@ -483,34 +487,46 @@
     border: 1px solid var(--border-strong);
   }
   .keys-intro { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); }
-  .keys { display: grid; gap: calc(var(--space-1) / 2); }
-  .keys li {
+  /* One grid for every key (subgrid): checkbox, type, the whole fingerprint
+     and the digit on the first line; "Used by" under the type, the badges
+     at the end of that second line. */
+  .keys {
     display: grid;
-    gap: calc(var(--space-1) / 2);
+    grid-template-columns: auto minmax(12ch, auto) minmax(0, 1fr) auto auto;
+    column-gap: var(--space-3);
+    row-gap: calc(var(--space-1) / 2);
+  }
+  .keys li {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    row-gap: calc(var(--space-1) / 2);
     padding: var(--space-1) var(--space-2) var(--space-2);
     border-radius: var(--radius-md);
     transition: background var(--motion-fast) var(--ease-standard);
   }
   .keys li:hover { background: var(--bg-elevated); }
   /* Ticked: the selection's surface and accent bar, as in lists. */
-  .keys li.on { background: var(--bg-selected); box-shadow: inset 2px 0 0 var(--accent); }
+  .keys li.on { background: var(--bg-selected); box-shadow: inset var(--size-bar) 0 0 var(--accent); }
   .key {
+    grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: auto minmax(7ch, auto) minmax(0, 1fr) auto auto;
+    grid-template-columns: subgrid;
     align-items: center;
-    column-gap: var(--space-3);
-    min-height: 34px;
+    min-height: var(--size-row);
     cursor: pointer;
   }
   .key input { margin: 0; accent-color: var(--accent); }
-  .type { color: var(--text-primary); font-weight: 550; }
-  .fp { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .badges { display: flex; gap: var(--space-1); justify-content: flex-end; flex-wrap: wrap; }
+  .type { min-width: 12ch; color: var(--text-primary); font-weight: 550; }
+  /* The whole fingerprint, wrapped rather than cut. */
+  .fp { grid-column: 3 / 5; min-width: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+  .digit { grid-column: 5; }
+  .badges { grid-column: 4 / 6; grid-row: 2; display: flex; gap: var(--space-1); justify-content: flex-end; flex-wrap: wrap; }
   .badge.reuse { color: var(--text-primary); border-color: var(--accent); }
   /* Meaning, so the status color: a destination change, an unverified fingerprint. */
   .badge.warn { color: var(--status-warning); border-color: var(--status-warning); }
   .warn-text { color: var(--status-warning); }
-  .hosts li.changed { padding-block: var(--space-1); box-shadow: inset 2px 0 0 var(--status-warning); }
+  .hosts li.changed { padding-block: var(--space-1); box-shadow: inset var(--size-bar) 0 0 var(--status-warning); }
   .hosts li.held .alias, .hosts li.held .address { color: var(--text-muted); }
   .redirect {
     grid-column: 1 / -1;
@@ -540,12 +556,12 @@
   .digit { justify-self: end; }
   /* Under the type, after the checkbox column. */
   .key-hosts {
-    padding-left: calc(var(--space-3) + var(--space-4));
+    grid-column: 2 / 4;
+    grid-row: 2;
+    align-self: center;
     color: var(--text-muted);
     font-size: var(--text-sm);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .key-hosts .mono { color: var(--text-secondary); font-size: inherit; }
   .passphrase {
@@ -557,8 +573,10 @@
   .pass-help { grid-column: 1 / -1; }
   @media (max-width: 720px) {
     .passphrase { grid-template-columns: minmax(0, 1fr); }
-    .key { grid-template-columns: auto minmax(7ch, auto) minmax(0, 1fr) auto; }
-    .badges { grid-column: 2 / -1; justify-content: flex-start; }
+    .badges { grid-column: 2 / -1; grid-row: 3; justify-content: flex-start; }
+    .key-hosts { grid-column: 2 / -1; }
+    .fp { grid-column: 3 / -1; }
+
     .digit { display: none; }
   }
   .notices li {
@@ -572,7 +590,8 @@
   .where { color: var(--text-muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .notices[data-tone="muted"] .message { color: var(--text-secondary); }
   .notices[data-tone="warning"] .message { color: var(--text-primary); }
-  .notices[data-tone="warning"] li { box-shadow: inset 2px 0 0 var(--status-warning); }
+  .notices[data-tone="warning"] li { box-shadow: inset var(--size-bar) 0 0 var(--status-warning); }
+
   .explain { display: block; color: var(--text-muted); font-size: var(--text-xs); }
   .aliases { margin: 0; padding: 0 var(--space-2); color: var(--text-secondary); }
   .paths li {
@@ -588,5 +607,7 @@
   .check kbd { margin-left: var(--space-1); }
   /* The note gives way to the buttons: it wraps, they never do. */
   .footer-note { flex: 1 1 auto; min-width: 0; }
+  /* A reason or an action, not a remark: the warning color. */
+  .footer-note.warn-text { color: var(--status-warning); }
   .footer-note .mono { font-size: inherit; }
 </style>

@@ -5,7 +5,7 @@
 // new host key, `db-prod` goes through a jump host and asks for a password
 // (anything but "wrong" works), `staging` presents a changed host key.
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { EngineEvent, ErrorSummary, Host, HostOrigin, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
+import type { EngineEvent, ErrorSummary, Host, HostOrigin, ImportSource, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
 import { demoHostsBackend, demoPorticoHosts } from "./demo-hosts";
 import { demoKeys } from "./demo-keys";
@@ -22,6 +22,7 @@ const base = {
   group: null as string | null,
   notes: null as string | null,
   origin: "ssh_config" as HostOrigin,
+  importedFrom: null as ImportSource | null,
 };
 
 // `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).
@@ -389,7 +390,7 @@ function demoSearch(q: string): Host[] {
   );
 }
 
-const managed = demoHostsBackend({ emit, hosts: demoHosts, keys: () => keyDemo.listKeys() });
+const managed = demoHostsBackend({ emit, hosts: demoHosts, keys: () => keyDemo.listKeys(), vaultStatus: () => keyDemo.vaultStatus() });
 
 export const demoBackend: Backend = {
   ...keyDemo,

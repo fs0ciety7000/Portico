@@ -139,6 +139,46 @@ test("startup: hosts from ~/.ssh/config, no vault yet", async () => {
   assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault before it is created");
 });
 
+/** Opens "Add host", fills alias, HostName and a password (nothing saved yet). */
+async function addHostWithPassword(alias: string, password: string): Promise<void> {
+  await hostsView();
+  await press(Key.Control, Key.Shift, "N");
+  await dialog("Add host");
+  await type(alias);
+  await press(Key.Tab);
+  await type("127.0.0.1");
+  await s.exec("document.querySelector('.modal [data-field=password]').focus()");
+  await type(password);
+  await sleep(500);
+}
+
+const passwordField = () => s.exec<string>("return document.querySelector('.modal [data-field=password]')?.value ?? ''");
+
+test("B1: a password with no vault chains to the vault; Not now returns to the form", async () => {
+  const PASSWORD = "no-vault-e2e-pw";
+  await addHostWithPassword("epsilon", PASSWORD);
+  await press(Key.Enter);
+  // vault_missing: the create dialog, worded for this host.
+  await dialog("Create a vault");
+  assert.match(await modal(), /no vault yet to remember this host's password/i);
+  await capture("b1-create-vault");
+  await press(Key.Escape); // Not now
+  await dialog("Add host");
+  // Back to the form: the password still typed, the reason under it.
+  assert.equal(await passwordField(), PASSWORD, "the typed password is kept");
+  assert.match(await modal(), /Create the vault \(Keys, then V\) to remember passwords, or leave the password empty\./);
+  assert.equal(await s.exec<string>("return document.querySelector('.modal [data-field=password]').getAttribute('aria-invalid')"), "true");
+  await capture("b1-not-now");
+  assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault created");
+  const hostsConf = join(configDir, "hosts.conf");
+  assert.ok(!existsSync(hostsConf) || !/^Host epsilon$/m.test(readFileSync(hostsConf, "utf8")), "nothing written");
+  // Leave without saving (discard: `y`).
+  await press(Key.Escape);
+  await waitFor("discard asked", async () => (await modal()).includes("Discard your changes?"));
+  await type("y");
+  await noDialog();
+});
+
 test("connect: new host key, terminal command, status and latency", async () => {
   await selectHost("alpha");
   await press(Key.Enter);
@@ -455,6 +495,48 @@ test("restart: theme kept, vault unlocked at startup, key login without prompt",
   await capture("restart");
 });
 
+test("B1: a password with a locked vault chains Unlock, then saves by itself", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const PASSWORD = "locked-vault-e2e-pw";
+  await hostsView();
+  await palette("Lock the vault");
+  await sleep(500);
+  await addHostWithPassword("epsilon", PASSWORD);
+  await press(Key.Enter);
+  // vault_locked: the unlock dialog, worded for this host.
+  await dialog("Unlock the vault");
+  assert.match(await modal(), /this host's password cannot be remembered/i);
+  await capture("b1-unlock-vault");
+  await type(VAULT_PASS);
+  await press(Key.Enter);
+  // Unlocked: the form saves again on its own and closes.
+  await noDialog();
+  await waitFor("epsilon written", () => existsSync(hostsConf) && /^Host epsilon$/m.test(readFileSync(hostsConf, "utf8")));
+  assert.ok(!readFileSync(hostsConf, "utf8").includes(PASSWORD), "never in hosts.conf");
+  assert.ok(!readFileSync(join(dataDir, "vault.toml"), "utf8").includes(PASSWORD), "encrypted in the vault");
+  // The form says a password is remembered (presence only).
+  await waitFor("epsilon selected", async () => (await text(".hosts li[aria-selected=true] .name")).includes("epsilon"));
+  await press(Key.Shift, "E");
+  await dialog("Saved in Portico");
+  assert.match(await text(".modal [data-testid=password-state]"), /A password is remembered/);
+  assert.equal(await passwordField(), "", "nothing prefilled");
+  await capture("b1-saved");
+  await press(Key.Escape);
+  await noDialog();
+  // B8: the delete confirmation, then gone.
+  await selectHost("epsilon");
+  await press(Key.Delete);
+  await dialog("Delete epsilon?");
+  assert.match(
+    await text(".modal [data-testid=delete-confirmation]"),
+    /^Delete epsilon \((?:\S+@)?127\.0\.0\.1:22\) and its tags and notes\. Its remembered password is forgotten unless another host uses the same account\. Open sessions stay connected\. This cannot be undone\.$/,
+  );
+  await type("y");
+  await noDialog();
+  await waitFor("epsilon deleted", () => !/^Host epsilon$/m.test(readFileSync(hostsConf, "utf8")));
+});
+
+
 test("Portico host: add with a key and a remembered password, connect, edit the port, delete", async () => {
   const hostsConf = join(configDir, "hosts.conf");
   const port = env("E2E_PORT");
@@ -579,7 +661,14 @@ test("Termix import: preview, one key ticked, written to ~/.ssh/portico, connect
   const report = await modal();
   assert.match(report, /1 key imported/);
   assert.match(report, /~\/\.ssh\/portico\/termix-box/);
-  assert.match(report, /delete it once the import is done/);
+  assert.match(report, /written · 0600 · no passphrase · used by termix-box/);
+  // B2: the delete action comes first, right after the summary, naming the
+  // export; a short version stays in the footer.
+  const advice = "Delete termix_export.json now: it holds 1 private key (in clear text or encrypted).";
+  assert.ok(report.includes(advice), report);
+  const lower = report.toLowerCase();
+  assert.ok(lower.indexOf(advice.toLowerCase()) < lower.indexOf("private keys"), "the delete action before the keys");
+  assert.match(await text(".modal footer"), /Delete termix_export\.json now: it holds secrets\./);
   await capture("termix-report");
 
   assert.ok(existsSync(written), "key written");

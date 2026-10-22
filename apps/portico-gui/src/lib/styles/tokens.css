@@ -32,6 +32,11 @@
   --size-card: 540px;
   --size-bar: 2px;
   --size-line-gap: 2px;
+  --size-row: 34px;
+  --size-control-sm: 30px;
+  --size-badge: 20px;
+  --size-badge-sm: 16px;
+  --size-icon-xs: 11px;
   --tracking-caps: 0.08em;
   --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
   --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);

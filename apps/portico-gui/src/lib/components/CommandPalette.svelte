@@ -145,9 +145,12 @@
     background: var(--accent);
   }
   .star { margin-left: var(--space-1); color: var(--accent); }
-  .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The title is never cut while the description can give way: the
+     description takes what is left and ellipsizes first. */
+  .title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .note { margin-left: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
-  .hint { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
+  .hint { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  li > :global(kbd) { flex: none; }
   .hint.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .dot {
     --c: var(--status-idle);

@@ -5,7 +5,7 @@
   import { untrack } from "svelte";
   import { asError, sentence, type ErrorSummary, type Host } from "../api";
   import { backend } from "../backend";
-  import { capitalizable, suggestAlias } from "../hostform";
+  import { cannotDeleteTitle, capitalizable, deleteConfirmation, READ_ONLY_IMPORTED, READ_ONLY_SSH_CONFIG, suggestAlias } from "../hostform";
   import { hosts, type HostDialog } from "../state/hosts.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
@@ -13,9 +13,9 @@
 
   let { dialog, host }: { dialog: Extract<HostDialog, { kind: "read-only" | "duplicate" | "delete" }>; host: Host } = $props();
 
-  /** Shared wording with the TUI. */
-  const READ_ONLY = "Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it.";
-  const READ_ONLY_IMPORTED = "Imported from Termius: the next import replaces it, and Portico never edits it. Duplicate it as a Portico host to change it.";
+  /** "Delete host" on a host Portico does not own: the read-only body, titled for it. */
+  const refusedDelete = $derived(dialog.kind === "read-only" && dialog.action === "delete");
+  const confirmation = $derived(deleteConfirmation(host));
 
   let armed = $state(false);
   let busy = $state(false);
@@ -69,9 +69,10 @@
   }
 
   function onkey(key: string): boolean {
+    // Same keys as the TUI: `D` duplicates, `t` opens tags and notes.
     if (dialog.kind === "read-only") {
-      if (key === "d" || key === "Enter") toDuplicate();
-      else if (key === "e") toMetadata();
+      if (key === "D" || key === "Enter") toDuplicate();
+      else if (key === "t") toMetadata();
       else return false;
       return true;
     }
@@ -93,20 +94,26 @@
 
 {#if dialog.kind === "read-only"}
   <Modal bind:armed onescape={close} {onkey} labelledBy="host-readonly-title">
-    {#snippet title()}<span class="title-line">Edit <span class="mono">{host.alias}</span><OriginBadge origin={host.origin} /></span>{/snippet}
-    <p class="lead">{host.origin === "imported" ? READ_ONLY_IMPORTED : READ_ONLY}</p>
+    {#snippet title()}
+      {#if refusedDelete}
+        <span class="title-line">{cannotDeleteTitle(host.alias)}<OriginBadge origin={host.origin} /></span>
+      {:else}
+        <span class="title-line">Edit <span class="mono">{host.alias}</span><OriginBadge origin={host.origin} /></span>
+      {/if}
+    {/snippet}
+    <p class="lead">{host.origin === "imported" ? READ_ONLY_IMPORTED : READ_ONLY_SSH_CONFIG}</p>
     <p class="note">Tags, group, favorite and notes stay editable for every host: they live in <span class="mono">hosts.toml</span>.</p>
     <dl>
       <dt>Defined in</dt><dd>{host.source}</dd>
     </dl>
     {#snippet footer()}
-      <button class="secondary" onclick={toMetadata} title="Edit tags, group and notes (Esc closes)">Tags and notes <kbd>e</kbd></button>
-      <button class="primary" data-autofocus onclick={toDuplicate}>Duplicate as Portico host… <kbd>d</kbd></button>
+      <button class="secondary" onclick={toMetadata} title="Edit tags, group and notes (Esc closes)">Tags and notes <kbd>t</kbd></button>
+      <button class="primary" data-autofocus onclick={toDuplicate}>Duplicate as Portico host… <kbd>D</kbd></button>
     {/snippet}
   </Modal>
 {:else if dialog.kind === "duplicate"}
   <Modal bind:armed onescape={close} labelledBy="host-duplicate-title">
-    {#snippet title()}Duplicate <span class="mono">{host.alias}</span> as a Portico host{/snippet}
+    {#snippet title()}Duplicate <span class="mono">{host.alias}</span>{/snippet}
     <p class="lead">
       Copies its HostName, User, Port, key and jump host into Portico's <span class="mono">hosts.conf</span>, with its tags and group. The original stays
       as it is{host.origin === "ssh_config" ? " in ~/.ssh/config" : ""}.
@@ -141,13 +148,10 @@
 {:else}
   <Modal bind:armed tone="danger" onescape={close} {onkey} labelledBy="host-delete-title">
     {#snippet title()}Delete <span class="mono">{host.alias}</span>?{/snippet}
-    <p class="lead">
-      Removes it from Portico's <span class="mono">hosts.conf</span>, with its tags, notes and remembered password. Open sessions stay connected;
-      <span class="mono">~/.ssh/config</span> is not touched.
+    <p class="lead" data-testid="delete-confirmation">
+      Delete <span class="mono">{confirmation.alias}</span> (<span class="mono">{confirmation.account}</span>) {confirmation.rest}
     </p>
-    <dl>
-      <dt>Host</dt><dd>{host.user ? `${host.user}@` : ""}{host.hostname}:{host.port}</dd>
-    </dl>
+
     {@render errorView()}
     {#snippet footer()}
       <button class="secondary danger" disabled={!armed || busy} onclick={() => void remove()}>

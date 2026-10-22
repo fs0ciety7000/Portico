@@ -8,16 +8,28 @@
 // (create, edit, read-only notice, duplicate, delete), the Include line
 // banner, and `hosts_changed`, on which the inventory is reloaded (App
 // keeps the selection, or moves it to `pendingSelect`).
-import type { EngineEvent, Host, HostMeta, ManagedHost, ManagedInclude, RecentHost } from "../api";
+import type { EngineEvent, ErrorSummary, Host, HostMeta, ManagedHost, ManagedInclude, RecentHost } from "../api";
+import type { HostForm } from "../hostform";
+
 import { backend } from "../backend";
 import { workspace } from "./workspace.svelte";
+
+/** See `Hosts.parked`. `form` and `initial` are `HostForm`s (hostform.ts). */
+export interface ParkedHostForm {
+  form: HostForm;
+  initial: HostForm;
+  /** The error that sent the user to the vault (shown again on "Not now"). */
+  error: ErrorSummary;
+  outcome: "pending" | "ready" | "declined";
+}
 
 export type HostDialog =
   | { kind: "create" }
   /** `managed`: what hosts.conf holds, read when the dialog opens (the form starts from it). */
   | { kind: "edit"; alias: string; managed: ManagedHost }
-  /** A host of ~/.ssh/config or of an import: never edited, duplicate offered. */
-  | { kind: "read-only"; alias: string }
+  /** A host of ~/.ssh/config or of an import: never edited, duplicate
+   * offered. `action: "delete"`: opened by "Delete host" (titled so). */
+  | { kind: "read-only"; alias: string; action?: "edit" | "delete" }
   | { kind: "duplicate"; alias: string }
   | { kind: "delete"; alias: string };
 
@@ -132,7 +144,34 @@ class Hosts {
   openDelete(alias: string) {
     const host = this.byAlias[alias];
     if (!host) return;
-    this.dialog = host.origin === "portico" ? { kind: "delete", alias } : { kind: "read-only", alias };
+    this.dialog = host.origin === "portico" ? { kind: "delete", alias } : { kind: "read-only", alias, action: "delete" };
+  }
+
+  /** B1: the host form waiting on the vault dialog (a password could not be
+   * saved: no vault, or a locked one). The form, typed password included,
+   * is parked here while the vault dialog has the screen, and given back
+   * when it closes: `ready` (created or unlocked: the form saves again) or
+   * `declined` ("Not now": the form shows the error under the password).
+   * Never outlives the host dialog. */
+  parked: ParkedHostForm | null = null;
+
+  park(form: ParkedHostForm) {
+    this.parked = form;
+  }
+
+  /** The parked form for the dialog now showing, once the vault dialog
+   * answered (taken: given back once). */
+  unpark(): ParkedHostForm | null {
+    const parked = this.parked;
+    if (!parked || parked.outcome === "pending") return null;
+    this.parked = null;
+    return parked;
+  }
+
+  /** The host dialog closed: nothing parked survives it. */
+  dropParked() {
+    if (this.parked) this.parked.form.password = "";
+    this.parked = null;
   }
 
   /** hosts.conf changed: reload, then select `alias` when given. */

@@ -150,7 +150,8 @@ export const ACTIONS: ActionDef[] = [
   { id: "snippets.new", title: "New snippet", doc: "Nouveau snippet", scope: "global", defaults: both() },
   { id: "files.download-dir", title: "Change download folder", doc: "Changer de dossier de téléchargement", scope: "global", defaults: both() },
   // The id predates Termix: kept, so a rebound key still applies.
-  { id: "app.import-termius", title: "Import hosts…", doc: "Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`)", scope: "global", defaults: both() },
+  // Free on both platforms and in a terminal (Linux: Ctrl-Shift-M), checked by test-shortcuts.
+  { id: "app.import-termius", title: "Import hosts…", doc: "Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`)", scope: "global", defaults: both("Mod+Shift+M") },
 ];
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));

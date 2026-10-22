@@ -213,12 +213,17 @@ pub(crate) struct ImportPreviewDto {
     skipped: Vec<ImportNotice>,
     warnings: Vec<ImportNotice>,
     secrets: IgnoredSecrets,
+    /// What was not imported, by cause ("Not imported: 1 password, …").
     secrets_advice: Option<String>,
+    /// "Delete <file> now: it holds …" (`ImportPlan::delete_export_advice`):
+    /// the dialog shows it first. `None` when the export held no secret.
+    delete_export_advice: Option<String>,
     identity_files: Vec<String>,
     /// Where the hosts will be written (`hosts.conf`, Portico's own folder).
     target: String,
     include_line: String,
-    /// Hosts of an earlier import that this plan updates.
+    /// Hosts of an earlier import this plan updates in place (destination
+    /// changes count once accepted: the dialog adds them).
     replaces: Option<usize>,
     /// Private keys found (Termix); none is selected by default.
     keys: Vec<PlannedKeyDto>,
@@ -228,16 +233,8 @@ pub(crate) struct ImportPreviewDto {
 
 impl ImportPreviewDto {
     fn new(token: u64, plan: ImportPlan, keys_dir: String) -> Self {
-        let file_name = plan
-            .source
-            .file_name()
-            .map(|n| {
-                n.to_string_lossy()
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let file_name = plan.file_name();
+        let delete_export_advice = plan.delete_export_advice();
         let source = plan.source_kind();
         Self {
             token,
@@ -248,6 +245,7 @@ impl ImportPreviewDto {
             records: plan.records,
             prefix: plan.options.prefix,
             secrets_advice: plan.secrets.advice(),
+            delete_export_advice,
             secrets: plan.secrets,
             target: display_path(&plan.target),
             include_line: plan.include_line,
@@ -267,8 +265,98 @@ impl ImportPreviewDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct KeyOutcomeDto {
     imported: Vec<String>,
+    /// The `imported` files, each with how it was written and the hosts
+    /// using it ("written · 0600 · encrypted · used by a, b").
+    written: Vec<WrittenKeyDto>,
     reused: Vec<String>,
     skipped: usize,
+}
+
+/// A key file the import wrote.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WrittenKeyDto {
+    /// `~/…`.
+    path: String,
+    /// Encrypted on disk (in the export already, or with the passphrase
+    /// given); `None` when the file matches no key of the plan.
+    encrypted: Option<bool>,
+    /// Imported hosts whose `IdentityFile` it is, in plan order.
+    used_by: Vec<String>,
+}
+
+/// What the report needs from the plan, kept before it is consumed: the
+/// export's file name (reports hold no path) and, for each ticked key,
+/// whether its written copy is encrypted and which hosts use it.
+#[derive(Debug, Default)]
+pub(crate) struct ReportContext {
+    file_name: String,
+    keys: Vec<TickedKey>,
+}
+
+#[derive(Debug)]
+struct TickedKey {
+    encrypted: bool,
+    aliases: Vec<String>,
+}
+
+impl ReportContext {
+    fn new(plan: &ImportPlan, options: &ImportOptions) -> Self {
+        let keys = plan
+            .keys
+            .iter()
+            .filter(|k| options.keys.contains(&k.id))
+            .map(|k| TickedKey {
+                // An unencrypted key gets the passphrase, an encrypted one
+                // keeps its own (written as it is).
+                encrypted: k.encrypted || options.key_passphrase.is_some(),
+                aliases: plan
+                    .hosts
+                    .iter()
+                    .filter(|h| h.key.as_ref() == Some(&k.id))
+                    .map(|h| h.alias.clone())
+                    .collect(),
+            })
+            .collect();
+        Self {
+            file_name: plan.file_name(),
+            keys,
+        }
+    }
+
+    /// `path` was written for the first imported host using its key
+    /// (`~/.ssh/portico/<alias>`, or `<alias>-2`… when taken): the key
+    /// whose first imported user has that name.
+    fn written(&self, path: &std::path::Path, imported: &[String]) -> WrittenKeyDto {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let named_after = |alias: &str| {
+            name == alias
+                || name
+                    .strip_prefix(alias)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        };
+        let key = self.keys.iter().find_map(|k| {
+            let used_by: Vec<String> = k
+                .aliases
+                .iter()
+                .filter(|a| imported.contains(a))
+                .cloned()
+                .collect();
+            used_by
+                .first()
+                .is_some_and(|first| named_after(first))
+                .then_some((k.encrypted, used_by))
+        });
+        WrittenKeyDto {
+            path: display_path(path),
+            encrypted: key.as_ref().map(|(encrypted, _)| *encrypted),
+            used_by: key.map(|(_, used_by)| used_by).unwrap_or_default(),
+        }
+    }
 }
 
 /// What the import did.
@@ -277,6 +365,8 @@ pub(crate) struct KeyOutcomeDto {
 pub(crate) struct ImportReportDto {
     format_label: &'static str,
     source: &'static str,
+    /// The export's file name (never its path).
+    file_name: String,
     target: String,
     unchanged: bool,
     imported: Vec<String>,
@@ -284,7 +374,11 @@ pub(crate) struct ImportReportDto {
     skipped: Vec<ImportNotice>,
     warnings: Vec<ImportNotice>,
     secrets: IgnoredSecrets,
+    /// What was not imported, by cause.
     secrets_advice: Option<String>,
+    /// "Delete <file> now: it holds …": shown first, right after the
+    /// summary. `None` when the export held no secret.
+    delete_export_advice: Option<String>,
     identity_files: Vec<String>,
     meta_updated: usize,
     include_line: String,
@@ -292,12 +386,20 @@ pub(crate) struct ImportReportDto {
     keys: KeyOutcomeDto,
 }
 
-impl From<ImportReport> for ImportReportDto {
-    fn from(r: ImportReport) -> Self {
-        let shown = |paths: Vec<PathBuf>| paths.iter().map(|p| display_path(p)).collect();
+impl ImportReportDto {
+    fn new(r: ImportReport, context: &ReportContext) -> Self {
+        let shown = |paths: &[PathBuf]| paths.iter().map(|p| display_path(p)).collect();
+        let written = r
+            .keys
+            .imported
+            .iter()
+            .map(|p| context.written(p, &r.imported))
+            .collect();
         Self {
             format_label: r.format.label(),
             source: r.format.source().label(),
+            file_name: context.file_name.clone(),
+            delete_export_advice: r.secrets.delete_export_advice(&context.file_name),
             target: display_path(&r.target),
             unchanged: r.unchanged,
             imported: r.imported,
@@ -311,8 +413,9 @@ impl From<ImportReport> for ImportReportDto {
             include_line: r.include_line,
             include_active: r.include_active,
             keys: KeyOutcomeDto {
-                imported: shown(r.keys.imported),
-                reused: shown(r.keys.reused),
+                imported: shown(&r.keys.imported),
+                written,
+                reused: shown(&r.keys.reused),
                 skipped: r.keys.skipped,
             },
         }
@@ -484,11 +587,12 @@ pub(crate) async fn import_apply(
 ) -> Result<ImportReportDto, ErrorSummary> {
     let token = request.token;
     let (pending, options) = imports.take_if(token, |plan| request.options_for(plan))?;
+    let context = ReportContext::new(&pending.plan, &options);
     let report = engine
         .apply_import(pending.plan, options)
         .await
         .map_err(|e| e.summary())?;
-    Ok(report.into())
+    Ok(ImportReportDto::new(report, &context))
 }
 
 /// The dialog was closed without importing.
@@ -769,6 +873,100 @@ mod tests {
         assert!(extra.is_err());
     }
 
+    /// B2: the delete-the-export action names the file, in the preview and
+    /// in the report (built from the plan's file name: reports hold no
+    /// path), apart from what was not imported.
+    #[test]
+    fn delete_export_advice_names_the_export_in_preview_and_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut plan = plan_with_keys(dir.path(), &["SHA256:aaa", "SHA256:bbb"]);
+        plan.secrets = IgnoredSecrets {
+            passwords: 1,
+            keys: 1,
+            unticked_keys: 1,
+            unreadable_keys: 0,
+            keys_in_export: 2,
+        };
+        let mut web = planned_host("web", None);
+        web.key = Some(KeyId::new("SHA256:aaa"));
+        web.update = false;
+        let mut db = planned_host("db", None);
+        db.key = Some(KeyId::new("SHA256:aaa"));
+        db.update = false;
+        plan.hosts = vec![web, db];
+        if let Some(k) = plan.keys.first_mut() {
+            k.local = None;
+        }
+
+        let preview = serde_json::to_value(ImportPreviewDto::new(1, plan.clone(), "~/x/".into()))
+            .expect("json");
+        assert_eq!(
+            preview["deleteExportAdvice"],
+            "Delete export.json now: it holds 1 password and 2 private keys (in clear text or encrypted)."
+        );
+        assert_eq!(
+            preview["secretsAdvice"],
+            "Not imported: 1 password, 1 unticked key."
+        );
+        assert_eq!(preview["secrets"]["untickedKeys"], 1);
+        assert_eq!(preview["secrets"]["unreadableKeys"], 0);
+
+        // Only the first key ticked, with a passphrase: its copy is
+        // encrypted, named after its first imported host.
+        let options = request(serde_json::json!({
+            "token": 1, "prefix": false, "keys": ["SHA256:aaa"], "redirect": [], "passphrase": "pw"
+        }))
+        .options_for(&plan)
+        .expect("options");
+        let context = ReportContext::new(&plan, &options);
+        let report = ImportReport {
+            format: portico_core::import::ImportFormat::TermixJson,
+            target: dir.path().join("hosts.conf"),
+            unchanged: false,
+            imported: vec!["web".into(), "db".into()],
+            updated: Vec::new(),
+            skipped: Vec::new(),
+            warnings: Vec::new(),
+            secrets: plan.secrets,
+            identity_files: Vec::new(),
+            meta_updated: 0,
+            include_line: "Include x".into(),
+            include_active: false,
+            keys: portico_core::import::KeyOutcome {
+                imported: vec![dir.path().join(".ssh/portico/web")],
+                reused: Vec::new(),
+                skipped: 1,
+            },
+        };
+        let json = serde_json::to_value(ImportReportDto::new(report, &context)).expect("json");
+        assert_eq!(json["fileName"], "export.json");
+        assert_eq!(
+            json["deleteExportAdvice"],
+            "Delete export.json now: it holds 1 password and 2 private keys (in clear text or encrypted)."
+        );
+        let written = &json["keys"]["written"][0];
+        assert_eq!(written["encrypted"], true, "{json}");
+        assert_eq!(written["usedBy"], serde_json::json!(["web", "db"]));
+        assert!(!json.to_string().contains("secret folder"), "{json}");
+
+        // Without a passphrase, an unencrypted key is written in clear;
+        // a taken name gets a numbered file (still matched).
+        let options = request(serde_json::json!({
+            "token": 1, "prefix": false, "keys": ["SHA256:aaa"], "redirect": [], "passphrase": null
+        }))
+        .options_for(&plan)
+        .expect("options");
+        let context = ReportContext::new(&plan, &options);
+        let written = context.written(
+            &dir.path().join(".ssh/portico/web-2"),
+            &["db".into(), "web".into()],
+        );
+        assert_eq!(written.encrypted, Some(false));
+        assert_eq!(written.used_by, vec!["web".to_owned(), "db".to_owned()]);
+        let other = context.written(&dir.path().join(".ssh/portico/webx"), &["web".into()]);
+        assert_eq!(other.encrypted, None);
+    }
+
     #[test]
     fn report_paths_are_shown_from_home() {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
@@ -793,8 +991,13 @@ mod tests {
                 skipped: 1,
             },
         };
-        let json = serde_json::to_value(ImportReportDto::from(report)).expect("json");
+        let json = serde_json::to_value(ImportReportDto::new(report, &ReportContext::default()))
+            .expect("json");
         assert_eq!(json["keys"]["imported"][0], "~/.ssh/portico/web");
+        // No plan context: the file is listed, its encryption unknown.
+        assert_eq!(json["keys"]["written"][0]["path"], "~/.ssh/portico/web");
+        assert!(json["keys"]["written"][0]["encrypted"].is_null());
+        assert!(json["deleteExportAdvice"].is_null(), "no secret held");
         assert_eq!(json["keys"]["reused"][0], "~/.ssh/id_ed25519");
         assert_eq!(json["keys"]["skipped"], 1);
         assert_eq!(json["source"], "Termix");

@@ -12,8 +12,13 @@
 // points one host at another server (a destination change, skipped unless
 // accepted); `?reimport=changed` shows that re-import on the first pick.
 import type { Backend } from "./backend";
-import type { ImportApplyRequest, ImportDestination, ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey } from "./api";
-import { destinationText, ignoredSecretsAdvice, keepRedirects } from "./importform";
+import type { IgnoredSecrets, ImportApplyRequest, ImportDestination, ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey } from "./api";
+import { deleteExportAdvice, destinationText, ignoredSecretsAdvice, keepRedirects } from "./importform";
+
+/** The secrets part of a demo plan, with the engine's two texts. */
+function secretsOf(secrets: IgnoredSecrets, fileName: string): Pick<ImportPreview, "secrets" | "secretsAdvice" | "deleteExportAdvice"> {
+  return { secrets, secretsAdvice: ignoredSecretsAdvice(secrets), deleteExportAdvice: deleteExportAdvice(secrets, fileName) };
+}
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("import");
@@ -88,8 +93,7 @@ function emptyPreview(prefix: boolean): ImportPreview {
       notice("missing_hostname", 4, "printer", "no host name or address"),
     ],
     warnings: [],
-    secrets: { passwords: 0, keys: 0, keysInExport: 0 },
-    secretsAdvice: null,
+    ...secretsOf({ passwords: 0, keys: 0, untickedKeys: 0, unreadableKeys: 0, keysInExport: 0 }, "switches.csv"),
     identityFiles: [],
     target: TARGET,
     includeLine: INCLUDE,
@@ -142,8 +146,7 @@ function termiusPreview(prefix: boolean): ImportPreview {
       ...(prefix ? [] : [notice("alias_looks_like_host", 4, "AT 198.51.100.7", "`at-198.51.100.7` looks like another host's name: imported as `termius-at-198.51.100.7`")]),
       ...changes,
     ],
-    secrets: { passwords: 2, keys: 1, keysInExport: 0 },
-    secretsAdvice: ignoredSecretsAdvice({ passwords: 2, keys: 1, keysInExport: 0 }),
+    ...secretsOf({ passwords: 2, keys: 1, untickedKeys: 0, unreadableKeys: 0, keysInExport: 0 }, "termius_template.csv"),
     identityFiles: [],
     target: TARGET,
     includeLine: INCLUDE,
@@ -196,8 +199,7 @@ function termixPreview(prefix: boolean): ImportPreview {
       notice("key_unreadable", 7, "Old router", "private key not imported: a PuTTY key (convert it with puttygen to OpenSSH)"),
       ...changes,
     ],
-    secrets: { passwords: 1, keys: 1, keysInExport: 4 },
-    secretsAdvice: ignoredSecretsAdvice({ passwords: 1, keys: 1, keysInExport: 4 }),
+    ...secretsOf({ passwords: 1, keys: 1, untickedKeys: 0, unreadableKeys: 1, keysInExport: 4 }, "termix_export.json"),
     identityFiles: [],
     target: TARGET,
     includeLine: INCLUDE,
@@ -226,7 +228,7 @@ export const demoImport: Pick<Backend, "importPick" | "importReplan" | "importAp
       throw {
         code: "import_unknown_format",
         message: "notes.txt is not a Termius or Termix export Portico recognizes",
-        hint: "Use a Termius CSV (import template header), a termius-local-export hosts.json or credentials.csv, the output of `termius export-ssh-config`, or a Termix JSON export. See docs/IMPORT.md.",
+        hint: "Use a CSV with the Termius import template header (Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,…), a termius-local-export hosts.json or credentials.csv, the output of `termius export-ssh-config`, or a Termix JSON export. See Portico's import guide.",
       };
     }
     pending = preview(prefix);
@@ -268,10 +270,17 @@ export const demoImport: Pick<Backend, "importPick" | "importReplan" | "importAp
     importedCount = written.length;
     const chosen = plan.keys.filter((k) => request.keys.includes(k.id));
     const firstAlias = (k: PlannedKey) => written.find((h) => h.key === k.id)?.alias ?? "key";
-    const secrets = { ...plan.secrets, keys: plan.secrets.keys + plan.keys.length - chosen.length };
+    const unticked = plan.keys.length - chosen.length;
+    const secrets = { ...plan.secrets, keys: plan.secrets.keys + unticked, untickedKeys: unticked };
+    const keyFile = (k: PlannedKey) => {
+      const usedBy = written.filter((h) => h.key === k.id).map((h) => h.alias);
+      return { path: `${KEYS_DIR}${usedBy[0] ?? "key"}`, encrypted: k.encrypted || !!request.passphrase, usedBy };
+    };
     return {
       formatLabel: plan.format,
       source: plan.source,
+      fileName: plan.fileName,
+      deleteExportAdvice: deleteExportAdvice(secrets, plan.fileName),
       target: plan.target,
       unchanged: false,
       imported: written.map((h) => h.alias),
@@ -287,6 +296,7 @@ export const demoImport: Pick<Backend, "importPick" | "importReplan" | "importAp
       includeActive: mode === "included",
       keys: {
         imported: chosen.filter((k) => !k.local).map((k) => `${KEYS_DIR}${firstAlias(k)}`),
+        written: chosen.filter((k) => !k.local).map(keyFile),
         reused: chosen.flatMap((k) => (k.local ? [k.local] : [])),
         skipped: plan.keys.length - chosen.length,
       },
