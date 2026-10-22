@@ -256,6 +256,9 @@ struct Inner {
     /// queue) alive; if they are dropped without closing, the writer ends.
     terminals:
         Mutex<HashMap<TerminalId, (SessionId, std::sync::Weak<crate::recording::TerminalTap>)>>,
+    /// Names of the recordings whose file is still open for writing (they
+    /// cannot be deleted).
+    recordings_active: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 #[derive(Debug)]
@@ -290,6 +293,7 @@ impl Engine {
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 terminals: Mutex::default(),
+                recordings_active: Arc::default(),
             }),
         }
     }
@@ -1190,8 +1194,10 @@ impl Engine {
 // ════ Phase 6: session recording (additive block) ════════════════════════
 //
 // The file side lives in `crate::recording`; here: the terminal registry and
-// the public commands. File I/O runs on `spawn_blocking`, the writer on a
-// tracked blocking thread (so `shutdown_and_wait` waits for the flush).
+// the public commands. Short file I/O runs on `spawn_blocking`; each
+// recording's writer runs on its own `portico-rec` thread (never a blocking
+// slot of the runtime), whose end is tracked so `shutdown_and_wait` waits
+// for the flush.
 
 impl Engine {
     /// Called by a terminal when it opens: makes it recordable.
@@ -1261,8 +1267,14 @@ impl Engine {
     /// [`RecordingState::Stopped`] (stop requested, terminal closed, writer
     /// behind, write error or size cap).
     ///
+    /// Cancel-safe: the start runs as a tracked task. If the caller stops
+    /// waiting before the file exists, the file is removed and the terminal
+    /// released; once the recording is active (`Started` emitted) it stays
+    /// active.
+    ///
     /// Errors: `recording_unknown_terminal`, `recording_already_active`,
-    /// `recording_unsafe_path` (symlinked folder), `recording_create_failed`.
+    /// `recording_unsafe_path` (symlinked folder), `recording_foreign_owner`,
+    /// `recording_create_failed`.
     ///
     /// [`RecordingState::Started`]: crate::events::RecordingState::Started
     /// [`RecordingState::Stopped`]: crate::events::RecordingState::Stopped
@@ -1270,41 +1282,99 @@ impl Engine {
         &self,
         terminal: TerminalId,
     ) -> Result<crate::recording::RecordingInfo> {
-        use crate::recording::{MAX_RECORDING_BYTES, NewRecording, RecordingInfo};
-
+        if self.inner.shutdown.is_cancelled() {
+            return Err(Error::EngineClosed);
+        }
         let (session, tap) = self.terminal_tap(terminal)?;
-        let size = tap.begin(terminal).map_err(Error::Recording)?;
+        // Released when dropped, whatever ends the start (error, cancel).
+        let reservation = tap.begin(terminal).map_err(Error::Recording)?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let engine = self.clone();
+        self.inner.tasks.spawn(async move {
+            let result = engine
+                .run_start(terminal, session, reservation, &reply_tx)
+                .await;
+            let _ = reply_tx.send(result);
+        });
+        reply_rx.await.map_err(|_| Error::EngineClosed)?
+    }
+
+    /// The body of [`Engine::start_recording`], on a tracked task.
+    async fn run_start(
+        &self,
+        terminal: TerminalId,
+        session: SessionId,
+        reservation: crate::recording::StartReservation,
+        reply: &oneshot::Sender<Result<crate::recording::RecordingInfo>>,
+    ) -> Result<crate::recording::RecordingInfo> {
+        use crate::recording::{
+            MAX_RECORDING_BYTES, NewRecording, RECORDING_QUEUE_CAPACITY, RecordingError,
+            RecordingInfo, StopCell,
+        };
+
+        let size = reservation.size();
         let alias = self
             .session_alias(session)
             .unwrap_or_else(|| "session".to_owned());
-        let dir = self.inner.config.paths.recordings();
+        let dir = self.recordings_dir();
         let started = time::OffsetDateTime::now_utc();
-        let created = tokio::task::spawn_blocking(move || {
+        let NewRecording { name, path, writer } = tokio::task::spawn_blocking(move || {
             crate::recording::create_recording(&dir, &alias, started, size, MAX_RECORDING_BYTES)
         })
         .await
-        .map_err(|_| Error::EngineClosed)
-        .and_then(|created| created);
-        let NewRecording { name, path, writer } = match created {
-            Ok(created) => created,
-            Err(e) => {
-                tap.abort_start();
-                return Err(e);
-            }
-        };
-        let info = RecordingInfo {
+        .map_err(|_| Error::EngineClosed)??;
+        if reply.is_closed() {
+            // The caller stopped waiting: no recording it would not know of.
+            // The file goes first, then the reservation (on return).
+            drop(writer);
+            remove_orphan(path).await;
+            return Err(Error::EngineClosed);
+        }
+
+        let (tx, rx) = mpsc::channel(RECORDING_QUEUE_CAPACITY);
+        let stop = Arc::new(StopCell::default());
+        let path_text = path.display().to_string();
+        let job = RecordingJob {
             terminal,
             session,
             name: name.clone(),
             path: path.clone(),
+            path_text: path_text.clone(),
+            active: ActiveName::register(&self.inner.recordings_active, &name),
+        };
+        // A dedicated thread per recording: it lives as long as the
+        // recording, so it must not hold one of the runtime's blocking slots.
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let engine = self.clone();
+        let job_stop = Arc::clone(&stop);
+        let spawned = std::thread::Builder::new()
+            .name(RECORDING_THREAD_NAME.to_owned())
+            .spawn(move || {
+                job.run(&engine, rx, writer, &job_stop);
+                drop(done_tx);
+            });
+        if let Err(source) = spawned {
+            // The closure (file, job) is dropped with the error.
+            remove_orphan(path.clone()).await;
+            return Err(Error::Recording(RecordingError::Create { path, source }));
+        }
+        // `shutdown_and_wait` waits for the writer to flush and close.
+        self.inner.tasks.spawn(async move {
+            let _ = done_rx.await;
+        });
+
+        let info = RecordingInfo {
+            terminal,
+            session,
+            name: name.clone(),
+            path,
             started,
         };
-        let path_text = path.display().to_string();
         self.emit(EngineEvent::Recording {
             terminal,
             session,
             state: crate::events::RecordingState::Started {
-                name: name.clone(),
+                name,
                 path: path_text.clone(),
             },
         });
@@ -1314,23 +1384,9 @@ impl Engine {
             "recording",
             format!("terminal {terminal}: recording to {path_text}"),
         );
-
-        let (tx, rx) = mpsc::channel(crate::recording::RECORDING_QUEUE_CAPACITY);
-        let stop = Arc::new(crate::recording::StopCell::default());
         // A terminal closed meanwhile drops `tx`: the writer then ends at
         // once with `terminal_closed`, after the header.
-        tap.activate(tx, Arc::clone(&stop), size);
-        let engine = self.clone();
-        let job = RecordingJob {
-            terminal,
-            session,
-            name,
-            path,
-            path_text,
-        };
-        self.inner
-            .tasks
-            .spawn_blocking(move || job.run(&engine, rx, writer, &stop));
+        reservation.activate(tx, stop);
         Ok(info)
     }
 
@@ -1368,8 +1424,21 @@ impl Engine {
     }
 
     /// Deletes the recording `name` (a file name from the listing). Paths,
-    /// `..`, symlinks and anything outside the recordings folder are refused.
+    /// `..`, symlinks and anything outside the recordings folder are refused,
+    /// and so is a recording still being written (`recording_active`: stop
+    /// it first).
     pub async fn delete_recording(&self, name: &str) -> Result<()> {
+        let active = self
+            .inner
+            .recordings_active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(name);
+        if active {
+            return Err(Error::Recording(crate::recording::RecordingError::Active {
+                name: name.to_owned(),
+            }));
+        }
         let dir = self.recordings_dir();
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || crate::recording::delete(&dir, &name))
@@ -1390,7 +1459,48 @@ impl Engine {
     }
 }
 
-/// The writer side of one recording (runs on a blocking thread).
+/// Name of the writer thread of a recording.
+const RECORDING_THREAD_NAME: &str = "portico-rec";
+
+/// Removes a recording file that will not be used (best effort, off the
+/// runtime).
+async fn remove_orphan(path: PathBuf) {
+    let removed = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+    if !matches!(removed, Ok(Ok(()))) {
+        tracing::warn!("cannot remove an abandoned recording file");
+    }
+}
+
+/// A recording name registered as being written (RAII: unregistered on
+/// drop).
+#[derive(Debug)]
+struct ActiveName {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl ActiveName {
+    fn register(set: &Arc<Mutex<std::collections::HashSet<String>>>, name: &str) -> Self {
+        set.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned());
+        Self {
+            set: Arc::clone(set),
+            name: name.to_owned(),
+        }
+    }
+}
+
+impl Drop for ActiveName {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.name);
+    }
+}
+
+/// The writer side of one recording (runs on its own thread).
 #[derive(Debug)]
 struct RecordingJob {
     terminal: TerminalId,
@@ -1398,6 +1508,7 @@ struct RecordingJob {
     name: String,
     path: PathBuf,
     path_text: String,
+    active: ActiveName,
 }
 
 impl RecordingJob {
@@ -1405,25 +1516,53 @@ impl RecordingJob {
         self,
         engine: &Engine,
         mut rx: mpsc::Receiver<crate::recording::TapEvent>,
-        mut writer: crate::recording::CastWriter<std::io::BufWriter<std::fs::File>>,
+        mut writer: crate::recording::CastWriter<std::fs::File>,
         stop: &crate::recording::StopCell,
     ) {
-        use crate::recording::RecordingStopReason as Reason;
+        use crate::recording::{RecordingStopReason as Reason, WriteStop};
 
+        let Self {
+            terminal,
+            session,
+            name,
+            path,
+            path_text,
+            active,
+        } = self;
         let failed = crate::recording::run_writer(&mut rx, &mut writer);
         drop(rx);
         let duration = writer.last_time();
-        let (sink, finished) = writer.finish();
-        let synced = sink
-            .into_inner()
-            .map_err(std::io::IntoInnerError::into_error)
-            .and_then(|file| file.sync_all());
-        let reason = match (failed, finished, synced) {
-            (Some(stop), _, _) | (None, Err(stop), _) => stop.reason(),
-            (None, Ok(()), Err(_)) => Reason::WriteFailed,
-            (None, Ok(()), Ok(())) => stop.get().unwrap_or(Reason::TerminalClosed),
+        let finished = match failed {
+            Some(WriteStop::Io(e)) => Err(WriteStop::Io(e)),
+            Some(WriteStop::SizeLimit) => {
+                // The cap: what fits is written (the decoder's tail may not).
+                let _ = writer.finish_in_place();
+                Err(WriteStop::SizeLimit)
+            }
+            None => writer.finish_in_place(),
         };
-        let bytes = std::fs::symlink_metadata(&self.path).map_or(0, |m| m.len());
+        let reason = match finished {
+            Err(WriteStop::Io(_)) => {
+                // Disk full or I/O error: no flush retried, the file is cut
+                // back to its complete lines.
+                if crate::recording::truncate_to_committed(writer).is_err() {
+                    tracing::warn!("cannot cut a failed recording back to complete lines");
+                }
+                Reason::WriteFailed
+            }
+            Err(stopped) => {
+                // The cap: the file ends on a complete line.
+                let _ = writer.into_sink().sync_all();
+                stopped.reason()
+            }
+            Ok(()) => match writer.into_sink().sync_all() {
+                Ok(()) => stop.get().unwrap_or(Reason::TerminalClosed),
+                Err(_) => Reason::WriteFailed,
+            },
+        };
+        let bytes = std::fs::symlink_metadata(&path).map_or(0, |m| m.len());
+        // The file is closed: it may be deleted from now on.
+        drop(active);
         let duration = Duration::try_from_secs_f64(duration).unwrap_or(Duration::ZERO);
         let level = if matches!(reason, Reason::Requested | Reason::TerminalClosed) {
             LogLevel::Info
@@ -1431,23 +1570,22 @@ impl RecordingJob {
             LogLevel::Warn
         };
         engine.session_log(
-            self.session,
+            session,
             level,
             "recording",
             format!(
-                "terminal {}: recording stopped ({}), {bytes} bytes, {:.1} s",
-                self.terminal,
+                "terminal {terminal}: recording stopped ({}), {bytes} bytes, {:.1} s",
                 reason.code(),
                 duration.as_secs_f64()
             ),
         );
         engine.emit(EngineEvent::Recording {
-            terminal: self.terminal,
-            session: self.session,
+            terminal,
+            session,
             state: crate::events::RecordingState::Stopped {
                 reason,
-                name: self.name,
-                path: self.path_text,
+                name,
+                path: path_text,
                 bytes,
                 duration,
             },
@@ -1771,5 +1909,128 @@ mod tests {
         let port = view.options.iter().find(|o| o.key == "port").expect("port");
         assert_eq!(port.values, ["2200"]);
         assert_eq!(view.route.len(), 1);
+    }
+
+    // ── Phase 6: recording (security review) ──
+
+    /// A recordable terminal without SSH: the tap a terminal task holds.
+    fn fake_terminal(engine: &Engine) -> (TerminalId, Arc<crate::recording::TerminalTap>) {
+        let id = TerminalId::next();
+        let tap = Arc::new(crate::recording::TerminalTap::new(PtySize {
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        }));
+        engine.register_terminal(id, SessionId::next(), &tap);
+        (id, tap)
+    }
+
+    async fn wait_stopped(events: &mut broadcast::Receiver<EngineEvent>, terminal: TerminalId) {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("event in time")
+                .expect("event stream open");
+            if let EngineEvent::Recording {
+                terminal: t,
+                state: crate::events::RecordingState::Stopped { .. },
+                ..
+            } = event
+                && t == terminal
+            {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_start_recording_releases_the_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path());
+        let (id, tap) = fake_terminal(&engine);
+        // Dropped right after its first poll, while the file is created.
+        let cancelled = tokio::time::timeout(Duration::ZERO, engine.start_recording(id)).await;
+        assert!(cancelled.is_err(), "the start was cancelled");
+        // The terminal is released (never stuck in "starting")…
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let info = loop {
+            match engine.start_recording(id).await {
+                Ok(info) => break info,
+                Err(e)
+                    if e.summary().code == "recording_already_active"
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(e) => panic!("the terminal stays reserved: {e}"),
+            }
+        };
+        // …and the abandoned file is gone: only the new recording exists.
+        let names: Vec<String> = engine
+            .list_recordings()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(names, [info.name]);
+        tap.close();
+        assert!(engine.shutdown_and_wait(Duration::from_secs(5)).await);
+    }
+
+    #[test]
+    fn many_recordings_do_not_starve_spawn_blocking() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let engine = engine(dir.path());
+            let mut taps = Vec::new();
+            for _ in 0..4 {
+                let (id, tap) = fake_terminal(&engine);
+                engine.start_recording(id).await.expect("start");
+                taps.push(tap);
+            }
+            // As many recordings as blocking threads: the runtime still
+            // has room for short blocking work.
+            let listed = tokio::time::timeout(Duration::from_secs(1), engine.list_recordings())
+                .await
+                .expect("list_recordings answers within 1 s")
+                .expect("list");
+            assert_eq!(listed.len(), 4);
+            for tap in &taps {
+                tap.close();
+            }
+            assert!(engine.shutdown_and_wait(Duration::from_secs(5)).await);
+        });
+    }
+
+    #[tokio::test]
+    async fn deleting_an_active_recording_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path());
+        let mut events = engine.subscribe();
+        let (id, tap) = fake_terminal(&engine);
+        let info = engine.start_recording(id).await.expect("start");
+        let err = engine
+            .delete_recording(&info.name)
+            .await
+            .expect_err("still being written");
+        assert_eq!(err.summary().code, "recording_active");
+        assert!(info.path.exists());
+
+        engine.stop_recording(id).expect("stop");
+        wait_stopped(&mut events, id).await;
+        engine
+            .delete_recording(&info.name)
+            .await
+            .expect("deleted once stopped");
+        assert!(!info.path.exists());
+        tap.close();
     }
 }
