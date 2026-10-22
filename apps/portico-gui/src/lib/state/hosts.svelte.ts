@@ -8,13 +8,14 @@
 // (create, edit, read-only notice, duplicate, delete), the Include line
 // banner, and `hosts_changed`, on which the inventory is reloaded (App
 // keeps the selection, or moves it to `pendingSelect`).
-import type { EngineEvent, Host, HostMeta, ManagedInclude, RecentHost } from "../api";
+import type { EngineEvent, Host, HostMeta, ManagedHost, ManagedInclude, RecentHost } from "../api";
 import { backend } from "../backend";
 import { workspace } from "./workspace.svelte";
 
 export type HostDialog =
   | { kind: "create" }
-  | { kind: "edit"; alias: string }
+  /** `managed`: what hosts.conf holds, read when the dialog opens (the form starts from it). */
+  | { kind: "edit"; alias: string; managed: ManagedHost }
   /** A host of ~/.ssh/config or of an import: never edited, duplicate offered. */
   | { kind: "read-only"; alias: string }
   | { kind: "duplicate"; alias: string }
@@ -65,6 +66,8 @@ class Hosts {
 
   /** The open host dialog (phase 6b). */
   dialog: HostDialog | null = $state(null);
+  /** Bumped by every "Edit host…" (a slow read never opens a stale dialog). */
+  private editRun = 0;
   /** The Include line for hosts.conf, and whether ~/.ssh/config has it. */
   include: ManagedInclude | null = $state(null);
   dismissed: string | null = $state(loadDismissed());
@@ -101,11 +104,28 @@ class Hosts {
     }
   }
 
-  /** "Edit host…": the host dialog for a Portico host, the read-only notice otherwise. */
-  openEdit(alias: string) {
+  /** "Edit host…": the host dialog for a Portico host, once its values in
+   * hosts.conf are read; the read-only notice otherwise. */
+  async openEdit(alias: string) {
     const host = this.byAlias[alias];
     if (!host) return;
-    this.dialog = host.origin === "portico" ? { kind: "edit", alias } : { kind: "read-only", alias };
+    if (host.origin !== "portico") {
+      this.dialog = { kind: "read-only", alias };
+      return;
+    }
+    const run = ++this.editRun;
+    try {
+      const managed = await backend.managedHost(alias);
+      // Another dialog opened meanwhile: that one wins.
+      if (run !== this.editRun || this.dialog) return;
+      if (managed) this.dialog = { kind: "edit", alias, managed };
+      else {
+        workspace.notify({ code: "host_not_found", message: `${alias} is no longer in Portico's hosts.conf`, hint: "Reload the host list." });
+        this.changed();
+      }
+    } catch (e) {
+      if (run === this.editRun) workspace.notify(e);
+    }
   }
 
   /** "Delete host": only a Portico host; the others are read-only. */

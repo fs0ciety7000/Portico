@@ -14,6 +14,8 @@ import {
   type HostMeta,
   type HostDraft,
   type ManagedInclude,
+  type ManagedHost,
+  type ImportApplyRequest,
   type ImportPreview,
   type ImportReport,
   type RecentHost,
@@ -101,6 +103,7 @@ export interface Backend {
   deleteHost(alias: string): Promise<void>;
   duplicateHost(alias: string, newAlias: string): Promise<string>;
   managedInclude(): Promise<ManagedInclude>;
+  managedHost(alias: string): Promise<ManagedHost | null>;
   recentHosts(limit: number): Promise<RecentHost[]>;
   clearRecent(): Promise<void>;
   forgetRecent(alias: string): Promise<boolean>;
@@ -111,9 +114,10 @@ export interface Backend {
   getSettings(): Promise<Settings>;
   saveTheme(theme: string): Promise<void>;
   /** Native picker in Rust, then the plan; `null` when cancelled. */
-  importTermiusPick(prefix: boolean): Promise<ImportPreview | null>;
-  importTermiusReplan(token: number, prefix: boolean): Promise<ImportPreview>;
-  importApply(token: number): Promise<ImportReport>;
+  importPick(prefix: boolean): Promise<ImportPreview | null>;
+  importReplan(token: number, prefix: boolean): Promise<ImportPreview>;
+  /** Key ids are checked against the plan in Rust; the passphrase becomes a SecretString. */
+  importApply(request: ImportApplyRequest): Promise<ImportReport>;
   importCancel(): Promise<void>;
   recordingStart(terminal: number): Promise<void>;
   recordingStop(terminal: number): Promise<void>;

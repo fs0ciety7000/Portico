@@ -2,18 +2,18 @@
 // Node's built-in test runner, no dependency.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Host, LocalKey } from "../src/lib/api.ts";
+import type { Host, ManagedHost } from "../src/lib/api.ts";
 import { capitalizable, emptyForm, fieldOf, FIELD_ORDER, formFromHost, isDirty, KEEP_IDENTITY, parsePort, suggestAlias, toDraft } from "../src/lib/hostform.ts";
 
-const key = (id: string, hasPrivate = true): LocalKey => ({
-  id,
-  privateDisplay: `~/.ssh/${id}`,
-  publicDisplay: `~/.ssh/${id}.pub`,
-  algorithm: "ED25519",
-  fingerprint: "SHA256:x",
-  comment: "",
-  hasPrivate,
-  certificate: null,
+/** What hosts.conf holds (`managed_host`): the key mapped to a discovered id in Rust. */
+const own = (identityFile: string | null, keyId: string | null): ManagedHost => ({
+  alias: "nas",
+  hostname: "nas.lan",
+  user: null,
+  port: 2222,
+  proxyJump: "bastion",
+  keyId,
+  identityFile,
 });
 
 const portico = (identityFile: string | null): Host => ({
@@ -33,7 +33,6 @@ const portico = (identityFile: string | null): Host => ({
   notes: null,
   source: "~/.config/portico/hosts.conf:5",
   origin: "portico",
-  managed: { hostname: "nas.lan", user: null, port: 2222, identityFile, proxyJump: "bastion" },
   warnings: [],
 });
 
@@ -64,23 +63,27 @@ test("engine error codes map to their field, by code only", () => {
   for (const code of ["host_invalid_alias", "host_invalid_port", "host_notes", "secrets"]) assert.ok(FIELD_ORDER.includes(fieldOf(code)!));
 });
 
-test("a Portico host's form starts from its own directives", () => {
-  const form = formFromHost(portico("~/.ssh/id_ed25519"), [key("id_rsa"), key("id_ed25519")]);
-  assert.equal(form.user, "", "the inherited user is not the host's");
+test("a Portico host's form starts from what hosts.conf holds", () => {
+  const form = formFromHost(portico("~/.ssh/id_ed25519"), own("~/.ssh/id_ed25519", "id_ed25519"));
+  assert.equal(form.user, "", "the effective user (inherited, or an earlier value elsewhere) is not the host's");
+  assert.equal(form.hostname, "nas.lan");
   assert.equal(form.port, "2222");
   assert.equal(form.identity, "key:id_ed25519");
   assert.equal(form.proxyJump, "bastion");
   assert.deepEqual(form.tags, ["home"]);
   assert.equal(form.group, "Lab");
   assert.equal(form.passwordMode, "keep");
-  // A key that is not discovered (or public only) is kept, never sent as a path.
-  assert.equal(formFromHost(portico("~/keys/old"), [key("id_ed25519")]).identity, KEEP_IDENTITY);
-  assert.equal(formFromHost(portico("~/.ssh/id_ed25519"), [key("id_ed25519", false)]).identity, KEEP_IDENTITY);
-  assert.equal(formFromHost(portico(null), [key("id_ed25519")]).identity, "");
+  // hosts.conf wins over the resolved values of the inventory.
+  const hidden = formFromHost(portico(null), { ...own(null, null), user: "deploy", hostname: "10.0.0.1" });
+  assert.equal(hidden.user, "deploy");
+  assert.equal(hidden.hostname, "10.0.0.1");
+  // A key that is not a discovered one is kept, never sent as a path.
+  assert.equal(formFromHost(portico("~/keys/old"), own("~/keys/old", null)).identity, KEEP_IDENTITY);
+  assert.equal(formFromHost(portico(null), own(null, null)).identity, "");
 });
 
 test("dirty tracking: edits, reverted edits, password choices", () => {
-  const initial = formFromHost(portico("~/.ssh/id_ed25519"), [key("id_ed25519")]);
+  const initial = formFromHost(portico("~/.ssh/id_ed25519"), own("~/.ssh/id_ed25519", "id_ed25519"));
   const form = { ...initial, tags: [...initial.tags] };
   assert.equal(isDirty(initial, form), false);
   form.hostname = "nas.lan "; // spaces only

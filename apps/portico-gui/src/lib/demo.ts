@@ -22,7 +22,6 @@ const base = {
   group: null as string | null,
   notes: null as string | null,
   origin: "ssh_config" as HostOrigin,
-  managed: null,
 };
 
 // `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).

@@ -5,7 +5,7 @@
   // the keys the engine discovered (by id): the webview never names a path.
   // The password goes to the engine once, then the field is cleared.
   import { onMount, untrack } from "svelte";
-  import { asError, sentence, type ErrorSummary, type Host, type LocalKey } from "../api";
+  import { asError, sentence, type ErrorSummary, type Host, type LocalKey, type ManagedHost } from "../api";
   import { backend } from "../backend";
   import {
     capitalizable,
@@ -29,7 +29,8 @@
   import OriginBadge from "./OriginBadge.svelte";
   import TagsField from "./TagsField.svelte";
 
-  let { host }: { host?: Host } = $props();
+  // `managed`: what hosts.conf holds for `host` (read by `hosts.openEdit`).
+  let { host, managed }: { host?: undefined; managed?: undefined } | { host: Host; managed: ManagedHost } = $props();
 
   const editing = untrack(() => !!host);
   /** The alias the host had when the dialog opened (a rename changes the form's). */
@@ -41,8 +42,10 @@
   let keys: LocalKey[] = $state([]);
   let keysLoading = $state(true);
   let keysError: ErrorSummary | null = $state(null);
-  // Snapshot at opening (keys refine the key choice once listed).
-  let initial: HostForm = $state(untrack(() => (host ? formFromHost(host, []) : emptyForm())));
+  /** The "(current)" key choice: hosts.conf's file, when not a discovered key. */
+  const currentKey = untrack(() => managed?.identityFile ?? null);
+  // Snapshot at opening, from hosts.conf itself (never the resolved config).
+  let initial: HostForm = $state(untrack(() => (host && managed ? formFromHost(host, managed) : emptyForm())));
   let form: HostForm = $state(structuredClone($state.snapshot(initial)));
   let errors: Partial<Record<FieldName, ErrorSummary>> = $state({});
   let formError: ErrorSummary | null = $state(null);
@@ -67,11 +70,6 @@
       (list) => {
         keys = list;
         keysLoading = false;
-        if (!host) return;
-        // The current key, now that the discovered ones are known.
-        const refined = formFromHost(host, list).identity;
-        if (form.identity === initial.identity) form.identity = refined;
-        initial.identity = refined;
       },
       (e) => {
         keysLoading = false;
@@ -272,7 +270,11 @@
           <select data-field="identity" bind:value={form.identity} aria-invalid={!!errors.identity} onchange={() => clear("identity")} onkeydown={onEnter}>
             <option value="">None · agent and default keys</option>
             {#if form.identity === KEEP_IDENTITY || initial.identity === KEEP_IDENTITY}
-              <option value={KEEP_IDENTITY}>{host?.managed?.identityFile ?? "Current key"} (current)</option>
+              <option value={KEEP_IDENTITY}>{currentKey ?? "Current key"} (current)</option>
+            {/if}
+            {#if form.identity.startsWith("key:") && !usableKeys.some((k) => keyValue(k.id) === form.identity)}
+              <!-- The host's key, while the list loads (or if it went away: saving says so). -->
+              <option value={form.identity}>{form.identity.slice(4)}</option>
             {/if}
             {#each usableKeys as k (k.id)}
               <option value={keyValue(k.id)}>{k.id} · {k.algorithm}</option>

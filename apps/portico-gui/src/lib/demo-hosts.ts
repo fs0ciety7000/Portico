@@ -5,7 +5,7 @@
 //
 // URL switches: `?include=active` (the Include line is already in
 // ~/.ssh/config: no banner), `?banner=none` (no Portico host at startup).
-import type { EngineEvent, ErrorSummary, Host, HostDraft, LocalKey, ManagedInclude } from "./api";
+import type { EngineEvent, ErrorSummary, Host, HostDraft, LocalKey, ManagedHost, ManagedInclude } from "./api";
 import type { Backend } from "./backend";
 import { normalizeTags } from "./demo-meta";
 
@@ -35,6 +35,13 @@ export interface HostsHooks {
   keys(): Promise<LocalKey[]>;
 }
 
+/** What hosts.conf holds for each Portico host (by alias): the edit form starts from it. */
+type Own = Omit<ManagedHost, "alias" | "keyId">;
+const own = new Map<string, Own>([
+  ["nas", { hostname: "192.168.1.20", user: "admin", port: 2222, identityFile: "~/.ssh/id_ed25519", proxyJump: null }],
+  ["ci-runner", { hostname: "10.0.9.4", user: "ci", port: null, identityFile: null, proxyJump: "bastion" }],
+]);
+
 const NO_FORWARDS = { localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [] as string[] };
 
 /** Portico hosts of the demo (unless `?banner=none`), and one imported host. */
@@ -55,7 +62,6 @@ export function demoPorticoHosts(): Host[] {
       notes: "Synology, nightly snapshots at 03:00.",
       source: `${MANAGED_FILE}:5`,
       origin: "portico",
-      managed: { hostname: "192.168.1.20", user: "admin", port: 2222, identityFile: "~/.ssh/id_ed25519", proxyJump: null },
     },
     {
       ...NO_FORWARDS,
@@ -71,7 +77,6 @@ export function demoPorticoHosts(): Host[] {
       notes: null,
       source: `${MANAGED_FILE}:11`,
       origin: "portico",
-      managed: { hostname: "10.0.9.4", user: "ci", port: null, identityFile: null, proxyJump: "bastion" },
     },
     {
       ...NO_FORWARDS,
@@ -87,12 +92,11 @@ export function demoPorticoHosts(): Host[] {
       notes: "Termius: web eu 1",
       source: "~/.config/portico/imports/termius.conf:4",
       origin: "imported",
-      managed: null,
     },
   ];
 }
 
-export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" | "updateHost" | "deleteHost" | "duplicateHost" | "managedInclude"> {
+export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" | "updateHost" | "deleteHost" | "duplicateHost" | "managedInclude" | "managedHost"> {
   const { emit, hosts } = hooks;
   const find = (alias: string) => hosts.find((h) => h.alias.toLowerCase() === alias.toLowerCase());
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -142,7 +146,7 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
       throw fail("host_invalid_port", `invalid port ${draft.port}: use 1 to 65535`, HINTS.port);
     }
     let identityFile: string | null = null;
-    if (draft.identity.kind === "keep") identityFile = existing?.managed?.identityFile ?? null;
+    if (draft.identity.kind === "keep") identityFile = (existing && own.get(existing.alias)?.identityFile) ?? null;
     else if (draft.identity.kind === "key") {
       const id = draft.identity.id;
       const key = (await hooks.keys()).find((k) => k.id === id);
@@ -158,6 +162,8 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     if (draft.password.kind === "set" && params.get("vault") === "locked") {
       throw fail("vault_locked", "the vault is locked", "Unlock the vault (Keys, then v) to remember passwords.");
     }
+    if (existing) own.delete(existing.alias);
+    own.set(alias, { hostname, user, port: draft.port, identityFile, proxyJump: jump });
     return {
       ...NO_FORWARDS,
       alias,
@@ -172,7 +178,6 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
       notes: draft.notes?.trim() ? draft.notes : null,
       source: existing?.source ?? `${MANAGED_FILE}:${(nextLine += 6)}`,
       origin: "portico",
-      managed: { hostname, user, port: draft.port, identityFile, proxyJump: jump },
     };
   }
 
@@ -208,7 +213,8 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
         for (const h of hosts) {
           if (h.proxyJump[0] === existing.alias) {
             h.proxyJump = [host.alias];
-            if (h.managed) h.managed.proxyJump = host.alias;
+            const values = own.get(h.alias);
+            if (values) values.proxyJump = host.alias;
           }
         }
       }
@@ -224,6 +230,7 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
       const by = hosts.find((h) => h.proxyJump.includes(existing.alias));
       if (by) throw fail("host_in_use", `${existing.alias} is the jump host of ${by.alias}`, HINTS.inUse);
       hosts.splice(hosts.indexOf(existing), 1);
+      own.delete(existing.alias);
       changed(null);
     },
     async duplicateHost(alias, newAlias) {
@@ -262,6 +269,14 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     },
     async managedInclude() {
       return { ...INCLUDE };
+    },
+    async managedHost(alias) {
+      await sleep(60);
+      const host = find(alias);
+      const values = host && host.origin === "portico" ? own.get(host.alias) : undefined;
+      if (!host || !values) return null;
+      const key = values.identityFile ? (await hooks.keys()).find((k) => k.hasPrivate && k.privateDisplay === values.identityFile) : undefined;
+      return { alias: host.alias, ...values, keyId: key?.id ?? null };
     },
   };
 }

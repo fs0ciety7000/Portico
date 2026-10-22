@@ -34,10 +34,19 @@ portico import termius ~/Downloads/termius.csv --prefix   # aperçu, alias préf
 portico import termius ~/Downloads/termius.csv --apply    # écrit, puis affiche la ligne Include
 ```
 
-**GUI** : palette (`⌘K` / `Ctrl-K`), « Import from Termius… ». Le fichier se choisit dans le sélecteur natif ;
-l'aperçu liste les hôtes, les enregistrements ignorés, les avertissements et les secrets ignorés. « Import » écrit,
-puis la ligne `Include` s'affiche avec un bouton de copie. La TUI n'a pas d'écran d'import : son aide `?` rappelle la
-commande ci-dessus.
+**GUI** : palette (`⌘K` / `Ctrl-K`), « Import hosts… » (Termius ou Termix, reconnu par le contenu). Le fichier se
+choisit dans le sélecteur natif (la webview ne nomme jamais un chemin) ; le plan reste côté Rust, clés comprises,
+derrière un jeton à usage unique. L'aperçu liste les hôtes (ceux qui mettent à jour un import précédent portent
+« update »), les **clés privées** (type, empreinte courte, hôtes qui l'utilisent, badge « encrypted », « already in
+~/.ssh · reused » pour une copie locale ; aucune cochée, `1`…`9` ou `Espace` pour cocher), les enregistrements
+ignorés, les avertissements (un hôte `edited_since_import` est expliqué : modifié à la main, laissé tel quel) et les
+secrets ignorés. Une clé cochée est écrite dans `~/.ssh/portico/`, lisible par vous seul ; dès qu'une clé non
+chiffrée doit être écrite, un champ de passphrase facultatif (masqué, avec confirmation) chiffre les copies. Les
+identifiants cochés sont vérifiés côté Rust contre ceux du plan, la passphrase est désérialisée directement en
+`SecretString` puis effacée du dialogue après l'appel. « Import » écrit ; le rapport donne les clés importées
+(chemins `~/…`), réutilisées et ignorées, les hôtes mis à jour, le conseil de supprimer l'export, et la ligne
+`Include` (facultative : les hôtes sont déjà dans Portico) avec un bouton de copie (`c`). La TUI n'a pas d'écran
+d'import : son aide `?` rappelle la commande ci-dessus.
 
 Un nouvel import **met à jour** les hôtes que le précédent a créés et que personne n'a modifiés : l'aperçu les compte
 (`replaces`). Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse, le bouton est
@@ -92,8 +101,8 @@ passe dans `User`) ; sans colonne secrète, seules les cellules manquantes en fi
 `IdentityFile`.
 
 **Collisions** : un alias déjà défini dans votre configuration (sans tenir compte de la casse) n'est pas importé,
-avec un avertissement, pour ne pas masquer votre propre entrée. L'option `--prefix` (case « Prefix every alias with
-termius- » dans la GUI) préfixe tous les alias importés et garde les deux.
+avec un avertissement, pour ne pas masquer votre propre entrée. L'option `--prefix` (case « Prefix aliases with
+termius- », ou `termix-`, dans la GUI, touche `p`) préfixe tous les alias importés et garde les deux.
 
 Limites connues : ni `ProxyJump`, ni clés, ni snippets, ni identités partagées Termius (formats non confirmés) ;
 5000 hôtes et 4 Mio par fichier au plus ; 500 avertissements listés au plus (les suivants sont comptés).

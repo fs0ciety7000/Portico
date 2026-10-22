@@ -77,6 +77,19 @@ export const GUI_FIXED: DocTable[] = [
     ],
   },
   {
+    title: "Import d'hôtes (GUI)",
+    intro:
+      "« Import hosts… » (palette) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. " +
+      "Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.",
+    rows: [
+      ["Préfixer les alias (`termius-`, `termix-`) on/off", "`p`"],
+      ["Cocher / décocher la n-ième clé privée", "`1` … `9`, ou `Espace` sur la case"],
+      ["Importer (après 400 ms sans frappe ; désactivé si les passphrases diffèrent)", "`↵`"],
+      ["Rapport : copier la ligne `Include`", "`c`"],
+      ["Annuler / fermer", "`Esc`"],
+    ],
+  },
+  {
     title: "Journaux de session (GUI)",
     intro:
       "Panneau debug : sessions à gauche (vivantes et 20 dernières terminées, sondes « probe » de copy-id comprises), à droite " +
