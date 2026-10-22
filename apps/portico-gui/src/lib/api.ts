@@ -111,10 +111,23 @@ export interface Duration {
 
 /** Mirrors `portico_core::events::PromptKind`. */
 export type PromptKind =
-  | { kind: "unknown_host_key"; host: string; port: number; algorithm: string; fingerprint: string; other_algorithms: string[] }
+  | {
+      kind: "unknown_host_key";
+      host: string;
+      port: number;
+      algorithm: string;
+      fingerprint: string;
+      other_algorithms: string[];
+      /** Accepting the key lets the session send a remembered password
+       * (risk 13 of SECURITY.md): the dialog says so. */
+      sends_remembered_password: boolean;
+    }
   | { kind: "password"; user: string; host: string; attempt: number; attempts: number }
   | { kind: "key_passphrase"; key_path: string; attempt: number; attempts: number }
   | { kind: "keyboard_interactive"; name: string; instructions: string; prompts: { text: string; echo: boolean }[] };
+
+/** Shown on a new host key when `sends_remembered_password` is set. */
+export const SENDS_REMEMBERED_PASSWORD = "A remembered password will be sent to this server once you accept its key.";
 
 export interface Prompt {
   id: number;
@@ -462,7 +475,21 @@ export interface PlannedHost {
   key: string | null;
   /** Updates a host an earlier import created (and nobody edited since). */
   update: boolean;
+  /** Set when this update points the alias at another server: where it
+   * points now. Applied only when accepted (`ImportApplyRequest.redirect`),
+   * skipped otherwise (`destination_changed`). */
+  previous: ImportDestination | null;
   sourceId: string;
+}
+
+/** Mirrors `import::DestinationDto`: an earlier imported host's destination. */
+export interface ImportDestination {
+  hostname: string;
+  user: string | null;
+  /** `null` for 22. */
+  port: number | null;
+  /** `~/…` (computed in Rust): never kept by a redirect. */
+  identityFile: string | null;
 }
 
 /** Mirrors `import::PlannedKeyDto`: a private key of the export (never its material). */
@@ -475,6 +502,9 @@ export interface PlannedKey {
   format: "open_ssh" | "pem";
   /** Encrypted in the export: written as it is. */
   encrypted: boolean;
+  /** `false`: the fingerprint is only claimed by the export (encrypted
+   * OpenSSH key), so the key is never matched with a local one. */
+  fingerprintVerified: boolean;
   /** Hosts of the plan using it. */
   aliases: string[];
   /** A local key with the same fingerprint (`~/…`): reused, nothing written. */
@@ -523,6 +553,9 @@ export interface ImportApplyRequest {
   prefix: boolean;
   /** `PlannedKey.id`s, checked against the plan in Rust. */
   keys: string[];
+  /** Aliases whose destination change was accepted (`PlannedHost.previous`),
+   * checked against the plan in Rust. */
+  redirect: string[];
   passphrase: string | null;
 }
 

@@ -8,11 +8,17 @@
 // unrecognized file), `?import=included` (the Include line is already in
 // ~/.ssh/config), `?import=empty` (every record is skipped). Without a
 // switch: the synthetic Termius template of portico-core's tests. A second
-// import in the same page says how many hosts it updates.
+// import in the same page says how many hosts it updates, and the export now
+// points one host at another server (a destination change, skipped unless
+// accepted); `?reimport=changed` shows that re-import on the first pick.
 import type { Backend } from "./backend";
-import type { ImportApplyRequest, ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey } from "./api";
+import type { ImportApplyRequest, ImportDestination, ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey } from "./api";
+import { destinationText, ignoredSecretsAdvice, keepRedirects } from "./importform";
 
-const mode = new URLSearchParams(location.search).get("import");
+const params = new URLSearchParams(location.search);
+const mode = params.get("import");
+/** A re-import: hosts update an earlier import, one of them moved. */
+const reimport = () => importedCount > 0 || params.get("reimport") === "changed";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const TARGET = "~/.config/portico/hosts.conf";
 const INCLUDE = "Include ~/.config/portico/hosts.conf";
@@ -43,12 +49,28 @@ const host = (
   record,
   favorite: false,
   key: null,
-  update: importedCount > 0,
+  update: reimport(),
+  previous: null,
   sourceId: `label:${alias}`,
   ...extra,
 });
 
 const notice = (code: string, record: number | null, label: string | null, message: string): ImportNotice => ({ code, record, label, message });
+
+/** On a re-import, `h` now points at `to`: it carries where it points today
+ * (`previous`) and the plan warns, as the engine does. */
+function moved(h: PlannedHost, to: string, before: ImportDestination, warnings: ImportNotice[]): PlannedHost {
+  if (!reimport()) return h;
+  warnings.push(
+    notice(
+      "destination_changed",
+      h.record,
+      h.label,
+      `\`${h.alias}\` was imported earlier for ${destinationText(before)}: the export now points it elsewhere (skipped unless you accept this change)`,
+    ),
+  );
+  return { ...h, hostname: to, previous: before };
+}
 
 function emptyPreview(prefix: boolean): ImportPreview {
   return {
@@ -80,9 +102,15 @@ function emptyPreview(prefix: boolean): ImportPreview {
 function termiusPreview(prefix: boolean): ImportPreview {
   const p = (alias: string) => (prefix ? `termius-${alias}` : alias);
   const h = (...args: Parameters<typeof host> extends [string, ...infer R] ? R : never) => host("Termius", ...args);
+  const changes: ImportNotice[] = [];
   const hosts = [
     h(p("web-eu-1"), "web eu 1", "203.0.113.10", "deploy", null, "Production/EU", ["web", "nginx"], 2),
-    h(p("db-eu-1"), "db-eu-1", "203.0.113.11", "postgres", 2222, "Production/EU", ["db", "postgres"], 3),
+    moved(
+      h(p("db-eu-1"), "db-eu-1", "203.0.113.11", "postgres", 2222, "Production/EU", ["db", "postgres"], 3),
+      "198.51.100.77",
+      { hostname: "203.0.113.11", user: "postgres", port: 2222, identityFile: null },
+      changes,
+    ),
     h("termius-at-198.51.100.7", "AT 198.51.100.7", "198.51.100.7", "root", 38444, "Production", [], 4),
     h(p("web-eu-1-2"), "web eu 1", "staging.example.test", "ubuntu", null, "Staging", ["web-serveur"], 5),
     h(p("v6-box"), "v6-box", "2001:db8::10", "ops", null, null, ["ipv6"], 7),
@@ -112,10 +140,10 @@ function termiusPreview(prefix: boolean): ImportPreview {
       notice("tag_normalized", 5, "web eu 1", "tag `Web Serveur` imported as `web-serveur`"),
       notice("invalid_port", 9, "bad-port", "the port is not between 1 and 65535: left out (22 applies)"),
       ...(prefix ? [] : [notice("alias_looks_like_host", 4, "AT 198.51.100.7", "`at-198.51.100.7` looks like another host's name: imported as `termius-at-198.51.100.7`")]),
+      ...changes,
     ],
     secrets: { passwords: 2, keys: 1, keysInExport: 0 },
-    secretsAdvice:
-      "2 passwords and 1 key ignored (never imported). The export holds them in clear text: delete it once the import is done, and keep secrets in your keychain or ssh-agent.",
+    secretsAdvice: ignoredSecretsAdvice({ passwords: 2, keys: 1, keysInExport: 0 }),
     identityFiles: [],
     target: TARGET,
     includeLine: INCLUDE,
@@ -127,20 +155,29 @@ function termiusPreview(prefix: boolean): ImportPreview {
 
 const ED25519 = "SHA256:q1Xv9mB3rTzK0pW7nLc2fYhJ8sDgE4uRaO6iVbN5kMw";
 const RSA = "SHA256:Zk4pN7wQe2LmT9vB1xCyR6uHsJ3aGdF8oIcE0nVtWbM";
+/** An encrypted OpenSSH key: its fingerprint is only claimed by the export. */
+const ECDSA = "SHA256:Hc8sLq2VtR5mX0bNwJ7pKf3yUe9aZgD1oTiC6nWrQvE";
 
 function termixPreview(prefix: boolean): ImportPreview {
   const p = (alias: string) => (prefix ? `termix-${alias}` : alias);
   const h = (...args: Parameters<typeof host> extends [string, ...infer R] ? R : never) => host("Termix", ...args);
+  const changes: ImportNotice[] = [];
   const hosts = [
     h(p("web-eu-1"), "Web EU 1", "203.0.113.10", "deploy", null, "Production/EU", ["web"], 1, { key: ED25519, favorite: true, sourceId: "1" }),
-    h(p("web-eu-2"), "Web EU 2", "203.0.113.12", "deploy", null, "Production/EU", ["web"], 2, { key: ED25519, sourceId: "2" }),
+    moved(
+      h(p("web-eu-2"), "Web EU 2", "203.0.113.12", "deploy", null, "Production/EU", ["web"], 2, { key: ED25519, sourceId: "2" }),
+      "198.51.100.212",
+      { hostname: "203.0.113.12", user: "deploy", port: null, identityFile: `${KEYS_DIR}${p("web-eu-1")}` },
+      changes,
+    ),
     h(p("db-eu-1"), "DB EU 1", "203.0.113.11", "postgres", 2222, "Production/EU", ["db"], 3, { key: ED25519, sourceId: "3" }),
     h(p("bastion"), "Bastion", "198.51.100.4", "ops", null, "Edge", [], 4, { key: RSA, sourceId: "4" }),
-    h(p("nas"), "NAS", "192.168.1.20", "admin", 2222, "Home", ["lab"], 6, { sourceId: "6" }),
+    h(p("nas"), "NAS", "192.168.1.20", "admin", 2222, "Home", ["lab"], 6, { key: ECDSA, sourceId: "6" }),
   ];
   const keys: PlannedKey[] = [
-    { id: ED25519, algorithm: "ssh-ed25519", fingerprint: ED25519, format: "open_ssh", encrypted: false, aliases: [p("web-eu-1"), p("web-eu-2"), p("db-eu-1")], local: null },
-    { id: RSA, algorithm: "ssh-rsa", fingerprint: RSA, format: "pem", encrypted: true, aliases: [p("bastion")], local: null },
+    { id: ED25519, algorithm: "ssh-ed25519", fingerprint: ED25519, format: "open_ssh", encrypted: false, fingerprintVerified: true, aliases: [p("web-eu-1"), p("web-eu-2"), p("db-eu-1")], local: null },
+    { id: RSA, algorithm: "ssh-rsa", fingerprint: RSA, format: "pem", encrypted: true, fingerprintVerified: true, aliases: [p("bastion")], local: null },
+    { id: ECDSA, algorithm: "ecdsa-sha2-nistp256", fingerprint: ECDSA, format: "open_ssh", encrypted: true, fingerprintVerified: false, aliases: [p("nas")], local: null },
   ];
   return {
     token: Date.now(),
@@ -157,10 +194,10 @@ function termixPreview(prefix: boolean): ImportPreview {
     warnings: [
       notice("ignored_setting", 4, "Bastion", "`tunnelConnections` (2) was not imported: Portico imports hosts only"),
       notice("key_unreadable", 7, "Old router", "private key not imported: a PuTTY key (convert it with puttygen to OpenSSH)"),
+      ...changes,
     ],
-    secrets: { passwords: 1, keys: 1, keysInExport: 3 },
-    secretsAdvice:
-      "1 password and 1 key ignored (never imported). The export holds 3 private keys in clear text or encrypted: delete it once the import is done, and keep secrets in your keychain or ssh-agent.",
+    secrets: { passwords: 1, keys: 1, keysInExport: 4 },
+    secretsAdvice: ignoredSecretsAdvice({ passwords: 1, keys: 1, keysInExport: 4 }),
     identityFiles: [],
     target: TARGET,
     includeLine: INCLUDE,
@@ -210,23 +247,40 @@ export const demoImport: Pick<Backend, "importPick" | "importReplan" | "importAp
     if (request.keys.some((id) => !plan.keys.some((k) => k.id === id))) {
       throw { code: "import_key_unknown", message: "a selected key is not in this export", hint: "Choose the export file again." };
     }
+    if (keepRedirects(plan.hosts, request.redirect).length !== request.redirect.length) {
+      throw { code: "import_redirect_unknown", message: "an accepted destination change is not in this preview", hint: "Choose the export file again." };
+    }
     pending = null;
     const again = imported;
     imported = true;
-    importedCount = plan.hosts.length;
+    // A destination change not accepted is skipped, as the engine does.
+    const written = plan.hosts.filter((h) => h.previous === null || request.redirect.includes(h.alias));
+    const held = plan.hosts
+      .filter((h) => h.previous !== null && !request.redirect.includes(h.alias))
+      .map((h) =>
+        notice(
+          "destination_changed",
+          h.record,
+          h.label,
+          `this alias was imported earlier for ${destinationText(h.previous ?? h)}: not pointed elsewhere without your consent`,
+        ),
+      );
+    importedCount = written.length;
     const chosen = plan.keys.filter((k) => request.keys.includes(k.id));
-    const firstAlias = (k: PlannedKey) => plan.hosts.find((h) => h.key === k.id)?.alias ?? "key";
+    const firstAlias = (k: PlannedKey) => written.find((h) => h.key === k.id)?.alias ?? "key";
+    const secrets = { ...plan.secrets, keys: plan.secrets.keys + plan.keys.length - chosen.length };
     return {
       formatLabel: plan.format,
       source: plan.source,
       target: plan.target,
       unchanged: false,
-      imported: plan.hosts.map((h) => h.alias),
-      updated: plan.hosts.filter((h) => h.update).map((h) => h.alias),
-      skipped: plan.skipped,
+      imported: written.map((h) => h.alias),
+      updated: written.filter((h) => h.update).map((h) => h.alias),
+      skipped: [...plan.skipped, ...held],
+      // Like the engine: the plan's warnings, destination changes included.
       warnings: plan.warnings,
-      secrets: { ...plan.secrets, keys: plan.secrets.keys + plan.keys.length - chosen.length },
-      secretsAdvice: plan.secretsAdvice,
+      secrets,
+      secretsAdvice: ignoredSecretsAdvice(secrets),
       identityFiles: plan.identityFiles,
       metaUpdated: again ? 0 : plan.hosts.length,
       includeLine: plan.includeLine,

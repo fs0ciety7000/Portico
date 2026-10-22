@@ -4,13 +4,18 @@
   // private keys, skipped records, warnings, ignored secrets), nothing is
   // written before "Import". Private keys are imported only when ticked
   // (none by default); an optional passphrase encrypts the copies written to
-  // ~/.ssh/portico/, crosses the IPC once, and is cleared right after. The
+  // ~/.ssh/portico/, crosses the IPC once, and is cleared right after. A
+  // re-import that points an alias at another server shows old → new and is
+  // written only when its "Accept the new destination" box is ticked (none
+  // by default; Rust checks the aliases against the plan). The
   // report ends with the Include line the user adds to ~/.ssh/config:
   // Portico never edits it.
   import { codeSpans, sentence, type ImportNotice, type PlannedHost, type PlannedKey } from "../api";
   import {
     applyLabel,
+    destinationText,
     dialogTitle,
+    hostsToWrite,
     keyHosts,
     keysToWrite,
     keyType,
@@ -19,7 +24,9 @@
     plural,
     reportKeysLine,
     shortFingerprint,
+    splitDestinationChanges,
     splitNotices,
+    UNVERIFIED_FINGERPRINT,
     wantsPassphrase,
   } from "../importform";
   import { COPIED_FEEDBACK_MS } from "../motion";
@@ -45,12 +52,19 @@
   const writing = $derived(preview ? keysToWrite(preview.keys, selected) : []);
   const askPassphrase = $derived(preview ? wantsPassphrase(preview.keys, selected) : false);
   const mismatch = $derived(askPassphrase ? passphraseError(passphrase, confirm) : null);
-  const warnings = $derived(preview ? splitNotices(preview.warnings) : { keys: [], other: [] });
-  const updates = $derived(preview ? preview.hosts.filter((h) => h.update).length : 0);
+  // Destination changes show on their host row, not again as warnings; in
+  // the report they are answered (skipped ones get their own section,
+  // accepted ones are updates).
+  const warnings = $derived(preview ? splitNotices(splitDestinationChanges(preview.warnings).other) : { keys: [], other: [] });
+  const accepted = $derived(importer.redirect);
+  const writable = $derived(preview ? hostsToWrite(preview.hosts, accepted) : []);
+  const updates = $derived(writable.filter((h) => h.update).length);
+  const changes = $derived(preview ? preview.hosts.filter((h) => h.previous !== null).length : 0);
+  const pendingChanges = $derived(changes - accepted.length);
   /** JSON exports number records by position, the others by line. */
   const unit = $derived((preview?.format ?? (view.kind === "done" ? view.report.formatLabel : "")).toLowerCase().includes("json") ? "#" : "line ");
 
-  const address = (h: PlannedHost) => `${h.user ? `${h.user}@` : ""}${h.hostname}${h.port ? `:${h.port}` : ""}`;
+  const address = (h: PlannedHost) => destinationText(h);
   const where = (n: ImportNotice) => [n.record !== null ? `${unit}${n.record}` : null, n.label && !n.label.startsWith("SHA256:") ? n.label : null].filter(Boolean).join(" · ");
   /** `~/…/portico/hosts.conf`: the folder that matters (already `~/…` from Rust). */
   const shortTarget = (path: string) => {
@@ -75,7 +89,7 @@
     queueMicrotask(() => document.querySelector<HTMLElement>(".modal footer [data-autofocus]")?.focus());
   });
 
-  const canApply = $derived(!!preview && !busy && armed && preview.hosts.length > 0 && !mismatch);
+  const canApply = $derived(!!preview && !busy && armed && writable.length > 0 && !mismatch);
 
   async function apply() {
     if (!canApply) return;
@@ -177,7 +191,8 @@
       <span class="type">{keyType(k.algorithm)}</span>
       <span class="fp mono" title={k.fingerprint}>{shortFingerprint(k.fingerprint)}</span>
       <span class="badges">
-        {#if k.encrypted}<span class="badge">encrypted</span>{/if}
+        {#if !k.fingerprintVerified}<span class="badge warn" title="The export only claims this fingerprint: the key is written, never matched with a local one.">{UNVERIFIED_FINGERPRINT}</span>
+        {:else if k.encrypted}<span class="badge">encrypted</span>{/if}
         {#if k.local}<span class="badge reuse" title={k.local}>already in ~/.ssh · reused</span>{/if}
       </span>
       {#if n <= 9}<kbd class="digit">{n}</kbd>{/if}
@@ -206,7 +221,7 @@
     </div>
   {:else if preview}
     <p class="summary">
-      <strong>{plural(preview.hosts.length, "host")}</strong> to import from {plural(preview.records, "record")}{#if preview.skipped.length}, {preview.skipped.length} skipped{/if}{#if updates}, {updates} updated from an earlier import{/if}
+      <strong>{plural(writable.length, "host")}</strong> to import from {plural(preview.records, "record")}{#if preview.skipped.length}, {preview.skipped.length} skipped{/if}{#if updates}, {updates} updated from an earlier import{/if}{#if pendingChanges > 0}, <span class="warn-text">{plural(pendingChanges, "destination change")} skipped unless accepted</span>{/if}
       <span class="muted">· {preview.format}</span>
     </p>
     <div class="prefix">
@@ -222,14 +237,33 @@
         <h3>Hosts <span class="count">{preview.hosts.length}</span></h3>
         <ul class="hosts">
           {#each preview.hosts as h (h.alias)}
-            <li>
+            {@const on = accepted.includes(h.alias)}
+            <li class:changed={h.previous !== null} class:held={h.previous !== null && !on} data-alias={h.alias}>
               <span class="alias mono">{h.alias}</span>
               <span class="address mono">{address(h)}</span>
               <span class="meta">
-                {#if h.update}<span class="state">update</span>{/if}
+                {#if h.previous}<span class="badge warn">destination changed</span>
+                {:else if h.update}<span class="state">update</span>{/if}
                 {#if h.group}<span class="group">{h.group}</span>{/if}
                 {#each h.tags as t (t)}<span class="tag">#{t}</span>{/each}
               </span>
+              {#if h.previous}
+                <div class="redirect">
+                  <span class="move mono">
+                    <span class="was">{destinationText(h.previous)}</span>
+                    <svg viewBox="0 0 16 16" aria-label="becomes"><path d="M3 8h10M9.5 4.5 13 8l-3.5 3.5" /></svg>
+                    <span class="now">{address(h)}</span>
+                  </span>
+                  <label class="check accept">
+                    <input type="checkbox" checked={on} disabled={busy} onchange={() => importer.toggleRedirect(h.alias)} onkeydown={onEnter} />
+                    Accept the new destination
+                  </label>
+                  <span class="redirect-help">
+                    {#if on}{h.previous.identityFile ? `Pointed at the new server; its key ${h.previous.identityFile} is not kept.` : "Pointed at the new server."}
+                    {:else}Skipped: <span class="mono">{h.alias}</span> keeps pointing at the server it was imported for.{/if}
+                  </span>
+                </div>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -290,6 +324,8 @@
   {:else if view.kind === "done"}
     {@const r = view.report}
     {@const keysLine = reportKeysLine(r)}
+    {@const skipped = splitDestinationChanges(r.skipped)}
+    {@const reportWarnings = splitDestinationChanges(r.warnings).other}
     <p class="summary">
       {#if r.unchanged}
         <strong>{plural(r.imported.length, "host")}</strong> already imported: nothing changed.
@@ -316,8 +352,9 @@
         {/if}
       </section>
     {/if}
-    {@render notices("Skipped", r.skipped, "muted")}
-    {@render notices("Warnings", r.warnings, "warning")}
+    {@render notices("Destination changes skipped", skipped.changes, "warning")}
+    {@render notices("Skipped", skipped.other, "muted")}
+    {@render notices("Warnings", reportWarnings, "warning")}
     {#if r.includeActive}
       <p class="ok">~/.ssh/config already includes this file: the hosts are in your list.</p>
     {:else}
@@ -350,7 +387,7 @@
       <button class="secondary" onclick={close}>Cancel <kbd>Esc</kbd></button>
       <button class="primary" data-autofocus disabled={!canApply} onclick={() => void apply()}>
         {#if view.kind === "applying"}<span class="spinner" aria-hidden="true"></span>{/if}
-        {applyLabel(preview, selected)}
+        {applyLabel(preview, selected, accepted)}
         <kbd>↵</kbd>
       </button>
     {:else}
@@ -470,6 +507,36 @@
   .fp { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .badges { display: flex; gap: var(--space-1); justify-content: flex-end; flex-wrap: wrap; }
   .badge.reuse { color: var(--text-primary); border-color: var(--accent); }
+  /* Meaning, so the status color: a destination change, an unverified fingerprint. */
+  .badge.warn { color: var(--status-warning); border-color: var(--status-warning); }
+  .warn-text { color: var(--status-warning); }
+  .hosts li.changed { padding-block: var(--space-1); box-shadow: inset 2px 0 0 var(--status-warning); }
+  .hosts li.held .alias, .hosts li.held .address { color: var(--text-muted); }
+  .redirect {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-4);
+    row-gap: var(--space-1);
+    padding: var(--space-1) 0 var(--space-1);
+  }
+  .move { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
+  .move .was { color: var(--text-secondary); }
+  .move .now { color: var(--text-primary); }
+  .move svg {
+    flex: 0 0 auto;
+    width: var(--space-4);
+    height: var(--space-4);
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .accept { font-size: var(--text-sm); }
+  .redirect-help { flex-basis: 100%; color: var(--text-muted); font-size: var(--text-xs); }
+  .redirect-help .mono { font-size: inherit; }
   .digit { justify-self: end; }
   /* Under the type, after the checkbox column. */
   .key-hosts {

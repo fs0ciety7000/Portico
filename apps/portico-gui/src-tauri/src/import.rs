@@ -13,6 +13,13 @@
 //! checked here against the plan's own keys, and an optional passphrase,
 //! deserialized straight into `SecretString` (redacted `Debug`, never
 //! serialized). Plans and reports never hold a secret.
+//!
+//! A re-import that points an earlier imported alias at another server
+//! (`PlannedHost::previous`, revue sécurité) is applied only for the
+//! aliases the user ticked: they come back as `redirect`, are checked here
+//! against the plan's own destination changes, then fill
+//! `ImportOptions::allow_redirect`. Nothing ticked: skipped by the engine
+//! (`destination_changed`).
 
 // Tauri injects `State` (and deserialized arguments) by value.
 #![allow(clippy::needless_pass_by_value)]
@@ -93,6 +100,67 @@ impl Imports {
     }
 }
 
+/// Where an earlier imported host points now (`PlannedHost::previous`):
+/// the destination only, its key shown `~/…` (a redirect never keeps it).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DestinationDto {
+    hostname: String,
+    user: Option<String>,
+    /// `None` for 22.
+    port: Option<u16>,
+    identity_file: Option<String>,
+}
+
+/// One host of the preview: `PlannedHost` with `previous` reduced to a
+/// [`DestinationDto`] (no absolute path reaches the webview).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlannedHostDto {
+    alias: String,
+    label: String,
+    hostname: String,
+    user: Option<String>,
+    port: Option<u16>,
+    group: Option<String>,
+    tags: Vec<String>,
+    notes: Option<String>,
+    record: usize,
+    favorite: bool,
+    key: Option<KeyId>,
+    update: bool,
+    /// Set when this update changes the destination: applied only if the
+    /// user accepts it ([`ImportApplyDto::redirect`]).
+    previous: Option<DestinationDto>,
+    source_id: String,
+}
+
+impl From<PlannedHost> for PlannedHostDto {
+    fn from(h: PlannedHost) -> Self {
+        Self {
+            previous: h.previous.map(|p| DestinationDto {
+                hostname: p.hostname,
+                user: p.user,
+                port: p.port,
+                identity_file: p.identity_file.as_deref().map(display_path),
+            }),
+            alias: h.alias,
+            label: h.label,
+            hostname: h.hostname,
+            user: h.user,
+            port: h.port,
+            group: h.group,
+            tags: h.tags,
+            notes: h.notes,
+            record: h.record,
+            favorite: h.favorite,
+            key: h.key,
+            update: h.update,
+            source_id: h.source_id,
+        }
+    }
+}
+
 /// A private key of the export, as the preview lists it (no material).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +171,9 @@ pub(crate) struct PlannedKeyDto {
     fingerprint: String,
     format: KeyFormat,
     encrypted: bool,
+    /// `false`: the fingerprint is only claimed by the export (encrypted
+    /// OpenSSH key), never matched with a local key.
+    fingerprint_verified: bool,
     aliases: Vec<String>,
     /// The local copy reused instead (`~/…`), if any.
     local: Option<String>,
@@ -116,6 +187,7 @@ impl From<PlannedKey> for PlannedKeyDto {
             fingerprint: k.fingerprint,
             format: k.format,
             encrypted: k.encrypted,
+            fingerprint_verified: k.fingerprint_verified,
             aliases: k.aliases,
             local: k.local.as_deref().map(display_path),
         }
@@ -137,7 +209,7 @@ pub(crate) struct ImportPreviewDto {
     prefix_text: &'static str,
     records: usize,
     prefix: bool,
-    hosts: Vec<PlannedHost>,
+    hosts: Vec<PlannedHostDto>,
     skipped: Vec<ImportNotice>,
     warnings: Vec<ImportNotice>,
     secrets: IgnoredSecrets,
@@ -180,7 +252,7 @@ impl ImportPreviewDto {
             target: display_path(&plan.target),
             include_line: plan.include_line,
             replaces: plan.replaces,
-            hosts: plan.hosts,
+            hosts: plan.hosts.into_iter().map(PlannedHostDto::from).collect(),
             skipped: plan.skipped,
             warnings: plan.warnings,
             identity_files: plan.identity_files,
@@ -256,6 +328,9 @@ pub(crate) struct ImportApplyDto {
     prefix: bool,
     /// Ids of the keys to import ([`PlannedKeyDto::id`]).
     keys: Vec<String>,
+    /// Aliases whose destination change the user accepted (only aliases
+    /// of the plan with `previous`).
+    redirect: Vec<String>,
     // Deserialized straight into `SecretString`: no intermediate `String`.
     passphrase: Option<SecretString>,
 }
@@ -267,6 +342,7 @@ impl std::fmt::Debug for ImportApplyDto {
             .field("token", &self.token)
             .field("prefix", &self.prefix)
             .field("keys", &self.keys)
+            .field("redirect", &self.redirect)
             .field(
                 "passphrase",
                 &self.passphrase.as_ref().map(|_| "[redacted]"),
@@ -277,8 +353,8 @@ impl std::fmt::Debug for ImportApplyDto {
 
 impl ImportApplyDto {
     /// The engine's options, once the request matches `plan`: the prefix
-    /// it was planned with, and only key ids it holds (an empty
-    /// passphrase is none).
+    /// it was planned with, only key ids it holds, and only aliases whose
+    /// destination it changes (an empty passphrase is none).
     fn options_for(self, plan: &ImportPlan) -> Result<ImportOptions, ErrorSummary> {
         if self.prefix != plan.options.prefix {
             return Err(ErrorSummary {
@@ -299,6 +375,23 @@ impl ImportApplyDto {
             }
             ids.insert(KeyId::new(id));
         }
+        let changes: BTreeSet<&str> = plan
+            .hosts
+            .iter()
+            .filter(|h| h.previous.is_some())
+            .map(|h| h.alias.as_str())
+            .collect();
+        let mut allow_redirect = BTreeSet::new();
+        for alias in self.redirect {
+            if !changes.contains(alias.as_str()) {
+                return Err(ErrorSummary {
+                    code: "import_redirect_unknown".into(),
+                    message: "an accepted destination change is not in this preview".into(),
+                    hint: Some("Choose the export file again.".into()),
+                });
+            }
+            allow_redirect.insert(alias);
+        }
         let keys = if ids.is_empty() {
             KeySelection::None
         } else {
@@ -311,9 +404,7 @@ impl ImportApplyDto {
             prefix: self.prefix,
             keys,
             key_passphrase,
-            // Destination changes are skipped until the dialog offers a
-            // per-host choice.
-            allow_redirect: std::collections::BTreeSet::new(),
+            allow_redirect,
         })
     }
 }
@@ -409,6 +500,7 @@ pub(crate) fn import_cancel(imports: State<'_, Imports>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use portico_core::managed_hosts::ManagedHost;
 
     fn plan_with_keys(dir: &std::path::Path, keys: &[&str]) -> ImportPlan {
         let paths = portico_core::store::Paths::rooted(dir);
@@ -486,7 +578,7 @@ mod tests {
         let token = imports.keep("a".into(), plan);
         let answer = |keys: serde_json::Value| {
             request(serde_json::json!({
-                "token": token, "prefix": false, "keys": keys, "passphrase": null
+                "token": token, "prefix": false, "keys": keys, "redirect": [], "passphrase": null
             }))
         };
 
@@ -521,12 +613,130 @@ mod tests {
         assert_eq!(options.keys, KeySelection::None);
     }
 
+    fn planned_host(alias: &str, previous: Option<ManagedHost>) -> PlannedHost {
+        PlannedHost {
+            alias: alias.into(),
+            label: alias.into(),
+            hostname: "198.51.100.99".into(),
+            user: Some("deploy".into()),
+            port: None,
+            group: None,
+            tags: Vec::new(),
+            notes: None,
+            record: 1,
+            favorite: false,
+            key: None,
+            update: true,
+            previous,
+            source_id: "1".into(),
+        }
+    }
+
+    fn earlier(alias: &str, home: &std::path::Path) -> ManagedHost {
+        ManagedHost {
+            alias: alias.into(),
+            hostname: "203.0.113.10".into(),
+            user: Some("deploy".into()),
+            port: Some(2222),
+            identity_file: Some(home.join(".ssh/portico/web")),
+            proxy_jump: None,
+        }
+    }
+
+    #[test]
+    fn accepted_redirects_must_be_destination_changes_of_the_plan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut plan = plan_with_keys(dir.path(), &[]);
+        plan.hosts = vec![
+            planned_host("web", Some(earlier("web", dir.path()))),
+            planned_host("db", None),
+        ];
+        let answer = |redirect: serde_json::Value| {
+            request(serde_json::json!({
+                "token": 1, "prefix": false, "keys": [], "redirect": redirect, "passphrase": null
+            }))
+        };
+
+        // An alias without a destination change, absent from the plan, or
+        // spelled otherwise: refused, nothing is redirected.
+        for bad in ["db", "mail", "WEB", "", "web "] {
+            let err = answer(serde_json::json!(["web", bad]))
+                .options_for(&plan)
+                .unwrap_err();
+            assert_eq!(err.code, "import_redirect_unknown", "{bad:?}");
+        }
+        // Nothing ticked: no redirect (the engine skips the change).
+        let options = answer(serde_json::json!([])).options_for(&plan).unwrap();
+        assert!(options.allow_redirect.is_empty());
+
+        let options = answer(serde_json::json!(["web", "web"]))
+            .options_for(&plan)
+            .expect("a change of the plan");
+        assert_eq!(options.allow_redirect, BTreeSet::from(["web".to_owned()]));
+
+        // The field is required: an older webview cannot skip the choice.
+        let missing: Result<ImportApplyDto, _> = serde_json::from_value(serde_json::json!({
+            "token": 1, "prefix": false, "keys": [], "passphrase": null
+        }));
+        assert!(missing.is_err());
+    }
+
+    #[test]
+    fn preview_shows_destination_changes_and_unverified_fingerprints() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut plan = plan_with_keys(dir.path(), &["SHA256:aaa"]);
+        if let Some(k) = plan.keys.first_mut() {
+            k.encrypted = true;
+            k.fingerprint_verified = false;
+            k.local = None;
+        }
+        plan.hosts = vec![
+            planned_host("web", Some(earlier("web", &home))),
+            planned_host("db", None),
+        ];
+        let json =
+            serde_json::to_value(ImportPreviewDto::new(1, plan, "~/x/".into())).expect("json");
+        let web = &json["hosts"][0];
+        assert_eq!(web["previous"]["hostname"], "203.0.113.10");
+        assert_eq!(web["previous"]["user"], "deploy");
+        assert_eq!(web["previous"]["port"], 2222);
+        assert_eq!(web["previous"]["identityFile"], "~/.ssh/portico/web");
+        assert!(web["previous"].get("alias").is_none(), "{web}");
+        assert_eq!(web["hostname"], "198.51.100.99");
+        assert_eq!(web["sourceId"], "1");
+        assert!(json["hosts"][1]["previous"].is_null());
+        assert_eq!(json["keys"][0]["fingerprintVerified"], false);
+        let text = json.to_string();
+        assert!(
+            !text.contains(&home.display().to_string()),
+            "no absolute path: {text}"
+        );
+    }
+
+    #[test]
+    fn host_key_prompt_says_a_remembered_password_is_sent() {
+        let kind = portico_core::events::PromptKind::UnknownHostKey {
+            host: "198.51.100.99".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: "SHA256:aaa".into(),
+            other_algorithms: Vec::new(),
+            sends_remembered_password: true,
+        };
+        let json = serde_json::to_value(&kind).expect("json");
+        assert_eq!(json["kind"], "unknown_host_key", "{json}");
+        assert_eq!(json["sends_remembered_password"], true, "{json}");
+    }
+
     #[test]
     fn passphrase_is_a_secret_never_serialized() {
         let dir = tempfile::tempdir().expect("tempdir");
         let plan = plan_with_keys(dir.path(), &["SHA256:aaa"]);
         let req = request(serde_json::json!({
-            "token": 1, "prefix": false, "keys": ["SHA256:aaa"], "passphrase": "correct horse"
+            "token": 1, "prefix": false, "keys": ["SHA256:aaa"], "redirect": [], "passphrase": "correct horse"
         }));
         assert!(!format!("{req:?}").contains("correct horse"));
         let options = req.options_for(&plan).unwrap();
@@ -548,13 +758,13 @@ mod tests {
             (serde_json::json!([]), "x"),
         ] {
             let req = request(serde_json::json!({
-                "token": 1, "prefix": false, "keys": keys, "passphrase": pass
+                "token": 1, "prefix": false, "keys": keys, "redirect": [], "passphrase": pass
             }));
             assert!(req.options_for(&plan).unwrap().key_passphrase.is_none());
         }
         // No path or other field can ride along.
         let extra: Result<ImportApplyDto, _> = serde_json::from_value(serde_json::json!({
-            "token": 1, "prefix": false, "keys": [], "passphrase": null, "path": "/etc/shadow"
+            "token": 1, "prefix": false, "keys": [], "redirect": [], "passphrase": null, "path": "/etc/shadow"
         }));
         assert!(extra.is_err());
     }

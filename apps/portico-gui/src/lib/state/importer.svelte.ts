@@ -1,12 +1,13 @@
 // "Import hosts…" (Termius or Termix, detected from the content): native
 // picker (Rust), preview of the plan, then the import and its report. The
 // plan, key material included, stays in Rust under a token; this state only
-// holds what the dialog shows and the ids of the ticked keys (never a
+// holds what the dialog shows, the ids of the ticked keys and the aliases
+// whose destination change is accepted (never a
 // secret: the passphrase lives in the dialog for the time of the call).
 import type { ErrorSummary, ImportPreview, ImportReport } from "../api";
 import { asError } from "../api";
 import { backend } from "../backend";
-import { applyRequest, keepSelected, toggleKey } from "../importform";
+import { applyRequest, keepRedirects, keepSelected, toggleKey, toggleRedirect } from "../importform";
 
 export type ImportView =
   | { kind: "picking" }
@@ -22,6 +23,8 @@ class Importer {
   prefix = $state(false);
   /** Ids of the ticked private keys (none by default, for every new file). */
   selected: string[] = $state([]);
+  /** Aliases whose destination change is accepted (none by default, for every new file). */
+  redirect: string[] = $state([]);
   /** Error of the last action inside the preview (replan, apply). */
   error: ErrorSummary | null = $state(null);
   /** Called after a successful import (the host list reloads). */
@@ -34,6 +37,7 @@ class Importer {
     this.open = true;
     this.error = null;
     this.selected = [];
+    this.redirect = [];
     this.view = { kind: "picking" };
     try {
       const preview = await backend.importPick(this.prefix);
@@ -60,6 +64,7 @@ class Importer {
       if (run === this.run) {
         this.error = null;
         this.selected = keepSelected(preview.keys, this.selected);
+        this.redirect = keepRedirects(preview.hosts, this.redirect);
         this.view = { kind: "preview", preview, busy: false };
       }
     } catch (e) {
@@ -75,6 +80,11 @@ class Importer {
     this.selected = toggleKey(this.view.preview.keys, this.selected, id);
   }
 
+  toggleRedirect(alias: string) {
+    if (this.view.kind !== "preview" || this.view.busy) return;
+    this.redirect = toggleRedirect(this.view.preview.hosts, this.redirect, alias);
+  }
+
   /** Writes the plan with the ticked keys. `passphrase` ("" for none) goes
    * to Rust once; the caller clears its field when this resolves. */
   async apply(passphrase: string): Promise<boolean> {
@@ -83,12 +93,13 @@ class Importer {
     const run = ++this.run;
     this.error = null;
     this.view = { kind: "applying", preview: view.preview };
-    const request = applyRequest(view.preview, this.selected, passphrase);
+    const request = applyRequest(view.preview, this.selected, passphrase, this.redirect);
     try {
       const report = await backend.importApply(request);
       if (run !== this.run) return true;
       this.view = { kind: "done", report };
       this.selected = [];
+      this.redirect = [];
       this.onimported?.();
       return true;
     } catch (e) {
@@ -107,6 +118,7 @@ class Importer {
     this.open = false;
     this.error = null;
     this.selected = [];
+    this.redirect = [];
     this.view = { kind: "picking" };
   }
 }
