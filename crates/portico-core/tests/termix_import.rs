@@ -597,7 +597,6 @@ async fn a_reimport_only_updates_hosts_it_created_and_nobody_edited() {
     for host in hosts.iter_mut() {
         host["ip"] = match host["name"].as_str() {
             Some("Hbd") => "203.0.113.120".into(),
-            Some("Hbd backup") => "203.0.113.121".into(),
             Some("Locked box") => "203.0.113.122".into(),
             _ => host["ip"].clone(),
         };
@@ -618,11 +617,26 @@ async fn a_reimport_only_updates_hosts_it_created_and_nobody_edited() {
     assert!(skipped.contains(&(Some("manual".into()), NoticeCode::AliasCollision)));
     assert!(plan.hosts.iter().all(|h| h.update), "{:?}", plan.hosts);
     assert_eq!(plan.replaces, Some(7));
+    // `locked-box` now points elsewhere: a destination change, applied
+    // only with the user's consent for that alias.
+    let redirected: Vec<&str> = plan
+        .hosts
+        .iter()
+        .filter(|h| h.previous.is_some())
+        .map(|h| h.alias.as_str())
+        .collect();
+    assert_eq!(redirected, ["locked-box"]);
 
     let mut events = env.engine.subscribe();
     let report = env
         .engine
-        .apply_import(plan, ImportOptions::default())
+        .apply_import(
+            plan,
+            ImportOptions {
+                allow_redirect: ["locked-box".to_owned()].into(),
+                ..ImportOptions::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(report.updated, report.imported);
@@ -638,8 +652,8 @@ async fn a_reimport_only_updates_hosts_it_created_and_nobody_edited() {
     );
     assert_eq!(
         block(&conf, "hbd-backup"),
-        "Host hbd-backup\n    HostName 203.0.113.121\n    User root\n    IdentityFile ~/.ssh/portico/hbd\n    IdentitiesOnly yes",
-        "updated, and its key kept although not selected again"
+        "Host hbd-backup\n    HostName 203.0.113.21\n    User root\n    IdentityFile ~/.ssh/portico/hbd\n    IdentitiesOnly yes",
+        "same destination: its key kept although not selected again"
     );
     assert!(block(&conf, "locked-box").contains("HostName 203.0.113.122\n"));
     assert_eq!(block(&conf, "manual"), "Host manual\n    HostName 10.0.0.7");
@@ -829,4 +843,291 @@ async fn no_secret_reaches_reports_files_events_or_errors() {
     assert_eq!(err.summary().code, "host_file_unmanaged");
     assert_no_secret("error", &format!("{err:?} {:?}", err.summary()));
     assert!(!env.ssh("portico").exists());
+}
+
+/// Writes a Termix export holding `hosts` and returns its path.
+fn write_export(env: &Env, name: &str, hosts: &[serde_json::Value]) -> PathBuf {
+    let file = env.dir.path().join(name);
+    let export = serde_json::json!({ "hosts": hosts });
+    std::fs::write(&file, serde_json::to_string(&export).unwrap()).unwrap();
+    file
+}
+
+/// A re-import that would point an alias at another server is a
+/// destination change: listed with the previous values, skipped unless
+/// accepted for that alias, and then never keeps the old key. An alias
+/// imported from another record is never updated.
+#[tokio::test]
+async fn reimport_never_redirects_an_alias_silently() {
+    let env = env();
+    let mut hbd = export()["hosts"][0].clone();
+    let first = write_export(&env, "one.json", &[hbd.clone()]);
+    let plan = env
+        .engine
+        .plan_termix_import(&first, ImportOptions::default())
+        .await
+        .unwrap();
+    env.engine
+        .apply_import(plan, select(&[ED25519]))
+        .await
+        .unwrap();
+    let before = hosts_conf(&env);
+    assert!(block(&before, "hbd").contains("IdentityFile ~/.ssh/portico/hbd"));
+
+    // Same record, another server.
+    hbd["ip"] = "198.51.100.99".into();
+    let moved = write_export(&env, "moved.json", &[hbd.clone()]);
+    let plan = env
+        .engine
+        .plan_termix_import(&moved, ImportOptions::default())
+        .await
+        .unwrap();
+    let planned = plan.hosts.first().unwrap();
+    assert!(planned.update);
+    let previous = planned.previous.as_ref().expect("a destination change");
+    assert_eq!(
+        (previous.hostname.as_str(), previous.port),
+        ("203.0.113.20", Some(2222))
+    );
+    assert!(
+        codes(&plan.warnings).contains(&(Some("Hbd".into()), NoticeCode::DestinationChanged)),
+        "{:?}",
+        plan.warnings
+    );
+
+    // By default: skipped, nothing written.
+    let report = env
+        .engine
+        .apply_import(plan.clone(), ImportOptions::default())
+        .await
+        .unwrap();
+    assert!(report.imported.is_empty(), "{report:?}");
+    assert_eq!(
+        codes(&report.skipped),
+        [(Some("Hbd".into()), NoticeCode::DestinationChanged)]
+    );
+    assert!(report.unchanged);
+    assert_eq!(hosts_conf(&env), before);
+
+    // Another record under the same alias (other id, same name and
+    // server): never taken for this host.
+    let mut other = hbd.clone();
+    other["id"] = 99.into();
+    other["ip"] = "203.0.113.20".into();
+    let impostor = write_export(&env, "impostor.json", &[other]);
+    let plan_other = env
+        .engine
+        .plan_termix_import(&impostor, ImportOptions::default())
+        .await
+        .unwrap();
+    assert!(plan_other.hosts.is_empty(), "{:?}", plan_other.hosts);
+    assert_eq!(
+        codes(&plan_other.skipped),
+        [(Some("Hbd".into()), NoticeCode::AliasCollision)]
+    );
+    let report = env
+        .engine
+        .apply_import(plan_other, ImportOptions::default())
+        .await
+        .unwrap();
+    assert!(report.imported.is_empty());
+    assert_eq!(hosts_conf(&env), before);
+
+    // Accepted for this alias: pointed elsewhere, without the old key.
+    let report = env
+        .engine
+        .apply_import(
+            plan,
+            ImportOptions {
+                allow_redirect: ["hbd".to_owned()].into(),
+                ..ImportOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["hbd"]);
+    assert_eq!(
+        block(&hosts_conf(&env), "hbd"),
+        "Host hbd\n    HostName 198.51.100.99\n    User root\n    Port 2222",
+        "the key of the old server is not carried along"
+    );
+}
+
+/// The encrypted OpenSSH text of `theirs` with the clear public half of
+/// `claimed` spliced in (both ed25519: same length).
+fn forged_key(theirs: &PrivateKey, claimed: &PrivateKey) -> String {
+    use base64::Engine as _;
+    let locked = theirs
+        .encrypt(&mut russh::keys::key::safe_rng(), "FAKEKEYPASS")
+        .unwrap()
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap();
+    let body: String = locked.lines().filter(|l| !l.starts_with("-----")).collect();
+    let mut bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .unwrap();
+    let from = theirs.public_key().key_data().ed25519().unwrap().0;
+    let to = claimed.public_key().key_data().ed25519().unwrap().0;
+    let at = bytes
+        .windows(32)
+        .position(|w| w == from)
+        .expect("public half in clear");
+    bytes[at..at + 32].copy_from_slice(&to);
+    format!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    )
+}
+
+fn random_key() -> PrivateKey {
+    PrivateKey::random(
+        &mut russh::keys::key::safe_rng(),
+        russh::keys::Algorithm::Ed25519,
+    )
+    .unwrap()
+}
+
+fn key_host(id: u32, name: &str, key: &str) -> serde_json::Value {
+    serde_json::json!({"id": id, "name": name, "ip": "203.0.113.30", "username": "root",
+        "authType": "key", "key": key})
+}
+
+/// An encrypted OpenSSH private key whose clear public half claims to be
+/// the user's own key (the private half is another key): the fingerprint
+/// is marked unverified and never selects the local key; a verified copy
+/// of the same id in the export wins; a `.pub` beside another private key
+/// never lends it its fingerprint.
+#[tokio::test]
+async fn a_claimed_fingerprint_never_reuses_a_local_key() {
+    let (mine, theirs) = (random_key(), random_key());
+    let claimed = mine.public_key().fingerprint(HashAlg::Sha256).to_string();
+    let forged = forged_key(&theirs, &mine);
+
+    let env = env();
+    env.write_key("id_mine", &mine, None);
+    let file = write_export(&env, "forged.json", &[key_host(1, "victim", &forged)]);
+    let plan = env
+        .engine
+        .plan_termix_import(&file, ImportOptions::default())
+        .await
+        .unwrap();
+    let key = plan.keys.first().unwrap();
+    assert_eq!(key.fingerprint, claimed, "the export claims it");
+    assert!(key.encrypted && !key.fingerprint_verified);
+    assert_eq!(key.local, None, "never matched with ~/.ssh/id_mine");
+    let report = env
+        .engine
+        .apply_import(plan, select(&[claimed.as_str()]))
+        .await
+        .unwrap();
+    assert!(report.keys.reused.is_empty(), "{:?}", report.keys);
+    assert_eq!(report.keys.imported, [env.ssh("portico/victim")]);
+    assert!(
+        block(&hosts_conf(&env), "victim").contains("IdentityFile ~/.ssh/portico/victim\n"),
+        "{}",
+        hosts_conf(&env)
+    );
+
+    // The same id twice: the clear (verified) copy wins over the claim,
+    // and it may then reuse the local key.
+    let env = Env::new("");
+    env.write_key("id_mine", &mine, None);
+    let clear = mine
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap()
+        .to_string();
+    let file = write_export(
+        &env,
+        "both.json",
+        &[
+            key_host(1, "forged", &forged),
+            key_host(2, "honest", &clear),
+        ],
+    );
+    let plan = env
+        .engine
+        .plan_termix_import(&file, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(plan.keys.len(), 1);
+    let key = plan.keys.first().unwrap();
+    assert!(key.fingerprint_verified && !key.encrypted);
+    assert_eq!(key.local, Some(env.ssh("id_mine")));
+
+    // A `.pub` of `mine` beside another private key: not a local copy.
+    let env = Env::new("");
+    env.write_key("id_other", &theirs, None);
+    std::fs::write(
+        env.ssh("id_other.pub"),
+        mine.public_key().to_openssh().unwrap(),
+    )
+    .unwrap();
+    let file = write_export(&env, "clear.json", &[key_host(2, "honest", &clear)]);
+    let plan = env
+        .engine
+        .plan_termix_import(&file, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(plan.keys.first().unwrap().local, None);
+}
+
+/// Short aliases that would shadow a name the configuration relies on get
+/// the prefix: `localhost`, a `ProxyJump` host, a dotless `HostName`.
+#[tokio::test]
+async fn aliases_used_as_jump_hosts_get_the_prefix() {
+    let env = Env::new(
+        "Host app\n    HostName 10.0.0.5\n    ProxyJump gw\n\nHost db\n    HostName dbserver\n",
+    );
+    let host = |id: u32, name: &str, ip: &str| serde_json::json!({"id": id, "name": name, "ip": ip, "username": "root"});
+    let file = write_export(
+        &env,
+        "short.json",
+        &[
+            host(1, "gw", "203.0.113.50"),
+            host(2, "localhost", "203.0.113.51"),
+            host(3, "dbserver", "203.0.113.52"),
+            host(4, "plain", "203.0.113.53"),
+            host(5, "self", "self"),
+        ],
+    );
+    let plan = env
+        .engine
+        .plan_termix_import(&file, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        aliases(&plan),
+        [
+            "termix-gw",
+            "termix-localhost",
+            "termix-dbserver",
+            "plain",
+            "self"
+        ]
+    );
+    let shadowing: Vec<_> = plan
+        .warnings
+        .iter()
+        .filter(|w| w.code == NoticeCode::AliasLooksLikeHost)
+        .map(|w| w.label.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(shadowing, ["gw", "localhost", "dbserver"]);
+
+    // Checked again when applying a plan edited by hand.
+    let mut plan = plan;
+    if let Some(first) = plan.hosts.first_mut() {
+        first.alias = "gw".into();
+    }
+    let report = env
+        .engine
+        .apply_import(plan, ImportOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        report.imported.contains(&"termix-gw".to_owned()),
+        "{report:?}"
+    );
+    assert!(!report.imported.contains(&"gw".to_owned()));
+    let conf = hosts_conf(&env);
+    assert!(!conf.contains("Host gw\n") && !conf.contains("Host localhost\n"));
 }

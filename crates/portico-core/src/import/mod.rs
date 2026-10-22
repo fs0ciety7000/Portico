@@ -24,11 +24,21 @@
 //!   `IdentityFile` + `IdentitiesOnly yes`, are written. Every value is
 //!   checked against a strict character set (no space, line break, control
 //!   character, `#`, quote or `%`): an export can never inject a directive.
-//! - A re-import updates only the hosts it created and nobody edited since
-//!   (provenance and a hash of the written values in `hosts.toml`, see
-//!   [`crate::hosts`]); an alias defined anywhere else, or edited by hand,
+//! - A re-import updates only the hosts it created from the same record
+//!   (same provenance `id`) and nobody edited since (provenance and a hash
+//!   of the written values in `hosts.toml`, see [`crate::hosts`]); an alias
+//!   defined anywhere else, edited by hand or imported from another record,
 //!   is never touched: that record is skipped, unless the
 //!   [`ImportOptions::prefix`] option prefixes every alias.
+//! - A re-import never points an alias at another server silently: an
+//!   update that changes `HostName`, `User` or `Port` carries the current
+//!   values ([`PlannedHost::previous`]) and is applied only for the aliases
+//!   the user accepted ([`ImportOptions::allow_redirect`]), otherwise
+//!   skipped ([`NoticeCode::DestinationChanged`]); the old `IdentityFile`
+//!   never follows it.
+//! - An alias that would shadow a name the configuration relies on (a
+//!   host name, `localhost`, a `ProxyJump` host, a dotless `HostName`) gets
+//!   the source's prefix ([`NoticeCode::AliasLooksLikeHost`]).
 //! - No password is imported, kept or logged: password cells and fields
 //!   are only tested for emptiness (and wiped from memory, `zeroize`).
 //!   Counts are reported, never values. Errors and notices never quote a
@@ -47,7 +57,7 @@ pub(crate) mod private_keys;
 pub mod termius;
 pub mod termix;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -215,6 +225,12 @@ pub struct PlannedKey {
     /// Encrypted in the export (written as it is, the passphrase is not
     /// changed).
     pub encrypted: bool,
+    /// `false` when [`Self::fingerprint`] was only **claimed** by the
+    /// export: an encrypted OpenSSH key carries its public half in clear,
+    /// and nothing proves it matches the encrypted private half. Such a key
+    /// is never matched with a local key ([`Self::local`] is `None`), and
+    /// the UIs should say the fingerprint is unverified.
+    pub fingerprint_verified: bool,
     /// Aliases of the planned hosts using it.
     pub aliases: Vec<String>,
     /// A local private key with the same fingerprint (`~/.ssh`,
@@ -280,6 +296,13 @@ pub struct ImportOptions {
     /// (empty: none). Never serialized.
     #[serde(skip)]
     pub key_passphrase: Option<SecretString>,
+    /// Aliases (as planned, lowercase) whose **destination change** the
+    /// user accepted ([`PlannedHost::previous`]): only these earlier
+    /// imported hosts may be pointed at another `HostName`, `User` or
+    /// `Port`. Any other destination change is skipped
+    /// ([`NoticeCode::DestinationChanged`]). Empty by default.
+    #[serde(default)]
+    pub allow_redirect: BTreeSet<String>,
 }
 
 impl ImportOptions {
@@ -289,7 +312,13 @@ impl ImportOptions {
             prefix: self.prefix,
             keys: KeySelection::None,
             key_passphrase: None,
+            allow_redirect: BTreeSet::new(),
         }
+    }
+
+    /// `true` when the user accepted that `alias` points elsewhere.
+    pub(crate) fn redirect_allowed(&self, alias: &str) -> bool {
+        self.allow_redirect.contains(&alias.to_lowercase()) || self.allow_redirect.contains(alias)
     }
 }
 
@@ -298,6 +327,7 @@ impl PartialEq for ImportOptions {
         self.prefix == other.prefix
             && self.keys == other.keys
             && self.key_passphrase.is_some() == other.key_passphrase.is_some()
+            && self.allow_redirect == other.allow_redirect
     }
 }
 
@@ -330,8 +360,16 @@ pub struct PlannedHost {
     /// written as its `IdentityFile` only when selected.
     pub key: Option<KeyId>,
     /// `true` when it updates a host an earlier import of the same source
-    /// created (and nobody edited since); `false` when it is created.
+    /// created from the same record (and nobody edited since); `false`
+    /// when it is created.
     pub update: bool,
+    /// For an update that **changes the destination** (`HostName`, `User`
+    /// or `Port`): the host as it is now. Such an update is applied only
+    /// when the user opts in for this alias
+    /// ([`ImportOptions::allow_redirect`]); otherwise it is skipped with
+    /// [`NoticeCode::DestinationChanged`]. `None` for a creation or an
+    /// update to the same destination.
+    pub previous: Option<crate::managed_hosts::ManagedHost>,
     /// Stable id of the record in the export (Termix `id`, otherwise
     /// `label:<slug of the label>`), kept as the host's provenance.
     pub source_id: String,
@@ -394,6 +432,10 @@ pub enum NoticeCode {
     EditedSinceImport,
     /// A selected key could not be imported (see the message).
     KeySkipped,
+    /// A re-import would point an alias at another server (`HostName`,
+    /// `User` or `Port` changed): not applied unless the user accepted it
+    /// for this alias ([`ImportOptions::allow_redirect`]).
+    DestinationChanged,
 }
 
 impl NoticeCode {
@@ -423,6 +465,7 @@ impl NoticeCode {
             Self::KeyNotUsed => "key_not_used",
             Self::EditedSinceImport => "edited_since_import",
             Self::KeySkipped => "key_skipped",
+            Self::DestinationChanged => "destination_changed",
         }
     }
 }
@@ -843,6 +886,30 @@ pub(crate) fn looks_like_other_host(alias: &str, hostname: &str, prefix: &str) -
         && !alias.starts_with(prefix)
 }
 
+/// `true` when an imported `alias` (pointing at `hostname`) would shadow a
+/// name the configuration already relies on, so it must get the source's
+/// prefix: a name that reads like another host ([`looks_like_other_host`]),
+/// `localhost`, a `ProxyJump` host used by the configuration (`ssh` would
+/// then jump through the imported server), or a dotless name other than
+/// `hostname` that the configuration uses as a `HostName`.
+pub(crate) fn shadows_a_name(
+    alias: &str,
+    hostname: &str,
+    prefix: &str,
+    occupancy: &Occupancy,
+) -> bool {
+    if alias.starts_with(prefix) {
+        return false;
+    }
+    let lower = alias.to_lowercase();
+    looks_like_other_host(alias, hostname, prefix)
+        || lower == "localhost"
+        || occupancy.jump_hosts.contains(&lower)
+        || (!lower.contains('.')
+            && !lower.eq_ignore_ascii_case(hostname)
+            && occupancy.hostnames.contains(&lower))
+}
+
 /// `true` when a cell holds private key material.
 pub(crate) fn looks_like_secret(value: &str) -> bool {
     value.contains("-----BEGIN") || value.contains("PRIVATE KEY")
@@ -888,6 +955,57 @@ pub(crate) fn includes(config: &SshConfig, target: &Path) -> bool {
 
 // ── Who owns which alias ────────────────────────────────────────────────
 
+/// A host of `hosts.conf` an earlier import of the same source created,
+/// and nobody edited since.
+#[derive(Debug, Clone)]
+pub(crate) struct Updatable {
+    /// The record id it was imported from ([`PlannedHost::source_id`]).
+    pub(crate) id: String,
+    /// The host as it is now.
+    pub(crate) host: crate::managed_hosts::ManagedHost,
+}
+
+impl Updatable {
+    /// `true` when `planned` keeps the destination (`HostName`, `User`,
+    /// `Port`) of this host.
+    pub(crate) fn same_destination(&self, planned: &PlannedHost) -> bool {
+        same_destination(
+            &self.host,
+            &planned.hostname,
+            planned.user.as_deref(),
+            planned.port,
+        )
+    }
+}
+
+/// `true` when `hostname`, `user` and `port` are the destination of `host`
+/// (`HostName` compared ignoring case, as `known_hosts` does).
+pub(crate) fn same_destination(
+    host: &crate::managed_hosts::ManagedHost,
+    hostname: &str,
+    user: Option<&str>,
+    port: Option<u16>,
+) -> bool {
+    host.hostname.eq_ignore_ascii_case(hostname)
+        && host.user.as_deref() == user
+        && host.port == port
+}
+
+/// `user@hostname:port` of `host`, for notices (not secret).
+pub(crate) fn destination(host: &crate::managed_hosts::ManagedHost) -> String {
+    let mut out = String::new();
+    if let Some(user) = &host.user {
+        out.push_str(user);
+        out.push('@');
+    }
+    out.push_str(&host.hostname);
+    if let Some(port) = host.port {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    out
+}
+
 /// Which aliases an import of `source` may write, computed under the
 /// `hosts.conf` lock (at planning time too: the same answer as applying).
 #[derive(Debug, Default)]
@@ -900,8 +1018,14 @@ pub(crate) struct Occupancy {
     /// then someone edited ([`NoticeCode::EditedSinceImport`]).
     pub(crate) edited: HashSet<String>,
     /// Lowercased aliases of `hosts.conf` that an earlier import of
-    /// `source` created and nobody edited since: updated in place.
-    pub(crate) updatable: HashSet<String>,
+    /// `source` created and nobody edited since: updated in place when the
+    /// record id matches (and, unless the user opts in, the destination).
+    pub(crate) updatable: HashMap<String, Updatable>,
+    /// Lowercased `ProxyJump` hosts the configuration uses.
+    pub(crate) jump_hosts: HashSet<String>,
+    /// Lowercased `HostName` values of the configuration, the hosts above
+    /// aside (a re-import keeps their aliases).
+    pub(crate) hostnames: HashSet<String>,
 }
 
 impl Occupancy {
@@ -923,7 +1047,13 @@ impl Occupancy {
             }
             let lower = host.alias.to_lowercase();
             if found.values == crate::managed_hosts::values_hash(&paths.home, host) {
-                occupancy.updatable.insert(lower);
+                occupancy.updatable.insert(
+                    lower,
+                    Updatable {
+                        id: found.id.clone(),
+                        host: host.clone(),
+                    },
+                );
             } else {
                 occupancy.edited.insert(lower);
             }
@@ -931,14 +1061,18 @@ impl Occupancy {
         for alias in target.every_alias()? {
             let lower = alias.name.to_lowercase();
             let own = same_file(&alias.source.file, target.file())
-                && occupancy.updatable.contains(&lower);
+                && occupancy.updatable.contains_key(&lower);
             if !own {
                 occupancy.blocked.insert(lower);
             }
         }
         // An updatable alias also defined elsewhere is not updatable.
         let blocked = &occupancy.blocked;
-        occupancy.updatable.retain(|a| !blocked.contains(a));
+        occupancy.updatable.retain(|a, _| !blocked.contains(a));
+        let own: HashSet<String> = occupancy.updatable.keys().cloned().collect();
+        let (jump_hosts, hostnames) = target.routing_names(&own)?;
+        occupancy.jump_hosts = jump_hosts;
+        occupancy.hostnames = hostnames;
         Ok(occupancy)
     }
 }
@@ -1056,15 +1190,17 @@ mod tests {
             prefix: true,
             keys: KeySelection::Some([KeyId::new("SHA256:x")].into()),
             key_passphrase: Some(SecretString::from("hunter2-passphrase")),
+            allow_redirect: ["db".to_owned()].into(),
         };
         let json = serde_json::to_string(&options).expect("json");
         assert!(!json.contains("hunter2"), "{json}");
         assert!(!format!("{options:?}").contains("hunter2"));
         assert_eq!(
             json,
-            r#"{"prefix":true,"keys":{"kind":"some","ids":["SHA256:x"]}}"#
+            r#"{"prefix":true,"keys":{"kind":"some","ids":["SHA256:x"]},"allowRedirect":["db"]}"#
         );
         assert_eq!(options.for_plan().keys, KeySelection::None);
+        assert!(options.for_plan().allow_redirect.is_empty());
         assert!(options.for_plan().key_passphrase.is_none());
     }
 }

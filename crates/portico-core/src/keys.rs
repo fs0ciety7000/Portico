@@ -167,7 +167,7 @@ pub const MIN_RSA_BITS: u32 = 3072;
 /// Maximum RSA modulus (larger keys take minutes and bring nothing).
 pub const MAX_RSA_BITS: u32 = 8192;
 /// Longest key file name.
-const MAX_NAME_LEN: usize = 64;
+pub(crate) const MAX_NAME_LEN: usize = 64;
 /// Longest key comment.
 const MAX_COMMENT_LEN: usize = 256;
 
@@ -251,7 +251,7 @@ pub(crate) fn system_rng() -> Result<rand::rand_core::UnwrapErr<rand::rngs::SysR
     Ok(rand::rand_core::UnwrapErr(rand::rngs::SysRng))
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let reason = if name.is_empty() {
         Some("empty")
     } else if name.len() > MAX_NAME_LEN {

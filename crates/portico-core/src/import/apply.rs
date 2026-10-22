@@ -23,7 +23,8 @@ use super::private_keys;
 use super::{
     BoundedNotices, ImportError, ImportNotice, ImportOptions, ImportPlan, ImportReport, KeyId,
     KeyOutcome, MAX_ALIAS_CHARS, NoticeCode, Occupancy, PlannedHost, clean_hostname, clean_user,
-    include_active, include_line, is_valid_alias, looks_like_other_host, slug,
+    destination, include_active, include_line, is_valid_alias, same_destination, shadows_a_name,
+    slug,
 };
 use crate::engine::EngineConfig;
 use crate::error::Result;
@@ -52,13 +53,7 @@ pub(crate) fn apply(
     let occupancy = Occupancy::compute(&target, paths, source)?;
     let mut skipped = plan.skipped.clone();
     let mut warnings = BoundedNotices::from_vec(plan.warnings.clone());
-    let accepted = checked_hosts(
-        plan,
-        options.prefix || plan.options.prefix,
-        &occupancy,
-        &mut skipped,
-        &mut warnings,
-    );
+    let accepted = checked_hosts(plan, options, &occupancy, &mut skipped, &mut warnings);
 
     let (keys, key_paths, written) = import_keys(paths, plan, options, &accepted, &mut warnings)?;
 
@@ -147,14 +142,25 @@ fn merged_hosts(
             .iter()
             .position(|h| h.alias.eq_ignore_ascii_case(&planned.alias));
         let selected = planned.key.as_ref().and_then(|id| key_paths.get(id));
-        // A re-import without the key keeps the key the host already has.
+        // A re-import without the key keeps the key the host already has,
+        // but only for the same destination: a key never follows an alias
+        // to another server.
         let identity_file = match (selected, index.and_then(|i| hosts.get(i))) {
             (Some(path), _) => Some(path.clone()),
-            (None, Some(existing)) => existing
-                .identity_file
-                .clone()
-                .filter(|p| check_identity_file(home, p).is_ok()),
-            (None, None) => None,
+            (None, Some(existing))
+                if same_destination(
+                    existing,
+                    &planned.hostname,
+                    planned.user.as_deref(),
+                    planned.port,
+                ) =>
+            {
+                existing
+                    .identity_file
+                    .clone()
+                    .filter(|p| check_identity_file(home, p).is_ok())
+            }
+            (None, _) => None,
         };
         let host = ManagedHost {
             alias: planned.alias.clone(),
@@ -239,7 +245,11 @@ fn import_keys(
             ));
             continue;
         };
-        if let Some(path) = private_keys::local_copy(paths, &local, id) {
+        // A fingerprint the export only claims (encrypted OpenSSH key)
+        // never selects a local key: the key is written instead.
+        if secret.fingerprint_verified()
+            && let Some(path) = private_keys::local_copy(paths, &local, id)
+        {
             key_paths.insert(id.clone(), path.clone());
             keys.reused.push(path);
             continue;
@@ -267,15 +277,19 @@ fn import_keys(
 
 /// The hosts of `plan` that can be written, checked again: a value
 /// Portico does not write or a duplicate is skipped, an alias now taken
-/// (or a host edited since) is skipped; an alias that looks like another
-/// host, or every alias with `prefix_all`, gets the source's prefix.
+/// (or a host edited since, or imported from another record) is skipped,
+/// an update that points the alias elsewhere is skipped unless the user
+/// accepted it ([`ImportOptions::allow_redirect`]); an alias that shadows
+/// a name, or every alias with the prefix option, gets the source's
+/// prefix.
 fn checked_hosts(
     plan: &ImportPlan,
-    prefix_all: bool,
+    options: &ImportOptions,
     occupancy: &Occupancy,
     skipped: &mut Vec<ImportNotice>,
     warnings: &mut BoundedNotices,
 ) -> Vec<PlannedHost> {
+    let prefix_all = options.prefix || plan.options.prefix;
     let source = plan.format.source();
     let prefix = source.prefix();
     let mut seen: HashSet<String> = HashSet::new();
@@ -290,7 +304,7 @@ fn checked_hosts(
         let mut host = planned.clone();
         let wants_prefix = if prefix_all {
             !host.alias.starts_with(prefix)
-        } else if looks_like_other_host(&host.alias, &host.hostname, prefix) {
+        } else if shadows_a_name(&host.alias, &host.hostname, prefix, occupancy) {
             warnings.push(notice(
                 NoticeCode::AliasLooksLikeHost,
                 format!(
@@ -331,8 +345,32 @@ fn checked_hosts(
                 NoticeCode::AliasCollision,
                 format!("this alias is now defined in your ssh config or your Portico hosts (import with the {prefix} prefix to keep both)"),
             ));
+        } else if let Some(existing) = occupancy.updatable.get(&lower) {
+            if existing.id != host.source_id {
+                skipped.push(notice(
+                    NoticeCode::AliasCollision,
+                    format!("this alias was imported earlier from another record of the export: left as it is (import with the {prefix} prefix to keep both)"),
+                ));
+            } else if existing.same_destination(&host) {
+                host.update = true;
+                host.previous = None;
+                hosts.push(host);
+            } else if options.redirect_allowed(&host.alias) {
+                host.update = true;
+                host.previous = Some(existing.host.clone());
+                hosts.push(host);
+            } else {
+                skipped.push(notice(
+                    NoticeCode::DestinationChanged,
+                    format!(
+                        "this alias was imported earlier for {}: not pointed elsewhere without your consent",
+                        destination(&existing.host)
+                    ),
+                ));
+            }
         } else {
-            host.update = occupancy.updatable.contains(&lower);
+            host.update = false;
+            host.previous = None;
             hosts.push(host);
         }
     }

@@ -19,18 +19,24 @@
 //! `folder` → group, `tags`, `pin` → favorite. `tunnelConnections` and
 //! `socks5ProxyChain` are listed as notices when not empty, never imported.
 //!
-//! Secrets: `password`, `key` and `keyPassword` are read into `Zeroizing`
-//! strings only (`serde_json`'s own unescaping buffer aside, which Portico
-//! cannot reach), never copied elsewhere. Passwords and key passphrases are
-//! counted, never kept; keys go through [`super::private_keys::parse`] and
-//! stay in the plan's [`super::KeyMaterial`].
+//! Secrets: `password`, `key` and `keyPassword` are borrowed from the
+//! export's `Zeroizing` text as raw JSON ([`RawValue`], so `serde_json`
+//! never copies them into its own scratch buffer) and unescaped by Portico
+//! into `Zeroizing` strings sized up front, never copied elsewhere.
+//! Passwords and key passphrases are counted, never kept; keys go through
+//! [`super::private_keys::parse`] (deduplicated by a hash of their text,
+//! at most [`super::private_keys::MAX_DECRYPTIONS_PER_PLAN`] decryptions)
+//! and stay in the plan's [`super::KeyMaterial`]. When two entries hold
+//! keys with the same fingerprint, one whose fingerprint is verified wins
+//! over an encrypted OpenSSH key that only claims it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use super::build::{Collected, MAX_TAGS_PER_CELL, RawHost};
@@ -254,65 +260,74 @@ impl fmt::Debug for TermixHost {
 }
 
 /// A string as a wiped-on-drop secret; blank, `null` or another type is
-/// `None` (an owned string handed over by the parser is wiped too).
+/// `None`. The value is taken as a [`RawValue`] **borrowed** from the
+/// export's text (itself `Zeroizing`), then unescaped here into a buffer
+/// sized up front: `serde_json` never copies it into its own scratch
+/// buffer, and no reallocation leaves an unwiped copy behind.
 fn secret<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<Zeroizing<String>>, D::Error> {
-    struct SecretVisitor;
-    impl<'de> Visitor<'de> for SecretVisitor {
-        type Value = Option<Zeroizing<String>>;
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a string")
+    let raw = <&'de RawValue>::deserialize(deserializer)?;
+    Ok(unescape_json_string(raw.get()).filter(|v| !v.trim().is_empty()))
+}
+
+/// The value of a JSON string literal (`raw` with its quotes), unescaped
+/// into a `Zeroizing` buffer that never grows (an escape is never shorter
+/// than what it stands for). `None` for anything else (a number, `null`,
+/// an object…) or an invalid escape.
+pub(crate) fn unescape_json_string(raw: &str) -> Option<Zeroizing<String>> {
+    let inner = raw.trim().strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = Zeroizing::new(String::with_capacity(inner.len()));
+    let mut chars = inner.chars();
+    let hex4 = |chars: &mut std::str::Chars<'_>| -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..4 {
+            value = value
+                .checked_mul(16)?
+                .checked_add(chars.next()?.to_digit(16)?)?;
         }
-        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
-            if v.trim().is_empty() {
-                return Ok(None);
+        Some(value)
+    };
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let unescaped = match chars.next()? {
+            '"' => '"',
+            '\\' => '\\',
+            '/' => '/',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'u' => {
+                let first = hex4(&mut chars)?;
+                if (0xD800..0xDC00).contains(&first) {
+                    if chars.next()? != '\\' || chars.next()? != 'u' {
+                        return None;
+                    }
+                    let second = hex4(&mut chars)?;
+                    if !(0xDC00..0xE000).contains(&second) {
+                        return None;
+                    }
+                    let high = first.checked_sub(0xD800)?;
+                    let low = second.checked_sub(0xDC00)?;
+                    char::from_u32(
+                        high.checked_mul(0x400)?
+                            .checked_add(low)?
+                            .checked_add(0x1_0000)?,
+                    )?
+                } else {
+                    char::from_u32(first)?
+                }
             }
-            let mut out = Zeroizing::new(String::with_capacity(v.len()));
-            out.push_str(v);
-            Ok(Some(out))
-        }
-        fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Self::Value, E> {
-            let v = Zeroizing::new(v);
-            if v.trim().is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(v))
-        }
-        fn visit_u64<E: de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_i64<E: de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_f64<E: de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_bool<E: de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_seq<A: SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> std::result::Result<Self::Value, A::Error> {
-            while seq.next_element::<IgnoredAny>()?.is_some() {}
-            Ok(None)
-        }
-        fn visit_map<A: MapAccess<'de>>(
-            self,
-            mut map: A,
-        ) -> std::result::Result<Self::Value, A::Error> {
-            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-            Ok(None)
-        }
+            _ => return None,
+        };
+        out.push(unescaped);
     }
-    deserializer.deserialize_any(SecretVisitor)
+    Some(out)
 }
 
 /// `tags`: a list of strings (other items skipped), or one comma-separated
@@ -455,6 +470,45 @@ fn count<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<usiz
     deserializer.deserialize_any(CountVisitor)
 }
 
+/// The keys of one export, parsed once each.
+#[derive(Default)]
+struct KeyParser {
+    keys: BTreeMap<KeyId, KeySecret>,
+    /// SHA-256 of each key text already parsed, and what came out of it:
+    /// the same text is never parsed (nor decrypted) twice.
+    seen: HashMap<Vec<u8>, std::result::Result<KeyId, private_keys::Unreadable>>,
+    budget: private_keys::DecryptBudget,
+}
+
+impl KeyParser {
+    /// The id of the key `raw`, kept in [`Self::keys`] (a verified copy
+    /// replaces one that only claims the same fingerprint), or why it
+    /// cannot be imported.
+    fn parse(
+        &mut self,
+        raw: &str,
+        key_password: Option<&str>,
+    ) -> std::result::Result<KeyId, private_keys::Unreadable> {
+        let digest = russh::keys::HashAlg::Sha256.digest(raw.as_bytes());
+        if let Some(earlier) = self.seen.get(&digest) {
+            return earlier.clone();
+        }
+        let outcome = private_keys::parse(raw, key_password, &mut self.budget).map(|secret| {
+            let id = secret.id();
+            let replace = self
+                .keys
+                .get(&id)
+                .is_none_or(|kept| !kept.fingerprint_verified() && secret.fingerprint_verified());
+            if replace {
+                self.keys.insert(id.clone(), secret);
+            }
+            id
+        });
+        self.seen.insert(digest, outcome.clone());
+        outcome
+    }
+}
+
 /// Reads a Termix export: hosts, counted secrets and parsed keys
 /// (blocking: an encrypted PEM key runs a KDF).
 #[allow(clippy::too_many_lines)] // one linear pass over the hosts
@@ -481,7 +535,7 @@ pub(crate) fn read(text: &str, source: &Path) -> Result<Collected> {
         }
     })?;
     let mut collected = Collected::default();
-    let mut keys: BTreeMap<KeyId, KeySecret> = BTreeMap::new();
+    let mut parser = KeyParser::default();
     for (index, host) in export.hosts.into_iter().enumerate() {
         let record = index.saturating_add(1);
         collected.records = collected.records.saturating_add(1);
@@ -525,12 +579,9 @@ pub(crate) fn read(text: &str, source: &Path) -> Result<Collected> {
                 None
             }
             Some(raw) => {
-                match private_keys::parse(raw, host.key_password.as_deref().map(String::as_str)) {
-                    Ok(secret) => {
-                        let id = secret.id();
-                        keys.entry(id.clone()).or_insert(secret);
-                        Some(id)
-                    }
+                let parsed = parser.parse(raw, host.key_password.as_deref().map(String::as_str));
+                match parsed {
+                    Ok(id) => Some(id),
                     Err(reason) => {
                         collected.secrets.keys = collected.secrets.keys.saturating_add(1);
                         collected.notice(
@@ -559,7 +610,7 @@ pub(crate) fn read(text: &str, source: &Path) -> Result<Collected> {
             import_id: host.id.filter(|id| !id.trim().is_empty()),
         });
     }
-    collected.keys = keys;
+    collected.keys = parser.keys;
     Ok(collected)
 }
 
@@ -596,6 +647,32 @@ mod tests {
         assert!(!format!("{collected:?}").contains("FAKEPASS123"));
         let export: TermixExport = serde_json::from_str(text).expect("parse");
         assert!(!format!("{export:?}").contains("FAKEPASS123"));
+    }
+
+    #[test]
+    fn secrets_are_unescaped_by_portico() {
+        let unescape = |raw: &str| unescape_json_string(raw).map(|s| s.as_str().to_owned());
+        assert_eq!(
+            unescape(r#""a\nb\"c\\d\/e\tf""#).as_deref(),
+            Some("a\nb\"c\\d/e\tf")
+        );
+        assert_eq!(unescape(r#""é😀""#).as_deref(), Some("é😀"));
+        assert_eq!(unescape(r#""plain""#).as_deref(), Some("plain"));
+        for bad in ["12", "null", r#""\x""#, r#""\ud83d""#, r#""\u12""#, "{}"] {
+            assert_eq!(unescape(bad), None, "{bad}");
+        }
+        // Never longer than the escaped text: no reallocation.
+        let raw = r#""é\nA""#;
+        let out = unescape_json_string(raw).expect("string");
+        assert!(out.capacity() <= raw.len());
+        // Through the deserializer: escapes in a key or password are read.
+        let text = r#"{"hosts":[{"name":"a","ip":"192.0.2.1","password":"FAKEPASS\n123"}]}"#;
+        let export: TermixExport = serde_json::from_str(text).expect("parse");
+        let host = export.hosts.first().expect("one");
+        assert_eq!(
+            host.password.as_ref().map(|p| p.as_str()),
+            Some("FAKEPASS\n123")
+        );
     }
 
     #[test]

@@ -552,6 +552,7 @@ mod tests {
                     algorithm: "ssh-ed25519".into(),
                     fingerprint: "SHA256:x".into(),
                     other_algorithms: vec![],
+                    sends_remembered_password: false,
                 },
             },
             None,
@@ -591,6 +592,7 @@ mod tests {
             algorithm: "a".into(),
             fingerprint: "f".into(),
             other_algorithms: vec!["b".into()],
+            sends_remembered_password: false,
         });
         hk.paste("yes");
         assert!(hk.confirm.is_empty());
@@ -627,6 +629,7 @@ mod tests {
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:x".into(),
             other_algorithms: vec![],
+            sends_remembered_password: false,
         });
         assert!(matches!(
             d.handle_key(key(KeyCode::Enter)),
@@ -643,6 +646,7 @@ mod tests {
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:x".into(),
             other_algorithms: vec!["ecdsa-sha2-nistp256".into()],
+            sends_remembered_password: false,
         });
         assert!(matches!(
             risky.handle_key(key(KeyCode::Char('y'))),
