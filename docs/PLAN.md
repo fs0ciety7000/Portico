@@ -171,16 +171,17 @@ l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Ter
 propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première release taguée) ; import d'un vrai export Termius
 (fixtures synthétiques seulement à ce jour).
 
-### Phase 6 : terminal ⏳
+### Phase 6 : terminal 🔄 *(décisions : `docs/STACK.md`, 2026-10-22, split panes et enregistrement)*
 - **Split panes** : divisions horizontales et verticales dans un onglet, focus et redimensionnement au clavier, chaque
   panneau étant un terminal indépendant (même session ou autre hôte) ; TUI et GUI
-- **Enregistrement asciicast v2** (ADR préalable : exception encadrée à l'interdit « contenu de terminal en clair ») :
-  opt-in explicite par session, indicateur « REC » toujours visible, sortie seulement (les saisies, donc les mots de passe,
-  ne sont pas enregistrées), fichiers `0600`, avertissement, chiffrement optionnel ; relecture dans les deux UIs
+- **Enregistrement asciicast v2** (ADR du 2026-10-22 : exception encadrée à l'interdit « contenu de terminal en clair ») :
+  opt-in explicite par terminal, indicateur « REC » toujours visible, sortie seulement (les saisies, donc les mots de passe,
+  ne sont pas enregistrées), fichiers `0600`, avertissement ; relecture dans les deux UIs. Chiffrement reporté au thème
+  « Vault enrichi » (voir l'ADR)
 
 **Sortie** : quatre panneaux sur deux hôtes utilisables au clavier seul ; une session enregistrée se relit à l'identique.
 
-### Phase 7 : synchronisation locale optionnelle ⏳
+### Phase 7 : synchronisation locale optionnelle ❌ *(abandonnée le 2026-10-22, décision du propriétaire)*
 - Sync de `hosts.toml`, des snippets et des réglages via un dossier choisi (Syncthing, git…) : **jamais de cloud imposé,
   jamais de secret** (le vault reste local, ou s'exporte chiffré à part) ; fusion par entrée, conflits montrés à
   l'utilisateur et jamais résolus en silence
@@ -226,7 +227,7 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 | 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
 | 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
 | 6 Split panes, asciicast | ⏳ | | | |
-| 7 Sync locale | ⏳ | | | |
+| 7 Sync locale | ❌ abandonnée | | | |
 | 8 Windows | ⏳ | | | |
 
 ## Revues de la phase 5 (2026-10-22)
