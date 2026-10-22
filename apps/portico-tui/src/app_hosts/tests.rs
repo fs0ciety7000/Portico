@@ -660,3 +660,47 @@ async fn a_remembered_password_connects_without_a_prompt() {
         1
     );
 }
+
+/// The password's destination note: under a typed password (add), under
+/// "Keep" (edit), never under "Forget"; the form still fits 80×24.
+#[tokio::test]
+async fn password_note_says_where_it_is_sent() {
+    const NOTE: &str = "Sent automatically to the server that answers at this";
+    let mut lab = Lab::new(USER_CONFIG).await;
+    lab.app.update(Action::AddHost);
+    lab.settle().await;
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(!shown.contains(NOTE), "nothing typed yet:\n{shown}");
+    lab.focus(HostField::Password);
+    lab.type_text("hunter2");
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    // Aligned with the input, after the label column, wrapped.
+    assert!(
+        shown.contains(&format!("{}{NOTE}", " ".repeat(11))),
+        "{shown}"
+    );
+    assert!(shown.contains("verified; then tied to that"), "{shown}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+    assert!(shown.contains("↵  save"), "{shown}");
+    lab.form_key(KeyCode::Esc);
+    lab.form_key(KeyCode::Char('y'));
+    assert!(lab.app.host_form.is_none());
+
+    // Edit: "Keep" says it, "Forget" does not.
+    lab.add("db", "10.0.0.5").await;
+    lab.app.update(Action::EditHost);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
+        .await;
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains("Keep"), "{shown}");
+    assert!(shown.contains(NOTE), "{shown}");
+    assert!(shown.contains("↵  save"), "{shown}");
+    lab.focus(HostField::PasswordMode);
+    lab.form_key(KeyCode::Left);
+    assert_eq!(
+        lab.app.host_form.as_ref().map(|f| f.password_mode),
+        Some(crate::host_form::PasswordMode::Forget)
+    );
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(!shown.contains(NOTE), "{shown}");
+}

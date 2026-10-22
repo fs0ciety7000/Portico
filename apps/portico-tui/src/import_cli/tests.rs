@@ -31,6 +31,7 @@ fn cli(file: impl Into<PathBuf>) -> ImportArgs {
         keys: Vec::new(),
         all_keys: false,
         key_passphrase: false,
+        accept_redirect: Vec::new(),
     }
 }
 
@@ -174,6 +175,50 @@ fn arguments() {
 }
 
 #[test]
+fn accept_redirect_arguments() {
+    // Repeatable, `=` form, lowercased, duplicates removed.
+    assert_eq!(
+        parse(&args(&[
+            "x.json",
+            "--accept-redirect",
+            "Web-Prod",
+            "--accept-redirect=db.eu_1",
+            "--accept-redirect",
+            "web-prod",
+        ])),
+        Ok(ImportArgs {
+            accept_redirect: vec!["web-prod".to_owned(), "db.eu_1".to_owned()],
+            ..cli("x.json")
+        })
+    );
+    assert!(parse(&args(&["x.json", "--accept-redirect"])).is_err());
+    // Outside the alias rules: refused, never echoed.
+    for hostile in [
+        "evil\nProxyCommand x",
+        "\u{1b}[2Jwipe",
+        "a b",
+        "",
+        "web/prod",
+        &"a".repeat(MAX_ALIAS_CHARS + 1),
+    ] {
+        for list in [
+            vec![
+                "x.json".to_owned(),
+                "--accept-redirect".to_owned(),
+                hostile.to_owned(),
+            ],
+            vec!["x.json".to_owned(), format!("--accept-redirect={hostile}")],
+        ] {
+            let message = parse(&list).unwrap_err();
+            assert_eq!(message, ACCEPT_REDIRECT_USAGE);
+            if !hostile.is_empty() {
+                assert!(!message.contains(hostile), "{message}");
+            }
+        }
+    }
+}
+
+#[test]
 fn paths_and_shell_words() {
     let home = Path::new("/home/ana");
     assert_eq!(
@@ -226,7 +271,11 @@ async fn termius_plan_and_report_texts() {
         text.contains("  line 3 · switch — the protocol is not SSH\n"),
         "{text}"
     );
-    assert!(text.contains("1 password and 0 keys ignored"), "{text}");
+    assert!(
+        text.contains("  1 password ignored (never imported). The export holds them"),
+        "{text}"
+    );
+    assert!(!text.contains("0 keys"), "{text}");
     assert!(
         text.ends_with(
             "Nothing written yet. Run again with --apply: portico import termius 'my export.csv' --apply\n"
@@ -239,6 +288,7 @@ async fn termius_plan_and_report_texts() {
         skipped: plan.skipped.clone(),
         warnings: plan.warnings.clone(),
         encrypted: false,
+        redirects: Vec::new(),
     };
     let report = engine
         .apply_import(plan, ImportOptions::default())
@@ -250,7 +300,7 @@ async fn termius_plan_and_report_texts() {
         "{text}"
     );
     assert!(
-        text.contains("\nDelete the export now: it holds 1 password and 0 private keys"),
+        text.contains("\nDelete the export now: it holds 1 password (in clear text or encrypted)"),
         "{text}"
     );
     assert!(!text.contains("Skipped while writing"), "{text}");
@@ -351,7 +401,7 @@ async fn termix_plan_lists_keys_and_how_to_select_them() {
              \x20 ssh-ed25519          {ED25519}\n\
              \x20   OpenSSH, not encrypted · used by hbd, hbd-backup\n\
              \x20 ssh-ed25519          {LOCKED}\n\
-             \x20   OpenSSH, encrypted · used by locked-box\n\
+             \x20   OpenSSH, encrypted · fingerprint not verified (encrypted key) · used by locked-box\n\
              \x20 ssh-rsa              {RSA}\n\
              \x20   PEM, not encrypted · used by legacy-rsa\n\
              \x20 Select keys with --key SHA256:… (repeatable) or --all-keys."
@@ -673,8 +723,266 @@ fn report_lists_reused_keys_and_new_warnings_only() {
     );
     assert!(!text.contains("already shown"), "{text}");
     assert!(
-        text.contains("Delete the export now: it holds 0 passwords and 1 private key"),
+        text.contains("Delete the export now: it holds 1 private key (in clear text or encrypted)"),
         "{text}"
     );
     assert!(text.ends_with("already includes this file: the hosts are in your list.\n"));
+}
+
+/// A host of `plan` as a destination change of `web-prod`.
+fn redirected_plan() -> ImportPlan {
+    let host = PlannedHost {
+        alias: "web-prod".into(),
+        label: "Web Prod".into(),
+        hostname: "198.51.100.99".into(),
+        user: Some("deploy".into()),
+        port: Some(2200),
+        group: None,
+        tags: vec!["web".into()],
+        notes: None,
+        record: 6,
+        favorite: false,
+        key: None,
+        update: true,
+        previous: Some(portico_core::managed_hosts::ManagedHost {
+            alias: "web-prod".into(),
+            hostname: "198.51.100.10".into(),
+            user: Some("deploy".into()),
+            port: None,
+            identity_file: None,
+            proxy_jump: None,
+        }),
+        source_id: "6".into(),
+    };
+    let same = PlannedHost {
+        alias: "hbd".into(),
+        label: "Hbd".into(),
+        hostname: "203.0.113.20".into(),
+        previous: None,
+        tags: Vec::new(),
+        record: 1,
+        source_id: "1".into(),
+        ..host.clone()
+    };
+    ImportPlan {
+        source: "export.json".into(),
+        format: portico_core::import::ImportFormat::TermixJson,
+        options: ImportOptions::default(),
+        records: 2,
+        hosts: vec![same, host],
+        skipped: Vec::new(),
+        warnings: vec![ImportNotice {
+            code: NoticeCode::DestinationChanged,
+            record: Some(6),
+            label: Some("Web Prod".into()),
+            message: "`web-prod` was imported earlier for deploy@198.51.100.10: the export now points it elsewhere".into(),
+        }],
+        secrets: portico_core::import::IgnoredSecrets::default(),
+        identity_files: Vec::new(),
+        target: "/home/ana/.config/portico/hosts.conf".into(),
+        include_line: "Include ~/.config/portico/hosts.conf".into(),
+        replaces: Some(2),
+        keys: Vec::new(),
+        key_material: portico_core::import::KeyMaterial::default(),
+    }
+}
+
+#[test]
+fn plan_shows_destination_changes() {
+    let plan = redirected_plan();
+    let home = Path::new("/home/ana");
+    let text = plan_text(&plan, home, &cli("export.json"), &KeySelection::None);
+    assert!(
+        text.contains("\n2 records: 1 host to import, 1 skipped.\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n  web-prod                 deploy@198.51.100.10 → deploy@198.51.100.99:2200 #web  (destination changed, skipped)\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  hbd                      deploy@203.0.113.20:2200  (update)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("unless you add --accept-redirect ALIAS"),
+        "{text}"
+    );
+    // The host line says it: no repeated warning.
+    assert!(!text.contains("Warnings"), "{text}");
+    assert!(
+        text.ends_with("Run again with --apply: portico import export.json --apply\n"),
+        "{text}"
+    );
+
+    // Accepted: marked so, counted, and kept in the suggested command.
+    let accepted = ImportArgs {
+        accept_redirect: vec!["web-prod".into()],
+        ..cli("export.json")
+    };
+    let text = plan_text(&plan, home, &accepted, &KeySelection::None);
+    assert!(text.contains("2 hosts to import, 0 skipped"), "{text}");
+    assert!(
+        text.contains(":2200 #web  (destination changed, accepted)\n"),
+        "{text}"
+    );
+    assert!(!text.contains("unless you add"), "{text}");
+    assert!(
+        text.ends_with(" --accept-redirect web-prod --apply\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn report_lists_skipped_destination_changes() {
+    let plan = redirected_plan();
+    let report = ImportReport {
+        format: portico_core::import::ImportFormat::TermixJson,
+        target: "/home/ana/.config/portico/hosts.conf".into(),
+        unchanged: false,
+        imported: vec!["hbd".into()],
+        updated: vec!["hbd".into()],
+        skipped: vec![ImportNotice {
+            code: NoticeCode::DestinationChanged,
+            record: Some(6),
+            label: Some("Web Prod".into()),
+            message: "this alias was imported earlier for deploy@198.51.100.10: not pointed elsewhere without your consent".into(),
+        }],
+        warnings: Vec::new(),
+        secrets: portico_core::import::IgnoredSecrets::default(),
+        identity_files: Vec::new(),
+        meta_updated: 1,
+        include_line: "Include ~/.config/portico/hosts.conf".into(),
+        include_active: true,
+        keys: portico_core::import::KeyOutcome::default(),
+    };
+    let shown = Shown {
+        redirects: plan
+            .hosts
+            .iter()
+            .filter(|h| h.previous.is_some())
+            .map(|h| (h.record, h.alias.clone()))
+            .collect(),
+        ..Shown::default()
+    };
+    let text = report_text(&report, &shown, Path::new("/home/ana"));
+    assert!(
+        text.contains(
+            "\nDestination changes not applied (still pointing at the earlier server)\n  web-prod — this alias was imported earlier for deploy@198.51.100.10: not pointed elsewhere without your consent\n  To apply one, run the import again with --accept-redirect ALIAS.\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("changed since the plan"), "{text}");
+    assert!(!text.contains("Delete the export"), "{text}");
+}
+
+/// The fixture with `Web Prod` moved to another server.
+fn moved_fixture(dir: &Path) -> PathBuf {
+    let text = std::fs::read_to_string(fixture()).unwrap();
+    assert!(text.contains("\"198.51.100.10\""));
+    let moved = dir.join("termix_export.json");
+    std::fs::write(
+        &moved,
+        text.replace("\"198.51.100.10\"", "\"198.51.100.99\""),
+    )
+    .unwrap();
+    moved
+}
+
+fn hosts_conf(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("config/hosts.conf")).unwrap()
+}
+
+/// Import the fixture, then a modified export that points `web-prod`
+/// elsewhere: skipped without `--accept-redirect`, applied with it.
+#[tokio::test]
+async fn reimport_with_a_destination_change_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let first = ImportArgs {
+        apply: true,
+        ..cli(fixture())
+    };
+    run_with(&engine, dir.path(), first, Scripted::default())
+        .await
+        .unwrap();
+    assert!(hosts_conf(dir.path()).contains("HostName 198.51.100.10\n"));
+
+    let moved = moved_fixture(dir.path());
+    // The plan shows the change, marked skipped.
+    let text = run_with(&engine, dir.path(), cli(&moved), Scripted::default())
+        .await
+        .unwrap();
+    assert!(
+        text.contains("deploy@198.51.100.10 → deploy@198.51.100.99"),
+        "{text}"
+    );
+    assert!(text.contains("(destination changed, skipped)\n"), "{text}");
+
+    // An alias that is not a destination change: refused, nothing written.
+    let before = hosts_conf(dir.path());
+    let failure = run_with(
+        &engine,
+        dir.path(),
+        ImportArgs {
+            apply: true,
+            accept_redirect: vec!["hbd".into()],
+            ..cli(&moved)
+        },
+        Scripted::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.summary.code, "import_unknown_redirect");
+    assert_eq!(
+        failure.summary.message,
+        "`hbd` is not a destination change of this import"
+    );
+    assert!(failure.stdout.contains("(destination changed, skipped)"));
+    assert_eq!(hosts_conf(dir.path()), before);
+
+    // Applied without consent: the host keeps its old destination.
+    let text = run_with(
+        &engine,
+        dir.path(),
+        ImportArgs {
+            apply: true,
+            ..cli(&moved)
+        },
+        Scripted::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        text.contains(
+            "\nDestination changes not applied (still pointing at the earlier server)\n  web-prod — "
+        ),
+        "{text}"
+    );
+    assert!(text.contains("--accept-redirect ALIAS"), "{text}");
+    let conf = hosts_conf(dir.path());
+    assert!(conf.contains("HostName 198.51.100.10\n"), "{conf}");
+    assert!(!conf.contains("198.51.100.99"), "{conf}");
+
+    // With consent (any case): pointed at the new server.
+    let text = run_with(
+        &engine,
+        dir.path(),
+        ImportArgs {
+            apply: true,
+            accept_redirect: vec!["web-prod".into()],
+            ..cli(&moved)
+        },
+        Scripted::default(),
+    )
+    .await
+    .unwrap();
+    assert!(text.contains("(destination changed, accepted)\n"), "{text}");
+    assert!(!text.contains("Destination changes not applied"), "{text}");
+    let conf = hosts_conf(dir.path());
+    assert!(conf.contains("HostName 198.51.100.99\n"), "{conf}");
+    assert!(!conf.contains("198.51.100.10"), "{conf}");
+    assert_no_secret(&text);
 }

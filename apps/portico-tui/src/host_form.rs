@@ -39,6 +39,11 @@ pub(crate) const READ_ONLY_HINT: &str = "Defined in ~/.ssh/config, which Portico
 /// next import).
 pub(crate) const IMPORTED_HINT: &str = "Imported from Termius into a file each import replaces. Duplicate it as a Portico host to change it.";
 
+/// Under the password once one is set or kept (shared with the GUI): it
+/// is not tied to a host key until the first connection (`SECURITY.md`,
+/// risk 13).
+pub(crate) const PASSWORD_DESTINATION_NOTE: &str = "Sent automatically to the server that answers at this address, after its host key is verified; then tied to that key.";
+
 /// Longest alias the engine accepts (`[a-z0-9_.-]`, 64 characters).
 const MAX_ALIAS: usize = 64;
 /// Longest host name typed (the engine checks the rest).
@@ -485,6 +490,16 @@ impl HostForm {
     /// A password has been typed (the mask is shown, never its length).
     pub(crate) fn password_typed(&self) -> bool {
         !self.password.0.is_empty()
+    }
+
+    /// Saving sets a password (typed) or keeps the remembered one (edit,
+    /// "Keep"): the form then says where it will be sent.
+    pub(crate) fn password_set_or_kept(&self) -> bool {
+        match (&self.mode, self.password_mode) {
+            (FormMode::ReadOnly { .. }, _) | (FormMode::Edit { .. }, PasswordMode::Forget) => false,
+            (FormMode::Edit { .. }, PasswordMode::Keep) => true,
+            _ => self.password_typed(),
+        }
     }
 
     /// The fields, in `Tab` order.

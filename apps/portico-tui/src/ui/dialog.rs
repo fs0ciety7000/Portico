@@ -156,17 +156,21 @@ fn render_prompt(p: &PromptDialog, s: Styles, frame: &mut Frame<'_>) {
             algorithm,
             fingerprint,
             other_algorithms,
+            sends_remembered_password,
             ..
         } => {
             host_key_lines(
                 p,
                 s,
                 &mut lines,
-                host,
-                *port,
-                algorithm,
-                fingerprint,
-                other_algorithms,
+                &HostKeyShown {
+                    host,
+                    port: *port,
+                    algorithm,
+                    fingerprint,
+                    other_algorithms,
+                    sends_remembered_password: *sends_remembered_password,
+                },
             );
             if other_algorithms.is_empty() {
                 (
@@ -505,16 +509,36 @@ fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) 
 }
 
 #[allow(clippy::too_many_arguments)] // the prompt's fields, destructured
+/// What an unknown-host-key prompt shows.
+struct HostKeyShown<'a> {
+    host: &'a str,
+    port: u16,
+    algorithm: &'a str,
+    fingerprint: &'a str,
+    other_algorithms: &'a [String],
+    /// A remembered password, not yet tied to a host key, leaves for this
+    /// server once the key is accepted (`SECURITY.md`, risk 13).
+    sends_remembered_password: bool,
+}
+
+/// Same wording as the GUI's host-key dialog.
+const SENDS_REMEMBERED_PASSWORD: &str =
+    "A remembered password will be sent to this server once you accept its key.";
+
 fn host_key_lines(
     p: &PromptDialog,
     s: Styles,
     lines: &mut Vec<Line<'static>>,
-    host: &str,
-    port: u16,
-    algorithm: &str,
-    fingerprint: &str,
-    other_algorithms: &[String],
+    shown: &HostKeyShown<'_>,
 ) {
+    let HostKeyShown {
+        host,
+        port,
+        algorithm,
+        fingerprint,
+        other_algorithms,
+        sends_remembered_password,
+    } = *shown;
     let target = if port == 22 {
         host.to_owned()
     } else {
@@ -531,6 +555,13 @@ fn host_key_lines(
     lines.push(Line::from(""));
     lines.push(kv(s, 13, "Key type", algorithm.to_owned()));
     lines.push(kv(s, 13, "Fingerprint", fingerprint.to_owned()));
+    if sends_remembered_password {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("▲ {SENDS_REMEMBERED_PASSWORD}"),
+            s.status(s.theme.status.warning),
+        )));
+    }
     if other_algorithms.is_empty() {
         return;
     }
@@ -609,4 +640,79 @@ fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
         ),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use portico_core::events::Prompt;
+    use portico_core::ids::PromptId;
+    use portico_theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    use super::*;
+
+    /// The rows of `dialog` drawn at 80×24, and the foreground of the
+    /// first cell of `needle`.
+    fn draw(dialog: &Dialog, needle: &str) -> (String, Option<Color>) {
+        let s = Styles::new(Theme::default_theme());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(dialog, s, 0, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut colour = None;
+        let mut rows = Vec::new();
+        for y in 0..24u16 {
+            let row: String = (0..80u16)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect();
+            if row.contains(needle) {
+                let before = row.split(needle).next().unwrap().chars().count();
+                let x = u16::try_from(before).unwrap();
+                colour = buffer.cell((x, y)).map(|c| c.fg);
+            }
+            rows.push(row);
+        }
+        (rows.join("\n"), colour)
+    }
+
+    fn host_key(sends_remembered_password: bool) -> Dialog {
+        Dialog::Prompt(PromptDialog::new(
+            Prompt {
+                id: PromptId::next(),
+                session: None,
+                kind: PromptKind::UnknownHostKey {
+                    host: "db.example.test".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: "SHA256:abc".into(),
+                    other_algorithms: vec![],
+                    sends_remembered_password,
+                },
+            },
+            Some("db".into()),
+        ))
+    }
+
+    #[test]
+    fn host_key_prompt_says_a_remembered_password_will_be_sent() {
+        let (screen, colour) = draw(&host_key(true), "▲ A remembered password will be sent");
+        assert!(
+            screen.contains("First connection to db.example.test."),
+            "{screen}"
+        );
+        // Wrapped in the modal: the end of the sentence on the next row.
+        assert!(screen.contains("its key."), "{screen}");
+        let s = Styles::new(Theme::default_theme());
+        assert_eq!(
+            colour,
+            s.status(s.theme.status.warning).fg,
+            "in the warning colour:\n{screen}"
+        );
+        assert!(screen.contains("trust & remember"), "{screen}");
+
+        let (screen, colour) = draw(&host_key(false), "remembered password");
+        assert_eq!(colour, None, "{screen}");
+        assert!(screen.contains("SHA256:abc"), "{screen}");
+    }
 }

@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use crate::app::App;
 use crate::form::display_safe;
 use crate::host_form::{
-    ADD_COMMAND, DUPLICATE_COMMAND, EDIT_COMMAND, FormMode, HostField, HostForm, PasswordMode,
-    origin_label, read_only_hint,
+    ADD_COMMAND, DUPLICATE_COMMAND, EDIT_COMMAND, FormMode, HostField, HostForm,
+    PASSWORD_DESTINATION_NOTE, PasswordMode, origin_label, read_only_hint,
 };
 use crate::theme::Styles;
 use crate::ui::{fmt, form, spinner};
@@ -446,6 +446,16 @@ fn form_lines(
         if focused(HostField::Password) {
             lines.push(note(&format!("remembered in {remember_in}"), s));
         }
+    }
+    if form.password_set_or_kept() {
+        lines.extend(
+            fmt::wrap(
+                PASSWORD_DESTINATION_NOTE,
+                w.saturating_sub(LABEL + 1).max(10),
+            )
+            .into_iter()
+            .map(|l| note(&l, s)),
+        );
     }
     lines.extend(problem(form, Some(HostField::Password), s, w));
     lines.extend(problem(form, Some(HostField::PasswordMode), s, w));

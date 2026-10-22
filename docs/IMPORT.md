@@ -55,7 +55,19 @@ portico import termix.json --all-keys --key-passphrase --apply                  
   `SecretString`), et n'est demandée que si une clé sélectionnée doit être écrite. `Ctrl-C` ou `Esc` arrête sans
   rien écrire. Sans elle, les clés en clair sont écrites sans passphrase (`0600`).
 
-Le rapport liste les hôtes mis à jour, les clés importées (`~/.ssh/portico/<alias>`), les clés réutilisées, le
+- `--accept-redirect ALIAS` (répétable, aussi `--accept-redirect=ALIAS`) accepte le **changement de destination**
+  d'un hôte importé précédemment (voir « Réimporter » plus bas). Sans elle, l'hôte n'est pas modifié. Un alias qui
+  n'est pas l'un des changements de destination de l'aperçu est refusé (`import_unknown_redirect`), rien n'est
+  écrit ; une valeur hors des règles d'alias (`[a-z0-9_.-]`, 64 caractères au plus, casse ignorée) est refusée sans
+  être recopiée dans le message.
+
+Dans l'aperçu, une clé OpenSSH chiffrée porte « fingerprint not verified (encrypted key) » (son empreinte n'est que
+déclarée par l'export), et un hôte dont la destination change s'affiche
+`web-prod   deploy@198.51.100.10 → deploy@198.51.100.99  (destination changed, skipped)` (ou `accepted` avec
+`--accept-redirect web-prod`) ; il n'est pas compté parmi les hôtes à importer tant qu'il n'est pas accepté.
+
+Le rapport liste les hôtes mis à jour, les **changements de destination non appliqués** (avec l'option qui les
+applique), les clés importées (`~/.ssh/portico/<alias>`), les clés réutilisées, le
 nombre de clés ignorées, les avertissements apparus à l'écriture, puis rappelle de **supprimer l'export**.
 
 **GUI** : palette (`⌘K` / `Ctrl-K`), « Import hosts… » (Termius ou Termix, reconnu par le contenu). Le fichier se
@@ -114,7 +126,8 @@ groupe ou le favori n'empêche pas les mises à jour. Un réimport ne supprime a
 modifie rien. Un alias importé depuis **un autre enregistrement** de l'export n'est jamais mis à jour
 (`alias_collision`). Si l'export **change la destination** d'un hôte (`HostName`, `User` ou `Port`), l'aperçu le
 signale avec les valeurs actuelles (`destination_changed`) et l'hôte n'est modifié que si vous l'acceptez pour cet
-alias (`allowRedirect`) ; il perd alors son ancienne clé (`IdentityFile`), qui ne suit jamais un alias vers un autre
+alias (`--accept-redirect ALIAS` en ligne de commande, `allowRedirect` dans l'API) ; sinon il est ignoré
+(`destination_changed`) et garde sa destination actuelle. Un hôte redirigé perd alors son ancienne clé (`IdentityFile`), qui ne suit jamais un alias vers un autre
 serveur. Un alias qui masquerait un nom utilisé par la config (`localhost`, un hôte de `ProxyJump`, un `HostName` sans
 point) reçoit le préfixe de la source.
 

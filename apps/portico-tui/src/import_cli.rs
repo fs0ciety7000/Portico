@@ -1,5 +1,6 @@
 //! `portico import [termius|termix] FILE [--prefix] [--key SHA256:…]…
-//! [--all-keys] [--key-passphrase] [--apply]` (phases 5 and 6b).
+//! [--all-keys] [--key-passphrase] [--accept-redirect ALIAS]… [--apply]`
+//! (phases 5 and 6b).
 //!
 //! The format (Termius or Termix) is detected from the file's content;
 //! `termius` / `termix` before the file are kept as aliases (`termix`
@@ -17,6 +18,13 @@
 //! off, twice; it lives in `Zeroizing` / `SecretString` only. Plain text
 //! on stdout (no TUI), errors on stderr as `ErrorSummary` (message + hint),
 //! never a secret: the core never puts one in a plan or report.
+//!
+//! A re-import that would point an earlier imported alias at another
+//! server (`HostName`, `User` or `Port` changed: `PlannedHost::previous`)
+//! is shown `old → new` and **skipped** unless the alias is named with
+//! `--accept-redirect ALIAS` (repeatable, `ImportOptions::allow_redirect`).
+//! An alias that is not one of the plan's destination changes is refused
+//! before anything is written.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -25,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use portico_core::import::{
     ImportNotice, ImportOptions, ImportPlan, ImportReport, KeyFormat, KeyId, KeySelection,
-    NoticeCode, PlannedHost, PlannedKey,
+    MAX_ALIAS_CHARS, NoticeCode, PlannedHost, PlannedKey,
 };
 use portico_core::{Engine, EngineConfig, ErrorSummary};
 use secrecy::SecretString;
@@ -74,6 +82,9 @@ pub(crate) struct ImportArgs {
     /// `--key-passphrase`: ask on the terminal for a passphrase that
     /// encrypts the written copies (never a value on the command line).
     pub(crate) key_passphrase: bool,
+    /// `--accept-redirect` aliases (lowercase, alias rules, in the order
+    /// given, duplicates removed): destination changes the user accepts.
+    pub(crate) accept_redirect: Vec<String>,
 }
 
 /// A failed run: what was already printable (the plan), then the error.
@@ -109,6 +120,7 @@ pub(crate) fn parse(args: &[String]) -> Result<ImportArgs, String> {
     let mut file = None;
     let (mut prefix, mut apply, mut all_keys, mut key_passphrase) = (false, false, false, false);
     let mut keys: Vec<String> = Vec::new();
+    let mut accept_redirect: Vec<String> = Vec::new();
     let mut previous_was_passphrase = false;
     let mut iter = rest.iter();
     while let Some(arg) = iter.next() {
@@ -126,6 +138,16 @@ pub(crate) fn parse(args: &[String]) -> Result<ImportArgs, String> {
                     .next()
                     .ok_or("--key needs a fingerprint: --key SHA256:…")?;
                 push_key(&mut keys, id)?;
+            }
+            "--accept-redirect" => {
+                let alias = iter.next().ok_or(ACCEPT_REDIRECT_USAGE)?;
+                push_alias(&mut accept_redirect, alias)?;
+            }
+            flag if flag.starts_with("--accept-redirect=") => {
+                push_alias(
+                    &mut accept_redirect,
+                    flag.trim_start_matches("--accept-redirect="),
+                )?;
             }
             flag if flag.starts_with("--key-passphrase=") => {
                 return Err(PASSPHRASE_AS_VALUE.into());
@@ -152,7 +174,29 @@ pub(crate) fn parse(args: &[String]) -> Result<ImportArgs, String> {
         keys,
         all_keys,
         key_passphrase,
+        accept_redirect,
     })
+}
+
+const ACCEPT_REDIRECT_USAGE: &str = "--accept-redirect needs a host alias as listed in the plan (a-z, 0-9, `_`, `.`, `-`): --accept-redirect ALIAS";
+
+/// Adds an `--accept-redirect` alias, lowercased. A value outside the
+/// alias rules is never echoed back (it may hold a line break or an
+/// escape sequence).
+fn push_alias(aliases: &mut Vec<String>, alias: &str) -> Result<(), String> {
+    let alias = alias.to_ascii_lowercase();
+    let valid = !alias.is_empty()
+        && alias.chars().count() <= MAX_ALIAS_CHARS
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'));
+    if !valid {
+        return Err(ACCEPT_REDIRECT_USAGE.into());
+    }
+    if !aliases.contains(&alias) {
+        aliases.push(alias);
+    }
+    Ok(())
 }
 
 /// Adds a `--key` value: `SHA256:` then base64 (never echoed back).
@@ -332,6 +376,34 @@ fn selection(plan: &ImportPlan, args: &ImportArgs) -> Result<KeySelection, Strin
     Ok(KeySelection::Some(ids))
 }
 
+/// The `--accept-redirect` aliases as `allow_redirect`, or the first one
+/// that is not a destination change of `plan` (it passed the alias rules,
+/// so it can be quoted).
+fn redirects(plan: &ImportPlan, args: &ImportArgs) -> Result<BTreeSet<String>, String> {
+    let mut allowed = BTreeSet::new();
+    for alias in &args.accept_redirect {
+        let planned = plan
+            .hosts
+            .iter()
+            .any(|h| h.previous.is_some() && h.alias.eq_ignore_ascii_case(alias));
+        if !planned {
+            return Err(alias.clone());
+        }
+        allowed.insert(alias.clone());
+    }
+    Ok(allowed)
+}
+
+/// `true` when `host` points its alias elsewhere and the user did not
+/// accept it: the import skips it.
+fn redirect_skipped(host: &PlannedHost, args: &ImportArgs) -> bool {
+    host.previous.is_some()
+        && !args
+            .accept_redirect
+            .iter()
+            .any(|a| host.alias.eq_ignore_ascii_case(a))
+}
+
 /// Keys the passphrase would encrypt: selected, not reused, not already
 /// encrypted in the export.
 fn keys_to_encrypt(plan: &ImportPlan, selected: &KeySelection) -> usize {
@@ -363,11 +435,26 @@ pub(crate) async fn run_with<P: SecretPrompt>(
             });
         }
     };
+    let allow_redirect = match redirects(&plan, &args) {
+        Ok(allowed) => allowed,
+        Err(alias) => {
+            return Err(Failure {
+                stdout: plan_text(&plan, home, &args, &selected),
+                summary: ErrorSummary {
+                    code: "import_unknown_redirect".into(),
+                    message: format!("`{alias}` is not a destination change of this import"),
+                    hint: Some(
+                        "Use --accept-redirect only for a host marked \"destination changed\" above.".into(),
+                    ),
+                },
+            });
+        }
+    };
     let mut text = plan_text(&plan, home, &args, &selected);
     if !args.apply {
         return Ok(text);
     }
-    if plan.hosts.is_empty() {
+    if plan.hosts.iter().all(|h| redirect_skipped(h, &args)) {
         return Err(Failure {
             stdout: text,
             summary: nothing_to_import(),
@@ -397,14 +484,18 @@ pub(crate) async fn run_with<P: SecretPrompt>(
         skipped: plan.skipped.clone(),
         warnings: plan.warnings.clone(),
         encrypted: key_passphrase.is_some(),
+        redirects: plan
+            .hosts
+            .iter()
+            .filter(|h| h.previous.is_some())
+            .map(|h| (h.record, h.alias.clone()))
+            .collect(),
     };
     let options = ImportOptions {
         prefix: args.prefix,
         keys: selected,
         key_passphrase,
-        // Destination changes are listed by the plan and never applied from
-        // the CLI for now (the review UI comes with the next change).
-        allow_redirect: std::collections::BTreeSet::new(),
+        allow_redirect,
     };
     let report = engine
         .apply_import(plan, options)
@@ -422,7 +513,10 @@ fn nothing_to_import() -> ErrorSummary {
     ErrorSummary {
         code: "import_nothing".into(),
         message: "nothing to import: hosts.conf left as is".into(),
-        hint: Some("Every record was skipped (see above). Try --prefix or another export.".into()),
+        hint: Some(
+            "Every record was skipped (see above). Try --prefix, --accept-redirect ALIAS for a destination change, or another export."
+                .into(),
+        ),
     }
 }
 
@@ -447,21 +541,36 @@ fn shell_word(text: &str) -> String {
     }
 }
 
-fn host_line(host: &PlannedHost) -> String {
-    let user = host
-        .user
-        .as_ref()
-        .map(|u| format!("{u}@"))
-        .unwrap_or_default();
-    let port = host.port.map(|p| format!(":{p}")).unwrap_or_default();
-    let mut line = format!("  {:<24} {user}{}{port}", host.alias, host.hostname);
+/// `user@host:port` (no user, no port 22).
+fn destination(user: Option<&str>, hostname: &str, port: Option<u16>) -> String {
+    let user = user.map(|u| format!("{u}@")).unwrap_or_default();
+    let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+    format!("{user}{hostname}{port}")
+}
+
+fn host_line(host: &PlannedHost, args: &ImportArgs) -> String {
+    let new = destination(host.user.as_deref(), &host.hostname, host.port);
+    let shown = match &host.previous {
+        Some(old) => format!(
+            "{} → {new}",
+            destination(old.user.as_deref(), &old.hostname, old.port)
+        ),
+        None => new,
+    };
+    let mut line = format!("  {:<24} {shown}", host.alias);
     if let Some(group) = &host.group {
         let _ = write!(line, "  @{group}");
     }
     for tag in &host.tags {
         let _ = write!(line, " #{tag}");
     }
-    if host.update {
+    if host.previous.is_some() {
+        line.push_str(if redirect_skipped(host, args) {
+            "  (destination changed, skipped)"
+        } else {
+            "  (destination changed, accepted)"
+        });
+    } else if host.update {
         line.push_str("  (update)");
     }
     line
@@ -492,6 +601,9 @@ fn key_lines(key: &PlannedKey, selected: &KeySelection, home: &Path) -> [String;
             "not encrypted"
         }
     );
+    if !key.fingerprint_verified {
+        second.push_str(" · fingerprint not verified (encrypted key)");
+    }
     if key.aliases.is_empty() {
         second.push_str(" · used by no imported host");
     } else {
@@ -549,6 +661,9 @@ fn apply_command(args: &ImportArgs) -> String {
     if args.key_passphrase {
         command.push_str(" --key-passphrase");
     }
+    for alias in &args.accept_redirect {
+        let _ = write!(command, " --accept-redirect {}", shell_word(alias));
+    }
     command.push_str(" --apply");
     command
 }
@@ -574,12 +689,18 @@ pub(crate) fn plan_text(
         name.chars().filter(|c| !c.is_control()).collect::<String>(),
         plan.format.label()
     );
+    let redirects_skipped = plan
+        .hosts
+        .iter()
+        .filter(|h| redirect_skipped(h, args))
+        .count();
+    let to_import = plan.hosts.len().saturating_sub(redirects_skipped);
     let _ = writeln!(
         text,
         "{} records: {} to import, {} skipped.",
         plan.records,
-        plural(plan.hosts.len(), "host"),
-        plan.skipped.len()
+        plural(to_import, "host"),
+        plan.skipped.len().saturating_add(redirects_skipped)
     );
     let target = shown_path(&plan.target, home);
     if let Some(previous) = plan.replaces {
@@ -589,17 +710,31 @@ pub(crate) fn plan_text(
             plural(previous, "host")
         );
     }
-    section(&mut text, "Hosts", plan.hosts.iter().map(host_line));
+    section(
+        &mut text,
+        "Hosts",
+        plan.hosts.iter().map(|h| host_line(h, args)),
+    );
+    if redirects_skipped > 0 {
+        let _ = writeln!(
+            text,
+            "  A destination change points an alias you imported earlier at another server: it is skipped unless you add --accept-redirect ALIAS."
+        );
+    }
     keys_section(&mut text, plan, args, selected, home);
     section(&mut text, "Skipped", plan.skipped.iter().map(notice_line));
-    // IdentityFile notices repeat the dedicated list below.
+    // IdentityFile notices repeat the dedicated list below, destination
+    // changes the host lines above.
     let listed = !plan.identity_files.is_empty();
     section(
         &mut text,
         "Warnings",
         plan.warnings
             .iter()
-            .filter(|n| !(listed && n.code == NoticeCode::IdentityFileIgnored))
+            .filter(|n| {
+                !(listed && n.code == NoticeCode::IdentityFileIgnored)
+                    && n.code != NoticeCode::DestinationChanged
+            })
             .map(notice_line),
     );
     section(
@@ -620,7 +755,7 @@ pub(crate) fn plan_text(
         );
     }
     if !args.apply {
-        if plan.hosts.is_empty() {
+        if to_import == 0 {
             let _ = writeln!(text, "\nNothing to import: {target} would be left as is.");
         } else {
             let _ = writeln!(
@@ -678,9 +813,13 @@ pub(crate) struct Shown {
     pub(crate) warnings: Vec<ImportNotice>,
     /// A passphrase was given for the written keys.
     pub(crate) encrypted: bool,
+    /// Destination changes of the plan: (record, alias), to name the
+    /// alias of a skipped one in the report.
+    pub(crate) redirects: Vec<(usize, String)>,
 }
 
 /// "Delete the export now: it holds 2 passwords and 3 private keys."
+/// Only the non-zero counts are named.
 fn delete_advice(report: &ImportReport) -> Option<String> {
     let secrets = report.secrets;
     // Termix counts the keys of the export (as the plan's advice does);
@@ -690,13 +829,56 @@ fn delete_advice(report: &ImportReport) -> Option<String> {
     } else {
         secrets.keys
     };
-    (secrets.passwords.saturating_add(keys) > 0).then(|| {
+    let held: Vec<String> = [(secrets.passwords, "password"), (keys, "private key")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, word)| plural(n, word))
+        .collect();
+    (!held.is_empty()).then(|| {
         format!(
-            "Delete the export now: it holds {} and {} (in clear text or encrypted). Under Linux: shred -u FILE.",
-            plural(secrets.passwords, "password"),
-            plural(keys, "private key")
+            "Delete the export now: it holds {} (in clear text or encrypted). Under Linux: shred -u FILE.",
+            held.join(" and ")
         )
     })
+}
+
+/// `  web-prod — message` for a skipped destination change (the alias
+/// from the plan, found by record), or the notice line.
+fn redirect_line(notice: &ImportNotice, shown: &Shown) -> String {
+    let alias = notice.record.and_then(|record| {
+        shown
+            .redirects
+            .iter()
+            .find(|(r, _)| *r == record)
+            .map(|(_, alias)| alias)
+    });
+    match alias {
+        Some(alias) => format!("  {alias} — {}", notice.message),
+        None => notice_line(notice),
+    }
+}
+
+/// Destination changes the import skipped (no `--accept-redirect`), and
+/// how to apply one.
+fn redirects_section(text: &mut String, report: &ImportReport, shown: &Shown) {
+    let redirects: Vec<String> = report
+        .skipped
+        .iter()
+        .filter(|n| n.code == NoticeCode::DestinationChanged)
+        .map(|n| redirect_line(n, shown))
+        .collect();
+    if redirects.is_empty() {
+        return;
+    }
+    section(
+        text,
+        "Destination changes not applied (still pointing at the earlier server)",
+        redirects,
+    );
+    let _ = writeln!(
+        text,
+        "  To apply one, run the import again with --accept-redirect ALIAS."
+    );
 }
 
 /// What the import did, and the Include line.
@@ -758,13 +940,14 @@ pub(crate) fn report_text(report: &ImportReport, shown: &Shown, home: &Path) -> 
             plural(keys.skipped, "key")
         );
     }
+    redirects_section(&mut text, report, shown);
     section(
         &mut text,
         "Skipped while writing (changed since the plan)",
         report
             .skipped
             .iter()
-            .filter(|n| !shown.skipped.contains(n))
+            .filter(|n| n.code != NoticeCode::DestinationChanged && !shown.skipped.contains(n))
             .map(notice_line),
     );
     section(
