@@ -46,11 +46,14 @@ sur n'importe quelle distribution (Alpine, conteneurs, vieilles glibc), mais ne 
    `release`, signe et notarise l'app ; enfin le job `publish` calcule les sommes et crée une
    **Release brouillon** contenant tous les fichiers.
 5. Relire le brouillon : notes de version, présence des 11 artefacts (2 deb, 2 AppImage, 1 dmg, 6 tarballs), de leurs `.sha256` et de `SHA256SUMS`, mention
-   `-unsigned` ou `-not-notarized` dans le nom du dmg (voir plus bas). Publier à la main.
+   `-unsigned` ou `-not-notarized` dans le nom du dmg (voir plus bas). Publier à la main
+   (une Release ni brouillon ni *pre-release*).
+6. La publication déclenche la **distribution** (tap Homebrew et AUR, voir « Distribution ») :
+   fusionner la PR ouverte sur le tap, vérifier les deux paquets sur l'AUR.
 
-**Essai à blanc** : *Actions → Release → Run workflow* (`workflow_dispatch`) construit tous les
-artefacts sans créer de Release et **sans signer** (le job de signature ne tourne que sur un push
-de tag) ; ils restent attachés à l'exécution (90 jours).
+**Essai à blanc** : *Actions → Release → Run workflow* (`workflow_dispatch`, champ `distribute`
+vide) construit tous les artefacts sans créer de Release et **sans signer** (le job de signature ne
+tourne que sur un push de tag) ; ils restent attachés à l'exécution (90 jours).
 
 **Construire localement** (Linux, `libwebkit2gtk-4.1-dev` installé) :
 ```bash
@@ -202,15 +205,150 @@ sudo apt install ./Portico_0.1.0_amd64.deb
   (FUSE 2 requis, sinon `--appimage-extract-and-run`).
 - **dmg** : glisser `Portico.app` dans *Applications*.
 - **TUI** : `tar xzf portico-<v>-<target>.tar.gz && install -m 0755 portico-<v>-<target>/portico ~/.local/bin/`.
+- **Homebrew** (macOS, Linux) : `brew install <owner>/portico/portico` (TUI) et
+  `brew install --cask <owner>/portico/portico` (GUI, macOS 13+). Le nom complet évite l'ambiguïté
+  entre la formule et le cask, qui portent le même nom, et vaut accord de confiance pour ce paquet
+  (Homebrew 7 ignore sinon les taps tiers non approuvés : `brew trust <owner>/portico`).
+- **AUR** (Arch Linux) : `portico-bin` (TUI) et `portico-gui-bin` (GUI), par exemple
+  `yay -S portico-bin portico-gui-bin`, ou `git clone https://aur.archlinux.org/portico-bin.git && cd portico-bin && makepkg -si`.
 
 Les secrets restent dans le trousseau système : sous Linux, un service Secret Service (GNOME Keyring,
 KeePassXC, KWallet ≥ 5.97…) doit tourner dans la session ; à défaut, Portico propose son vault chiffré.
+
+## Distribution (Homebrew, AUR)
+
+Les paquets sont **générés depuis la Release publiée** : mêmes fichiers, mêmes sommes que `SHA256SUMS`,
+rien n'est reconstruit.
+
+| Cible | Paquet | Source | Gabarit et rendu |
+|---|---|---|---|
+| Tap `<owner>/homebrew-portico` | formule `portico` (TUI) | tarballs `aarch64`/`x86_64-apple-darwin` et `aarch64`/`x86_64-unknown-linux-gnu` (`on_macos`/`on_linux`, `on_arm`/`on_intel`) | [`packaging/homebrew/`](../packaging/homebrew/) |
+| Tap `<owner>/homebrew-portico` | cask `portico` (GUI) | `Portico_<v>_universal*.dmg`, `depends_on macos: :ventura` (= 13 ou plus, comme `minimumSystemVersion`) | idem |
+| AUR | `portico-bin` (TUI) | tarballs `x86_64`/`aarch64-unknown-linux-gnu` | [`packaging/aur/`](../packaging/aur/) |
+| AUR | `portico-gui-bin` (GUI) | `.deb` `amd64`/`arm64`, extrait | idem |
+
+- **AUR, GUI : le `.deb` plutôt que l'AppImage.** Le `.deb` ne contient que `portico-gui`, l'entrée de
+  menu et les icônes ; il se lie au WebKitGTK d'Arch (`webkit2gtk-4.1`), donc les correctifs de sécurité
+  de WebKit arrivent par pacman. L'AppImage embarque le WebKitGTK d'Ubuntu 22.04 (figé, 82 Mio) et
+  demande FUSE. Le binaire, construit sur glibc 2.35, tourne sur la glibc plus récente d'Arch (ABI
+  stable, sonames identiques). Dépendances déclarées = bibliothèques liées (`readelf -d`), chacune
+  rattachée à son paquet Arch : `cairo dbus gdk-pixbuf2 glib2 glibc gtk3 libgcc libsoup3 webkit2gtk-4.1`,
+  plus `hicolor-icon-theme` (icônes). TUI : `glibc libgcc`. Optionnels : `org.freedesktop.secrets`
+  (gnome-keyring, keepassxc…) et `openssh` (`ssh-agent`).
+- `provides`/`conflicts` : `portico` et `portico-gui` (pour un futur paquet construit depuis les sources).
+  Licence SPDX `MIT OR Apache-2.0` ; `LICENSE-MIT` et `LICENSE-APACHE` dans `/usr/share/licenses/<paquet>/`
+  (pour la GUI, téléchargés depuis le tag : leurs sommes viennent des fichiers du dépôt au tag).
+- **Cask non notarisé** : `render.sh` prend le dmg que la Release a gardé. S'il porte `-unsigned` ou
+  `-not-notarized`, le cask pointe vers lui et ajoute un `caveats` (Gatekeeper bloque le premier
+  lancement : autorisation dans *Réglages Système → Confidentialité et sécurité*, ou
+  `xattr -dr com.apple.quarantine`), et le job émet un avertissement. Le dépôt officiel `homebrew/cask`
+  refuserait une app non notarisée ; un tap tiers l'accepte.
+- **`zap`** (`brew uninstall --zap --cask portico`) supprime `~/Library/Application Support/dev.Portico.portico`
+  (`ProjectDirs::from("dev", "Portico", "portico")` de `store.rs` : `hosts.toml`, réglages, snippets,
+  vault, journaux, **partagés avec la TUI**) et l'état WebKit/AppKit de `dev.portico.app` (`Caches`,
+  `HTTPStorages`, `Preferences`, `Saved Application State`, `WebKit`). Jamais `~/.ssh`. Les entrées du
+  trousseau (service `dev.portico`) restent : *Trousseaux d'accès* pour les retirer.
+
+### Déroulé
+
+1. La publication de la Release (`release: published` ; un brouillon ne déclenche rien, une
+   *pre-release* est ignorée) lance trois jobs, et **aucun build** :
+   - `dist-render` (aucun secret, `contents: read`) : vérifie que la Release est publiée et finale
+     (`vX.Y.Z`, ni brouillon ni *pre-release*), télécharge les 7 artefacts utiles (4 tarballs, 2 `.deb`,
+     le dmg) et `SHA256SUMS`, les vérifie (`sha256sum --strict -c`), rend les fichiers
+     (`render.sh` refuse un artefact absent de `SHA256SUMS` ou une somme mal formée), contrôle la
+     syntaxe (`ruby -c`, `bash -n`) et les transmet dans l'artefact `distribution` (7 jours) ;
+   - `homebrew` (`permissions: {}`, secret `HOMEBREW_TAP_TOKEN`) : pousse `Formula/portico.rb` et
+     `Casks/portico.rb` sur la branche `portico-<v>` du tap et **ouvre une PR** (ou met à jour celle qui
+     existe). La PR laisse au propriétaire le dernier mot, et à la CI du tap (`brew test-bot`) le temps
+     de tourner ;
+   - `aur` (`permissions: {}`, secret `AUR_SSH_PRIVATE_KEY`) : pousse `PKGBUILD` et `.SRCINFO` sur
+     `master` de `portico-bin` et `portico-gui-bin` (commit `Update to <v>-<pkgrel>`). L'AUR n'a pas de
+     PR. La clé d'hôte de `aur.archlinux.org` n'est acceptée que si son empreinte ed25519 est celle
+     publiée sur la page d'accueil de l'AUR (`SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4`).
+2. Les deux jobs à secret n'exécutent **aucun code du dépôt** ni action tierce (sauf
+   `download-artifact`) : `git`, `gh` et `ssh` du runner, sur les fichiers rendus. Le jeton du tap passe
+   en en-tête HTTP de chaque commande (`http.extraheader`), jamais dans une URL ni dans `.git/config` ;
+   la clé AUR est écrite en `0600` dans `$RUNNER_TEMP` et supprimée en fin de job (`if: always()`).
+3. **Sans secret, le job se saute proprement** : avertissement et ligne dans le résumé, statut vert.
+   Rien n'est relancé tant qu'aucun secret n'est fourni.
+
+**Relancer** (secret ajouté après coup, PR fermée par erreur…) : *Actions → Release → Run workflow*
+depuis `main`, champ `distribute` = `vX.Y.Z` (une Release **publiée** ; ce mode ne construit rien).
+Sur `release: published`, GitHub exécute le workflow **tel qu'il est au tag** : la distribution
+automatique commence avec le premier tag qui contient ces jobs ; une version antérieure (`v0.1.0`) se
+distribue par ce lancement manuel. Le contenu inchangé n'est pas recommité (relance idempotente).
+Pour republier la même version avec un `PKGBUILD` corrigé, rendre localement avec `PKGREL=2` et pousser
+à la main (le workflow utilise toujours `pkgrel=1`).
+
+### Mise en place (une fois, par le propriétaire)
+
+1. **Tap** : créer le dépôt **public** `<owner>/homebrew-portico` (Homebrew trouve `<owner>/portico` à
+   ce nom), **non vide** (la PR a besoin d'une branche de base) : par exemple `brew tap-new <owner>/portico`,
+   qui ajoute un README et la CI `brew test-bot`, puis pousser ce dépôt. Un autre nom : variable
+   `HOMEBREW_TAP_REPO` (`owner/repo`) dans *Settings → Secrets and variables → Actions → Variables*.
+2. **Jeton du tap** : *Settings → Developer settings → Fine-grained tokens*, propriétaire de la
+   ressource = celui du tap, *Repository access : Only select repositories* → `homebrew-portico` seul,
+   permissions **Contents : Read and write** et **Pull requests : Read and write** (Metadata en lecture,
+   imposé), expiration courte (à renouveler). Pas de *classic token*.
+3. **AUR** : un compte sur <https://aur.archlinux.org> (idéalement dédié à Portico : une clé SSH du compte
+   peut pousser **tous** ses paquets), une clé réservée à la CI :
+   ```bash
+   ssh-keygen -t ed25519 -N '' -C portico-release-ci -f aur-portico
+   ```
+   `aur-portico.pub` dans *My Account → SSH Public Key* ; le contenu de `aur-portico` devient le secret,
+   puis supprimer le fichier local. Le premier push crée les deux paquets (noms libres à ce jour).
+   Variables facultatives : `AUR_MAINTAINER` (`Nom <courriel>`, ligne `# Maintainer:`),
+   `AUR_GIT_NAME`, `AUR_GIT_EMAIL` (auteur des commits AUR).
+4. **Environnement `distribution`** (*Settings → Environments*) : *Deployment branches and tags* →
+   **Selected** : règle de tag `v*` (événement `release`) et branche `main` (relance manuelle). Y créer
+   `HOMEBREW_TAP_TOKEN` et `AUR_SSH_PRIVATE_KEY` ; **jamais** en secrets de dépôt. Des *required
+   reviewers* sont possibles (chaque distribution attend alors une approbation).
+
+### Vérifications
+
+```bash
+# Rendu depuis le SHA256SUMS d'une Release (gh release download vX.Y.Z -p SHA256SUMS) :
+packaging/homebrew/render.sh X.Y.Z SHA256SUMS out/homebrew
+packaging/aur/render.sh X.Y.Z SHA256SUMS out/aur
+ruby -c out/homebrew/Formula/portico.rb out/homebrew/Casks/portico.rb
+# Homebrew (dans un tap local : brew tap-new local/portico, fichiers copiés dedans) :
+brew style local/portico
+brew audit --strict --new --os all --arch all --formula local/portico/portico
+brew audit --strict --new --cask local/portico/portico
+brew install --formula local/portico/portico && brew test local/portico/portico
+# Arch (utilisateur non root, dans le dossier du paquet) :
+makepkg --printsrcinfo | diff - .SRCINFO
+namcap PKGBUILD && makepkg -f && namcap portico-bin-*.pkg.tar.zst
+```
+
+**Vérifié le 2026-10-22** (Linux x86_64, avec de fausses sommes puis de vrais binaires release locaux) :
+- **Homebrew 7.0.8** (Linuxbrew, tap local) : `brew style` sans offense (formule et cask) ;
+  `brew audit --strict --new --os all --arch all` de la formule et `brew audit --strict` du cask : seules
+  erreurs restantes, les URL en 404 et l'API GitHub (aucune Release `v0.1.0` publiée) ; `brew install` +
+  `brew test` de la formule depuis un tarball local construit comme ceux de la Release (`portico 0.1.0`,
+  licences et README installés dans le Cellar).
+- **Arch** (chroot depuis l'image *bootstrap* officielle, pacman à jour) : `.SRCINFO` de `render.sh`
+  **identique** à `makepkg --printsrcinfo` pour les deux paquets ; `makepkg` puis `pacman -U` des deux
+  (TUI depuis un tarball de Release reconstitué, GUI depuis un `.deb` au format du bundler Tauri) ;
+  `portico --version` installé ; `ldd` sans bibliothèque manquante avec les seules dépendances déclarées.
+  `namcap` : seulement deux avertissements attendus, `Reference to x86_64 should be changed to $CARCH`
+  (les URL par architecture des paquets `-bin`) et `Unused shared library ld-linux-x86-64.so.2`
+  (tout binaire Rust).
+- **Workflow** : `actionlint` 1.7.12 (avec shellcheck) et `zizmor` 1.30.1 (`--offline`, aussi en
+  `--persona pedantic`) sans nouvelle remarque ; contrôle des artefacts et rendu exécutés localement sur
+  une fausse Release (artefact modifié refusé).
+
+**Non vérifié** : une exécution réelle des jobs (aucune Release publiée, ni tap, ni compte AUR, ni secret) ;
+le cask sur macOS (installation, `zap`, Gatekeeper) ; les paquets `aarch64` (Arch Linux ARM n'est pas un
+portage officiel d'Arch : sommes rendues, paquets non construits) ; `brew audit --new` en ligne, qui
+signalera probablement un dépôt GitHub encore peu « notable » (sans effet pour un tap tiers).
 
 ## Limites connues
 
 - **Pas de mise à jour automatique** : le *updater* Tauri n'est pas activé (il exigerait une clé de
   signature des mises à jour et un point de publication ; à décider par ADR, sans service tiers imposé).
-- **Pas de Windows**, pas de `.rpm`, pas de Flatpak/Snap, pas de formule Homebrew pour l'instant.
+- **Pas de Windows**, pas de `.rpm`, pas de Flatpak/Snap. Homebrew et l'AUR : voir les limites de « Distribution ».
 - **Linux non signé** (voir plus haut). L'AppImage n'embarque pas de signature GPG.
 - **AppImage** : construite sur Ubuntu 22.04 (glibc 2.35) ; elle embarque WebKitGTK et GTK, d'où sa taille.
   Plus ancien que glibc 2.35 : non supporté.
@@ -222,7 +360,8 @@ KeePassXC, KWallet ≥ 5.97…) doit tourner dans la session ; à défaut, Porti
   les outils restent des binaires tiers de projets distincts (Tauri, linuxdeploy, AppImage), dont on
   fige la version sans pouvoir les reconstruire. Lancée avec `APPIMAGE_EXTRACT_AND_RUN=1`, l'AppImage
   journalise un avertissement Tauri (`APPDIR` détecté) sans effet.
-- **TUI** : pas encore d'option `--version` ni de message propre hors terminal (lancée sans TTY, elle
-  s'arrête sur une erreur d'initialisation) ; le test de fumée de la CI la lance donc sous un pty (`script`).
+- **TUI** : `--version` et `--help` répondent sans terminal (le `test do` de la formule Homebrew s'en sert),
+  mais l'interface elle-même n'a pas de message propre hors terminal (lancée sans TTY, elle s'arrête sur une
+  erreur d'initialisation) ; le test de fumée de la CI la lance donc sous un pty (`script`).
 - Les builds ne sont pas encore **reproductibles** bit à bit (chemins et horodatages), ni accompagnés
   d'attestations de provenance (SLSA) : piste post-MVP.
