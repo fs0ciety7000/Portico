@@ -5,7 +5,7 @@
 // runs it under Node. The engine validates everything; the only checks here
 // are those the IPC types need (a port must be a number) and the form's own
 // (a password to set must be typed).
-import type { ErrorSummary, Host, HostDraft, IdentityChoice, LocalKey, PasswordChange } from "./api";
+import type { ErrorSummary, Host, HostDraft, IdentityChoice, ManagedHost, PasswordChange } from "./api";
 
 export type FieldName = "alias" | "hostname" | "user" | "port" | "identity" | "proxyJump" | "password" | "tags" | "group" | "notes";
 
@@ -51,20 +51,19 @@ export function emptyForm(): HostForm {
   };
 }
 
-/** The form of a Portico host, from its own directives (never inherited
- * values). Its key is preselected when it is a discovered one; otherwise
- * "keep" stands for it (the path stays in Rust). */
-export function formFromHost(host: Host, keys: LocalKey[]): HostForm {
-  const own = host.managed;
-  const file = own?.identityFile ?? null;
-  const key = file ? keys.find((k) => k.hasPrivate && k.privateDisplay === file) : undefined;
+/** The form of a Portico host, from what hosts.conf itself holds
+ * (`ManagedHost`, never the resolved config: an earlier value elsewhere could
+ * hide one, and saving would erase it). Its key is preselected when it is a
+ * discovered one (`keyId`, mapped in Rust); otherwise "keep" stands for it
+ * (the path stays in Rust). */
+export function formFromHost(host: Host, own: ManagedHost): HostForm {
   return {
     alias: host.alias,
-    hostname: own?.hostname ?? host.hostname,
-    user: own?.user ?? "",
-    port: own?.port != null ? String(own.port) : "",
-    identity: key ? keyValue(key.id) : file ? KEEP_IDENTITY : "",
-    proxyJump: own?.proxyJump ?? "",
+    hostname: own.hostname,
+    user: own.user ?? "",
+    port: own.port != null ? String(own.port) : "",
+    identity: own.keyId ? keyValue(own.keyId) : own.identityFile ? KEEP_IDENTITY : "",
+    proxyJump: own.proxyJump ?? "",
     tags: [...host.tags],
     group: host.group ?? "",
     favorite: host.favorite,

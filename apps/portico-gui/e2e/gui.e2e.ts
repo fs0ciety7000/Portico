@@ -532,6 +532,82 @@ test("Portico host: add with a key and a remembered password, connect, edit the 
   await waitFor("gone from the list", async () => !(await text(".hosts")).includes("delta"));
 });
 
+/** Chooses `path` in the native GTK file chooser (outside WebDriver): `Ctrl-L`,
+ * the path, `Enter`, typed with xdotool on the virtual display. */
+async function pickNativeFile(path: string, title: string): Promise<void> {
+  const win = await waitFor("native file chooser", () => {
+    try {
+      return execFileSync("xdotool", ["search", "--onlyvisible", "--name", title], { encoding: "utf8" }).trim().split("\n")[0];
+    } catch {
+      return ""; // exit 1: not shown yet
+    }
+  });
+  // No window manager here: give the chooser the keyboard ourselves.
+  execFileSync("xdotool", ["windowfocus", "--sync", win]);
+  await sleep(400);
+  execFileSync("xdotool", ["key", "--clearmodifiers", "ctrl+l"]);
+  await sleep(300);
+  execFileSync("xdotool", ["type", "--delay", "5", path]);
+  await sleep(300);
+  execFileSync("xdotool", ["key", "Return"]);
+}
+
+test("Termix import: preview, one key ticked, written to ~/.ssh/portico, connect with it", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const written = join(home, ".ssh/portico/termix-box");
+  await hostsView();
+  await palette("Import hosts");
+  await pickNativeFile(env("E2E_TERMIX_EXPORT"), "Import hosts");
+  await dialog("Import from Termix");
+  const preview = await modal();
+  assert.match(preview, /1 host to import/);
+  assert.match(preview, /termix-box/);
+  assert.match(preview, /Private keys/i);
+  assert.match(preview, /Ed25519/);
+  assert.ok(!preview.includes("BEGIN OPENSSH"), "never the key text");
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal .keys input[type=checkbox]').checked"), false, "none ticked");
+  // Tick it with its digit (the focus on a button: single keys reach the dialog).
+  await type("1");
+  await waitFor("key ticked", () => s.exec<boolean>("return document.querySelector('.modal .keys input[type=checkbox]').checked"));
+  // An unencrypted key to write: the optional passphrase shows; left empty.
+  assert.ok(await s.find(".modal .passphrase input"), "passphrase field");
+  assert.match(await text(".modal footer"), /Import 1 host and 1 key/);
+  await capture("termix-preview");
+  await sleep(600);
+  await press(Key.Enter);
+  await dialog("Imported from Termix");
+  const report = await modal();
+  assert.match(report, /1 key imported/);
+  assert.match(report, /~\/\.ssh\/portico\/termix-box/);
+  assert.match(report, /delete it once the import is done/);
+  await capture("termix-report");
+
+  assert.ok(existsSync(written), "key written");
+  assert.equal(statSync(written).mode & 0o777, 0o600);
+  assert.equal(statSync(join(home, ".ssh/portico")).mode & 0o777, 0o700);
+  assert.ok(existsSync(`${written}.pub`));
+  const conf = readFileSync(hostsConf, "utf8");
+  assert.match(conf, /^Host termix-box$/m);
+  assert.match(conf, /^\s+IdentityFile ~\/\.ssh\/portico\/termix-box$/m);
+  assert.match(conf, /^\s+IdentitiesOnly yes$/m);
+  assert.ok(!conf.includes("PRIVATE KEY"));
+  assert.ok(!readFileSync(join(home, ".ssh/config"), "utf8").includes("termix"), "~/.ssh/config untouched");
+  await press(Key.Enter);
+  await noDialog();
+
+  // Connects with the written key only (known host key, IdentitiesOnly): no prompt.
+  await waitFor("termix-box listed", async () => (await text(".hosts")).includes("termix-box"));
+  await selectHost("termix-box");
+  await press(Key.Enter);
+  await waitFor("termix-box connected", async () => {
+    const st = await status();
+    return st.includes("termix-box") && st.includes("Connected");
+  });
+  assert.equal(await s.find(".modal"), null, "no prompt");
+  await shellReady();
+  await capture("termix-connected");
+});
+
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();

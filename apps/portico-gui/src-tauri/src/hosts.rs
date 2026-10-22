@@ -18,16 +18,15 @@
 
 use std::path::PathBuf;
 
-use portico_core::hosts::{HostEntry, HostOrigin};
 use portico_core::keys::LocalKey;
-use portico_core::managed_hosts::{HostDraft, PasswordChange};
+use portico_core::managed_hosts::{HostDraft, ManagedHost, PasswordChange};
 use portico_core::{Engine, ErrorSummary};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::dto::own_identity_file;
-use crate::keys::private_key_path;
+use crate::dto::display_path;
+use crate::keys::{key_id, private_key_path};
 
 fn summary(e: portico_core::Error) -> ErrorSummary {
     e.summary()
@@ -141,22 +140,16 @@ async fn identity_for(
             let Some(alias) = editing else {
                 return Ok(None);
             };
-            let inventory = engine.load_hosts().await.map_err(summary)?;
-            Ok(current_identity(&inventory.hosts, alias))
+            // What hosts.conf holds, never the resolved config (an earlier
+            // value elsewhere could hide it).
+            let own = engine.managed_host(alias).await.map_err(summary)?;
+            Ok(own.and_then(|h| h.identity_file))
         }
         IdentityChoiceDto::Key { .. } => {
             let keys = engine.local_keys().await.map_err(summary)?;
             resolve_identity(choice, &keys, None)
         }
     }
-}
-
-/// The `IdentityFile` of the Portico host `alias` (none for another origin).
-fn current_identity(hosts: &[HostEntry], alias: &str) -> Option<PathBuf> {
-    hosts
-        .iter()
-        .find(|h| h.alias == alias && h.origin == HostOrigin::Portico)
-        .and_then(own_identity_file)
 }
 
 /// Creates a Portico host; returns its alias as written.
@@ -227,6 +220,73 @@ pub(crate) async fn managed_include(
         line: engine.managed_include_line(),
         active: engine.managed_include_active().await.map_err(summary)?,
     })
+}
+
+/// The values `hosts.conf` itself holds for a Portico host: the edit form
+/// starts from them, never from the resolved config, where an earlier value
+/// (an `Include` placed lower in `~/.ssh/config`) could hide one, and saving
+/// would then erase it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedHostDto {
+    pub alias: String,
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    pub proxy_jump: Option<String>,
+    /// The key as a discovered key's id (`id_ed25519`), the form's choice.
+    pub key_id: Option<String>,
+    /// `~/…`, display only (the "(current)" choice when `key_id` is
+    /// `None`); never sent back (see [`IdentityChoiceDto::Keep`]).
+    pub identity_file: Option<String>,
+}
+
+impl ManagedHostDto {
+    /// `keys`: a listing from the engine. The key maps to an id only when
+    /// that id resolves back to the very same file.
+    pub(crate) fn new(host: ManagedHost, keys: &[LocalKey]) -> Self {
+        let key_id = host.identity_file.as_ref().and_then(|file| {
+            let key = keys.iter().find(|k| &k.private_path == file)?;
+            let id = key_id(key)?;
+            (private_key_path(keys, &id).ok().as_ref() == Some(file)).then_some(id)
+        });
+        Self {
+            alias: host.alias,
+            hostname: host.hostname,
+            user: host.user,
+            port: host.port,
+            proxy_jump: host.proxy_jump,
+            key_id,
+            identity_file: host.identity_file.as_deref().map(display_path),
+        }
+    }
+}
+
+/// The Portico host `alias` as `hosts.conf` holds it; `None` when it is
+/// not a Portico host (any more).
+#[tauri::command]
+pub(crate) async fn managed_host(
+    engine: State<'_, Engine>,
+    alias: String,
+) -> Result<Option<ManagedHostDto>, ErrorSummary> {
+    managed_host_dto(&engine, &alias).await
+}
+
+async fn managed_host_dto(
+    engine: &Engine,
+    alias: &str,
+) -> Result<Option<ManagedHostDto>, ErrorSummary> {
+    let Some(host) = engine.managed_host(alias).await.map_err(summary)? else {
+        return Ok(None);
+    };
+    // No key listing when there is no key (and a failed listing only
+    // loses the preselection: the form offers "(current)").
+    let keys = if host.identity_file.is_some() {
+        engine.local_keys().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok(Some(ManagedHostDto::new(host, &keys)))
 }
 
 #[cfg(test)]
@@ -356,10 +416,31 @@ mod tests {
         );
     }
 
-    /// A real engine under a temporary root: the DTO shows the origin and
-    /// only the host's own directives; "keep the key" reads it back.
+    fn engine_at(root: &Path) -> Engine {
+        Engine::new(portico_core::EngineConfig {
+            paths: portico_core::store::Paths::rooted(root),
+            local_user: "alice".into(),
+            event_capacity: 16,
+            secrets: std::sync::Arc::new(portico_core::secrets::MemoryStore::default()),
+            agent_socket: None,
+            connect_timeout: portico_core::engine::DEFAULT_CONNECT_TIMEOUT,
+            keepalive: portico_core::engine::DEFAULT_KEEPALIVE,
+        })
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    /// A real engine under a temporary root: the inventory shows the origin;
+    /// the form's values are the host's own, its key mapped to a discovered
+    /// key's id; "keep the key" reads it back from hosts.conf.
     #[test]
-    fn inventory_shows_origin_and_own_values_only() {
+    fn managed_host_gives_own_values_and_the_key_id() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join(".ssh")).unwrap();
@@ -369,21 +450,13 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join(".ssh/id_test"), "not a real key").unwrap();
-        let config = portico_core::EngineConfig {
-            paths: portico_core::store::Paths::rooted(root),
-            local_user: "alice".into(),
-            event_capacity: 16,
-            secrets: std::sync::Arc::new(portico_core::secrets::MemoryStore::default()),
-            agent_socket: None,
-            connect_timeout: portico_core::engine::DEFAULT_CONNECT_TIMEOUT,
-            keepalive: portico_core::engine::DEFAULT_KEEPALIVE,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let engine = Engine::new(config);
+        std::fs::write(
+            root.join(".ssh/id_test.pub"),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAFn0jtDPqkMZ2znTeNinwlBFedmDlUUWl2OGimwLau test\n",
+        )
+        .unwrap();
+        block_on(async {
+            let engine = engine_at(root);
             let mut json = base();
             json["user"] = serde_json::Value::Null;
             json["password"] = serde_json::json!({ "kind": "keep" });
@@ -397,31 +470,78 @@ mod tests {
             let inventory = engine.load_hosts().await.unwrap();
             let web = inventory.hosts.iter().find(|h| h.alias == "web").unwrap();
             let shown = crate::dto::HostDto::from(web);
-            assert_eq!(shown.origin, HostOrigin::Portico);
+            assert_eq!(shown.origin, portico_core::hosts::HostOrigin::Portico);
             // Inherited from `Host *`: effective, but not the host's own.
             assert_eq!(shown.user.as_deref(), Some("other"));
-            let own = shown.managed.unwrap();
+
+            let own = managed_host_dto(&engine, "web").await.unwrap().unwrap();
             assert_eq!(own.user, None);
             assert_eq!(own.port, Some(2222));
             assert_eq!(own.hostname, "10.0.0.1");
             assert_eq!(own.proxy_jump, None);
+            assert_eq!(own.key_id.as_deref(), Some("id_test"));
             assert!(own.identity_file.unwrap().ends_with(".ssh/id_test"));
             assert_eq!(
-                current_identity(&inventory.hosts, "web"),
+                identity_for(&engine, &IdentityChoiceDto::Keep, Some("web"))
+                    .await
+                    .unwrap(),
                 Some(root.join(".ssh/id_test"))
             );
+            let json =
+                serde_json::to_value(managed_host_dto(&engine, "WEB").await.unwrap()).unwrap();
+            assert_eq!(json["keyId"], "id_test", "alias matched without case");
 
-            let legacy = inventory
-                .hosts
-                .iter()
-                .find(|h| h.alias == "legacy")
+            // Not a Portico host: nothing to prefill, nothing to keep.
+            assert_eq!(managed_host_dto(&engine, "legacy").await.unwrap(), None);
+            assert_eq!(
+                identity_for(&engine, &IdentityChoiceDto::Keep, Some("legacy"))
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    /// The Include placed at the bottom of ~/.ssh/config, under a `Host
+    /// web` block that sets `User early`: the resolved config says `early`,
+    /// the form must show (and keep) the user hosts.conf holds.
+    #[test]
+    fn managed_host_is_not_hidden_by_an_earlier_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        let engine = engine_at(root);
+        block_on(async {
+            let mut json = base();
+            json["identity"] = serde_json::json!({ "kind": "none" });
+            json["password"] = serde_json::json!({ "kind": "keep" });
+            engine
+                .create_host(draft(json).unwrap().into_draft(None))
+                .await
                 .unwrap();
-            let shown = crate::dto::HostDto::from(legacy);
-            assert_eq!(shown.origin, HostOrigin::SshConfig);
-            assert!(shown.managed.is_none());
-            assert_eq!(current_identity(&inventory.hosts, "legacy"), None);
-            let json = serde_json::to_value(&shown).unwrap();
-            assert_eq!(json["origin"], "ssh_config");
+            let conf = engine.config().paths.managed_hosts();
+            assert!(conf.exists(), "{}", conf.display());
+            std::fs::write(
+                root.join(".ssh/config"),
+                format!("Host web\n  User early\n\nInclude \"{}\"\n", conf.display()),
+            )
+            .unwrap();
+
+            let inventory = engine.load_hosts().await.unwrap();
+            let web = inventory.hosts.iter().find(|h| h.alias == "web").unwrap();
+            assert_eq!(
+                web.resolved.user.as_deref(),
+                Some("early"),
+                "first value wins"
+            );
+
+            let own = managed_host_dto(&engine, "web").await.unwrap().unwrap();
+            assert_eq!(
+                own.user.as_deref(),
+                Some("deploy"),
+                "the value of hosts.conf"
+            );
+            assert_eq!(own.port, Some(2222));
         });
     }
 

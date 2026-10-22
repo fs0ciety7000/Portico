@@ -175,7 +175,7 @@
 
   /** "Edit": the whole host for a Portico host, its metadata otherwise. */
   function editHost(alias: string) {
-    if (hosts.byAlias[alias]?.origin === "portico") hosts.openEdit(alias);
+    if (hosts.byAlias[alias]?.origin === "portico") void hosts.openEdit(alias);
     else hosts.editing = alias;
   }
 
@@ -517,7 +517,7 @@
             title: "Edit host…",
             hint: targetHost.origin === "portico" ? targetHost.alias : `${targetHost.alias} · read-only, can be duplicated`,
             shortcut: pane ? undefined : k("host.edit"),
-            run: () => hosts.openEdit(targetHost.alias),
+            run: () => void hosts.openEdit(targetHost.alias),
           },
           {
             id: "host.duplicate",
@@ -601,8 +601,8 @@
     },
     {
       id: "app.import-termius",
-      title: "Import from Termius…",
-      hint: "Termius CSV, JSON or ssh-config export · previewed before writing",
+      title: "Import hosts…",
+      hint: "Termius or Termix export, detected from the content · previewed before writing",
       shortcut: k("app.import-termius"),
       run: () => void importer.start(),
     },
@@ -684,7 +684,7 @@
         hosts.dialog = { kind: "create" };
         return;
       case "host.edit":
-        if (targetAlias) hosts.openEdit(targetAlias);
+        if (targetAlias) void hosts.openEdit(targetAlias);
         return;
       case "host.duplicate":
         if (targetAlias) hosts.dialog = { kind: "duplicate", alias: targetAlias };
@@ -1085,7 +1085,7 @@
     {#if hosts.dialog.kind === "create"}
       <HostDialog />
     {:else if hosts.dialog.kind === "edit" && dialogHost}
-      <HostDialog host={dialogHost} />
+      <HostDialog host={dialogHost} managed={hosts.dialog.managed} />
     {:else if dialogHost && hosts.dialog.kind !== "edit"}
       <HostActionDialog dialog={hosts.dialog} host={dialogHost} />
     {/if}

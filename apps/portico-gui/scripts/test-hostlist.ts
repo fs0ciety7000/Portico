@@ -21,7 +21,6 @@ const host = (alias: string, group: string | null = null): Host => ({
   notes: null,
   source: "~/.ssh/config:1",
   origin: "ssh_config",
-  managed: null,
   warnings: [],
 });
 const recent = (...aliases: string[]): RecentHost[] => aliases.map((alias, i) => ({ alias, last: 100 - i, count: 1 }));

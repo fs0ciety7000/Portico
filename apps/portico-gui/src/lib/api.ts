@@ -21,22 +21,24 @@ export interface Host {
   source: string;
   /** Which file declares the host: only `portico` hosts are editable. */
   origin: HostOrigin;
-  /** A Portico host's own directives in hosts.conf (null otherwise). */
-  managed: ManagedFields | null;
   warnings: string[];
 }
 
 /** Mirrors `portico_core::hosts::HostOrigin`. */
 export type HostOrigin = "ssh_config" | "portico" | "imported";
 
-/** Mirrors `dto::ManagedFieldsDto`: what hosts.conf says, nothing inherited. */
-export interface ManagedFields {
+/** Mirrors `hosts::ManagedHostDto`: what hosts.conf itself holds, nothing
+ * inherited and nothing hidden by an earlier value elsewhere. */
+export interface ManagedHost {
+  alias: string;
   hostname: string;
   user: string | null;
   port: number | null;
-  /** `~/…`, display and preselection only: never sent back. */
-  identityFile: string | null;
   proxyJump: string | null;
+  /** The key as a discovered key's id (the form's choice), when it is one. */
+  keyId: string | null;
+  /** `~/…`, display only (the "(current)" choice): never sent back. */
+  identityFile: string | null;
 }
 
 /** Mirrors `hosts::IdentityChoiceDto`: a discovered key by id, never a path. */
@@ -435,7 +437,7 @@ export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
 /** Mirrors `portico_core::import::ImportNotice` (never a secret). */
 export interface ImportNotice {
-  /** `unsupported_protocol`, `missing_hostname`, `invalid_hostname`, `alias_collision`, `tag_normalized`… */
+  /** `unsupported_protocol`, `missing_hostname`, `alias_collision`, `edited_since_import`, `key_unreadable`… */
   code: string;
   record: number | null;
   label: string | null;
@@ -454,12 +456,37 @@ export interface PlannedHost {
   tags: string[];
   notes: string | null;
   record: number;
+  /** Pinned in the export: a favorite when created. */
+  favorite: boolean;
+  /** Id of the private key it uses in the export (`ImportPreview.keys`). */
+  key: string | null;
+  /** Updates a host an earlier import created (and nobody edited since). */
+  update: boolean;
+  sourceId: string;
+}
+
+/** Mirrors `import::PlannedKeyDto`: a private key of the export (never its material). */
+export interface PlannedKey {
+  /** Its `SHA256:…` fingerprint, sent back to select it. */
+  id: string;
+  /** `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`… */
+  algorithm: string;
+  fingerprint: string;
+  format: "open_ssh" | "pem";
+  /** Encrypted in the export: written as it is. */
+  encrypted: boolean;
+  /** Hosts of the plan using it. */
+  aliases: string[];
+  /** A local key with the same fingerprint (`~/…`): reused, nothing written. */
+  local: string | null;
 }
 
 /** Secrets found in the export and ignored (counts only). */
 export interface IgnoredSecrets {
   passwords: number;
   keys: number;
+  /** Distinct private keys the export holds, imported or not. */
+  keysInExport: number;
 }
 
 /** Mirrors `import::ImportPreviewDto`: a plan kept in Rust under `token`. */
@@ -467,7 +494,11 @@ export interface ImportPreview {
   token: number;
   /** File name only: the path stays in Rust. */
   fileName: string;
+  /** The detected tool: `Termius` or `Termix`. */
+  source: string;
   format: string;
+  /** The source's alias prefix (`termius-`, `termix-`). */
+  prefixText: string;
   records: number;
   prefix: boolean;
   hosts: PlannedHost[];
@@ -478,16 +509,34 @@ export interface ImportPreview {
   identityFiles: string[];
   target: string;
   includeLine: string;
-  /** `Host` blocks already in `target` (a previous import) that this one replaces. */
+  /** Hosts of an earlier import that this one updates. */
   replaces: number | null;
+  /** Private keys found (Termix); none is ticked by default. */
+  keys: PlannedKey[];
+  /** Where a ticked key is written (`~/.ssh/portico/`). */
+  keysDir: string;
+}
+
+/** Mirrors `import::ImportApplyDto`: `passphrase` becomes a SecretString in Rust. */
+export interface ImportApplyRequest {
+  token: number;
+  prefix: boolean;
+  /** `PlannedKey.id`s, checked against the plan in Rust. */
+  keys: string[];
+  passphrase: string | null;
 }
 
 /** Mirrors `import::ImportReportDto` (`portico_core::import::ImportReport`). */
 export interface ImportReport {
   formatLabel: string;
+  source: string;
+  /** `~/…` (computed in Rust). */
   target: string;
   unchanged: boolean;
+  /** Aliases created or updated. */
   imported: string[];
+  /** The aliases of `imported` that updated an earlier import. */
+  updated: string[];
   skipped: ImportNotice[];
   warnings: ImportNotice[];
   secrets: IgnoredSecrets;
@@ -496,6 +545,8 @@ export interface ImportReport {
   metaUpdated: number;
   includeLine: string;
   includeActive: boolean;
+  /** Key files written and reused (`~/…`, computed in Rust). */
+  keys: { imported: string[]; reused: string[]; skipped: number };
 }
 
 export const api = {
@@ -572,6 +623,8 @@ export const api = {
   deleteHost: (alias: string) => invoke<void>("delete_host", { alias }),
   duplicateHost: (alias: string, newAlias: string) => invoke<string>("duplicate_host", { alias, newAlias }),
   managedInclude: () => invoke<ManagedInclude>("managed_include"),
+  /** What hosts.conf holds for a Portico host (`null`: not one any more). */
+  managedHost: (alias: string) => invoke<ManagedHost | null>("managed_host", { alias }),
   recentHosts: (limit: number) => invoke<RecentHost[]>("recent_hosts", { limit }),
   clearRecent: () => invoke<void>("clear_recent"),
   forgetRecent: (alias: string) => invoke<boolean>("forget_recent", { alias }),
@@ -583,9 +636,9 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
   /** Native file picker (Rust side), then the plan; `null` when cancelled. */
-  importTermiusPick: (prefix: boolean) => invoke<ImportPreview | null>("import_termius_pick", { prefix }),
-  importTermiusReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_termius_replan", { token, prefix }),
-  importApply: (token: number) => invoke<ImportReport>("import_apply", { token }),
+  importPick: (prefix: boolean) => invoke<ImportPreview | null>("import_pick", { prefix }),
+  importReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_replan", { token, prefix }),
+  importApply: (request: ImportApplyRequest) => invoke<ImportReport>("import_apply", { request }),
   importCancel: () => invoke<void>("import_cancel"),
   /** Starts recording a terminal; `REC` shows from the `started` event only. */
   recordingStart: (terminal: number) => invoke<void>("recording_start", { terminal }),

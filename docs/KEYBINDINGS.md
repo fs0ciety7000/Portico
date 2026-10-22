@@ -534,7 +534,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
-| Importer depuis Termius (aperçu, puis fichier à inclure dans `~/.ssh/config`, voir `docs/IMPORT.md`) | `app.import-termius` | — | — |
+| Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`) | `app.import-termius` | — | — |
 
 ## Panneaux (GUI)
 
@@ -643,6 +643,18 @@ Sans recherche, la liste montre « Recent » (les 5 derniers hôtes encore prés
 | Lecture seule (hôte de `~/.ssh/config` ou importé) : dupliquer / éditer tags et notes | `d` ou `↵` / `e` |
 | Dupliquer : nouvel alias | `↵` |
 | Supprimer un hôte Portico : confirmer / garder | `y` / `n` |
+
+## Import d'hôtes (GUI)
+
+« Import hosts… » (palette) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.
+
+| Action | Touches |
+|---|---|
+| Préfixer les alias (`termius-`, `termix-`) on/off | `p` |
+| Cocher / décocher la n-ième clé privée | `1` … `9`, ou `Espace` sur la case |
+| Importer (après 400 ms sans frappe ; désactivé si les passphrases diffèrent) | `↵` |
+| Rapport : copier la ligne `Include` | `c` |
+| Annuler / fermer | `Esc` |
 
 ## Journaux de session (GUI)
 

@@ -99,7 +99,7 @@ pub(crate) struct LocalKeyDto {
     pub certificate: Option<CertificateDto>,
 }
 
-fn key_id(key: &LocalKey) -> Option<String> {
+pub(crate) fn key_id(key: &LocalKey) -> Option<String> {
     key.private_path
         .file_name()
         .and_then(|n| n.to_str())

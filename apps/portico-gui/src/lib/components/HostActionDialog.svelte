@@ -41,7 +41,9 @@
       const alias = await backend.duplicateHost(host.alias, newAlias.trim());
       hosts.changed(alias);
       // Straight to the copy's form: duplicating is for changing it.
-      hosts.dialog = { kind: "edit", alias };
+      // (the form starts from what hosts.conf holds, read once written).
+      const managed = await backend.managedHost(alias);
+      hosts.dialog = managed ? { kind: "edit", alias, managed } : null;
       workspace.notify({ code: "host_duplicated", message: `${host.alias} duplicated as ${alias}`, hint: null }, "info");
     } catch (e) {
       error = asError(e);
