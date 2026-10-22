@@ -17,8 +17,9 @@
 // Left, Right, Home, End, PageUp, PageDown, and / [ ] . , ; ' - = ` \ ? *
 
 export type Platform = "mac" | "linux";
-/** Where an action listens: everywhere (terminal included), or only in the host list. */
-export type Scope = "global" | "hosts";
+/** Where an action listens: everywhere (terminal included), only in the
+ * host list, or only in a terminal tab (split panes). */
+export type Scope = "global" | "hosts" | "terminal";
 /** What has the keyboard when a key is pressed. */
 export type Context = "hosts" | "terminal";
 
@@ -56,6 +57,38 @@ const tabGoto: ActionDef[] = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({
   defaults: per([`Mod+${n}`], [`Alt+${n}`]),
 }));
 
+const arrows = ["left", "right", "up", "down"] as const;
+const towards = { left: "à gauche", right: "à droite", up: "vers le haut", down: "vers le bas" } as const;
+const arrowKey = { left: "Left", right: "Right", up: "Up", down: "Down" } as const;
+
+/** Split panes (ADR "Split panes", docs/STACK.md): only in a terminal tab. */
+const panes: ActionDef[] = [
+  { id: "pane.split-right", title: "Split right", doc: "Diviser à droite (même session : un canal PTY de plus)", scope: "terminal", defaults: both("Mod+D") },
+  { id: "pane.split-down", title: "Split down", doc: "Diviser en bas (même session)", scope: "terminal", defaults: per(["Mod+Shift+D"], ["Mod+E"]) },
+  { id: "pane.split-host", title: "Split with another host…", doc: "Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas)", scope: "terminal", defaults: both() },
+  ...arrows.map(
+    (d): ActionDef => ({
+      id: `pane.focus-${d}`,
+      title: `Focus pane ${d}`,
+      doc: `Focus au panneau voisin ${towards[d]}`,
+      scope: "terminal",
+      defaults: per([`Mod+Alt+${arrowKey[d]}`], [`Ctrl+Alt+${arrowKey[d]}`]),
+    }),
+  ),
+  ...arrows.map(
+    (d): ActionDef => ({
+      id: `pane.resize-${d}`,
+      title: `Move divider ${d}`,
+      doc: `Déplacer la séparation la plus proche ${towards[d]} (dans la taille minimale des panneaux)`,
+      scope: "terminal",
+      defaults: per([`Mod+Alt+Shift+${arrowKey[d]}`], [`Ctrl+Alt+Shift+${arrowKey[d]}`]),
+    }),
+  ),
+  { id: "pane.next", title: "Next pane", doc: "Panneau suivant (ordre de lecture)", scope: "terminal", defaults: per(["Mod+Alt+N"], ["Ctrl+Alt+N"]) },
+  { id: "pane.zoom", title: "Zoom pane", doc: "Zoom on/off : le panneau actif occupe tout l'onglet", scope: "terminal", defaults: both("Mod+Shift+Enter") },
+  { id: "pane.close", title: "Close pane", doc: "Fermer le panneau (son canal PTY ; le dernier panneau d'une session la déconnecte)", scope: "terminal", defaults: per(["Mod+Shift+W"], ["Mod+Q"]) },
+];
+
 /**
  * Every bindable action. Palette commands use these ids; an action with no
  * default combination can still be bound in settings.toml (it then runs
@@ -68,7 +101,7 @@ export const ACTIONS: ActionDef[] = [
   { id: "app.keys", title: "Keys", doc: "Clés (locales, agent, vault)", scope: "global", defaults: both("Mod+Shift+I") },
   { id: "app.snippets", title: "Snippets", doc: "Snippets de l'hôte (la palette liste aussi « Run: <nom> »)", scope: "global", defaults: both("Mod+Shift+S") },
   { id: "app.logs", title: "Session logs", doc: "Journaux de session et config effective (panneau debug)", scope: "global", defaults: both("Mod+Shift+L") },
-  { id: "app.favorite", title: "Toggle favorite", doc: "Favori on/off (hôte sélectionné, ou celui de l'onglet)", scope: "global", defaults: both("Mod+D") },
+  { id: "app.favorite", title: "Toggle favorite", doc: "Favori on/off de l'hôte sélectionné (depuis un onglet : palette, « Add <alias> to favorites » ; dans un terminal, `Mod+D` divise le panneau)", scope: "hosts", defaults: both("Mod+D") },
   { id: "tab.new", title: "New tab", doc: "Nouvel onglet sur le même hôte (depuis la liste : se connecter)", scope: "global", defaults: both("Mod+T") },
   { id: "tab.close", title: "Close tab", doc: "Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler)", scope: "global", defaults: both("Mod+W") },
   { id: "tab.next", title: "Next tab", doc: "Onglet suivant", scope: "global", defaults: per(["Ctrl+Tab", "Mod+]"], ["Ctrl+Tab"]) },
@@ -96,6 +129,7 @@ export const ACTIONS: ActionDef[] = [
   { id: "hosts.expand", title: "Expand group", doc: "Déplier le groupe", scope: "hosts", defaults: both("Right") },
   { id: "hosts.clear-recent", title: "Clear recent", doc: "Vider « Recent » (confirmation)", scope: "hosts", defaults: both("Shift+X") },
   { id: "app.theme", title: "Next theme", doc: "Thème suivant (mémorisé dans `settings.toml`)", scope: "hosts", defaults: both("T") },
+  ...panes,
   { id: "keys.new", title: "New key", doc: "Nouvelle clé", scope: "global", defaults: both() },
   { id: "snippets.new", title: "New snippet", doc: "Nouveau snippet", scope: "global", defaults: both() },
   { id: "files.download-dir", title: "Change download folder", doc: "Changer de dossier de téléchargement", scope: "global", defaults: both() },
@@ -216,13 +250,14 @@ export function signatures(combo: Combo, platform: Platform, context: Context): 
 }
 
 /** Contexts an action of `scope` listens in. */
-export const contextsOf = (scope: Scope): Context[] => (scope === "global" ? ["hosts", "terminal"] : ["hosts"]);
+export const contextsOf = (scope: Scope): Context[] =>
+  scope === "global" ? ["hosts", "terminal"] : scope === "terminal" ? ["terminal"] : ["hosts"];
 
 const MAC_MENU = ["c", "v", "x", "a", "z", "q", "h", "m"];
 
 /** Why `combo` cannot be bound in `scope`, or null. */
 export function reservedReason(combo: Combo, platform: Platform, scope: Scope): string | null {
-  if (scope === "global" && !hasModifier(combo) && !/^f\d+$/.test(combo.key)) {
+  if (scope !== "hosts" && !hasModifier(combo) && !/^f\d+$/.test(combo.key)) {
     return "needs Mod, Ctrl or Alt (plain keys belong to the terminal)";
   }
   if (!hasModifier(combo) && (combo.key === "escape" || combo.key === "tab")) return "reserved for dialogs and focus";
@@ -355,8 +390,8 @@ const KEY_LABEL: Record<string, string> = {
 
 /**
  * What the UI shows: `⌘⇧F` on macOS, `Ctrl-Shift-F` on Linux. A global
- * `Mod` shortcut shows Ctrl-Shift on Linux (it works everywhere, terminal
- * included); in the host list it shows plain Ctrl.
+ * (or terminal) `Mod` shortcut shows Ctrl-Shift on Linux (it works
+ * everywhere, terminal included); in the host list it shows plain Ctrl.
  */
 export function formatCombo(c: Combo, platform: Platform, scope: Scope): string {
   const any = hasModifier(c) || c.shift;
@@ -369,7 +404,7 @@ export function formatCombo(c: Combo, platform: Platform, scope: Scope): string 
     }
     return `${c.alt ? "⌥" : ""}${c.mod || c.meta ? "⌘" : ""}${c.shift ? "⇧" : ""}${key}`;
   }
-  const shift = c.shift || (c.mod && scope === "global");
+  const shift = c.shift || (c.mod && scope !== "hosts");
   const words = [(c.ctrl || c.mod) && "Ctrl", c.alt && "Alt", shift && "Shift", c.meta && "Super"].filter(Boolean);
   return words.length ? `${words.join("-")}-${key}` : key;
 }

@@ -21,6 +21,12 @@ export const GUI_FIXED: DocTable[] = [
       ["Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer", "`←` `→`, `Home` / `End`, `Suppr`"],
       ["Fermer un onglet (souris)", "clic milieu sur l'onglet"],
       ["Coller (Linux)", "`Ctrl-Shift-V`, `Shift-Insert`, clic milieu"],
+      ["Panneaux : donner le focus à un panneau (souris)", "clic dans le panneau"],
+      ["Séparation entre panneaux (souris)", "glisser"],
+      [
+        "Séparation entre panneaux (focus clavier) : déplacer, aller aux limites, rendre le clavier au panneau",
+        "`←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc`",
+      ],
     ],
     outro: "Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.",
   },

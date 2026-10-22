@@ -1,5 +1,5 @@
 <script lang="ts">
-  // One terminal tab: xterm.js (WebGL, DOM fallback) on the engine's PTY.
+  // One terminal (a pane of a tab): xterm.js (WebGL, DOM fallback) on the engine's PTY.
   //
   // Data plane: output arrives as raw bytes; each chunk is acknowledged once
   // xterm.js has parsed it (flow control, see src-tauri/src/terminals.rs).
@@ -11,29 +11,46 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { WebglAddon } from "@xterm/addon-webgl";
   import "@xterm/xterm/css/xterm.css";
-  import { asError, describe, sentence } from "../api";
+  import { asError, describe, formatRtt, sentence } from "../api";
   import { backend } from "../backend";
   import { chunks, sanitizePaste, sanitizeTitle } from "../keys";
   import { keymap } from "../state/keymap.svelte";
   import { logs } from "../state/logs.svelte";
   import { dur } from "../motion";
-  import { isLive, workspace, type Tab } from "../state/workspace.svelte";
+  import { isLive, workspace, type Pane } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
 
   let {
-    tab,
-    active,
+    pane,
+    visible,
+    focused,
+    split = false,
+    zoomed = false,
     themeId,
     autofocus = true,
+    onfocusin,
   }: {
-    tab: Tab;
-    active: boolean;
+    pane: Pane;
+    /** On screen: its tab is active and no other pane is zoomed. */
+    visible: boolean;
+    /** The focused pane of its tab (the only one that takes keystrokes). */
+    focused: boolean;
+    /** Its tab shows several panes: a status header, the accent edge when focused, dimmed otherwise. */
+    split?: boolean;
+    /** Takes the whole tab while its siblings are hidden. */
+    zoomed?: boolean;
     themeId: string;
     /** False while another panel (files) owns the keyboard: no automatic focus. */
     autofocus?: boolean;
+    /** The keyboard (or a click) entered this pane. */
+    onfocusin?: () => void;
   } = $props();
-  const closeKey = $derived(keymap.label("tab.close"));
+  /** Visible and focused: takes the keyboard. */
+  const active = $derived(visible && focused);
+  // A lone pane closes with its tab: show the tab's key; a split one, the pane's.
+  const closeKey = $derived(keymap.label(split ? "pane.close" : "tab.close"));
   const logsKey = $derived(keymap.label("app.logs"));
+  const zoomKey = $derived(keymap.label("pane.zoom"));
 
   /** Acknowledge parsed output at least this often (bytes). */
   const ACK_EVERY = 128 * 1024;
@@ -45,12 +62,12 @@
   let fit: FitAddon | undefined;
   let destroyed = false;
 
-  const session = $derived(workspace.sessions[tab.session]);
+  const session = $derived(workspace.sessions[pane.session]);
   const status = $derived(describe(session));
   const failed = $derived(session?.phase.phase === "failed" ? session.phase.error : null);
-  const error = $derived(failed ?? tab.error);
-  const waiting = $derived(tab.terminal === null && !tab.end && !error && isLive(session));
-  const cancelled = $derived(tab.terminal === null && !error && !isLive(session) && !tab.end);
+  const error = $derived(failed ?? pane.error);
+  const waiting = $derived(pane.terminal === null && !pane.end && !error && isLive(session));
+  const cancelled = $derived(pane.terminal === null && !error && !isLive(session) && !pane.end);
   /** A changed host key: retrying would only show the same refusal. */
   const keyChanged = $derived(error?.code === "host_key_changed");
 
@@ -83,7 +100,7 @@
   function send(data: string, binary: boolean) {
     // Before the id is known only automatic replies (DA, DSR…) get here:
     // keep them, the shell may wait for them.
-    if (tab.end) return;
+    if (pane.end) return;
     const last = queue[queue.length - 1];
     if (last && last.binary === binary) last.data += data;
     else queue.push({ data, binary });
@@ -91,7 +108,7 @@
   }
 
   function schedule() {
-    if (flushScheduled || sending || tab.terminal === null) return;
+    if (flushScheduled || sending || pane.terminal === null) return;
     flushScheduled = true;
     requestAnimationFrame(() => {
       flushScheduled = false;
@@ -103,8 +120,8 @@
     if (sending) return;
     sending = true;
     try {
-      while (queue.length && tab.terminal !== null && !destroyed) {
-        const id = tab.terminal;
+      while (queue.length && pane.terminal !== null && !destroyed) {
+        const id = pane.terminal;
         const items = queue;
         queue = [];
         for (const { data, binary } of items) {
@@ -161,10 +178,10 @@
   }
 
   function write(flow: Flow, bytes: Uint8Array) {
-    if (!term || flow.generation !== tab.generation) return;
+    if (!term || flow.generation !== pane.generation) return;
     wake();
     term.write(bytes, () => {
-      if (flow.generation !== tab.generation) return;
+      if (flow.generation !== pane.generation) return;
       flow.parsed += bytes.length;
       ack(flow, false);
       // Idle again: settle the count so the engine never waits on us.
@@ -186,16 +203,16 @@
   let sentSize = { cols: 0, rows: 0 };
 
   function pushSize() {
-    if (!term || tab.terminal === null || tab.end) return;
+    if (!term || pane.terminal === null || pane.end) return;
     const s = size();
     if (s.cols === sentSize.cols && s.rows === sentSize.rows) return;
     sentSize = { cols: s.cols, rows: s.rows };
-    backend.terminalResize(tab.terminal, s.cols, s.rows, s.width, s.height).catch(() => {});
+    backend.terminalResize(pane.terminal, s.cols, s.rows, s.width, s.height).catch(() => {});
   }
 
   async function open() {
     if (!term || !fit) return;
-    const flow: Flow = { generation: tab.generation, id: null, parsed: 0, acked: 0 };
+    const flow: Flow = { generation: pane.generation, id: null, parsed: 0, acked: 0 };
     if (flow.generation > 0) {
       term.write("\r\n\x1b[2m──── reconnecting ────\x1b[0m\r\n");
     }
@@ -203,14 +220,14 @@
     fitNow();
     const s = size();
     try {
-      const id = await backend.openTerminal(tab.session, s, (b) => write(flow, b));
-      if (destroyed || flow.generation !== tab.generation) {
+      const id = await backend.openTerminal(pane.session, s, (b) => write(flow, b));
+      if (destroyed || flow.generation !== pane.generation) {
         backend.closeTerminal(id).catch(() => {});
         return;
       }
       flow.id = id;
       sentSize = { cols: s.cols, rows: s.rows };
-      workspace.attach(tab, id);
+      workspace.attach(pane, id);
       ack(flow, true);
       // The window may have changed while we were connecting.
       fitNow();
@@ -218,17 +235,17 @@
       schedule();
       if (active && autofocus) term.focus();
     } catch (e) {
-      if (destroyed || flow.generation !== tab.generation) return;
+      if (destroyed || flow.generation !== pane.generation) return;
       const err = asError(e);
       // The session's own failure is shown from its phase.
-      if (err.code !== "session_ended") tab.error = err;
+      if (err.code !== "session_ended") pane.error = err;
     }
   }
 
   // ── Size ──
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   function fitNow() {
-    if (!fit || !term || !active || host.clientWidth === 0) return;
+    if (!fit || !term || !visible || host.clientWidth === 0) return;
     fit.fit();
   }
   function onResize() {
@@ -300,15 +317,15 @@
         e.preventDefault();
         return false;
       }
-      if (tab.terminal !== null && !tab.end) return true;
+      if (pane.terminal !== null && !pane.end) return true;
       // No shell behind this view: Enter (re)connects, Esc cancels or goes
       // back to the hosts, the rest is swallowed (also by the browser: no
       // stray line break later).
       e.preventDefault();
       if (e.type !== "keydown") return false;
-      if (e.key === "Enter" && !waiting && !keyChanged) void workspace.reconnect(tab.key);
+      if (e.key === "Enter" && !waiting && !keyChanged) void workspace.reconnect(pane.key);
       if (e.key === "Escape") {
-        if (waiting) void workspace.close(tab.key);
+        if (waiting) void workspace.closePane(pane.key);
         else workspace.active = null;
       }
       return false;
@@ -318,7 +335,7 @@
       send(d, false);
     });
     term.onBinary((d) => send(d, true));
-    term.onTitleChange((t) => (tab.title = sanitizeTitle(t)));
+    term.onTitleChange((t) => (pane.title = sanitizeTitle(t)));
 
     // Every paste (menu, Shift-Insert, middle click) is sanitized first.
     const onPaste = (e: ClipboardEvent) => {
@@ -336,7 +353,7 @@
 
   // (Re)open whenever the tab asks for a new generation.
   $effect(() => {
-    void tab.generation;
+    void pane.generation;
     untrack(() => void open());
   });
 
@@ -346,10 +363,13 @@
   });
 
   $effect(() => {
+    if (visible && term) requestAnimationFrame(onResize);
+  });
+
+  $effect(() => {
     if (active && term) {
       const focus = autofocus;
       requestAnimationFrame(() => {
-        onResize();
         if (focus) term?.focus();
       });
     }
@@ -370,29 +390,52 @@
   }
 
   const endLabel = $derived.by(() => {
-    const end = tab.end;
+    const end = pane.end;
     if (!end) return "";
     if (end.kind === "closed") return isLive(session) ? "Shell closed" : "Connection closed";
     if (end.signal) return `Shell killed by SIG${end.signal}`;
     return `Shell exited${end.status ? ` with status ${end.status}` : ""}`;
   });
-  const endIsError = $derived(!!tab.end && tab.end.kind === "exited" && (!!tab.end.signal || !!tab.end.status));
+  const endIsError = $derived(!!pane.end && pane.end.kind === "exited" && (!!pane.end.signal || !!pane.end.status));
 </script>
 
-<section class="terminal" class:hidden={!active} aria-hidden={!active} aria-busy={waiting}>
-  <div class="xterm-host" class:dimmed={!!tab.end || !!failed} bind:this={host}></div>
+<section
+  class="terminal"
+  class:hidden={!visible}
+  class:split
+  class:focused
+  aria-hidden={!visible}
+  aria-busy={waiting}
+  aria-label={split ? `${pane.alias}, pane${focused ? ' (focused)' : ''}` : undefined}
+  data-pane={pane.key}
+  {onfocusin}
+>
+  {#if split}
+    <!-- Per-pane status: the status bar only speaks for the focused one. -->
+    <header class="head" data-status={status.status}>
+      <span class="dot" class:busy={status.busy} class:hollow={!!pane.end || (!isLive(session) && pane.terminal === null)}></span>
+      <span class="alias">{pane.alias}</span>
+      <span class="phase">{pane.end ? endLabel : status.label}</span>
+      {#if session?.latencyMs != null && session.phase.phase === "connected" && !pane.end}
+        <span class="rtt mono" class:slow={status.status === "warning"}>{formatRtt(session.latencyMs)}</span>
+      {/if}
+      {#if pane.title}<span class="title" title={pane.title}>{pane.title}</span>{/if}
+      {#if zoomed}<span class="zoom" title={zoomKey ? `Zoom (${zoomKey})` : 'Zoom'}>Zoom</span>{/if}
+    </header>
+  {/if}
+  <div class="xterm-host" class:dimmed={!!pane.end || !!failed} class:idle={split && !focused} bind:this={host}></div>
 
   {#if waiting || cancelled}
     <div class="overlay" transition:fade={{ duration: dur("fast") }}>
       <div class="card">
-        <h2>{tab.alias}</h2>
+        <h2>{pane.alias}</h2>
         <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
         {#if waiting}
           <p class="muted">Press <kbd>Esc</kbd>{#if closeKey} or <kbd>{closeKey}</kbd>{/if} to cancel</p>
         {:else}
           <div class="actions">
-            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
-            <button class="primary" onclick={() => workspace.reconnect(tab.key)}>Connect <kbd>↵</kbd></button>
+            <button class="secondary" onclick={() => workspace.closePane(pane.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
+            <button class="primary" onclick={() => workspace.reconnect(pane.key)}>Connect <kbd>↵</kbd></button>
           </div>
         {/if}
       </div>
@@ -400,7 +443,7 @@
   {:else if error}
     <div class="overlay" transition:fade={{ duration: dur("fast") }}>
       <div class="card failure" class:neutral={error.code === "host_key_rejected"}>
-        <h2>{tab.alias}</h2>
+        <h2>{pane.alias}</h2>
         <StatusBadge status={status.status} label={status.label} />
         {#if keyChanged}
           <!-- The blocking alert already showed the details. -->
@@ -413,32 +456,32 @@
           {#if error.hint}<p class="hint">{error.hint}</p>{/if}
         {/if}
         <!-- Same entry point as the host details: the connection records. -->
-        <button class="link" onclick={() => void logs.show(tab.session)}>
+        <button class="link" onclick={() => void logs.show(pane.session)}>
           Show session logs{#if logsKey} <kbd>{logsKey}</kbd>{/if}
         </button>
         <div class="actions">
           {#if keyChanged}
-            <button class="secondary" onclick={() => workspace.reconnect(tab.key)}>Retry</button>
-            {#if workspace.hasAlert(tab.session)}
-              <button class="secondary" onclick={() => workspace.showAlert(tab.session)}>Show details</button>
+            <button class="secondary" onclick={() => workspace.reconnect(pane.key)}>Retry</button>
+            {#if workspace.hasAlert(pane.session)}
+              <button class="secondary" onclick={() => workspace.showAlert(pane.session)}>Show details</button>
             {/if}
-            <button class="primary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
+            <button class="primary" onclick={() => workspace.closePane(pane.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
           {:else}
             <button class="secondary" onclick={() => (workspace.active = null)}>Hosts <kbd>Esc</kbd></button>
-            <button class="secondary" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
-            <button class="primary" onclick={() => workspace.reconnect(tab.key)}>Retry <kbd>↵</kbd></button>
+            <button class="secondary" onclick={() => workspace.closePane(pane.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
+            <button class="primary" onclick={() => workspace.reconnect(pane.key)}>Retry <kbd>↵</kbd></button>
           {/if}
         </div>
       </div>
     </div>
-  {:else if tab.end}
+  {:else if pane.end}
     <div class="ended" data-status={status.status} class:error={endIsError} transition:fade={{ duration: dur("fast") }}>
       <span class="dot" class:hollow={!isLive(session)}></span>
       <span class="what">{endLabel}</span>
       {#if isLive(session)}<span class="muted-inline">· session still connected</span>{/if}
       <span class="spacer"></span>
-      <button class="link" onclick={() => workspace.reconnect(tab.key)}>Reconnect <kbd>↵</kbd></button>
-      <button class="link" onclick={() => workspace.close(tab.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
+      <button class="link" onclick={() => workspace.reconnect(pane.key)}>Reconnect <kbd>↵</kbd></button>
+      <button class="link" onclick={() => workspace.closePane(pane.key)}>Close{#if closeKey} <kbd>{closeKey}</kbd>{/if}</button>
     </div>
   {/if}
 </section>
@@ -457,6 +500,85 @@
     transition: opacity var(--motion-base) var(--ease-standard);
   }
   .xterm-host.dimmed { opacity: 0.55; }
+
+  /* ── Split panes: one framed surface per terminal. The focused one gets
+     the accent edge (top bar + ring); the others are dimmed. The chrome
+     sizes here are the ones App.svelte counts in the minimum pane size. ── */
+  .terminal.split {
+    --pane-head: calc(var(--space-5) + var(--space-1));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    container-type: size;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .terminal.split.focused { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .terminal.split .xterm-host {
+    inset: calc(var(--pane-head) + var(--space-1)) var(--space-2) var(--space-2) var(--space-3);
+  }
+  .xterm-host.idle { opacity: 0.6; }
+  .xterm-host.idle.dimmed { opacity: 0.4; }
+  .head {
+    --c: var(--status-idle);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: var(--pane-head);
+    min-width: 0;
+    padding: 0 var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    transition: color var(--motion-fast) var(--ease-standard),
+      box-shadow var(--motion-fast) var(--ease-standard);
+  }
+  .focused .head { color: var(--text-secondary); box-shadow: inset 0 2px 0 0 var(--accent); }
+  .head[data-status="connecting"] { --c: var(--status-connecting); }
+  .head[data-status="authenticating"] { --c: var(--status-authenticating); }
+  .head[data-status="connected"] { --c: var(--status-connected); }
+  .head[data-status="warning"] { --c: var(--status-warning); }
+  .head[data-status="error"] { --c: var(--status-error); }
+  .head > * { flex: 0 0 auto; }
+  .head .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+  .head .dot.hollow { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+  .head .dot.busy { animation: pulse var(--motion-loop) var(--ease-standard) infinite; }
+  .head .alias { color: var(--text-secondary); font-weight: 550; }
+  .focused .head .alias { color: var(--text-primary); }
+  .head .rtt { font-variant-numeric: tabular-nums; }
+  .head .rtt.slow { color: var(--status-warning); }
+  .head[data-status="error"] .phase { color: var(--status-error); }
+  .head .title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .head > * + *:not(.alias):not(.zoom)::before { content: "·"; margin-right: var(--space-2); color: var(--text-muted); }
+  .head .zoom {
+    margin-left: auto;
+    padding: 0 var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--text-secondary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent); }
+    100% { box-shadow: 0 0 0 4px transparent; }
+  }
+  /* Cards and bars fit a small pane. */
+  .terminal.split .overlay { top: var(--pane-head); overflow: auto; }
+  .terminal.split .card {
+    min-width: 0;
+    max-width: min(540px, calc(100% - var(--space-5)));
+    padding: var(--space-4);
+    gap: var(--space-2);
+  }
+  .terminal.split .card h2 { font-size: var(--text-xl); }
+  .terminal.split .ended { left: var(--space-2); right: var(--space-2); bottom: var(--space-2); }
+  @container (max-width: 420px) {
+    .terminal.split .ended .muted-inline { display: none; }
+    .terminal.split .card .link kbd,
+    .terminal.split .card .actions kbd { display: none; }
+  }
   .xterm-host :global(.xterm) { height: 100%; }
   .xterm-host :global(.xterm-viewport) { background: transparent !important; }
 

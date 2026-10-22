@@ -68,7 +68,9 @@ test("Mod on Linux: Ctrl in the host list, Ctrl-Shift in a terminal", () => {
   assert.equal(t.hosts.get(eventSignature(key("k", "KeyK", { ctrlKey: true }))!), "app.palette");
   assert.equal(t.terminal.get(eventSignature(key("k", "KeyK", { ctrlKey: true }))!), undefined);
   assert.equal(t.terminal.get(eventSignature(key("K", "KeyK", { ctrlKey: true, shiftKey: true }))!), "app.palette");
-  assert.equal(t.terminal.get(eventSignature(key("D", "KeyD", { ctrlKey: true, shiftKey: true }))!), "app.favorite");
+  // Mod+D: favorite in the host list, split right in a terminal.
+  assert.equal(t.hosts.get(eventSignature(key("d", "KeyD", { ctrlKey: true }))!), "app.favorite");
+  assert.equal(t.terminal.get(eventSignature(key("D", "KeyD", { ctrlKey: true, shiftKey: true }))!), "pane.split-right");
   assert.equal(t.terminal.get(eventSignature(key("1", "Digit1", { altKey: true }))!), "tab.goto-1");
   // AZERTY: the letter typed counts, digits by physical key.
   assert.equal(t.hosts.get(eventSignature(key("w", "KeyZ", { ctrlKey: true }))!), "tab.close");
@@ -137,4 +139,36 @@ test("swapping two shortcuts works", () => {
   const r = resolveKeymap({ "tab.new": "Mod+W", "tab.close": "Mod+T" }, "mac");
   assert.deepEqual(r.problems, []);
   assert.equal(r.bindings["tab.new"]?.[0]?.key, "w");
+});
+
+test("pane commands: terminal only, distinct per platform, need a modifier", () => {
+  const mac = matchTables(defaultBindings("mac"), "mac");
+  const linux = matchTables(defaultBindings("linux"), "linux");
+  const ev = (k: string, code: string, mods: Partial<KeyLike>) => eventSignature(key(k, code, mods))!;
+  // ⌘D / ⌘⇧D on macOS; Ctrl-Shift-D / Ctrl-Shift-E on Linux (Ctrl-Shift-D is also Mod+Shift+D there).
+  assert.equal(mac.terminal.get(ev("d", "KeyD", { metaKey: true })), "pane.split-right");
+  assert.equal(mac.terminal.get(ev("D", "KeyD", { metaKey: true, shiftKey: true })), "pane.split-down");
+  assert.equal(linux.terminal.get(ev("E", "KeyE", { ctrlKey: true, shiftKey: true })), "pane.split-down");
+  // Focus: ⌘⌥ arrows / Ctrl-Alt arrows; resize adds Shift.
+  assert.equal(mac.terminal.get(ev("ArrowLeft", "ArrowLeft", { metaKey: true, altKey: true })), "pane.focus-left");
+  assert.equal(linux.terminal.get(ev("ArrowDown", "ArrowDown", { ctrlKey: true, altKey: true })), "pane.focus-down");
+  assert.equal(linux.terminal.get(ev("ArrowUp", "ArrowUp", { ctrlKey: true, altKey: true, shiftKey: true })), "pane.resize-up");
+  // Option changes the typed character on macOS: the physical key counts.
+  assert.equal(mac.terminal.get(ev("˜", "KeyN", { metaKey: true, altKey: true })), "pane.next");
+  // Zoom and close.
+  assert.equal(mac.terminal.get(ev("Enter", "Enter", { metaKey: true, shiftKey: true })), "pane.zoom");
+  assert.equal(linux.terminal.get(ev("Enter", "Enter", { ctrlKey: true, shiftKey: true })), "pane.zoom");
+  assert.equal(mac.terminal.get(ev("W", "KeyW", { metaKey: true, shiftKey: true })), "pane.close");
+  assert.equal(linux.terminal.get(ev("Q", "KeyQ", { ctrlKey: true, shiftKey: true })), "pane.close");
+  // Never in the host list.
+  for (const t of [mac, linux]) {
+    for (const id of t.hosts.values()) assert.ok(!id.startsWith("pane."), id);
+  }
+  // Labels: Ctrl-Shift on Linux, as for the global shortcuts.
+  assert.equal(formatCombo(parseCombo("Mod+E")!, "linux", "terminal"), "Ctrl-Shift-E");
+  assert.equal(formatCombo(parseCombo("Mod+Alt+Left")!, "mac", "terminal"), "⌥⌘←");
+  // A terminal action needs a modifier, like a global one.
+  assert.match(resolveKeymap({ "pane.zoom": "Z" }, "linux").problems.join(), /needs Mod/);
+  // Rebinding a pane command onto a host-list key is fine (other context).
+  assert.deepEqual(resolveKeymap({ "pane.next": "Mod+R" }, "linux").problems, []);
 });
