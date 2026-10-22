@@ -55,6 +55,10 @@ pub(crate) enum Overlay {
     Edit,
     /// Session logs and effective config.
     Debug,
+    /// The recordings list (play, delete).
+    Recordings,
+    /// A recording being played (`App::player`).
+    Player,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -183,6 +187,14 @@ pub(crate) struct App {
     pub(crate) machine: Option<String>,
     /// OSC 52 goes to the real terminal (off in tests).
     pub(crate) clipboard: bool,
+    /// Terminals being recorded, with the file name when known. Driven by
+    /// `RecordingState::Started` / `Stopped` only (and `is_recording`
+    /// after a lagged bus), never by the result of `start_recording`.
+    pub(crate) recording: HashMap<TerminalId, Option<String>>,
+    /// The recordings panel (kept under the player, which returns to it).
+    pub(crate) recordings_panel: Option<crate::recordings::RecordingsPanel>,
+    /// The playback in progress, while `overlay == Some(Overlay::Player)`.
+    pub(crate) player: Option<crate::player::Player>,
     search: HostSearch,
     pub(crate) tx: mpsc::UnboundedSender<Action>,
     rx: mpsc::UnboundedReceiver<Action>,
@@ -193,6 +205,28 @@ async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
         None => std::future::pending().await,
+    }
+}
+
+/// The playback reader's next message; never resolves without a player.
+async fn player_recv(
+    player: Option<&mut crate::player::Player>,
+) -> Option<crate::player::ReaderMsg> {
+    match player {
+        Some(player) => player.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// An engine bus message as an action: a lagged receiver resynchronises
+/// (`None` once the bus is closed).
+pub(crate) fn engine_action(
+    event: Result<EngineEvent, tokio::sync::broadcast::error::RecvError>,
+) -> Option<Action> {
+    match event {
+        Ok(event) => Some(Action::Engine(event)),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Some(Action::EngineLagged),
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
     }
 }
 
@@ -249,6 +283,9 @@ impl App {
             probes: HashMap::new(),
             machine: None,
             clipboard: true,
+            recording: HashMap::new(),
+            recordings_panel: None,
+            player: None,
             search: HostSearch::default(),
             tx,
             rx,
@@ -294,10 +331,15 @@ impl App {
             // Timed states wake the loop once, when they run out (no
             // ticking, so no redraw, in between).
             let deadline = self.next_deadline();
+            let playing = self
+                .player
+                .as_ref()
+                .is_some_and(crate::player::Player::wants_input);
             let action = tokio::select! {
                 Some(Ok(event)) = input.next() => self.map_event(event),
                 Some(action) = self.rx.recv() => Some(action),
-                event = engine_events.recv() => event.ok().map(Action::Engine),
+                event = engine_events.recv() => engine_action(event),
+                msg = player_recv(self.player.as_mut()), if playing => Some(Action::PlayerFeed(msg)),
                 _ = ticker.tick(), if self.needs_animation() => Some(Action::Tick),
                 () = sleep_until(deadline), if deadline.is_some() => Some(Action::Expire),
             };
@@ -375,6 +417,10 @@ impl App {
                 .dialogs
                 .front()
                 .is_some_and(|d| matches!(d, Dialog::Secret(s) if s.busy))
+            || self
+                .recordings_panel
+                .as_ref()
+                .is_some_and(crate::recordings::RecordingsPanel::busy)
     }
 
     fn spawn_load_hosts(&self) {
@@ -602,6 +648,9 @@ impl App {
         self.snippets_panel = None;
         self.edit_panel = None;
         self.debug_panel = None;
+        self.recordings_panel = None;
+        // The playback ends with its panel (its reader thread stops).
+        self.player = None;
         self.help.over_panel = false;
     }
 
@@ -672,6 +721,8 @@ impl App {
                     panel.paste(text);
                 }
             }
+            // Other panels, the recordings list and the player included,
+            // take no paste: nothing reaches a terminal through them.
             None if self.overlay.is_some() => {}
             None => match (self.focus, self.active_terminal()) {
                 (Focus::Terminal, Some(view)) => view.paste(text),
@@ -1316,9 +1367,16 @@ impl App {
     ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         while !done(self) {
+            let playing = self
+                .player
+                .as_ref()
+                .is_some_and(crate::player::Player::wants_input);
+            let next = self.next_deadline();
             let action = tokio::select! {
                 Some(action) = self.rx.recv() => Some(action),
-                event = events.recv() => event.ok().map(Action::Engine),
+                event = events.recv() => engine_action(event),
+                msg = player_recv(self.player.as_mut()), if playing => Some(Action::PlayerFeed(msg)),
+                () = sleep_until(next), if next.is_some() => Some(Action::Expire),
                 () = tokio::time::sleep_until(deadline) => {
                     panic!("not reached in 20 s: {:?} {:?}", self.tabs, self.sessions)
                 }

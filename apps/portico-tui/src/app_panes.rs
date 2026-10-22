@@ -395,10 +395,14 @@ impl App {
     /// The next instant a timed state runs out.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         let note = self.note.as_ref().map(|n| n.until);
-        match (self.pane_repeat, note) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let playback = self
+            .player
+            .as_ref()
+            .and_then(crate::player::Player::next_due);
+        [self.pane_repeat, note, playback]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Ends what ran out at `now`.
@@ -408,6 +412,9 @@ impl App {
         }
         if self.note.as_ref().is_some_and(|n| n.until <= now) {
             self.note = None;
+        }
+        if let Some(player) = &mut self.player {
+            player.step(now);
         }
     }
 

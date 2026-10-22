@@ -182,7 +182,9 @@ fn render_title(
                 .as_ref()
                 .map_or(0, |t| t.chars().count() + if with_label { 3 } else { 0 })
     };
-    let fixed = 1 + 2 + right.chars().count();
+    // A recorded pane says so in its title, whatever its width.
+    let rec = app.recorded_in(slot);
+    let fixed = 1 + 2 + right.chars().count() + if rec { 5 } else { 0 };
     let with_label = width >= fixed + status_width(true) + 8;
     let alias_room = width
         .saturating_sub(fixed + status_width(with_label))
@@ -191,8 +193,12 @@ fn render_title(
         lead,
         Span::styled(fmt::truncate(slot.alias(), alias_room), alias_style),
         Span::raw("  "),
-        Span::styled(format!("{dot} "), s.status(dot_color)),
     ];
+    if rec {
+        spans.push(Span::styled("REC", super::rec_style(s)));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(format!("{dot} "), s.status(dot_color)));
     if with_label {
         spans.push(Span::styled(label, label_style));
     }

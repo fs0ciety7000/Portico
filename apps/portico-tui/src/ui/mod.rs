@@ -11,6 +11,7 @@ mod hosts;
 mod keys;
 mod overlays;
 mod panes;
+mod recordings;
 mod snippets;
 mod status;
 mod statusbar;
@@ -47,6 +48,13 @@ pub(crate) fn panel_rect(screen: Rect, width: u16, height: u16, band: u16) -> Re
     area
 }
 
+/// The REC badge: the error colour, reserved for meaning (a recorded
+/// terminal is a sensitive state), in bold.
+pub(crate) fn rec_style(s: crate::theme::Styles) -> ratatui::style::Style {
+    s.status(s.theme.status.error)
+        .add_modifier(ratatui::style::Modifier::BOLD)
+}
+
 /// Braille spinner, advanced by `App::tick`.
 pub(crate) const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
@@ -81,7 +89,15 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         .files
         .as_ref()
         .map(|f| files::RemoteLink::of(app.session_by_id(f.session), s));
-    if app.focus == crate::app::Focus::Files
+    if let Some(player) = app
+        .player
+        .as_ref()
+        .filter(|_| app.overlay == Some(Overlay::Player))
+    {
+        // The playback takes the whole body: it is a screen of its own.
+        recordings::render_player(player, s, tick, frame, body);
+        toast_zone = body.inner(ratatui::layout::Margin::new(1, 1));
+    } else if app.focus == crate::app::Focus::Files
         && let Some(view) = &mut app.files
     {
         let link = link.unwrap_or(files::RemoteLink::Up);
@@ -109,7 +125,14 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     // never on the panel's frame or hints: the panel gives way if needed.
     let panel_open = matches!(
         app.overlay,
-        Some(Overlay::Keys | Overlay::Snippets | Overlay::Tunnels | Overlay::Edit | Overlay::Debug)
+        Some(
+            Overlay::Keys
+                | Overlay::Snippets
+                | Overlay::Tunnels
+                | Overlay::Edit
+                | Overlay::Debug
+                | Overlay::Recordings
+        )
     );
     let band = match &app.toast {
         Some(t) if panel_open => {
@@ -136,6 +159,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         Some(Overlay::Snippets) => snippets::render(app, frame, band),
         Some(Overlay::Edit) => edit_host::render(app, frame, band),
         Some(Overlay::Debug) => debug::render(app, frame, band),
+        Some(Overlay::Recordings) => recordings::render(app, frame, band),
         _ => {}
     }
     // After the panels: their scroll is clamped to what they show, so the
@@ -168,10 +192,13 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         &format!("Hosts {count}"),
         None,
         app.active.is_none(),
+        false,
     ));
     for (i, tab) in app.tabs.iter().enumerate() {
         let (label, dot) = tab_label(app, i, tab);
-        tabs.push(tab_spans(s, &label, Some(dot), app.active == Some(i)));
+        // A one-pane tab has no pane title: its tab carries the REC badge.
+        let rec = tab.len() == 1 && tab.focused().is_some_and(|slot| app.recorded_in(slot));
+        tabs.push(tab_spans(s, &label, Some(dot), app.active == Some(i), rec));
     }
 
     // Window [first, last] around the active tab within the budget.
@@ -259,6 +286,7 @@ fn tab_spans(
     label: &str,
     dot: Option<(&'static str, portico_theme::Rgb)>,
     active: bool,
+    rec: bool,
 ) -> (Vec<Span<'static>>, usize) {
     let mut spans = vec![Span::styled("│", s.border())];
     if active {
@@ -277,6 +305,17 @@ fn tab_spans(
             s.status(color)
         };
         spans.push(Span::styled(format!("{dot} "), style));
+    }
+    if rec {
+        let style = rec_style(s);
+        spans.push(Span::styled(
+            "REC ",
+            if active {
+                style.patch(s.selected())
+            } else {
+                style
+            },
+        ));
     }
     let width = spans.iter().map(Span::width).sum();
     (spans, width)

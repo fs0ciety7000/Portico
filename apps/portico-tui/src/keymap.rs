@@ -194,6 +194,14 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::OpenDebug
     ),
     bind!(
+        "hosts.recordings",
+        Hosts,
+        ["v"],
+        "recordings",
+        "« Recordings » : enregistrements de sessions (relire, supprimer)",
+        Action::OpenRecordings
+    ),
+    bind!(
         "hosts.forget_recent",
         Hosts,
         ["x"],
@@ -456,6 +464,22 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "logs",
         "Panneau debug (présélectionne la session de l'onglet)",
         Action::OpenDebug
+    ),
+    bind!(
+        "prefix.record",
+        Prefix,
+        ["R"],
+        "record",
+        "« Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation",
+        Action::ToggleRecording
+    ),
+    bind!(
+        "prefix.recordings",
+        Prefix,
+        ["v"],
+        "recordings",
+        "« Recordings » : enregistrements de sessions (relire, supprimer)",
+        Action::OpenRecordings
     ),
     bind!(
         "prefix.search",
@@ -881,7 +905,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                 &[Id("hosts.edit", 1), Id("hosts.favorite", 1)],
                 "Edit · favorite",
             ),
-            (&[Id("hosts.debug", 1)], "Session logs"),
+            (
+                &[Id("hosts.debug", 1), Id("hosts.recordings", 1)],
+                "Logs · recordings",
+            ),
             (
                 &[Id("hosts.forget_recent", 1), Id("hosts.clear_recent", 1)],
                 "Forget recent · all",
@@ -929,6 +956,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
             (
                 &[Id("prefix.keys", 1), Id("prefix.snippets", 1)],
                 "Keys · snippets",
+            ),
+            (
+                &[Id("prefix.record", 1), Id("prefix.recordings", 1)],
+                "Record · recordings",
             ),
             (&[Fixed("Ctrl-Space")], "Send it to remote"),
         ],
@@ -999,6 +1030,15 @@ const HELP: &[(&str, usize, HelpRows)] = &[
             (&[Fixed("↵ · Ctrl-N")], "Run/paste · new"),
             (&[Fixed("Ctrl-E")], "Edit"),
             (&[Fixed("Ctrl-D")], "Delete (asks)"),
+        ],
+    ),
+    (
+        "Recordings",
+        1,
+        &[
+            (&[Fixed("↵ · d")], "Play · delete"),
+            (&[Fixed("Space · + -")], "Pause · speed"),
+            (&[Fixed("→ · q")], "Skip idle · close"),
         ],
     ),
     (
@@ -1277,6 +1317,9 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
         Overlay::Snippets => Action::SnippetsKey,
         Overlay::Edit => Action::EditKey,
         Overlay::Debug => Action::DebugKey,
+        Overlay::Recordings => Action::RecordingsKey,
+        // Every key drives the player's controls; none goes further.
+        Overlay::Player => Action::PlayerKey,
         Overlay::Help => return None,
     };
     if ctrl && key.code == KeyCode::Char('c') {
@@ -1655,7 +1698,7 @@ mod tests {
             "{hosts:?}"
         );
         assert!(
-            hosts.contains(&("L".to_owned(), "Session logs")),
+            hosts.contains(&("L · v".to_owned(), "Logs · recordings")),
             "{hosts:?}"
         );
         let defaults = help(&Keymap::defaults());

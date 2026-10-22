@@ -239,6 +239,8 @@ pub(crate) struct ChangedKeyAlert {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfirmAction {
     ClearRecent,
+    /// "Record session": start recording this terminal.
+    StartRecording(portico_core::ids::TerminalId),
 }
 
 /// A yes / no question: `y` confirms, `n` or `Esc` keeps things as they are.
@@ -249,6 +251,51 @@ pub(crate) struct ConfirmDialog {
     /// Label of the confirming action (`y`).
     pub(crate) confirm: &'static str,
     pub(crate) action: ConfirmAction,
+    /// `Some(opened)`: an **armed** confirmation. Keys are ignored for
+    /// [`ARM_DELAY`] after `opened` (they were typed for the shell), then
+    /// only a plain `y` confirms and any other key cancels.
+    pub(crate) armed: Option<Instant>,
+}
+
+/// What a key does to a [`ConfirmDialog`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmOutcome {
+    /// Ignored (not armed yet, or not an answer).
+    None,
+    Confirm,
+    Cancel,
+}
+
+impl ConfirmDialog {
+    pub(crate) fn handle_key(&self, key: KeyEvent) -> ConfirmOutcome {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return ConfirmOutcome::None;
+        }
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match self.armed {
+            Some(opened) if opened.elapsed() < ARM_DELAY => ConfirmOutcome::None,
+            Some(_) => match key.code {
+                KeyCode::Char('y') if plain => ConfirmOutcome::Confirm,
+                _ => ConfirmOutcome::Cancel,
+            },
+            None => match key.code {
+                KeyCode::Char('y' | 'Y') => ConfirmOutcome::Confirm,
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => ConfirmOutcome::Cancel,
+                _ => ConfirmOutcome::None,
+            },
+        }
+    }
+
+    /// The footer's cancel key and label.
+    pub(crate) fn cancel_hint(&self) -> (&'static str, &'static str) {
+        if self.armed.is_some() {
+            ("any key", "cancel")
+        } else {
+            ("n / Esc", "keep")
+        }
+    }
 }
 
 #[derive(Debug)]

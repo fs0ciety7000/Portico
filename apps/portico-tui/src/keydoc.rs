@@ -231,6 +231,32 @@ const PANES: Panel = Panel {
     outro: "Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Un panneau en échec a un point plein et sa phase en couleur d'erreur, dans son titre comme dans l'onglet ; le point creux est réservé à un panneau sans shell (sorti, fermé). Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin, et diviser un panneau zoomé dézoome puis divise. Une division impossible est refusée sur une ligne de la barre de statut, pendant 4 s, sans couvrir aucun panneau (« This tab already has 8 panes · Close a pane first. », « Each pane needs at least 20 columns × 5 rows · Enlarge the window, or close a pane. »). Depuis un onglet divisé, `?` ouvre l'aide sur la page « Panes ».",
 };
 
+const RECORDINGS: Panel = Panel {
+    title: "TUI : enregistrements et lecture",
+    intro: "« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début (UTC), durée, taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` pour un fichier invalide (non lisible, mais supprimable). Le nom du fichier sélectionné s'affiche sous la liste.",
+    rows: &[
+        (
+            "Se déplacer",
+            "`j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G`",
+        ),
+        ("Lire l'enregistrement", "`↵`"),
+        (
+            "Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, toute autre touche annule ; refusé tant que l'enregistrement est en cours)",
+            "`d` ou `Suppr`, puis `y`",
+        ),
+        ("Rafraîchir", "`Ctrl-R`"),
+        ("Fermer", "`Esc`, `q`, `Ctrl-C`"),
+        ("Lecture : pause / reprise", "`Espace`"),
+        ("Lecture : vitesse (×0,5 à ×8)", "`+` / `-`"),
+        ("Lecture : sauter le silence en cours", "`→`"),
+        (
+            "Lecture : revenir à la liste",
+            "`q`, `Esc` (`Ctrl-C` ferme tout)",
+        ),
+    ],
+    outro: "Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total », la taille et la vitesse. Les silences de plus de 2 s sont raccourcis. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.",
+};
+
 /// Fixed keys of the configurable contexts (not rebindable).
 const FIXED: &[(Context, &str, &str)] = &[
     (Context::Hosts, "Aller à l'onglet n", "`1`-`9`"),
@@ -324,7 +350,16 @@ pub(crate) fn block() -> String {
         "TUI : terminal",
         "Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.",
     );
-    for panel in [&PANES, &EDIT, &DEBUG, &FILES, &TUNNELS, &KEYS, &SNIPPETS] {
+    for panel in [
+        &PANES,
+        &EDIT,
+        &DEBUG,
+        &FILES,
+        &TUNNELS,
+        &KEYS,
+        &SNIPPETS,
+        &RECORDINGS,
+    ] {
         panel_section(&mut out, panel);
     }
     // One trailing newline before the end marker.

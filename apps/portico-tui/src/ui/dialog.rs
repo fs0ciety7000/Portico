@@ -37,13 +37,27 @@ pub(crate) fn render(dialog: &Dialog, s: Styles, tick: u64, frame: &mut Frame<'_
 /// Width of a yes / no question.
 const CONFIRM_WIDTH: u16 = 56;
 
+/// Width of an armed confirmation (a longer explanation).
+const ARMED_CONFIRM_WIDTH: u16 = 66;
+
 fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
-    let lines = vec![
-        Line::from(Span::styled(c.body.clone(), s.secondary())),
-        Line::from(""),
-        footer(s, &[("n / Esc", "keep"), ("y", c.confirm)]),
-    ];
-    let area = modal(frame, CONFIRM_WIDTH, wrapped_height(&lines, CONFIRM_WIDTH));
+    let width = if c.armed.is_some() {
+        ARMED_CONFIRM_WIDTH
+    } else {
+        CONFIRM_WIDTH
+    }
+    .min(frame.area().width);
+    // Wrapped here, word by word, so the height is exact.
+    let inner = usize::from(width.saturating_sub(6)).max(1);
+    let mut lines: Vec<Line<'static>> = c
+        .body
+        .split('\n')
+        .flat_map(|paragraph| crate::ui::fmt::wrap(paragraph, inner))
+        .map(|l| Line::from(Span::styled(l, s.secondary())))
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(footer(s, &[c.cancel_hint(), ("y", c.confirm)]));
+    let area = modal(frame, width, wrapped_height(&lines, width));
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
