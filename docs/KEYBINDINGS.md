@@ -191,11 +191,11 @@ Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet 
 
 ### TUI : tunnels
 
-Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config` (`LocalForward`, `RemoteForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.
+Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config` (`LocalForward`, `RemoteForward`, `DynamicForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.
 
 | Action | Touches |
 |---|---|
-| Ajouter (`-L 8080:db:5432`, `-R 9000:localhost:3000`) | `a` (ou `n`), saisie, `↵` |
+| Ajouter (`-L 8080:db:5432`, `-R 9000:localhost:3000`, `-D 1080` pour un proxy SOCKS5) | `a` (ou `n`), saisie, `↵` |
 | Démarrer un tunnel proposé | `↵` |
 | Arrêter le tunnel sélectionné | `x`, `d` ou `Suppr` |
 | Confirmer une écoute exposée (adresse autre que loopback) | `y` (toute autre touche annule) |

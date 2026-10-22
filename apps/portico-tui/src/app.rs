@@ -837,7 +837,12 @@ impl App {
             .remote_forwards
             .iter()
             .filter_map(|f| portico_core::forward::ForwardSpec::parse_remote(f).ok());
-        local.chain(remote).collect()
+        let dynamic = host
+            .resolved
+            .dynamic_forwards
+            .iter()
+            .filter_map(|f| portico_core::forward::ForwardSpec::parse_dynamic(f).ok());
+        local.chain(remote).chain(dynamic).collect()
     }
 
     fn rebuild_tunnels_panel(&mut self) {
@@ -1522,5 +1527,32 @@ mod render_tests {
         assert!(contains(&lines, "account"), "not truncated:\n{text}");
         assert!(message_row < hint_row && hint_row < keys_row, "{text}");
         assert!(contains(&lines, "↵  start"), "{text}");
+    }
+    #[test]
+    fn socks_tunnels_show_their_bind_and_connections() {
+        let mut app = test_app();
+        let session = SessionId::next();
+        let socks = ForwardSpec::parse_cli("-D 1080").unwrap();
+        app.tunnels.push(TunnelRow {
+            id: portico_core::ids::TunnelId::next(),
+            session,
+            alias: "web".into(),
+            spec: socks,
+            status: TunnelStatus::Listening("127.0.0.1:1080, [::1]:1080".into()),
+            connections: 2,
+        });
+        let mut panel = TunnelsPanel::new(Some((session, "web".into())));
+        let declared = ForwardSpec::parse_dynamic("0.0.0.0:9050").unwrap();
+        panel.rebuild(&app.tunnels, &[declared]);
+        app.tunnels_panel = Some(panel);
+        app.overlay = Some(Overlay::Tunnels);
+        let lines = screen(&mut app, 80, 24);
+        let text = lines.join("\n");
+        assert!(contains(&lines, "SOCKS · localhost:1080"), "{text}");
+        assert!(contains(&lines, "2 connections"), "{text}");
+        assert!(
+            contains(&lines, "SOCKS · 0.0.0.0:9050  from ssh_config"),
+            "{text}"
+        );
     }
 }

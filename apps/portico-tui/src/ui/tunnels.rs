@@ -117,6 +117,17 @@ fn item_line(item: &Item, rows: &[TunnelRow], s: Styles, tick: u64, width: usize
             let Some(row) = rows.iter().find(|r| r.id == *id) else {
                 return Line::from("");
             };
+            let spec = row.spec.to_string();
+            let alias = fmt::truncate(&row.alias, 14);
+            // Listening beyond loopback: said in the warning colour.
+            let exposed = if row.spec.is_exposed() {
+                "  exposed"
+            } else {
+                ""
+            };
+            let room = width.saturating_sub(
+                spec.chars().count() + alias.chars().count() + exposed.chars().count() + 7,
+            );
             let (dot, color, detail) = match &row.status {
                 TunnelStatus::Starting => (
                     super::spinner(tick),
@@ -129,23 +140,15 @@ fn item_line(item: &Item, rows: &[TunnelRow], s: Styles, tick: u64, width: usize
                         1 => "  · 1 connection".to_owned(),
                         n => format!("  · {n} connections"),
                     };
+                    // The count matters more than every bound address.
+                    let bind_room = room.saturating_sub(conns.chars().count());
+                    let bind = fmt::truncate(bind, bind_room);
                     ("●", status.connected, format!("{bind}{conns}"))
                 }
                 // The full message and its hint show under the list when
                 // the row is selected.
                 TunnelStatus::Failed(error) => ("●", status.error, fmt::sentence(&error.message)),
             };
-            let spec = row.spec.to_string();
-            let alias = fmt::truncate(&row.alias, 14);
-            // Listening beyond loopback: said in the warning colour.
-            let exposed = if row.spec.is_exposed() {
-                "  exposed"
-            } else {
-                ""
-            };
-            let room = width.saturating_sub(
-                spec.chars().count() + alias.chars().count() + exposed.chars().count() + 7,
-            );
             let detail_style = if matches!(row.status, TunnelStatus::Failed(_)) {
                 s.status(status.error)
             } else {
@@ -215,7 +218,7 @@ fn form_lines(
             Span::styled(cursor, s.accent()),
         ]));
         lines.push(Line::from(Span::styled(
-            "-L local:host:port  ·  -R remote:host:port",
+            "-L local:host:port  ·  -R remote:host:port  ·  -D port (SOCKS)",
             s.muted(),
         )));
     }

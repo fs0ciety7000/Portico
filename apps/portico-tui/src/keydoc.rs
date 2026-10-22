@@ -129,10 +129,10 @@ const FILES: Panel = Panel {
 
 const TUNNELS: Panel = Panel {
     title: "TUI : tunnels",
-    intro: "Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config` (`LocalForward`, `RemoteForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.",
+    intro: "Panneau superposé : tunnels actifs de toutes les sessions, puis ceux déclarés dans `ssh_config` (`LocalForward`, `RemoteForward`, `DynamicForward`) pour l'hôte courant, proposés mais jamais démarrés d'office.",
     rows: &[
         (
-            "Ajouter (`-L 8080:db:5432`, `-R 9000:localhost:3000`)",
+            "Ajouter (`-L 8080:db:5432`, `-R 9000:localhost:3000`, `-D 1080` pour un proxy SOCKS5)",
             "`a` (ou `n`), saisie, `↵`",
         ),
         ("Démarrer un tunnel proposé", "`↵`"),

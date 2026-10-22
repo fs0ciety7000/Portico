@@ -1,6 +1,6 @@
 //! Tunnels panel state: running tunnels (all sessions), forwards declared in
 //! `ssh_config` for the current host (offered, never started on their own),
-//! and a one-line form to add `-L` / `-R` specs.
+//! and a one-line form to add `-L` / `-R` / `-D` specs.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use portico_core::ErrorSummary;
@@ -186,12 +186,15 @@ impl TunnelsPanel {
     }
 }
 
-/// `-L 8080:db:5432`, `L 8080 db:5432`, `-R 9000:localhost:3000`.
+/// `-L 8080:db:5432`, `L 8080 db:5432`, `-R 9000:localhost:3000`, `-D 1080`.
 pub(crate) fn parse(input: &str) -> Result<ForwardSpec, ErrorSummary> {
     ForwardSpec::parse_cli(input).map_err(|e| ErrorSummary {
         code: "invalid_forward".into(),
         message: e.to_string(),
-        hint: Some("Type -L [bind:]port:host:port or -R [bind:]port:host:port.".into()),
+        hint: Some(
+            "Type -L [bind:]port:host:port, -R [bind:]port:host:port or -D [bind:]port (SOCKS)."
+                .into(),
+        ),
     })
 }
 
@@ -253,8 +256,9 @@ mod tests {
             parse("-R 9000:localhost:3000"),
             Ok(ForwardSpec::Remote { .. })
         ));
+        assert!(matches!(parse("-D 1080"), Ok(ForwardSpec::Dynamic { .. })));
         assert!(parse("8080:db:5432").is_err());
-        assert!(parse("-D 1080").is_err());
+        assert!(parse("-D nope").is_err());
         assert!(parse("-L nope").is_err());
     }
 
@@ -287,6 +291,19 @@ mod tests {
         assert!(matches!(
             press(&mut panel, KeyCode::Enter),
             PanelOutcome::Start(_, false)
+        ));
+        // A SOCKS proxy on every interface asks first too.
+        panel.input = Some("-D 0.0.0.0:1080".into());
+        press(&mut panel, KeyCode::Enter);
+        assert!(matches!(panel.confirm, Some(ForwardSpec::Dynamic { .. })));
+        assert!(matches!(
+            press(&mut panel, KeyCode::Char('y')),
+            PanelOutcome::Start(ForwardSpec::Dynamic { .. }, true)
+        ));
+        panel.input = Some("-D 1080".into());
+        assert!(matches!(
+            press(&mut panel, KeyCode::Enter),
+            PanelOutcome::Start(ForwardSpec::Dynamic { .. }, false)
         ));
     }
 
