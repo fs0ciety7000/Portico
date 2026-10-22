@@ -158,6 +158,11 @@ touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
 - Import **Termius** (après vérification du format d'export réel) : génère un fichier de config dans le dossier de Portico
   (jamais dans `~/.ssh`) et indique la ligne `Include` à ajouter soi-même ; tags et groupes importés dans `hosts.toml`.
   Aucun secret importé en clair
+  ✅ *(livré : core `import`, `portico import termius FILE [--prefix] [--apply]`, palette GUI « Import from Termius… »
+  avec aperçu, voir `docs/IMPORT.md`. Termius n'a pas d'export officiel des hôtes : formats lus = CSV du modèle d'import
+  (en-tête vu dans des sources non officielles, lu avec tolérance), `hosts.json`/`credentials.csv` de
+  `termius-local-export`, sortie de `termius export-ssh-config`. Vérifié sur fixtures synthétiques seulement ; à
+  confirmer sur un vrai export. GUI vérifiée en mode démo seulement)*
 
 **Sortie** : `curl --socks5-hostname localhost:1080` passe par un hôte via Portico (les deux UIs) ; `brew install` et
 l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Termius de test donne les mêmes hôtes dans Portico.

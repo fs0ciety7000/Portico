@@ -44,6 +44,7 @@ cargo run -p portico-theme --bin export-tokens   # après modification des token
 | [`docs/STACK.md`](docs/STACK.md) | Stack retenue, alternatives, journal des décisions |
 | [`docs/PLAN.md`](docs/PLAN.md) | Plan MVP par phases et roadmap |
 | [`docs/KEYBINDINGS.md`](docs/KEYBINDINGS.md) | Raccourcis clavier |
+| [`docs/IMPORT.md`](docs/IMPORT.md) | Importer ses hôtes depuis Termius (`portico import termius`, palette de la GUI) |
 
 ## Licence
 
