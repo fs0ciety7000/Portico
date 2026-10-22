@@ -373,6 +373,8 @@ export interface ImportPreview {
   identityFiles: string[];
   target: string;
   includeLine: string;
+  /** `Host` blocks already in `target` (a previous import) that this one replaces. */
+  replaces: number | null;
 }
 
 /** Mirrors `import::ImportReportDto` (`portico_core::import::ImportReport`). */
@@ -513,6 +515,15 @@ export function asError(e: unknown): ErrorSummary {
  * identifier (`id_ed25519 …`, `~/.ssh/…`, `ssh-agent …`), left as written. */
 export function sentence(text: string): string {
   return /^[a-z]+(?:\s|$)/.test(text) ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
+/** A core message cut at its backticks: `code` parts are shown in mono
+ * (`tag \`Web Serveur\` imported as \`web-serveur\``). An unpaired
+ * backtick is kept as text. */
+export function codeSpans(text: string): { text: string; code: boolean }[] {
+  const parts = text.split("`");
+  if (parts.length % 2 === 0) return [{ text, code: false }];
+  return parts.map((part, i) => ({ text: part, code: i % 2 === 1 })).filter((p) => p.text !== "");
 }
 
 export type Status = "idle" | "connecting" | "authenticating" | "connected" | "warning" | "error";

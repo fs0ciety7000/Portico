@@ -28,7 +28,7 @@
 //! built (`Zeroizing`), JSON secret fields are never copied out of the
 //! parser's input.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -37,9 +37,10 @@ use zeroize::Zeroizing;
 
 use super::csv;
 use super::{
-    IMPORT_PREFIX, IgnoredSecrets, ImportError, ImportNotice, ImportOptions, ImportPlan,
-    MAX_ALIAS_CHARS, MAX_IMPORT_FILE_BYTES, NoticeCode, PlannedHost, clean_hostname, clean_user,
-    display_text, existing_aliases, include_line, looks_like_secret, slug, termius_target,
+    BoundedNotices, IMPORT_PREFIX, IgnoredSecrets, ImportError, ImportNotice, ImportOptions,
+    ImportPlan, MAX_ALIAS_CHARS, MAX_IMPORT_FILE_BYTES, NoticeCode, PlannedHost, clean_hostname,
+    clean_user, display_text, existing_aliases, host_blocks, include_line, looks_like_other_host,
+    looks_like_secret, slug, termius_target,
 };
 use crate::error::{Error, Result};
 use crate::hosts::{MAX_GROUP_CHARS, MAX_TAG_CHARS, MAX_TAGS};
@@ -87,6 +88,10 @@ struct RawHost {
     tags: Vec<String>,
 }
 
+/// Most tags read from one cell (more are ignored without a notice: the
+/// alias keeps at most [`MAX_TAGS`] anyway).
+const MAX_TAGS_PER_CELL: usize = MAX_TAGS * 4;
+
 /// Everything collected while reading, besides the hosts.
 #[derive(Debug, Default)]
 struct Collected {
@@ -94,7 +99,9 @@ struct Collected {
     records: usize,
     secrets: IgnoredSecrets,
     identity_files: Vec<String>,
-    warnings: Vec<ImportNotice>,
+    warnings: BoundedNotices,
+    /// Records refused while reading (before any value is looked at).
+    skipped: Vec<ImportNotice>,
 }
 
 impl Collected {
@@ -140,8 +147,9 @@ pub(crate) fn plan(paths: &Paths, source: &Path, options: ImportOptions) -> Resu
         options,
         existing: &existing,
         taken: HashSet::new(),
+        next_suffix: HashMap::new(),
         hosts: Vec::new(),
-        skipped: Vec::new(),
+        skipped: collected.skipped,
         warnings: collected.warnings,
     };
     for raw in collected.raw {
@@ -154,10 +162,11 @@ pub(crate) fn plan(paths: &Paths, source: &Path, options: ImportOptions) -> Resu
         records: collected.records,
         hosts: builder.hosts,
         skipped: builder.skipped,
-        warnings: builder.warnings,
+        warnings: builder.warnings.into_vec(),
         secrets: collected.secrets,
         identity_files: collected.identity_files,
         include_line: include_line(paths, &target),
+        replaces: host_blocks(&target)?,
         target,
     })
 }
@@ -173,7 +182,10 @@ fn decode(bytes: &[u8]) -> Option<Zeroizing<String>> {
             [a, b] => u16::from_be_bytes([*a, *b]),
             _ => 0,
         });
-        let mut out = Zeroizing::new(String::with_capacity(rest.len()));
+        // One UTF-16 unit is at most 3 UTF-8 bytes (a surrogate pair, two
+        // units, is 4): the string never reallocates, so no copy of the
+        // text is left unwiped behind.
+        let mut out = Zeroizing::new(String::with_capacity(rest.len() / 2 * 3));
         for unit in char::decode_utf16(units) {
             out.push(unit.ok()?);
         }
@@ -375,6 +387,8 @@ fn read_csv(text: &str, delimiter: char, columns: &Columns, source: &Path) -> Re
             format!("columns not imported: {names}"),
         );
     }
+    let header_cells = columns.names.len();
+    let has_secret_column = !columns.passwords.is_empty() || !columns.keys.is_empty();
     for record in records.iter().skip(1) {
         let fields = record.fields.as_slice();
         if fields.iter().all(|f| f.trim().is_empty()) {
@@ -387,6 +401,21 @@ fn read_csv(text: &str, delimiter: char, columns: &Columns, source: &Path) -> Re
         let keys = columns.keys.iter().filter(|(i, _)| present(i)).count();
         collected.secrets.passwords = collected.secrets.passwords.saturating_add(passwords);
         collected.secrets.keys = collected.secrets.keys.saturating_add(keys);
+        // A row with a cell too many or too few is shifted: a password
+        // could land in the user or host column. Only missing trailing
+        // cells are tolerated, and only when no column holds a secret.
+        let cells = fields.len();
+        if cells > header_cells || (cells < header_cells && has_secret_column) {
+            collected.skipped.push(ImportNotice {
+                code: NoticeCode::ColumnCountMismatch,
+                record: Some(line),
+                label: None,
+                message: format!(
+                    "this row has {cells} cells and the header {header_cells}: its values could be in the wrong columns"
+                ),
+            });
+            continue;
+        }
 
         let mut cell = |column| text_cell(fields, column, columns, line, &mut collected);
         let label = cell(columns.label);
@@ -406,7 +435,11 @@ fn read_csv(text: &str, delimiter: char, columns: &Columns, source: &Path) -> Re
             user,
             protocol,
             group,
-            tags: tags.split(',').map(str::to_owned).collect(),
+            tags: tags
+                .split(',')
+                .take(MAX_TAGS_PER_CELL)
+                .map(str::to_owned)
+                .collect(),
         });
     }
     Ok(collected)
@@ -712,9 +745,12 @@ struct Builder<'a> {
     existing: &'a HashSet<String>,
     /// Lowercased aliases already given in this import.
     taken: HashSet<String>,
+    /// The next `-n` suffix to try for a base alias (renaming stays linear
+    /// with thousands of identical labels).
+    next_suffix: HashMap<String, usize>,
     hosts: Vec<PlannedHost>,
     skipped: Vec<ImportNotice>,
-    warnings: Vec<ImportNotice>,
+    warnings: BoundedNotices,
 }
 
 impl Builder<'_> {
@@ -746,24 +782,32 @@ impl Builder<'_> {
         if base.is_empty() {
             "host".clone_into(&mut base);
         }
-        if self.options.prefix {
-            base = slug(&format!("{IMPORT_PREFIX}{base}"), MAX_ALIAS_CHARS);
-        }
         let notice = |code, message: String| ImportNotice {
             code,
             record: Some(raw.record),
             label: Some(label.clone()),
             message,
         };
+        if self.options.prefix {
+            base = slug(&format!("{IMPORT_PREFIX}{base}"), MAX_ALIAS_CHARS);
+        } else if looks_like_other_host(&base, &hostname) {
+            let prefixed = slug(&format!("{IMPORT_PREFIX}{base}"), MAX_ALIAS_CHARS);
+            self.warnings.push(notice(
+                NoticeCode::AliasLooksLikeHost,
+                format!("`{base}` looks like another host's name: imported as `{prefixed}`"),
+            ));
+            base = prefixed;
+        }
         let alias = if self.taken.contains(&base) {
-            let mut n = 2usize;
+            let mut n = self.next_suffix.get(&base).copied().unwrap_or(2);
             let renamed = loop {
                 let candidate = with_suffix(&base, n);
+                n = n.saturating_add(1);
                 if !self.taken.contains(&candidate) && !self.existing.contains(&candidate) {
                     break candidate;
                 }
-                n = n.saturating_add(1);
             };
+            self.next_suffix.insert(base.clone(), n);
             self.warnings.push(notice(
                 NoticeCode::AliasRenamed,
                 format!("`{base}` is already used in this import: imported as `{renamed}`"),
@@ -773,7 +817,7 @@ impl Builder<'_> {
             self.skipped.push(notice(
                 NoticeCode::AliasCollision,
                 format!(
-                    "`{base}` is already defined in your ssh config: skipped (import with the termius- prefix to keep both)"
+                    "`{base}` is already defined in your ssh config (import with the termius- prefix to keep both)"
                 ),
             ));
             return;
@@ -809,21 +853,21 @@ impl Builder<'_> {
         if !protocol.is_empty() && protocol != "ssh" {
             self.skipped.push(notice(
                 NoticeCode::UnsupportedProtocol,
-                format!("protocol `{}` is not SSH: skipped", slug(&protocol, 16)),
+                "the protocol is not SSH".to_owned(),
             ));
             return None;
         }
         if raw.hostname.trim().is_empty() {
             self.skipped.push(notice(
                 NoticeCode::MissingHostname,
-                "no host name or address: skipped".to_owned(),
+                "no host name or address".to_owned(),
             ));
             return None;
         }
         let Some(hostname) = clean_hostname(&raw.hostname) else {
             self.skipped.push(notice(
                 NoticeCode::InvalidHostname,
-                "the host name contains a space, line break, `#`, quote or another character not allowed in a host name: skipped".to_owned(),
+                "the host name contains a space, line break, `#`, quote or another character not allowed in a host name".to_owned(),
             ));
             return None;
         };
@@ -834,7 +878,7 @@ impl Builder<'_> {
         } else {
             self.skipped.push(notice(
                 NoticeCode::InvalidUser,
-                "the user name contains a space, line break, `#`, quote or another character not allowed: skipped".to_owned(),
+                "the user name contains a space, line break, `#`, quote or another character not allowed".to_owned(),
             ));
             return None;
         };
@@ -846,10 +890,7 @@ impl Builder<'_> {
                 _ => {
                     self.warnings.push(notice(
                         NoticeCode::InvalidPort,
-                        format!(
-                            "port `{}` is not between 1 and 65535: left out (22 applies)",
-                            display_text(text, 16)
-                        ),
+                        "the port is not between 1 and 65535: left out (22 applies)".to_owned(),
                     ));
                     None
                 }

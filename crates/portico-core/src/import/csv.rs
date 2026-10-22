@@ -9,6 +9,9 @@
 //!
 //! Every field is a [`Zeroizing`] string: an export may hold passwords and
 //! private keys, which are wiped from memory when the records are dropped.
+//! A field never reallocates in place (that would free an unwiped buffer):
+//! when it is full, it is copied into a larger `Zeroizing` string and the
+//! old one is wiped as it is dropped. [`Record`]'s `Debug` shows counts only.
 
 use zeroize::Zeroizing;
 
@@ -17,11 +20,42 @@ pub(crate) const MAX_RECORDS: usize = 5000;
 /// Most fields in one record.
 pub(crate) const MAX_FIELDS: usize = 64;
 
+/// Smallest capacity given to a field that grows.
+const MIN_FIELD_CAPACITY: usize = 32;
+
 /// One CSV record and the line it starts on (1-based).
-#[derive(Debug)]
 pub(crate) struct Record {
     pub(crate) line: usize,
     pub(crate) fields: Vec<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for Record {
+    /// Line and cell count only: a cell may hold a password.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Record")
+            .field("line", &self.line)
+            .field(
+                "fields",
+                &format_args!("<{} cells redacted>", self.fields.len()),
+            )
+            .finish()
+    }
+}
+
+/// Appends `c` to `field` without ever reallocating it in place: a full
+/// field is first copied into a larger one, and the old buffer is wiped
+/// when it is dropped.
+fn push_wiped(field: &mut Zeroizing<String>, c: char) {
+    let needed = field.len().saturating_add(c.len_utf8());
+    if needed > field.capacity() {
+        let capacity = needed
+            .max(field.capacity().saturating_mul(2))
+            .max(MIN_FIELD_CAPACITY);
+        let mut larger = Zeroizing::new(String::with_capacity(capacity));
+        larger.push_str(field);
+        *field = larger;
+    }
+    field.push(c);
 }
 
 /// Why a CSV text could not be read (no field content, ever).
@@ -82,7 +116,7 @@ pub(crate) fn parse(text: &str, delimiter: char) -> Result<Vec<Record>, CsvError
             match c {
                 '"' if chars.peek() == Some(&'"') => {
                     chars.next();
-                    acc.field.push('"');
+                    push_wiped(&mut acc.field, '"');
                 }
                 '"' => in_quotes = false,
                 '\r' | '\n' => {
@@ -91,9 +125,9 @@ pub(crate) fn parse(text: &str, delimiter: char) -> Result<Vec<Record>, CsvError
                         chars.next();
                     }
                     line = line.saturating_add(1);
-                    acc.field.push('\n');
+                    push_wiped(&mut acc.field, '\n');
                 }
-                other => acc.field.push(other),
+                other => push_wiped(&mut acc.field, other),
             }
             continue;
         }
@@ -111,7 +145,7 @@ pub(crate) fn parse(text: &str, delimiter: char) -> Result<Vec<Record>, CsvError
                 record_line = line;
             }
             c if c == delimiter => acc.end_field(record_line)?,
-            other => acc.field.push(other),
+            other => push_wiped(&mut acc.field, other),
         }
     }
     if in_quotes {
@@ -186,6 +220,25 @@ mod tests {
         let records = parse("a;b,c\n", ';').expect("valid");
         let fields: Vec<String> = records[0].fields.iter().map(|f| f.to_string()).collect();
         assert_eq!(fields, ["a", "b,c"]);
+    }
+
+    #[test]
+    fn record_debug_is_redacted() {
+        let records = parse("Label,Password\nweb,FAKEPASS123\n", ',').expect("valid");
+        let debug = format!("{records:?}");
+        assert!(!debug.contains("FAKEPASS123"), "{debug}");
+        assert!(!debug.contains("web"), "{debug}");
+        assert!(debug.contains("line: 2"), "{debug}");
+        assert!(debug.contains("<2 cells redacted>"), "{debug}");
+    }
+
+    #[test]
+    fn long_fields_grow_without_losing_text() {
+        let long = "x".repeat(1000);
+        let records = parse(&format!("{long},\"{long}\"\n"), ',').expect("valid");
+        let record = records.first().expect("one");
+        assert_eq!(record.fields.len(), 2);
+        assert!(record.fields.iter().all(|f| f.as_str() == long));
     }
 
     #[test]

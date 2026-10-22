@@ -374,7 +374,7 @@
     {
       id: "app.import-termius",
       title: "Import from Termius…",
-      hint: "CSV or JSON export, previewed before anything is written",
+      hint: "Termius CSV, JSON or ssh-config export · previewed before writing",
       shortcut: k("app.import-termius"),
       run: () => void importer.start(),
     },

@@ -6,6 +6,7 @@
 // Test helpers fail loudly; the end-to-end apply test reads best in one piece.
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -78,7 +79,7 @@ async fn template_csv_plan() {
         [
             "web-eu-1",
             "db-eu-1",
-            "at-198.51.100.7",
+            "termius-at-198.51.100.7",
             "web-eu-1-2",
             "v6-box",
             "bad-port"
@@ -98,7 +99,7 @@ async fn template_csv_plan() {
     assert_eq!(db.tags, ["db", "postgres"]);
     assert_eq!(db.notes, None, "alias equals the label");
 
-    let at = host(&plan, "at-198.51.100.7");
+    let at = host(&plan, "termius-at-198.51.100.7");
     assert_eq!(
         (at.hostname.as_str(), at.port),
         ("198.51.100.7", Some(38444))
@@ -198,7 +199,7 @@ async fn apply_writes_only_safe_directives_and_is_idempotent() {
         body,
         "Host web-eu-1\n    HostName 203.0.113.10\n    User deploy\n\n\
          Host db-eu-1\n    HostName 203.0.113.11\n    User postgres\n    Port 2222\n\n\
-         Host at-198.51.100.7\n    HostName 198.51.100.7\n    User root\n    Port 38444\n\n\
+         Host termius-at-198.51.100.7\n    HostName 198.51.100.7\n    User root\n    Port 38444\n\n\
          Host web-eu-1-2\n    HostName staging.example.test\n    User ubuntu\n\n\
          Host v6-box\n    HostName 2001:db8::10\n    User ops\n\n\
          Host bad-port\n    HostName 192.0.2.60\n    User root\n"
@@ -308,7 +309,12 @@ async fn collisions_are_skipped_or_prefixed_and_user_metadata_is_kept() {
         .expect("plan");
     assert_eq!(
         aliases(&plan),
-        ["web-eu-1", "at-198.51.100.7", "web-eu-1-2", "bad-port"]
+        [
+            "web-eu-1",
+            "termius-at-198.51.100.7",
+            "web-eu-1-2",
+            "bad-port"
+        ]
     );
     let collisions: Vec<_> = plan
         .skipped
@@ -398,13 +404,273 @@ async fn a_tampered_plan_is_checked_again() {
     if let Some(second) = plan.hosts.get_mut(1) {
         second.alias = "db *".into();
     }
+    plan.include_line = "x\nProxyCommand y".into();
+    plan.hosts.push(portico_core::import::PlannedHost {
+        alias: "github.com".into(),
+        label: "github.com".into(),
+        hostname: "203.0.113.66".into(),
+        user: None,
+        port: None,
+        group: None,
+        tags: Vec::new(),
+        notes: None,
+        record: 99,
+    });
     let report = engine.apply_import(plan).await.expect("apply");
-    assert!(report.imported.is_empty());
+    assert_eq!(report.imported, ["termius-github.com"], "prefixed again");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == NoticeCode::AliasLooksLikeHost)
+    );
     assert_eq!(report.skipped.len(), 2);
     let text = std::fs::read_to_string(report.target).expect("conf");
     assert!(
         !text.contains("ProxyCommand") && !text.contains("Host db"),
         "{text}"
+    );
+    assert!(!text.contains("Host github.com\n"), "{text}");
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        assert!(
+            line.starts_with('#')
+                || line.starts_with("Host ")
+                || ["    HostName ", "    User ", "    Port "]
+                    .iter()
+                    .any(|p| line.starts_with(p)),
+            "unexpected line: {line:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_user_copy_after_the_include_is_detected_on_reimport() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    let csv = root.join("export.csv");
+    std::fs::write(
+        &csv,
+        "Label,Hostname/IP,Username\nweb,192.0.2.1,deploy\ndb,192.0.2.2,pg\n",
+    )
+    .expect("w");
+    let plan = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan");
+    let report = engine.apply_import(plan).await.expect("apply");
+    assert_eq!(report.imported, ["web", "db"]);
+
+    // The user adds the Include line, then copies `web` *after* it to edit
+    // it: the import file wins for `ssh web` (first value wins) until the
+    // next import leaves it out.
+    std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+    std::fs::write(
+        root.join(".ssh/config"),
+        format!(
+            "{}\n\nHost web\n    HostName 10.0.0.5\n",
+            report.include_line
+        ),
+    )
+    .expect("config");
+    let plan = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan again");
+    assert_eq!(aliases(&plan), ["db"]);
+    assert_eq!(
+        codes(&plan.skipped),
+        [(Some("web".into()), NoticeCode::AliasCollision)]
+    );
+    let report = engine.apply_import(plan).await.expect("apply again");
+    assert_eq!(report.imported, ["db"]);
+    let text = std::fs::read_to_string(&report.target).expect("conf");
+    assert!(!text.contains("Host web"), "{text}");
+    assert!(text.contains("Host db\n"), "{text}");
+    assert!(
+        text.contains("copy it to ~/.ssh/config,\n# then import again"),
+        "{text}"
+    );
+    let inventory = engine.load_hosts().await.expect("load");
+    let web = inventory
+        .hosts
+        .iter()
+        .find(|h| h.alias == "web")
+        .expect("web");
+    assert_eq!(
+        web.resolved.hostname, "10.0.0.5",
+        "the user's copy wins now"
+    );
+}
+
+#[tokio::test]
+async fn a_short_row_never_moves_a_password_into_another_field() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    let csv = root.join("shifted.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,Password,SSH_KEY\n\
+             G,web,,192.0.2.1,ssh,deploy,{SECRET}\n\
+             G,api,,192.0.2.2,ssh,22,svc,{SECRET},,extra\n"
+        ),
+    )
+    .expect("w");
+    let plan = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan");
+    assert!(plan.hosts.is_empty(), "{:?}", aliases(&plan));
+    assert_eq!(
+        codes(&plan.skipped),
+        [
+            (None, NoticeCode::ColumnCountMismatch),
+            (None, NoticeCode::ColumnCountMismatch)
+        ]
+    );
+    let first = plan.skipped.first().expect("first");
+    assert_eq!(first.record, Some(2));
+    assert!(
+        first.message.contains("7 cells and the header 9"),
+        "{first:?}"
+    );
+    let json = serde_json::to_string(&plan).expect("json");
+    let debug = format!("{plan:?}");
+    assert!(!json.contains("FAKEPASS"), "{json}");
+    assert!(!debug.contains("FAKEPASS"), "{debug}");
+    let report = engine.apply_import(plan).await.expect("apply");
+    let conf = std::fs::read_to_string(&report.target).expect("conf");
+    assert!(!conf.contains("FAKEPASS"), "{conf}");
+    assert!(!format!("{report:?}").contains("FAKEPASS"));
+
+    // Without a secret column, missing trailing cells are tolerated.
+    let csv = root.join("short.csv");
+    std::fs::write(&csv, "Label,Hostname/IP,Username,Port\nweb,192.0.2.1\n").expect("w");
+    let plan = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan");
+    assert_eq!(aliases(&plan), ["web"]);
+}
+
+#[tokio::test]
+async fn an_alias_that_looks_like_another_host_is_prefixed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    let csv = root.join("lookalike.csv");
+    std::fs::write(
+        &csv,
+        "Label,Hostname/IP\ngithub.com,203.0.113.66\ndb.example.test,DB.example.test\nweb,192.0.2.1\n",
+    )
+    .expect("w");
+    let plan = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan");
+    assert_eq!(
+        aliases(&plan),
+        ["termius-github.com", "db.example.test", "web"]
+    );
+    assert_eq!(
+        codes(&plan.warnings),
+        [(Some("github.com".into()), NoticeCode::AliasLooksLikeHost)]
+    );
+    assert_eq!(
+        host(&plan, "termius-github.com").notes.as_deref(),
+        Some("Termius: github.com")
+    );
+    let report = engine.apply_import(plan).await.expect("apply");
+    let conf = std::fs::read_to_string(&report.target).expect("conf");
+    assert!(
+        conf.contains("Host termius-github.com\n    HostName 203.0.113.66\n"),
+        "{conf}"
+    );
+    assert!(!conf.contains("Host github.com"), "{conf}");
+}
+
+#[tokio::test]
+async fn notices_are_bounded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    let csv = root.join("tags.csv");
+    let mut text = format!(
+        "Label,Hostname/IP,Tags\nmany,192.0.2.1,\"{}\"\n",
+        "!,".repeat(100_000)
+    );
+    // Every row gives up to 64 warnings: far more than the bound.
+    for n in 0..40 {
+        let _ = writeln!(text, "h{n},192.0.2.2,\"{}\"", "!,".repeat(100));
+    }
+    std::fs::write(&csv, text).expect("w");
+    let plan = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan");
+    assert_eq!(plan.hosts.len(), 41);
+    assert!(plan.warnings.len() <= 501, "{}", plan.warnings.len());
+    let last = plan.warnings.last().expect("summary");
+    assert_eq!(last.code, NoticeCode::NoticesTruncated);
+    assert!(
+        last.message.ends_with("more warnings not listed"),
+        "{last:?}"
+    );
+    // The report keeps the bound, summary included once.
+    let report = engine.apply_import(plan).await.expect("apply");
+    assert!(report.warnings.len() <= 501);
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.code == NoticeCode::NoticesTruncated)
+            .count(),
+        1
+    );
+
+    // Thousands of identical labels are renamed quickly (linear).
+    let same = root.join("same.csv");
+    let mut text = "Label,Hostname/IP\n".to_owned();
+    for _ in 0..4999 {
+        text.push_str("web,192.0.2.3\n");
+    }
+    std::fs::write(&same, text).expect("w");
+    let started = std::time::Instant::now();
+    let plan = engine
+        .plan_termius_import(&same, ImportOptions::default())
+        .await
+        .expect("plan");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(plan.hosts.len(), 4999);
+    assert_eq!(
+        plan.hosts.last().map(|h| h.alias.as_str()),
+        Some("web-4999")
+    );
+}
+
+#[tokio::test]
+async fn apply_is_all_or_nothing_when_metadata_does_not_fit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    std::fs::create_dir_all(root.join("config")).expect("mkdir");
+    // hosts.toml a few bytes under its 1 MiB bound.
+    let max = usize::try_from(portico_core::hosts::MAX_HOSTS_FILE_BYTES).expect("usize");
+    let filler = format!("# {}\n", "x".repeat(max - 10));
+    std::fs::write(root.join("config/hosts.toml"), &filler).expect("w");
+    let plan = engine
+        .plan_termius_import(fixture("termius_template.csv"), ImportOptions::default())
+        .await
+        .expect("plan");
+    let target = plan.target.clone();
+    let err = engine.apply_import(plan).await.expect_err("too large");
+    assert_eq!(err.summary().code, "file_too_large");
+    assert!(!target.exists(), "termius.conf must not be written");
+    assert_eq!(
+        std::fs::read_to_string(root.join("config/hosts.toml")).expect("meta"),
+        filler
     );
 }
 
@@ -647,4 +913,59 @@ async fn unreadable_exports_are_typed_errors() {
     let latin1 = root.join("latin1.csv");
     std::fs::write(&latin1, b"Label,Hostname/IP\ncaf\xe9,192.0.2.1\n").expect("w");
     assert_eq!(plan(latin1).await.code, "import_encoding");
+}
+
+#[tokio::test]
+async fn a_second_import_says_what_it_replaces_and_the_include_is_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    let plan = engine
+        .plan_termius_import(fixture("termius_template.csv"), ImportOptions::default())
+        .await
+        .expect("plan");
+    assert_eq!(plan.replaces, None, "nothing imported yet");
+    let report = engine.apply_import(plan).await.expect("apply");
+    assert!(!report.include_active);
+
+    let again = engine
+        .plan_termius_import(fixture("termius_template.csv"), ImportOptions::default())
+        .await
+        .expect("plan again");
+    assert_eq!(again.replaces, Some(6));
+
+    // An export where every record is skipped: the plan says it would
+    // replace the 6 hosts with none.
+    let csv = root.join("nothing.csv");
+    std::fs::write(
+        &csv,
+        "Label,Hostname/IP,Protocol\nswitch,192.0.2.9,telnet\n",
+    )
+    .expect("w");
+    let empty = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan empty");
+    assert!(empty.hosts.is_empty());
+    assert_eq!(empty.replaces, Some(6));
+
+    // The Include is found from the directive itself, even when the file
+    // it names holds no host at all.
+    std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+    std::fs::write(
+        root.join(".ssh/config"),
+        format!(
+            "{}\n\nHost mine\n    HostName 10.0.0.1\n",
+            report.include_line
+        ),
+    )
+    .expect("config");
+    let report = engine.apply_import(empty).await.expect("apply empty");
+    assert!(report.imported.is_empty());
+    assert!(report.include_active, "Include present, file empty");
+    let after = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan after");
+    assert_eq!(after.replaces, None, "the file holds no host now");
 }

@@ -4,7 +4,8 @@
 //
 // URL switches: `?import=cancel` (the picker is dismissed), `?import=error`
 // (an unrecognized file), `?import=included` (the Include line is already
-// in ~/.ssh/config).
+// in ~/.ssh/config), `?import=empty` (every record is skipped). A second
+// import in the same page says how many hosts it replaces.
 import type { Backend } from "./backend";
 import type { ImportNotice, ImportPreview, ImportReport, PlannedHost } from "./api";
 
@@ -27,19 +28,43 @@ const host = (alias: string, label: string, hostname: string, user: string, port
 
 const notice = (code: string, record: number, label: string, message: string): ImportNotice => ({ code, record, label, message });
 
+function emptyPreview(prefix: boolean): ImportPreview {
+  return {
+    token: Date.now(),
+    fileName: "switches.csv",
+    format: "Termius CSV",
+    records: 3,
+    prefix,
+    hosts: [],
+    skipped: [
+      notice("unsupported_protocol", 2, "core-switch", "the protocol is not SSH"),
+      notice("unsupported_protocol", 3, "edge-switch", "the protocol is not SSH"),
+      notice("missing_hostname", 4, "printer", "no host name or address"),
+    ],
+    warnings: [],
+    secrets: { passwords: 0, keys: 0 },
+    secretsAdvice: null,
+    identityFiles: [],
+    target: TARGET,
+    includeLine: INCLUDE,
+    replaces: importedCount || null,
+  };
+}
+
 function preview(prefix: boolean): ImportPreview {
+  if (mode === "empty") return emptyPreview(prefix);
   const p = (alias: string) => (prefix ? `termius-${alias}` : alias);
   const hosts = [
     host(p("web-eu-1"), "web eu 1", "203.0.113.10", "deploy", null, "Production/EU", ["web", "nginx"], 2),
     host(p("db-eu-1"), "db-eu-1", "203.0.113.11", "postgres", 2222, "Production/EU", ["db", "postgres"], 3),
-    host(p("at-198.51.100.7"), "AT 198.51.100.7", "198.51.100.7", "root", 38444, "Production", [], 4),
+    host("termius-at-198.51.100.7", "AT 198.51.100.7", "198.51.100.7", "root", 38444, "Production", [], 4),
     host(p("web-eu-1-2"), "web eu 1", "staging.example.test", "ubuntu", null, "Staging", ["web-serveur"], 5),
     host(p("v6-box"), "v6-box", "2001:db8::10", "ops", null, null, ["ipv6"], 7),
     host(p("bad-port"), "bad-port", "192.0.2.60", "root", null, "Lab", [], 9),
   ];
   // `web-01` exists in the demo's ssh config: without the prefix, a
   // Termius host of that name is skipped.
-  const collision = prefix ? [] : [notice("alias_collision", 11, "web-01", "`web-01` is already defined in your ssh config: skipped (import with the termius- prefix to keep both)")];
+  const collision = prefix ? [] : [notice("alias_collision", 11, "web-01", "`web-01` is already defined in your ssh config (import with the termius- prefix to keep both)")];
   if (prefix) hosts.push(host("termius-web-01", "web-01", "198.51.100.30", "deploy", null, "Production", ["web"], 11));
   return {
     token: Date.now(),
@@ -49,15 +74,16 @@ function preview(prefix: boolean): ImportPreview {
     prefix,
     hosts,
     skipped: [
-      notice("unsupported_protocol", 6, "legacy-switch", "protocol `telnet` is not SSH: skipped"),
-      notice("missing_hostname", 8, "no-host", "no host name or address: skipped"),
-      notice("invalid_hostname", 10, "inject", "the host name contains a space, line break, `#`, quote or another character not allowed in a host name: skipped"),
+      notice("unsupported_protocol", 6, "legacy-switch", "the protocol is not SSH"),
+      notice("missing_hostname", 8, "no-host", "no host name or address"),
+      notice("invalid_hostname", 10, "inject", "the host name contains a space, line break, `#`, quote or another character not allowed in a host name"),
       ...collision,
     ],
     warnings: [
       notice("alias_renamed", 5, "web eu 1", `\`${p("web-eu-1")}\` is already used in this import: imported as \`${p("web-eu-1-2")}\``),
       notice("tag_normalized", 5, "web eu 1", "tag `Web Serveur` imported as `web-serveur`"),
-      notice("invalid_port", 9, "bad-port", "port `70000` is not between 1 and 65535: left out (22 applies)"),
+      notice("invalid_port", 9, "bad-port", "the port is not between 1 and 65535: left out (22 applies)"),
+      ...(prefix ? [] : [notice("alias_looks_like_host", 4, "AT 198.51.100.7", "`at-198.51.100.7` looks like another host's name: imported as `termius-at-198.51.100.7`")]),
     ],
     secrets: { passwords: 2, keys: 1 },
     secretsAdvice:
@@ -65,11 +91,14 @@ function preview(prefix: boolean): ImportPreview {
     identityFiles: [],
     target: TARGET,
     includeLine: INCLUDE,
+    replaces: importedCount || null,
   };
 }
 
 let pending: ImportPreview | null = null;
 let imported = false;
+/** Hosts written by the last demo import (a second one replaces them). */
+let importedCount = 0;
 
 export const demoImport: Pick<Backend, "importTermiusPick" | "importTermiusReplan" | "importApply" | "importCancel"> = {
   async importTermiusPick(prefix) {
@@ -98,6 +127,7 @@ export const demoImport: Pick<Backend, "importTermiusPick" | "importTermiusRepla
     pending = null;
     const again = imported;
     imported = true;
+    importedCount = plan.hosts.length;
     return {
       formatLabel: plan.format,
       target: plan.target,
