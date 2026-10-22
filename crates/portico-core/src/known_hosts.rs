@@ -257,6 +257,19 @@ impl KnownHosts {
         out
     }
 
+    /// SHA256 fingerprints of the plain keys recorded for this host (what
+    /// remembered passwords are bound to), without duplicates.
+    pub(crate) fn fingerprints(&self, host: &str, port: u16) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for e in self.matching(host, port, Marker::None) {
+            let fingerprint = e.key.fingerprint(HashAlg::Sha256).to_string();
+            if !out.contains(&fingerprint) {
+                out.push(fingerprint);
+            }
+        }
+        out
+    }
+
     /// `true` if an `@cert-authority` line covers this host.
     pub fn has_cert_authority(&self, host: &str, port: u16) -> bool {
         self.matching(host, port, Marker::CertAuthority)

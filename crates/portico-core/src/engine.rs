@@ -38,7 +38,7 @@ use crate::logs::{LogRecord, LogRing};
 use crate::secrets::SecretStore;
 use crate::session::{self, Attached, SessionCommand, SessionCtx};
 use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
-use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
+use crate::ssh_config::{ConfigWarning, ResolveContext};
 use crate::store::Paths;
 
 /// Capacity of the control-plane broadcast channel. Slow subscribers get
@@ -307,13 +307,16 @@ impl Engine {
         self.inner.events.subscribe()
     }
 
-    /// Parses `~/.ssh/config` (+ includes) and merges Portico metadata.
+    /// Parses `~/.ssh/config` (+ includes) with Portico's `hosts.conf`
+    /// (see [`crate::managed_hosts`]) and merges Portico metadata. Each
+    /// host says which file it comes from ([`crate::hosts::HostOrigin`]).
     pub async fn load_hosts(&self) -> Result<HostInventory> {
         let config = self.inner.config.clone();
         tokio::task::spawn_blocking(move || {
-            let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+            let ssh = crate::managed_hosts::load_config(&config.paths)?;
             let (meta, meta_warnings) = crate::hosts::load_meta(&config.paths.hosts_meta())?;
-            let hosts = inventory(&ssh, &meta, &config.resolve_context(None));
+            let mut hosts = inventory(&ssh, &meta, &config.resolve_context(None));
+            crate::managed_hosts::mark_origins(&config.paths, &mut hosts);
             let mut warnings = ssh.warnings().to_vec();
             warnings.extend(meta_warnings);
             warnings.extend(
@@ -1026,7 +1029,7 @@ impl Engine {
         let config = self.inner.config.clone();
         let alias = alias.to_owned();
         tokio::task::spawn_blocking(move || {
-            let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+            let ssh = crate::managed_hosts::load_config(&config.paths)?;
             Ok(crate::effective::compute(&ssh, &config, &alias, None))
         })
         .await
@@ -1190,6 +1193,111 @@ impl Engine {
 }
 
 // ════ end Phase 5 ════════════════════════════════════════════════════════
+
+// ════ Phase 6b: hosts created in Portico (additive block) ════════════════
+//
+// `hosts.conf` edits run on `spawn_blocking` under its lock (file I/O,
+// keyring); see `crate::managed_hosts`.
+
+impl Engine {
+    /// Creates a host in Portico's `hosts.conf`, with its metadata and,
+    /// when given, a password to remember. Emits
+    /// [`EngineEvent::HostsChanged`], then [`EngineEvent::HostMeta`].
+    pub async fn create_host(
+        &self,
+        draft: crate::managed_hosts::HostDraft,
+    ) -> Result<crate::managed_hosts::HostSummary> {
+        let config = self.inner.config.clone();
+        let summary =
+            tokio::task::spawn_blocking(move || crate::managed_hosts::create(&config, &draft))
+                .await
+                .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(Some(&summary));
+        Ok(summary)
+    }
+
+    /// Replaces the Portico host `alias` (renaming allowed: its metadata
+    /// moves too). A host of `~/.ssh/config` is refused with
+    /// `host_read_only`. Emits [`EngineEvent::HostsChanged`], then
+    /// [`EngineEvent::HostMeta`].
+    pub async fn update_host(
+        &self,
+        alias: &str,
+        draft: crate::managed_hosts::HostDraft,
+    ) -> Result<crate::managed_hosts::HostSummary> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        let summary = tokio::task::spawn_blocking(move || {
+            crate::managed_hosts::update(&config, &alias, &draft)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(Some(&summary));
+        Ok(summary)
+    }
+
+    /// Deletes the Portico host `alias`, its metadata and its remembered
+    /// password. Emits [`EngineEvent::HostsChanged`].
+    pub async fn delete_host(&self, alias: &str) -> Result<()> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || crate::managed_hosts::delete(&config, &alias))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(None);
+        Ok(())
+    }
+
+    /// Copies the effective `HostName`, `User`, `Port`, `IdentityFile` and
+    /// `ProxyJump` of any host (one of `~/.ssh/config` included) into a new
+    /// Portico host `new_alias`. Emits [`EngineEvent::HostsChanged`], then
+    /// [`EngineEvent::HostMeta`].
+    pub async fn duplicate_as_managed(
+        &self,
+        alias: &str,
+        new_alias: &str,
+    ) -> Result<crate::managed_hosts::HostSummary> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        let new_alias = new_alias.to_owned();
+        let summary = tokio::task::spawn_blocking(move || {
+            crate::managed_hosts::duplicate(&config, &alias, &new_alias)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(Some(&summary));
+        Ok(summary)
+    }
+
+    /// The line to add at the top of `~/.ssh/config` so `ssh`, `scp` and
+    /// `git` see the hosts created in Portico (Portico never adds it).
+    pub fn managed_include_line(&self) -> String {
+        crate::managed_hosts::include_line_for(&self.inner.config.paths)
+    }
+
+    /// `true` when `~/.ssh/config` already has an `Include` resolving to
+    /// `hosts.conf`.
+    pub async fn managed_include_active(&self) -> Result<bool> {
+        let paths = self.inner.config.paths.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::import::include_active(&paths, &paths.managed_hosts())
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)
+    }
+
+    fn hosts_changed(&self, summary: Option<&crate::managed_hosts::HostSummary>) {
+        self.emit(EngineEvent::HostsChanged);
+        if let Some(summary) = summary {
+            self.emit(EngineEvent::HostMeta {
+                alias: summary.host.alias.clone(),
+                meta: summary.meta.clone(),
+            });
+        }
+    }
+}
+
+// ════ end Phase 6b ═══════════════════════════════════════════════════════
 
 // ════ Phase 6: session recording (additive block) ════════════════════════
 //

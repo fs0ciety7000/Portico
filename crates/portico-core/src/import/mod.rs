@@ -42,7 +42,7 @@ use time::OffsetDateTime;
 use crate::error::Result;
 use crate::hosts::{HostMeta, ImportedMeta, merge_imported_meta};
 use crate::ssh_config::SshConfig;
-use crate::store::{self, Paths};
+use crate::store::{self, Paths, same_file};
 
 pub use termius::TermiusFormat;
 
@@ -467,7 +467,7 @@ pub(crate) fn slug(raw: &str, max: usize) -> String {
 }
 
 /// `true` for an alias Portico generates (and accepts back in a plan).
-fn is_valid_alias(alias: &str) -> bool {
+pub(crate) fn is_valid_alias(alias: &str) -> bool {
     !alias.is_empty()
         && alias.chars().count() <= MAX_ALIAS_CHARS
         && alias
@@ -545,13 +545,14 @@ pub fn include_line(paths: &Paths, target: &Path) -> String {
     }
 }
 
-/// Lowercased aliases of the user's ssh config, except the occurrences
+/// Lowercased aliases of the user's ssh config and of Portico's own
+/// `hosts.conf` (see [`crate::managed_hosts`]), except the occurrences
 /// declared in `exclude` (the import file itself: re-importing never
 /// collides with the previous import). Every occurrence counts, not only
 /// the first: a host the user copied into their own config *after* the
 /// `Include` is still seen, so the next import leaves it out of the file.
 pub(crate) fn existing_aliases(paths: &Paths, exclude: &Path) -> Result<HashSet<String>> {
-    let config = SshConfig::load(&paths.ssh_config(), &paths.ssh_dir)?;
+    let config = crate::managed_hosts::load_config(paths)?;
     Ok(config
         .all_concrete_aliases()
         .into_iter()
@@ -563,11 +564,16 @@ pub(crate) fn existing_aliases(paths: &Paths, exclude: &Path) -> Result<HashSet<
 /// `true` when the user's ssh config has an `Include` (nested ones too)
 /// that resolves to `target`, whatever the file holds.
 pub(crate) fn include_active(paths: &Paths, target: &Path) -> bool {
-    SshConfig::load(&paths.ssh_config(), &paths.ssh_dir).is_ok_and(|c| {
-        c.included_files()
-            .iter()
-            .any(|included| same_file(included, target))
-    })
+    SshConfig::load(&paths.ssh_config(), &paths.ssh_dir).is_ok_and(|c| includes(&c, target))
+}
+
+/// `true` when `config` has an `Include` (nested ones too) that resolves
+/// to `target`.
+pub(crate) fn includes(config: &SshConfig, target: &Path) -> bool {
+    config
+        .included_files()
+        .iter()
+        .any(|included| same_file(included, target))
 }
 
 /// The number of `Host` blocks in the import file `target`, `None` when it
@@ -584,16 +590,6 @@ pub(crate) fn host_blocks(target: &Path) -> Result<Option<usize>> {
         })
         .count();
     Ok((count > 0).then_some(count))
-}
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
 }
 
 /// The config file text for `hosts` (only `Host`, `HostName`, `User`,

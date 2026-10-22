@@ -143,6 +143,7 @@ pub(crate) fn test_host(alias: &str, group: Option<&str>) -> HostEntry {
             file: PathBuf::from("cfg"),
             line: 1,
         },
+        origin: portico_core::hosts::HostOrigin::SshConfig,
         resolved: config.resolve(alias, &ctx),
         meta: HostMeta {
             group: group.map(str::to_owned),

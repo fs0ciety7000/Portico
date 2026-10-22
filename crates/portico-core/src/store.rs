@@ -5,6 +5,7 @@
 //! | file              | content                                   |
 //! |-------------------|-------------------------------------------|
 //! | `hosts.toml`      | tags, groups, favorites, notes per alias  |
+//! | `hosts.conf`      | `ssh_config` fragment of the hosts created in Portico |
 //! | `snippets.toml`   | command snippets                          |
 //! | `settings.toml`   | theme, keymap overrides, preferences      |
 //! | `state/recent.toml` | recent sessions (data dir)              |
@@ -88,6 +89,12 @@ impl Paths {
         self.config_dir.join("hosts.toml")
     }
 
+    /// `hosts.conf` (config dir): the `ssh_config` fragment of the hosts
+    /// created in Portico, see [`crate::managed_hosts`].
+    pub fn managed_hosts(&self) -> PathBuf {
+        self.config_dir.join("hosts.conf")
+    }
+
     /// `settings.toml` (config dir), see [`crate::settings`].
     pub fn settings(&self) -> PathBuf {
         self.config_dir.join("settings.toml")
@@ -109,6 +116,18 @@ impl Paths {
             .iter()
             .map(|n| self.ssh_dir.join(n))
             .collect()
+    }
+}
+
+/// `true` when `a` and `b` name the same file: equal paths, or equal once
+/// canonicalized (both must exist for that). Blocking.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 

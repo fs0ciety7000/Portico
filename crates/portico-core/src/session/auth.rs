@@ -9,6 +9,12 @@
 //!    answered from the secret store);
 //! 4. `password` (secret store first, then up to 3 prompts).
 //!
+//! The secret store holds passwords bound to the verified host key
+//! ([`SecretKey::HostPassword`]). A password typed when a host was created in
+//! Portico has no key yet ([`SecretKey::UnboundHostPassword`]): it is offered
+//! only after the host key passed verification, when no bound one exists, and
+//! the first login it opens binds it to that key (moved, never copied).
+//!
 //! Secrets never reach logs: only fingerprints, paths and method names do.
 
 use std::path::{Path, PathBuf};
@@ -455,8 +461,13 @@ impl Auth<'_> {
     // ── keyboard-interactive ───────────────────────────────────────────────
 
     async fn keyboard_interactive(&mut self) -> Result<bool> {
-        let mut stored = self.stored_password().await;
+        let (mut stored, unbound) = match self.stored_password().await {
+            Some((secret, unbound)) => (Some(secret), unbound),
+            None => (None, false),
+        };
         for _ in 0..self.password_attempts {
+            // Whether this attempt answered with the stored password.
+            let had_stored = stored.is_some();
             if !self.allows(MethodKind::KeyboardInteractive) {
                 return Ok(false);
             }
@@ -476,6 +487,8 @@ impl Auth<'_> {
                     KeyboardInteractiveAuthResponse::Success => {
                         if let Some(secret) = remember {
                             self.save_password(secret).await;
+                        } else if unbound && had_stored && stored.is_none() {
+                            self.bind_unbound_password().await;
                         }
                         return Ok(true);
                     }
@@ -608,7 +621,7 @@ impl Auth<'_> {
             return Ok(false);
         }
         self.mark("password");
-        if let Some(stored) = self.stored_password().await {
+        if let Some((stored, unbound)) = self.stored_password().await {
             self.ctx.phase(SessionPhase::Authenticating {
                 method: AuthMethod::Password,
             });
@@ -619,7 +632,11 @@ impl Auth<'_> {
                 .authenticate_password(self.hop.user.clone(), stored.expose_secret())
                 .await
                 .map_err(|e| transport(self.hop, &e))?;
+            drop(stored);
             if self.settle(r) {
+                if unbound {
+                    self.bind_unbound_password().await;
+                }
                 return Ok(true);
             }
             self.ctx
@@ -676,14 +693,72 @@ impl Auth<'_> {
         }
     }
 
-    async fn stored_password(&self) -> Option<SecretString> {
+    fn unbound_password_key(&self) -> SecretKey {
+        SecretKey::UnboundHostPassword {
+            user: self.hop.user.clone(),
+            host: self.identity.name.clone(),
+            port: self.identity.port,
+        }
+    }
+
+    /// The remembered password: the one bound to this host key, else the
+    /// one typed when the host was created in Portico (`true`: unbound).
+    async fn stored_password(&self) -> Option<(SecretString, bool)> {
         let store = std::sync::Arc::clone(&self.ctx.engine.config().secrets);
-        let key = self.password_key();
-        tokio::task::spawn_blocking(move || store.get(&key))
-            .await
-            .ok()
-            .and_then(std::result::Result::ok)
-            .flatten()
+        let bound = self.password_key();
+        let unbound = self.unbound_password_key();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(Some(secret)) = store.get(&bound) {
+                return Some((secret, false));
+            }
+            store
+                .get(&unbound)
+                .ok()
+                .flatten()
+                .map(|secret| (secret, true))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Moves the unbound password to the key of this (verified) server:
+    /// from now on only this server identity receives it.
+    async fn bind_unbound_password(&self) {
+        let store = std::sync::Arc::clone(&self.ctx.engine.config().secrets);
+        let bound = self.password_key();
+        let unbound = self.unbound_password_key();
+        let moved = tokio::task::spawn_blocking(move || -> crate::error::Result<bool> {
+            let Some(secret) = store.get(&unbound)? else {
+                return Ok(false);
+            };
+            store.set(&bound, &secret)?;
+            store.delete(&unbound)?;
+            Ok(true)
+        })
+        .await;
+        match moved {
+            Ok(Ok(true)) => self.ctx.log(
+                LogLevel::Info,
+                "secrets",
+                "password bound to this server's host key",
+            ),
+            Ok(Ok(false)) => {}
+            // The error code only: never a secret.
+            Ok(Err(e)) => self.ctx.log(
+                LogLevel::Warn,
+                "secrets",
+                format!(
+                    "could not bind the password to the host key ({})",
+                    e.summary().code
+                ),
+            ),
+            Err(_) => self.ctx.log(
+                LogLevel::Warn,
+                "secrets",
+                "could not bind the password to the host key",
+            ),
+        }
     }
 
     async fn save_password(&self, secret: SecretString) {

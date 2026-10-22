@@ -38,6 +38,23 @@ pub(crate) struct HostIdentity {
     pub(crate) fingerprint: String,
 }
 
+/// The name and port `resolved` is looked up under in `known_hosts`: the
+/// `HostKeyAlias` (port 22: OpenSSH ignores the port for it) or the
+/// lowercased `HostName` and port. Remembered passwords are bound to it.
+pub(crate) fn known_hosts_name(resolved: &crate::ssh_config::ResolvedHost) -> (String, u16) {
+    match resolved.options.get("hostkeyalias").and_then(|v| v.first()) {
+        // OpenSSH takes a single alias and ignores the port for it.
+        Some((args, _)) if !args.is_empty() => (
+            args.first()
+                .map(|a| a.to_ascii_lowercase())
+                .unwrap_or_default(),
+            22,
+        ),
+        // known_hosts names are lowercase (OpenSSH lowercases before hashing).
+        _ => (resolved.hostname.to_ascii_lowercase(), resolved.port),
+    }
+}
+
 /// Where and how to verify the server key.
 #[derive(Debug)]
 struct HostCheck {
@@ -101,25 +118,7 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop, is_target: bool) -> Resul
         ctx.log(LogLevel::Warn, "known_hosts", w.clone());
     }
 
-    let (name, port) = match hop
-        .resolved
-        .options
-        .get("hostkeyalias")
-        .and_then(|v| v.first())
-    {
-        // OpenSSH takes a single alias and ignores the port for it.
-        Some((args, _)) if !args.is_empty() => (
-            args.first()
-                .map(|a| a.to_ascii_lowercase())
-                .unwrap_or_default(),
-            22,
-        ),
-        // known_hosts names are lowercase (OpenSSH lowercases before hashing).
-        _ => (
-            hop.resolved.hostname.to_ascii_lowercase(),
-            hop.resolved.port,
-        ),
-    };
+    let (name, port) = known_hosts_name(&hop.resolved);
     known_hosts::validate_host_name(&name)?;
 
     let mut preferred = russh::Preferred::default();

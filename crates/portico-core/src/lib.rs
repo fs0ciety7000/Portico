@@ -32,6 +32,7 @@ pub mod import;
 pub mod keys;
 pub mod known_hosts;
 pub mod logs;
+pub mod managed_hosts;
 pub mod recent;
 pub mod recording;
 pub mod search;
