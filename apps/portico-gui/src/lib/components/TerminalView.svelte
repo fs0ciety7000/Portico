@@ -14,6 +14,7 @@
   import { asError, formatRtt, sentence } from "../api";
   import { backend } from "../backend";
   import { chunks, sanitizePaste, sanitizeTitle } from "../keys";
+  import { hardwareWebgl } from "../webgl";
   import { keymap } from "../state/keymap.svelte";
   import { logs } from "../state/logs.svelte";
   import { dur } from "../motion";
@@ -121,7 +122,11 @@
   function schedule() {
     if (flushScheduled || sending || pane.terminal === null) return;
     flushScheduled = true;
-    requestAnimationFrame(() => {
+    // A microtask, not a frame: WebKitGTK can hold animation frames back for
+    // tens of milliseconds (software rendering, Wayland frame callbacks) and
+    // every keystroke would wait for one. Keys typed while a send is in
+    // flight still go out together (see `flush`).
+    queueMicrotask(() => {
       flushScheduled = false;
       void flush();
     });
@@ -313,13 +318,16 @@
     fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    try {
-      const webgl = new WebglAddon();
-      // GPU context lost (sleep, driver reset): fall back to the DOM renderer.
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      // No WebGL2: the DOM renderer is already active.
+    // On a CPU rasterizer the DOM renderer is faster (src/lib/webgl.ts).
+    if (hardwareWebgl()) {
+      try {
+        const webgl = new WebglAddon();
+        // GPU context lost (sleep, driver reset): fall back to the DOM renderer.
+        webgl.onContextLoss(() => webgl.dispose());
+        term.loadAddon(webgl);
+      } catch {
+        // No WebGL2: the DOM renderer is already active.
+      }
     }
 
     term.attachCustomKeyEventHandler((e) => {
