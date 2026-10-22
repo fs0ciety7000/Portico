@@ -34,6 +34,17 @@ export interface HostForm {
   password: string;
 }
 
+/** Under the password field when a password is set or kept (same wording
+ * as the TUI): where a remembered password goes (risk 13 of SECURITY.md). */
+export const PASSWORD_DESTINATION_NOTE =
+  "Sent automatically to the server that answers at this address, after its host key is verified; then tied to that key.";
+
+/** True when the form sets a password (typed) or keeps the remembered one. */
+export function sendsPassword(form: HostForm, editing: boolean): boolean {
+  if (!editing) return form.password !== "";
+  return form.passwordMode === "keep" || (form.passwordMode === "set" && form.password !== "");
+}
+
 export function emptyForm(): HostForm {
   return {
     alias: "",

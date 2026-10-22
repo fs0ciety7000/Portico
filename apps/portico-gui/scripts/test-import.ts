@@ -2,11 +2,16 @@
 // Node's built-in test runner, no dependency.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ImportNotice, ImportPreview, ImportReport, PlannedKey } from "../src/lib/api.ts";
+import type { ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey } from "../src/lib/api.ts";
 import {
   applyLabel,
   applyRequest,
+  destinationChanges,
+  destinationText,
   dialogTitle,
+  hostsToWrite,
+  ignoredSecretsAdvice,
+  keepRedirects,
   keepSelected,
   keyHosts,
   keysToWrite,
@@ -15,8 +20,11 @@ import {
   passphraseError,
   reportKeysLine,
   shortFingerprint,
+  splitDestinationChanges,
   splitNotices,
   toggleKey,
+  toggleRedirect,
+  UNVERIFIED_FINGERPRINT,
   wantsPassphrase,
 } from "../src/lib/importform.ts";
 
@@ -26,6 +34,7 @@ const key = (id: string, extra: Partial<PlannedKey> = {}): PlannedKey => ({
   fingerprint: id,
   format: "open_ssh",
   encrypted: false,
+  fingerprintVerified: true,
   aliases: ["web"],
   local: null,
   ...extra,
@@ -57,6 +66,7 @@ const preview = (keys: PlannedKey[] = KEYS, hosts = 3): ImportPreview => ({
     favorite: false,
     key: null,
     update: false,
+    previous: null,
     sourceId: String(i),
   })),
   skipped: [],
@@ -103,8 +113,8 @@ test("passphrase confirmation", () => {
 
 test("the apply request: token, prefix, ticked ids, passphrase only when it applies", () => {
   const p = preview();
-  assert.deepEqual(applyRequest(p, [], "secret"), { token: 7, prefix: false, keys: [], passphrase: null });
-  assert.deepEqual(applyRequest(p, [PLAIN.id, "SHA256:stranger"], "secret"), { token: 7, prefix: false, keys: [PLAIN.id], passphrase: "secret" });
+  assert.deepEqual(applyRequest(p, [], "secret"), { token: 7, prefix: false, keys: [], redirect: [], passphrase: null });
+  assert.deepEqual(applyRequest(p, [PLAIN.id, "SHA256:stranger"], "secret"), { token: 7, prefix: false, keys: [PLAIN.id], redirect: [], passphrase: "secret" });
   assert.equal(applyRequest(p, [LOCKED.id], "secret").passphrase, null, "an encrypted key keeps its own");
   assert.equal(applyRequest(p, [PLAIN.id], "").passphrase, null, "empty: none");
 });
@@ -162,4 +172,62 @@ test("report: keys imported, reused, skipped", () => {
   assert.equal(reportKeysLine(report({ imported: [], reused: [], skipped: 0 })), null);
   assert.equal(reportKeysLine(report({ imported: ["~/.ssh/portico/web"], reused: ["~/.ssh/id_ed25519"], skipped: 1 })), "1 key imported, 1 reused from ~/.ssh, 1 not imported.");
   assert.equal(reportKeysLine(report({ imported: [], reused: [], skipped: 2 })), "2 not imported.");
+});
+
+/** A re-import: `web` moved to another server, `db` did not. */
+const moved = (): ImportPreview => {
+  const p = preview([], 3);
+  const [a, b, c] = p.hosts as [PlannedHost, PlannedHost, PlannedHost];
+  p.hosts = [
+    { ...a, alias: "web", hostname: "198.51.100.99", user: "deploy", update: true, previous: { hostname: "203.0.113.10", user: "deploy", port: 2222, identityFile: "~/.ssh/portico/web" } },
+    { ...b, alias: "db", update: true },
+    { ...c, alias: "mail", hostname: "198.51.100.25", update: true, previous: { hostname: "203.0.113.25", user: null, port: null, identityFile: null } },
+  ];
+  return p;
+};
+
+test("destination changes: unticked by default, only plan aliases, skipped unless accepted", () => {
+  const p = moved();
+  assert.deepEqual(destinationChanges(p.hosts).map((h) => h.alias), ["web", "mail"]);
+  assert.deepEqual(applyRequest(p, [], "").redirect, [], "none accepted by default");
+  assert.deepEqual(hostsToWrite(p.hosts, []).map((h) => h.alias), ["db"]);
+  assert.equal(applyLabel(p, []), "Import 1 host", "a change not accepted is not counted");
+
+  let accepted = toggleRedirect(p.hosts, [], "mail");
+  accepted = toggleRedirect(p.hosts, accepted, "web");
+  assert.deepEqual(accepted, ["web", "mail"], "plan order");
+  assert.deepEqual(toggleRedirect(p.hosts, accepted, "db"), accepted, "no destination change: ignored");
+  assert.deepEqual(toggleRedirect(p.hosts, accepted, "stranger"), accepted, "not in the plan: ignored");
+  assert.deepEqual(toggleRedirect(p.hosts, accepted, "mail"), ["web"], "untick");
+  assert.deepEqual(hostsToWrite(p.hosts, ["web"]).map((h) => h.alias), ["web", "db"]);
+  assert.equal(applyLabel(p, [], ["web", "mail"]), "Import 3 hosts");
+  assert.deepEqual(applyRequest(p, [], "", ["mail", "db", "stranger"]).redirect, ["mail"], "only changes of the plan are sent");
+  // A replan (prefix) renames the aliases: the old answers do not carry over.
+  const renamed = { ...p, hosts: p.hosts.map((h) => ({ ...h, alias: `termix-${h.alias}` })) };
+  assert.deepEqual(keepRedirects(renamed.hosts, ["web", "mail"]), []);
+});
+
+test("destination and fingerprint texts", () => {
+  assert.equal(destinationText({ hostname: "203.0.113.10", user: "deploy", port: 2222 }), "deploy@203.0.113.10:2222");
+  assert.equal(destinationText({ hostname: "203.0.113.25", user: null, port: null }), "203.0.113.25");
+  assert.equal(UNVERIFIED_FINGERPRINT, "fingerprint not verified (encrypted key)");
+  assert.match(noticeExplanation("destination_changed") ?? "", /Accept the new destination/);
+  const n = (code: string): ImportNotice => ({ code, record: 1, label: null, message: "m" });
+  const split = splitDestinationChanges([n("destination_changed"), n("alias_collision"), n("destination_changed")]);
+  assert.equal(split.changes.length, 2, "the report lists skipped destination changes apart");
+  assert.deepEqual(split.other.map((x) => x.code), ["alias_collision"]);
+});
+
+test("ignored secrets advice leaves out zero counts", () => {
+  assert.equal(ignoredSecretsAdvice({ passwords: 0, keys: 0, keysInExport: 0 }), null);
+  const both = ignoredSecretsAdvice({ passwords: 2, keys: 1, keysInExport: 0 }) ?? "";
+  assert.match(both, /^2 passwords and 1 key ignored \(never imported\)\. The export holds them in clear text: delete it/);
+  const passwords = ignoredSecretsAdvice({ passwords: 1, keys: 0, keysInExport: 0 }) ?? "";
+  assert.match(passwords, /^1 password ignored/);
+  assert.doesNotMatch(passwords, /\b0 /);
+  const keys = ignoredSecretsAdvice({ passwords: 0, keys: 3, keysInExport: 3 }) ?? "";
+  assert.match(keys, /^3 keys ignored \(never imported\)\. The export holds 3 private keys in clear text or encrypted:/);
+  const allImported = ignoredSecretsAdvice({ passwords: 0, keys: 0, keysInExport: 2 }) ?? "";
+  assert.equal(allImported, "The export holds 2 private keys in clear text or encrypted: delete it once the import is done, and keep secrets in your keychain or ssh-agent.");
+  assert.doesNotMatch(allImported, /\b0 /);
 });

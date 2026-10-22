@@ -2,7 +2,7 @@
   // Engine prompts: new host key (TOFU), password, key passphrase,
   // keyboard-interactive. Secrets live in this component only until they are
   // sent, then the fields are cleared.
-  import { displayPath, type Prompt, type PromptAnswer } from "../api";
+  import { displayPath, SENDS_REMEMBERED_PASSWORD, type Prompt, type PromptAnswer } from "../api";
   import { sanitizeRemote } from "../keys";
   import { vault } from "../state/vault.svelte";
   import Modal from "./Modal.svelte";
@@ -94,6 +94,9 @@
         <dt>Key type</dt><dd>{kind.algorithm}</dd>
         <dt>Fingerprint</dt><dd class="fingerprint">{kind.fingerprint}</dd>
       </dl>
+      {#if kind.sends_remembered_password}
+        <p class="warning" data-testid="sends-password">{SENDS_REMEMBERED_PASSWORD}</p>
+      {/if}
       {#if unusual}
         <p class="warning">
           This host is already known with another key type ({kind.other_algorithms.join(", ")}). This is unusual.

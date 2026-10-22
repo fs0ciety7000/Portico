@@ -608,6 +608,39 @@ test("Termix import: preview, one key ticked, written to ~/.ssh/portico, connect
   await capture("termix-connected");
 });
 
+test("Termix re-import that moves a host: skipped by default, accepted only when ticked", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const before = readFileSync(hostsConf, "utf8");
+  // The same export, now pointing the record at another address.
+  const original = env("E2E_TERMIX_EXPORT");
+  const moved = original.replace(/\.json$/, "-moved.json");
+  const data = JSON.parse(readFileSync(original, "utf8")) as { hosts: { ip: string }[] };
+  for (const h of data.hosts) h.ip = "127.0.0.2";
+  writeFileSync(moved, JSON.stringify(data), { mode: 0o600 });
+
+  await hostsView();
+  await palette("Import hosts");
+  await pickNativeFile(moved, "Import hosts");
+  await dialog("Import from Termix");
+  const preview = await modal();
+  assert.match(preview, /destination changed/i);
+  assert.match(preview, /127\.0\.0\.1:\d+/, "old destination");
+  assert.match(preview, /127\.0\.0\.2:\d+/, "new destination");
+  assert.match(preview, /0 hosts to import/);
+  assert.match(preview, /1 destination change skipped unless accepted/);
+  const accept = "document.querySelector('.modal .hosts li.changed input[type=checkbox]')";
+  assert.equal(await s.exec<boolean>(`return ${accept}.checked`), false, "not accepted by default");
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal footer button.primary').disabled"), true, "nothing to write");
+  await capture("termix-destination-changed");
+
+  // Ticking it counts the host; the dialog is then cancelled: nothing moves.
+  await s.exec(`${accept}.click()`);
+  await waitFor("redirect accepted", async () => /Import 1 host/.test(await text(".modal footer")));
+  await press(Key.Escape);
+  await noDialog();
+  assert.equal(readFileSync(hostsConf, "utf8"), before, "hosts.conf unchanged");
+});
+
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();

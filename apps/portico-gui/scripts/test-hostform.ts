@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Host, ManagedHost } from "../src/lib/api.ts";
-import { capitalizable, emptyForm, fieldOf, FIELD_ORDER, formFromHost, isDirty, KEEP_IDENTITY, parsePort, suggestAlias, toDraft } from "../src/lib/hostform.ts";
+import { capitalizable, emptyForm, fieldOf, FIELD_ORDER, formFromHost, isDirty, KEEP_IDENTITY, parsePort, PASSWORD_DESTINATION_NOTE, sendsPassword, suggestAlias, toDraft } from "../src/lib/hostform.ts";
 
 /** What hosts.conf holds (`managed_host`): the key mapped to a discovered id in Rust. */
 const own = (identityFile: string | null, keyId: string | null): ManagedHost => ({
@@ -153,4 +153,19 @@ test("duplicate alias suggestion is a valid, free alias", () => {
   assert.equal(suggestAlias("Web Prod", ["web-prod-copy"]), "web-prod-copy-2");
   assert.equal(suggestAlias(".hidden", []), "hidden-copy");
   assert.match(suggestAlias("x".repeat(80), []), /^x{55}-copy$/);
+});
+
+test("the password destination note shows when a password is set or kept", () => {
+  assert.equal(
+    PASSWORD_DESTINATION_NOTE,
+    "Sent automatically to the server that answers at this address, after its host key is verified; then tied to that key.",
+    "same wording as the TUI",
+  );
+  const form = emptyForm();
+  assert.equal(sendsPassword(form, false), false, "creating, nothing typed");
+  assert.equal(sendsPassword({ ...form, password: "s3cret" }, false), true, "creating, typed");
+  assert.equal(sendsPassword({ ...form, passwordMode: "keep" }, true), true, "editing, kept");
+  assert.equal(sendsPassword({ ...form, passwordMode: "set" }, true), false, "editing, nothing typed yet");
+  assert.equal(sendsPassword({ ...form, passwordMode: "set", password: "x" }, true), true, "editing, new one typed");
+  assert.equal(sendsPassword({ ...form, passwordMode: "forget" }, true), false, "editing, forgotten");
 });

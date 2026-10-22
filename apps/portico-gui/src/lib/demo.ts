@@ -152,7 +152,9 @@ async function run(id: number, host: Host) {
       hint: "Do not connect. Verify the new key with the server administrator; if legitimate, remove the old line from known_hosts.",
     });
   }
-  if (host.alias === "web-01") {
+  // `nas` is a Portico host created with a password: accepting its first
+  // key sends that password (`sends_remembered_password`).
+  if (host.alias === "web-01" || host.alias === "nas") {
     const a = await ask(id, {
       kind: "unknown_host_key",
       host: host.hostname,
@@ -160,6 +162,7 @@ async function run(id: number, host: Host) {
       algorithm: "ssh-ed25519",
       fingerprint: "SHA256:q2Xn8kD0bT1sV9cXr4mJ7yPwZ3aLhE5uGfN6oKiRtYs",
       other_algorithms: [],
+      sends_remembered_password: host.alias === "nas",
     });
     if (a.kind !== "accept_host_key") {
       return fail(id, { code: "host_key_rejected", message: `host key for ${host.hostname} was not trusted`, hint: null });

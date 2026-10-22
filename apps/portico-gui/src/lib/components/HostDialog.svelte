@@ -16,6 +16,8 @@
     isDirty,
     KEEP_IDENTITY,
     keyValue,
+    PASSWORD_DESTINATION_NOTE,
+    sendsPassword,
     toDraft,
     type FieldName,
     type HostForm,
@@ -335,8 +337,13 @@
         <span class="help">The remembered password is forgotten when you save.</span>
       {:else if editing && form.passwordMode === "keep"}
         <span class="help">The remembered password, if any, stays as it is.</span>
+      {:else if form.password}
+        <span class="help">Remembered in your keyring (or the vault), never written to a file.</span>
       {:else}
         <span class="help">Remembered in your keyring (or the vault), never written to a file. Offered only once the host key is verified.</span>
+      {/if}
+      {#if !errors.password && sendsPassword(form, editing)}
+        <span class="help" data-testid="password-destination">{PASSWORD_DESTINATION_NOTE}</span>
       {/if}
     </div>
 
