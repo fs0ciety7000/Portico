@@ -66,6 +66,20 @@ export function buildRows(
   return rows;
 }
 
+/**
+ * Where the selected row is after the list changed under it: the same row,
+ * else the same host moved to another section (an edit changed its group,
+ * "Recent" appeared), else -1: the index stays, so a host removed from
+ * "Recent" (x) hands the selection to the next one.
+ */
+export function relocate(rows: Row[], previous: Row | undefined): number {
+  if (!previous) return -1;
+  const same = rows.findIndex((r) => r.key === previous.key);
+  if (same >= 0 || previous.kind !== "host" || previous.section.kind === "recent") return same;
+  const alias = previous.host.alias;
+  return rows.findIndex((r) => r.kind === "host" && r.section.kind !== "recent" && r.host.alias === alias);
+}
+
 /** Existing group names, alphabetical (suggestions in the editor). */
 export function groupNames(hosts: Host[]): string[] {
   const names = new Set<string>();
