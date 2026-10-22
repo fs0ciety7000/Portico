@@ -1277,6 +1277,28 @@ impl Engine {
         Ok(summary)
     }
 
+    /// The values `hosts.conf` itself holds for the Portico host `alias`
+    /// (alias matched without case), or `None` when it is not a Portico
+    /// host. Edit forms prefill from this, never from the resolved config:
+    /// an earlier value elsewhere in `~/.ssh/config` (an `Include` placed
+    /// lower down) must not hide, then erase, a value of the file.
+    pub async fn managed_host(
+        &self,
+        alias: &str,
+    ) -> Result<Option<crate::managed_hosts::ManagedHost>> {
+        let paths = self.inner.config.paths.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::managed_hosts::read_hosts(&paths).map(|hosts| {
+                hosts
+                    .into_iter()
+                    .find(|host| host.alias.eq_ignore_ascii_case(&alias))
+            })
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
+    }
+
     /// Deletes the Portico host `alias`, its metadata and its remembered
     /// password. Emits [`EngineEvent::HostsChanged`].
     pub async fn delete_host(&self, alias: &str) -> Result<()> {

@@ -347,3 +347,37 @@ async fn openssh_reads_hosts_conf_like_portico() {
             .any(|l| l == "proxyjump bastion")
     );
 }
+
+#[tokio::test]
+async fn edit_forms_read_the_file_values_not_the_resolved_ones() {
+    let env = Env::new("");
+    env.engine
+        .create_host(HostDraft {
+            user: Some("deploy".into()),
+            port: Some(2222),
+            ..draft("web", "203.0.113.10")
+        })
+        .await
+        .unwrap();
+    // The user puts the Include line at the bottom, under a block that sets
+    // `User` and `Port` first: OpenSSH (and Portico) resolve those.
+    let include = env.engine.managed_include_line();
+    std::fs::write(
+        env.dir.path().join(".ssh/config"),
+        format!("Host web\n    User early\n    Port 2200\n\n{include}\n"),
+    )
+    .unwrap();
+    let inventory = env.engine.load_hosts().await.unwrap();
+    let resolved = inventory
+        .hosts
+        .iter()
+        .find(|host| host.alias == "web")
+        .unwrap();
+    assert_eq!(resolved.resolved.user.as_deref(), Some("early"));
+    assert_eq!(resolved.resolved.port, 2200);
+    // The form still gets what hosts.conf holds, so saving keeps it.
+    let own = env.engine.managed_host("WEB").await.unwrap().unwrap();
+    assert_eq!(own.user.as_deref(), Some("deploy"));
+    assert_eq!(own.port, Some(2222));
+    assert!(env.engine.managed_host("mine").await.unwrap().is_none());
+}
