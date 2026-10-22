@@ -4,6 +4,7 @@
 //! lines, above the key hints (which stay visible).
 
 use portico_core::ErrorSummary;
+use portico_core::forward::ForwardSpec;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
@@ -186,6 +187,17 @@ fn error_lines(error: &ErrorSummary, s: Styles, width: usize) -> Vec<Line<'stati
     lines
 }
 
+/// What an exposed tunnel gives away: a SOCKS proxy is an open relay to
+/// everything the server reaches, under the user's SSH identity.
+fn exposure_warning(spec: &ForwardSpec) -> &'static str {
+    match spec {
+        ForwardSpec::Dynamic { .. } => {
+            "Anyone on the network can use it as an open proxy to everything the server reaches, as you."
+        }
+        _ => "Anyone on the network can reach it.",
+    }
+}
+
 /// Add form or exposure confirmation, then the current error (the panel's,
 /// else the selected failed tunnel's), then the keys that work right now.
 fn form_lines(
@@ -207,7 +219,7 @@ fn form_lines(
             Span::styled(" listens beyond this machine", warning),
         ]));
         lines.push(Line::from(Span::styled(
-            "Anyone on the network can reach it.",
+            exposure_warning(spec),
             s.secondary(),
         )));
     } else if let Some(input) = &panel.input {
@@ -252,4 +264,18 @@ fn form_lines(
         lines.push(Line::from(spans));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tunnels::parse;
+
+    #[test]
+    fn socks_exposed_confirmation_says_open_proxy() {
+        let socks = parse("-D 0.0.0.0:1080").unwrap();
+        assert!(exposure_warning(&socks).contains("open proxy"));
+        let local = parse("-L 0.0.0.0:8080:db:5432").unwrap();
+        assert!(!exposure_warning(&local).contains("open proxy"));
+    }
 }

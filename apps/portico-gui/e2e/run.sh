@@ -75,8 +75,18 @@ export DISPLAY=$display
 export LIBGL_ALWAYS_SOFTWARE=1
 export PORTICO_LOG=${PORTICO_LOG:-info}
 
-driver_port=${E2E_DRIVER_PORT:-4444}
-tauri-driver --port "$driver_port" --native-port $((driver_port + 1)) >"$root/driver.log" 2>&1 &
+# WebDriver launches any program a request names, and a web page can reach it
+# with a CORS "simple" request: random ports by default, never the well-known 4444.
+free_port() {
+  python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+driver_port=${E2E_DRIVER_PORT:-$(free_port)}
+native_port=${E2E_NATIVE_PORT:-$(free_port)}
+if [ "$mode" = serve ] && [ "$driver_port" = 4444 ] && [ "${E2E_I_KNOW:-}" != 1 ]; then
+  echo "refusing --serve on the well-known port 4444 (set E2E_I_KNOW=1 to override)" >&2
+  exit 2
+fi
+tauri-driver --port "$driver_port" --native-port "$native_port" >"$root/driver.log" 2>&1 &
 echo $! >>"$root/pids"
 for _ in $(seq 100); do
   python3 -c "import socket; socket.create_connection(('127.0.0.1', $driver_port), 0.2)" 2>/dev/null && break
@@ -87,6 +97,8 @@ export E2E_APP=$app
 export E2E_DRIVER=http://127.0.0.1:$driver_port
 if [ "$mode" = serve ]; then
   echo "ready: E2E_ROOT=$root E2E_DRIVER=$E2E_DRIVER DISPLAY=$DISPLAY" >&2
+  echo "warning: any local process or web page can drive this WebDriver and run a program as you;" >&2
+  echo "         do not browse while it is up, never use it on a shared machine. Ctrl-C to stop." >&2
   while :; do sleep 3600 & wait $!; done
 fi
 node --test --test-concurrency=1 "$here/gui.e2e.ts"

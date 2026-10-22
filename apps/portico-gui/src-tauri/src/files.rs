@@ -240,6 +240,8 @@ pub(crate) struct ForwardDto {
     display: String,
     /// Listens beyond loopback: the UI must confirm before starting it.
     exposed: bool,
+    /// A SOCKS proxy (`-D`): exposed, it is an open relay.
+    dynamic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -457,6 +459,7 @@ pub(crate) fn check_forward(spec: String) -> Result<ForwardDto, ErrorSummary> {
     Ok(ForwardDto {
         display: spec.to_string(),
         exposed: spec.is_exposed(),
+        dynamic: matches!(spec, ForwardSpec::Dynamic { .. }),
     })
 }
 

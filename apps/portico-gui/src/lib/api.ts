@@ -226,6 +226,8 @@ export type OnConflict = "ask" | "overwrite" | "skip" | "rename";
 export interface ForwardCheck {
   display: string;
   exposed: boolean;
+  /** A SOCKS proxy (`-D`): exposed, it is an open relay. */
+  dynamic: boolean;
 }
 
 /** Mirrors `files::TunnelDto`. */

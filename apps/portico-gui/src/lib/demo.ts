@@ -507,7 +507,7 @@ export const demoBackend: Backend = {
     const d = /^\s*-?D\s+(?:([^\s:]*):)?(\d+)\s*$/i.exec(spec);
     if (d) {
       const bind = d[1] === undefined ? "localhost" : d[1] === "" || d[1] === "*" ? "0.0.0.0" : d[1];
-      return { display: `SOCKS · ${bind}:${d[2]}`, exposed: !["localhost", "127.0.0.1", "::1"].includes(bind) };
+      return { display: `SOCKS · ${bind}:${d[2]}`, exposed: !["localhost", "127.0.0.1", "::1"].includes(bind), dynamic: true };
     }
     const m = /^\s*-?([LR])\s+(?:([^\s:]+):)?(\d+)[:\s]([^\s:]+):(\d+)\s*$/i.exec(spec);
     if (!m) throw { code: "invalid_forward", message: "expected [bind:]port:host:hostport", hint: "For example -L 8080:db.internal:5432, -R 9000:localhost:3000 or -D 1080 (SOCKS)." } satisfies ErrorSummary;
@@ -515,6 +515,7 @@ export const demoBackend: Backend = {
     return {
       display: `-${(m[1] ?? "L").toUpperCase()} ${bind}:${m[3]} → ${m[4]}:${m[5]}`,
       exposed: !["localhost", "127.0.0.1", "::1"].includes(bind),
+      dynamic: false,
     };
   },
   listTunnels: async () => [...tunnels.values()],

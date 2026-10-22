@@ -302,8 +302,12 @@ Pour republier la même version avec un `PKGBUILD` corrigé, rendre localement a
    `AUR_GIT_NAME`, `AUR_GIT_EMAIL` (auteur des commits AUR).
 4. **Environnement `distribution`** (*Settings → Environments*) : *Deployment branches and tags* →
    **Selected** : règle de tag `v*` (événement `release`) et branche `main` (relance manuelle). Y créer
-   `HOMEBREW_TAP_TOKEN` et `AUR_SSH_PRIVATE_KEY` ; **jamais** en secrets de dépôt. Des *required
-   reviewers* sont possibles (chaque distribution attend alors une approbation).
+   `HOMEBREW_TAP_TOKEN` et `AUR_SSH_PRIVATE_KEY` ; **jamais** en secrets de dépôt. **Required reviewers
+   obligatoires**, comme pour `release` (*Prevent self-review* si l'équipe le permet) : sans eux, quiconque peut pousser un
+   tag `v*` fait tourner un `release.yml` de son choix avec ces secrets, et la clé AUR publie sans revue
+   chez les utilisateurs Arch. Chaque distribution attend donc une approbation.
+5. **Tags protégés** (*Settings → Rules → Rulesets*, cible *Tags*, motif `v*`) : création, mise à jour et
+   suppression réservées aux administrateurs (*bypass list*). Cela protège `release` comme `distribution`.
 
 ### Vérifications
 

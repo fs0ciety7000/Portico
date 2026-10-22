@@ -45,3 +45,9 @@ publions un correctif puis un avis (GitHub Security Advisory) une fois les utili
 9. **Non pris en charge** : `ProxyCommand` et `Match exec` (refus explicite, rien n'est exécuté).
 10. **Releases** : paquets Linux non signés (vérifiez `SHA256SUMS`) ; app macOS signée et notarisée
     seulement si les secrets de signature sont configurés (voir `docs/RELEASE.md`).
+11. **Tunnels `-L` / `-D`** : l'écoute loopback est joignable par tout processus local, de n'importe quel
+    utilisateur de la machine, sans authentification (comme OpenSSH). Un proxy SOCKS donne accès à tout ce
+    que le serveur atteint, y compris ses services `localhost`, sous votre identité SSH. Exposé hors
+    loopback (confirmation explicite), c'est un relais ouvert pour le réseau.
+12. **Destinations SOCKS** : les destinations en échec apparaissent dans le panneau debug (donc dans
+    « Copier ») et, en mode diagnostic, dans `portico-tui.log` ; elles révèlent une partie de la navigation.

@@ -25,7 +25,7 @@
   let busy = $state(false);
   let armed = $state(false);
   /** Exposed spec waiting for confirmation. */
-  let confirm: { spec: string; display: string } | null = $state(null);
+  let confirm: { spec: string; display: string; dynamic: boolean } | null = $state(null);
   let input: HTMLInputElement | undefined = $state();
   let cancelButton: HTMLButtonElement | undefined = $state();
   let exposeButton: HTMLButtonElement | undefined = $state();
@@ -93,7 +93,7 @@
     try {
       const check = await backend.checkForward(text);
       if (check.exposed) {
-        confirm = { spec: text, display: check.display };
+        confirm = { spec: text, display: check.display, dynamic: check.dynamic };
         return;
       }
       if (await tunnels.start(session, text, false)) spec = "-L ";
@@ -198,7 +198,11 @@
   {#if confirm}
     <div class="confirm" role="alert" transition:fly={{ y: 6, duration: dur("base") }}>
       <strong><span class="mono">{confirm.display}</span> listens beyond this machine</strong>
-      <span>Anyone who can reach this computer on the network can use the tunnel.</span>
+      {#if confirm.dynamic}
+        <span>Anyone who can reach this computer can use it as an open proxy to everything the server reaches, as you.</span>
+      {:else}
+        <span>Anyone who can reach this computer on the network can use the tunnel.</span>
+      {/if}
     </div>
   {:else if session !== null}
     <div class="form">

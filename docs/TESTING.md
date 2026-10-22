@@ -54,8 +54,13 @@ se connecte en tant que lui) ; sous root il lui faut `/run/sshd`, que le script 
 cd apps/portico-gui
 pnpm e2e                                  # build debug + test (~1 min hors build)
 E2E_KEEP=1 e2e/run.sh --no-build          # garder captures et logs (sshd.log, driver.log)
-e2e/run.sh --serve --no-build             # environnement prêt, WebDriver sur :4444, pour piloter à la main
+e2e/run.sh --serve --no-build             # environnement prêt, WebDriver sur un port aléatoire, pour piloter à la main
 ```
+
+> **Attention, `--serve`** : `tauri-driver` lance tout programme qu'une requête WebDriver lui désigne, et une
+> page web peut l'atteindre par une requête cross-origin « simple » (sans preflight). Les ports sont donc
+> aléatoires par défaut (`E2E_DRIVER_PORT` et `E2E_NATIVE_PORT` pour les fixer ; `4444` refusé en `--serve`
+> sauf `E2E_I_KNOW=1`). Pendant un run ou un `--serve`, ne naviguez pas, et jamais sur une machine partagée.
 
 ### Limites
 
