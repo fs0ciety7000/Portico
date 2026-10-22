@@ -19,6 +19,8 @@
   import { dur } from "../motion";
   import { isLive, paneStatus, workspace, type Pane } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
+  import RecBadge from "./RecBadge.svelte";
+  import { recordings } from "../state/recordings.svelte";
 
   let {
     pane,
@@ -439,6 +441,7 @@
     <header class="head" data-status={status.status}>
       <span class="dot" class:busy={status.busy} class:hollow={status.hollow}></span>
       <span class="alias" title={pane.alias}>{pane.alias}</span>
+      {#if recordings.isRecording(pane.terminal)}<RecBadge compact />{/if}
       <span class="phase">{pane.end ? endLabel : status.label}</span>
       {#if session?.latencyMs != null && session.phase.phase === "connected" && !pane.end && !status.failed}
         <span class="rtt mono" class:slow={status.status === "warning"}>{formatRtt(session.latencyMs)}</span>

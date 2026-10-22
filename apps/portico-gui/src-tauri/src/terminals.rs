@@ -38,7 +38,7 @@ struct Entry {
 
 /// New acknowledged total: monotonic and capped at what was really sent, so
 /// a buggy or hostile view can neither lower it nor switch flow control off.
-fn next_ack(current: u64, claimed: u64, sent: u64) -> Option<u64> {
+pub(crate) fn next_ack(current: u64, claimed: u64, sent: u64) -> Option<u64> {
     let total = claimed.min(sent);
     (total > current).then_some(total)
 }

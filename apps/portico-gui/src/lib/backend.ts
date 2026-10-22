@@ -30,6 +30,11 @@ import {
   type ThemeInfo,
   type TunnelInfo,
   type Upload,
+  type PlaybackControl,
+  type PlaybackFrame,
+  type PlaybackInfo,
+  type PlaybackState,
+  type Recording,
 } from "./api";
 
 export interface Backend {
@@ -103,6 +108,18 @@ export interface Backend {
   importTermiusReplan(token: number, prefix: boolean): Promise<ImportPreview>;
   importApply(token: number): Promise<ImportReport>;
   importCancel(): Promise<void>;
+  recordingStart(terminal: number): Promise<void>;
+  recordingStop(terminal: number): Promise<void>;
+  recordingStatus(terminal: number): Promise<boolean>;
+  recordingsFolder(): Promise<string>;
+  listRecordings(): Promise<Recording[]>;
+  deleteRecording(name: string): Promise<void>;
+  /** Frames (already sanitised) go to `onFrame`, in order. */
+  playRecording(name: string, speed: number, onFrame: (frame: PlaybackFrame) => void): Promise<PlaybackInfo>;
+  playbackControl(id: number, control: PlaybackControl): Promise<PlaybackState>;
+  playbackAck(id: number, total: number): Promise<void>;
+  playbackClose(id: number): Promise<void>;
+  onEngineLagged(cb: () => void): Promise<UnlistenFn>;
 }
 
 const tauriBackend: Backend = {
@@ -111,6 +128,11 @@ const tauriBackend: Backend = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (buf) => onData(new Uint8Array(buf));
     return api.openTerminal(session, size, channel);
+  },
+  playRecording(name, speed, onFrame) {
+    const channel = new Channel<PlaybackFrame>();
+    channel.onmessage = onFrame;
+    return api.playRecording(name, speed, channel);
   },
 };
 

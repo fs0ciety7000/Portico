@@ -179,7 +179,23 @@ test("pane commands: terminal only, distinct per platform, need a modifier", () 
   // A terminal action needs a modifier, like a global one.
   assert.match(resolveKeymap({ "pane.zoom": "Z" }, "linux").problems.join(), /needs Mod/);
   // Rebinding a pane command onto a host-list key is fine (other context).
-  assert.deepEqual(resolveKeymap({ "pane.next": "Mod+R" }, "linux").problems, []);
+  assert.deepEqual(resolveKeymap({ "pane.next": "Mod+R" }, "mac").problems, []);
+  // On Linux, Mod+R in a terminal is Ctrl-Shift-R: `session.record`'s key.
+  assert.deepEqual(resolveKeymap({ "pane.next": "Mod+R" }, "linux").problems, ['pane.next = "Mod+R": already used by session.record']);
+});
+
+test("recording: Mod+Shift+R in a terminal only; Recordings has no default key", () => {
+  const mac = matchTables(defaultBindings("mac"), "mac");
+  const linux = matchTables(defaultBindings("linux"), "linux");
+  const ev = (k: string, code: string, mods: Partial<KeyLike>) => eventSignature(key(k, code, mods))!;
+  assert.equal(mac.terminal.get(ev("R", "KeyR", { metaKey: true, shiftKey: true })), "session.record");
+  assert.equal(linux.terminal.get(ev("R", "KeyR", { ctrlKey: true, shiftKey: true })), "session.record");
+  // The host list keeps Mod+R (reload), Ctrl-Shift-R included on Linux.
+  assert.equal(linux.hosts.get(ev("R", "KeyR", { ctrlKey: true, shiftKey: true })), "app.reload");
+  assert.equal(mac.hosts.get(ev("R", "KeyR", { metaKey: true, shiftKey: true })), undefined);
+  assert.equal(formatCombo(parseCombo("Mod+Shift+R")!, "linux", "terminal"), "Ctrl-Shift-R");
+  assert.deepEqual(defaultBindings("linux")["recordings.open"], []);
+  assert.deepEqual(defaultBindings("mac")["recordings.open"], []);
 });
 
 test("closing: Mod+W closes the focused pane (or the tab), close-all the whole tab; pane.close has no key", () => {

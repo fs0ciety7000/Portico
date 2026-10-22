@@ -134,7 +134,18 @@ export type EngineEvent =
   /** `hosts.toml` changed for `alias`: update the host in place. */
   | { type: "host_meta"; alias: string; meta: HostMeta }
   /** The recent-sessions list changed: fetch it again if shown. */
-  | { type: "recent_changed" };
+  | { type: "recent_changed" }
+  /** A terminal recording started or stopped: `REC` shows between the two. */
+  | { type: "recording"; terminal: number; session: number; state: RecordingState };
+
+/** Mirrors `portico_core::recording::RecordingStopReason`. */
+export type RecordingStopReason = "requested" | "terminal_closed" | "queue_full" | "write_failed" | "size_limit";
+
+/** Mirrors `portico_core::events::RecordingState`. The view never sends
+ * `path` back (requests name recordings by `name` only) nor shows it. */
+export type RecordingState =
+  | { state: "started"; name: string; path: string }
+  | { state: "stopped"; reason: RecordingStopReason; name: string; path: string; bytes: number; duration: Duration };
 
 /** Mirrors `portico_core::hosts::HostMeta` (as serialized in events). */
 export interface HostMeta {
@@ -326,6 +337,54 @@ export interface Snippet {
 /** What `save_snippet` takes (an empty id creates). */
 export type SnippetDraft = Omit<Snippet, "placeholders">;
 
+/** Mirrors `recordings::RecordingDto`. `name` is the only id sent back
+ * (play, delete); `alias` comes from the file header (escaped in Rust). */
+export interface Recording {
+  name: string;
+  alias: string;
+  /** Unix ms. */
+  started: number | null;
+  size: number;
+  /** Seconds. */
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+  valid: boolean;
+}
+
+/** Mirrors `recordings::PlaybackDto`. */
+export interface PlaybackInfo {
+  id: number;
+  name: string;
+  title: string | null;
+  cols: number;
+  rows: number;
+  paused: boolean;
+  speed: number;
+}
+
+/** Mirrors `recordings::PlaybackStateDto`. */
+export interface PlaybackState {
+  paused: boolean;
+  speed: number;
+}
+
+/** Mirrors `recordings::PlaybackControlDto`. */
+export type PlaybackControl =
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "speed"; value: number }
+  | { kind: "skip" }
+  | { kind: "seek"; time: number };
+
+/** Mirrors `recordings::PlaybackFrame`: output is already sanitised in Rust. */
+export type PlaybackFrame =
+  | { kind: "output"; data: string; size: number; time: number }
+  | { kind: "resize"; cols: number; rows: number; time: number }
+  | { kind: "reset"; time: number }
+  | { kind: "end"; time: number }
+  | { kind: "error"; error: ErrorSummary };
+
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
 /** Mirrors `portico_core::import::ImportNotice` (never a secret). */
@@ -475,6 +534,24 @@ export const api = {
   importTermiusReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_termius_replan", { token, prefix }),
   importApply: (token: number) => invoke<ImportReport>("import_apply", { token }),
   importCancel: () => invoke<void>("import_cancel"),
+  /** Starts recording a terminal; `REC` shows from the `started` event only. */
+  recordingStart: (terminal: number) => invoke<void>("recording_start", { terminal }),
+  recordingStop: (terminal: number) => invoke<void>("recording_stop", { terminal }),
+  /** Resync after a lagged event stream only. */
+  recordingStatus: (terminal: number) => invoke<boolean>("recording_status", { terminal }),
+  /** The recordings folder for display (`~/…`), built in Rust. */
+  recordingsFolder: () => invoke<string>("recordings_folder"),
+  listRecordings: () => invoke<Recording[]>("list_recordings"),
+  /** `name` from `listRecordings` only (validated again in Rust). */
+  deleteRecording: (name: string) => invoke<void>("delete_recording", { name }),
+  playRecording: (name: string, speed: number, frames: Channel<PlaybackFrame>) =>
+    invoke<PlaybackInfo>("play_recording", { name, speed, frames }),
+  playbackControl: (id: number, control: PlaybackControl) => invoke<PlaybackState>("playback_control", { id, control }),
+  /** Flow control: `total` bytes of playback output were parsed by the player. */
+  playbackAck: (id: number, total: number) => invoke<void>("playback_ack", { id, total }),
+  playbackClose: (id: number) => invoke<void>("playback_close", { id }),
+  /** The engine event stream lost events: resync what is derived from them. */
+  onEngineLagged: (cb: () => void): Promise<UnlistenFn> => listen<number>("portico://engine-lagged", () => cb()),
   /** Files dropped on the window, already registered as upload tokens. */
   onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
     listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),

@@ -16,6 +16,8 @@
   import { dur } from "../motion";
   import { panesOf } from "../panes";
   import { paneStatus, workspace, type Pane } from "../state/workspace.svelte";
+  import { recordings } from "../state/recordings.svelte";
+  import RecBadge from "./RecBadge.svelte";
 
   let { hostCount }: { hostCount: number } = $props();
 
@@ -103,6 +105,8 @@
       {@const count = panesOf(tab.root).length}
       {@const dot = dotOf(focus)}
       {@const selected = workspace.active === tab.key}
+      <!-- Any pane of the tab recording: REC on the tab (the header says which). -->
+      {@const rec = workspace.panesIn(tab).some((p) => recordings.isRecording(p.terminal))}
       <div
         class="tab"
         role="tab"
@@ -118,6 +122,7 @@
       >
         <span class="dot" data-status={dot.status} class:busy={dot.busy} class:hollow={dot.hollow}></span>
         <span class="alias">{alias}</span>
+        {#if rec}<RecBadge compact title="A pane of this tab is being recorded" />{/if}
         {#if title && selected && count < 2}<span class="remote">{title}</span>{/if}
         {#if count > 1}
           <span class="panes" aria-label={`${count} panes`}>

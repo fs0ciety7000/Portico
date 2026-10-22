@@ -31,6 +31,10 @@
   import EditHostDialog from "./lib/components/EditHostDialog.svelte";
   import LogsDialog from "./lib/components/LogsDialog.svelte";
   import ImportDialog from "./lib/components/ImportDialog.svelte";
+  import RecordingsDialog from "./lib/components/RecordingsDialog.svelte";
+  import RecordConfirm from "./lib/components/RecordConfirm.svelte";
+  import RecBadge from "./lib/components/RecBadge.svelte";
+  import { recordings } from "./lib/state/recordings.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -81,8 +85,14 @@
       !!editing ||
       hosts.confirmClear ||
       logs.open ||
-      importer.open,
+      importer.open ||
+      !!recordings.confirm ||
+      recordings.open,
   );
+  /** Terminals being recorded (any tab): REC in the status bar. */
+  const recCount = $derived(Object.keys(recordings.active).length);
+  const recHere = $derived(recordings.isRecording(pane?.terminal ?? null));
+
   /** Favorite, edit: the active pane's host, else the selected one. */
   const targetAlias = $derived(pane ? pane.alias : selectedHost?.alias);
   const targetHost = $derived(targetAlias ? hosts.byAlias[targetAlias] : undefined);
@@ -405,6 +415,13 @@
           ...(paneCount > 1 ? [] : [{ id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() }]),
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
+          ...(recordings.recordable(pane)
+            ? [
+                recordings.isRecording(pane.terminal)
+                  ? { id: "session.record", title: "Stop recording", hint: pane.alias, shortcut: k("session.record"), run: () => void recordings.toggle(pane) }
+                  : { id: "session.record", title: "Record session", hint: `${pane.alias} · output only, asks first`, shortcut: k("session.record"), run: () => void recordings.toggle(pane) },
+              ]
+            : []),
           { id: "tab.reconnect", title: `Reconnect ${pane.alias}`, shortcut: k("tab.reconnect"), run: () => void workspace.reconnect(pane.key) },
           { id: "tab.disconnect", title: `Disconnect ${pane.alias}`, shortcut: k("tab.disconnect"), run: () => void workspace.disconnect(pane.alias) },
           ...paneCommands,
@@ -484,6 +501,13 @@
       hint: tunnels.list.length ? `${tunnels.list.length} running` : undefined,
       shortcut: k("app.tunnels"),
       run: () => (tunnelsOpen = true),
+    },
+    {
+      id: "recordings.open",
+      title: "Recordings…",
+      hint: recCount ? `${recCount} recording now` : "play or delete recorded sessions",
+      shortcut: k("recordings.open"),
+      run: () => recordings.show(),
     },
     {
       id: "files.download-dir",
@@ -607,6 +631,10 @@
         return void workspace.closePane();
       case "pane.divider":
         return focusDivider();
+      case "session.record":
+        return void recordings.toggle(pane);
+      case "recordings.open":
+        return recordings.show();
       default:
         // Palette-only actions bound in settings.toml run their command.
         commands.find((c) => c.id === id)?.run();
@@ -679,6 +707,7 @@
     const unlisten = [
       backend.onEngineEvent((ev) => {
         workspace.onEvent(ev);
+        recordings.onEvent(ev);
         hosts.onEvent(ev);
         logs.onEvent(ev);
         if (ev.type === "sftp") files.onEvent(ev.session, ev.event);
@@ -687,6 +716,8 @@
           files.forget(ev.id);
         }
       }),
+      // Events were lost: REC is resynchronised from the engine.
+      backend.onEngineLagged(() => void recordings.resync()),
       backend.onDragging((d) => (files.dragging = d)),
       backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
     ];
@@ -836,6 +867,9 @@
         <!-- Split: each pane header shows its own title already. -->
         {#if pane.title && paneCount < 2}<span class="title" title={pane.title}>{pane.title}</span>{/if}
       </span>
+      {#if recCount}
+        <RecBadge title={recHere ? "This pane's output is being recorded" : `${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
+      {/if}
       <span class="hints">
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
         {#each tabHints as [key, label] (label)}
@@ -844,6 +878,9 @@
       </span>
     {:else}
       <span class="counts">{hosts.all.length} hosts · {workspace.tabs.length} open</span>
+      {#if recCount}
+        <RecBadge title={`${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
+      {/if}
       <span class="hints">
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
         {#each hostHints as [id, label] (id)}
@@ -961,6 +998,12 @@
   <LogsDialog />
 {:else if importer.open}
   <ImportDialog />
+{:else if recordings.confirm}
+  {#key recordings.confirm}
+    <RecordConfirm alias={recordings.confirm.alias} folder={recordings.confirm.folder} />
+  {/key}
+{:else if recordings.open}
+  <RecordingsDialog themeId={settings.themeId} />
 {/if}
 
 {#if workspace.toast && !toastOnStage}
