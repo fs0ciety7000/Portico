@@ -247,6 +247,26 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             };
             return (" CONFIRM ", owned(vec![cancel, ("y", confirm)]));
         }
+        // The vault a host's password waits for: Esc goes back to the form.
+        _ if matches!(app.dialogs.front(), Some(Dialog::Secret(d)) if d.host_save) => {
+            if matches!(
+                app.dialogs.front(),
+                Some(Dialog::Secret(d)) if matches!(d.purpose, SecretPurpose::VaultCreate { .. })
+            ) {
+                (" DIALOG ", &[("↵", "create & save"), ("Esc", "not now")])
+            } else {
+                (" DIALOG ", &[("↵", "unlock & save"), ("Esc", "not now")])
+            }
+        }
+        // A new host key: the two answers (the same words as the dialog).
+        _ if matches!(
+            app.dialogs.front(),
+            Some(Dialog::Prompt(p)) if matches!(p.kind, portico_core::events::PromptKind::UnknownHostKey { .. })
+                && !p.needs_typed_confirmation()
+        ) =>
+        {
+            (" HOST KEY ", &[("y", "trust"), ("n", "refuse")])
+        }
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
         _ if app.prefix && app.active_tab().is_some_and(|t| t.len() > 1) => {
             // A split tab: the pane commands first, then help, then the
@@ -384,10 +404,12 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         }
         _ if app.overlay == Some(crate::app::Overlay::HostForm) => {
             let hints: &[(&'static str, &'static str)] = match &app.host_form {
-                Some(f) if matches!(f.mode, crate::host_form::FormMode::ReadOnly { .. }) => {
-                    &[("D", "duplicate"), ("t", "tags & notes"), ("Esc", "close")]
-                }
-                Some(f) if f.confirm_discard => &[("y", "discard"), ("any key", "keep editing")],
+                Some(f) if matches!(f.mode, crate::host_form::FormMode::ReadOnly { .. }) => &[
+                    ("D", "duplicate"),
+                    ("t", "tags and notes"),
+                    ("Esc", "close"),
+                ],
+                Some(f) if f.confirm_discard => &[("y", "discard"), ("n / Esc", "keep editing")],
                 Some(f) if f.busy => &[],
                 Some(f) if matches!(f.mode, crate::host_form::FormMode::Duplicate { .. }) => {
                     &[("↵", "duplicate"), ("Esc", "cancel")]

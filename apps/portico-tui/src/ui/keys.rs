@@ -213,7 +213,8 @@ fn browse(panel: &mut KeysPanel, ctx: &Context, frame: &mut Frame<'_>, band: u16
                 } else {
                     crate::app::ToastKind::Error
                 };
-                let toast = ToastBox::new(s, kind, &n.message, n.hint.as_deref(), screen.width);
+                let message = crate::ui::fmt::sentence(&n.message);
+                let toast = ToastBox::new(s, kind, &message, n.hint.as_deref(), screen.width);
                 band = band.max(toast.height);
                 overflow = Some(toast);
                 footer_with(panel, None)

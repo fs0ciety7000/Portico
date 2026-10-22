@@ -16,7 +16,7 @@ use portico_core::hosts::HostOrigin;
 
 use crate::action::Action;
 use crate::app::{App, Overlay};
-use crate::dialog::{ConfirmAction, ConfirmDialog, Dialog};
+use crate::dialog::{ConfirmAction, ConfirmDialog, Dialog, SecretDialog, SecretPurpose};
 use crate::host_form::{
     DELETE_COMMAND, FormMode, FormOutcome, HostForm, HostRequest, read_only_hint,
 };
@@ -33,9 +33,35 @@ pub(crate) struct IncludeBanner {
     pub(crate) line: String,
 }
 
-/// The banner's first sentence (shared with the GUI).
-pub(crate) const INCLUDE_BANNER: &str =
-    "To use your Portico hosts with ssh, scp and git, add this line at the top of ~/.ssh/config:";
+/// The banner's first sentence (shared with the GUI and the CLI).
+pub(crate) const INCLUDE_BANNER: &str = "Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config:";
+
+/// Error codes whose message starts with a host alias: shown as written
+/// (never sentence-cased, the alias keeps its case).
+pub(crate) const ALIAS_FIRST_CODES: &[&str] = &["host_read_only", "host_in_use"];
+
+/// `user@host:port` of `host` (the local user when none is set).
+pub(crate) fn account(host: &portico_core::hosts::HostEntry, local_user: &str) -> String {
+    let resolved = &host.resolved;
+    format!(
+        "{}@{}:{}",
+        resolved.user.as_deref().unwrap_or(local_user),
+        resolved.hostname,
+        resolved.port
+    )
+}
+
+/// The delete confirmation's body (shared with the GUI).
+pub(crate) fn delete_body(alias: &str, account: &str) -> String {
+    format!(
+        "Delete {alias} ({account}) and its tags and notes. Its remembered password is forgotten unless another host uses the same account. Open sessions stay connected. This cannot be undone."
+    )
+}
+
+/// A save refused for want of a vault (none yet, or locked).
+fn needs_vault(error: &ErrorSummary) -> bool {
+    matches!(error.code.as_str(), "vault_missing" | "vault_locked")
+}
 
 /// Spawns `fut` and sends its result back as an action. Outside a runtime
 /// (pure state tests) nothing is spawned: the app always runs in one.
@@ -80,7 +106,11 @@ impl App {
                 Ok(()) => self.notify(format!("Deleted {}", fmt::truncate(&alias, 48))),
                 Err(e) => {
                     self.pending_select = None;
-                    self.notify_error(e);
+                    if ALIAS_FIRST_CODES.contains(&e.code.as_str()) {
+                        self.notify_error_as_written(e);
+                    } else {
+                        self.notify_error(e);
+                    }
                 }
             },
             Action::IncludeChecked(result) => self.include.active = result.ok(),
@@ -215,7 +245,10 @@ impl App {
             // The values hosts.conf holds, read off the UI thread.
             let engine = self.engine.clone();
             spawn(self, async move {
-                let result = engine.managed_host(&alias).await.map_err(|e| e.summary());
+                let result = engine
+                    .managed_host_details(&alias)
+                    .await
+                    .map_err(|e| e.summary());
                 Action::HostFormManaged { alias, result }
             });
         }
@@ -232,7 +265,7 @@ impl App {
     fn host_form_managed(
         &mut self,
         alias: &str,
-        result: Result<Option<portico_core::managed_hosts::ManagedHost>, ErrorSummary>,
+        result: Result<Option<portico_core::managed_hosts::ManagedHostDetails>, ErrorSummary>,
     ) {
         let waiting = self.host_form.as_ref().is_some_and(|form| {
             form.loading && matches!(&form.mode, FormMode::Edit { original } if original == alias)
@@ -341,10 +374,39 @@ impl App {
             Err(error) => {
                 let home = self.engine.config().paths.home.clone();
                 match &mut self.host_form {
+                    // A password to remember and no vault (or a locked
+                    // one): create or unlock it, then save again.
+                    Some(form) if form.busy && needs_vault(&error) && form.sets_password() => {
+                        let purpose = if error.code == "vault_missing" {
+                            SecretPurpose::VaultCreate { offered: true }
+                        } else {
+                            SecretPurpose::VaultUnlock { startup: false }
+                        };
+                        form.wait_for_vault(error);
+                        self.dialogs
+                            .push_back(Dialog::Secret(SecretDialog::for_host_save(purpose)));
+                    }
                     Some(form) if form.busy => form.refused(error, &home),
                     _ => self.notify_error(error),
                 }
             }
+        }
+    }
+
+    /// The vault dialog opened by a host save closed: the vault is ready
+    /// (`true`: save again) or the user said "not now" (back to the form,
+    /// the password still typed, the refusal under it).
+    pub(crate) fn host_save_vault_done(&mut self, ready: bool) {
+        let home = self.engine.config().paths.home.clone();
+        let Some(form) = &mut self.host_form else {
+            return;
+        };
+        if ready {
+            if let Some(request) = form.retry_after_vault() {
+                self.save_host(request);
+            }
+        } else {
+            form.vault_declined(&home);
         }
     }
 
@@ -355,8 +417,10 @@ impl App {
             return;
         };
         let (alias, origin) = (host.alias.clone(), host.origin);
+        let account = account(host, &self.engine.config().local_user);
         if origin != HostOrigin::Portico {
-            self.notify_warning(
+            // The alias keeps its case: never sentence-cased.
+            self.notify_warning_as_written(
                 format!("{} is read-only", fmt::truncate(&alias, 32)),
                 Some(read_only_hint(origin).into()),
             );
@@ -365,10 +429,7 @@ impl App {
         self.dialogs.push_back(Dialog::Confirm(ConfirmDialog {
             title: format!("{DELETE_COMMAND} {}?", fmt::truncate(&alias, 40)),
             subject: None,
-            body: format!(
-                "Removes {} from Portico's hosts.conf, with its tags, notes and remembered password.\n~/.ssh/config is not touched.",
-                fmt::truncate(&alias, 40)
-            ),
+            body: delete_body(&fmt::truncate(&alias, 40), &fmt::truncate(&account, 48)),
             confirm: "delete",
             action: ConfirmAction::DeleteHost(alias),
             armed: Some(std::time::Instant::now()),

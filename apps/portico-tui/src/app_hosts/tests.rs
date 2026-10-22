@@ -48,7 +48,37 @@ struct Lab {
 
 impl Lab {
     async fn new(config: &str) -> Self {
-        let env = Env::new(config);
+        Self::from_env(Env::new(config)).await
+    }
+
+    /// No system keyring: secrets go to the Portico vault, which does not
+    /// exist yet (production KDF; the throwaway HOME holds it).
+    async fn without_vault(config: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+        std::fs::write(dir.path().join(".ssh/config"), config).unwrap();
+        let paths = portico_core::store::Paths::rooted(dir.path());
+        let vault = portico_core::vault::VaultStore::open(paths.vault());
+        let engine = portico_core::Engine::new(portico_core::EngineConfig {
+            paths,
+            local_user: "alice".into(),
+            event_capacity: 4096,
+            secrets: std::sync::Arc::new(vault),
+            agent_socket: None,
+            connect_timeout: Duration::from_secs(10),
+            keepalive: Duration::from_millis(200),
+        });
+        let events = engine.subscribe();
+        Self::from_env(Env {
+            dir,
+            engine,
+            secrets: std::sync::Arc::default(),
+            events,
+        })
+        .await
+    }
+
+    async fn from_env(env: Env) -> Self {
         let events = env.engine.subscribe();
         let mut app = App::new(env.engine.clone());
         app.clipboard = false;
@@ -132,6 +162,22 @@ impl Lab {
         std::fs::read_to_string(self.env.dir.path().join("config/hosts.conf")).unwrap_or_default()
     }
 
+    /// "Add host…" with a password too, saved; waits for the reload.
+    async fn add_with_password(&mut self, alias: &str, hostname: &str, password: &str) {
+        self.app.update(Action::AddHost);
+        self.type_text(alias);
+        self.form_key(KeyCode::Tab);
+        self.type_text(hostname);
+        self.focus(HostField::Password);
+        self.type_text(password);
+        self.form_key(KeyCode::Enter);
+        let alias = alias.to_owned();
+        self.until(|app| {
+            app.host_form.is_none() && app.selected_host().is_some_and(|h| h.alias == alias)
+        })
+        .await;
+    }
+
     /// "Add host…" with an alias and a host name, saved; waits for the
     /// reload that selects it.
     async fn add(&mut self, alias: &str, hostname: &str) {
@@ -178,7 +224,7 @@ async fn add_selects_the_new_host_marks_it_and_offers_the_include_line() {
     assert!(shown.contains("Portico · e edits"), "{shown}");
     // The banner: the shared sentence, the exact line, never-edits, keys.
     assert!(
-        shown.contains("To use your Portico hosts with ssh, scp"),
+        shown.contains("Optional: for ssh, scp and git to see these"),
         "{shown}"
     );
     assert!(shown.contains("Include ~/config/hosts.conf"), "{shown}");
@@ -394,6 +440,22 @@ async fn engine_refusals_show_inline_with_their_hint() {
     assert!(field < message && message.is_some(), "{shown}");
     assert!(shown.contains("Use a DNS name or an IP address"), "{shown}");
     assert!(lab.hosts_conf().is_empty());
+
+    // A port out of range: the message alone (its hint only repeats it).
+    lab.clear_field();
+    lab.type_text("10.0.0.7");
+    lab.focus(HostField::Port);
+    lab.type_text("70000");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.busy))
+        .await;
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert!(
+        matches!(&form.error, Some((Some(HostField::Port), e)) if e.code == "host_invalid_port" && e.hint.is_some())
+    );
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains("Invalid port 70000"), "{shown}");
+    assert!(!shown.contains("A port is a number"), "{shown}");
 }
 
 #[tokio::test]
@@ -419,6 +481,16 @@ async fn ssh_config_hosts_are_read_only_and_duplicate() {
     assert!(joined.contains(READ_ONLY_HINT), "{shown}");
     assert!(READ_ONLY_HINT.starts_with("Defined in ~/.ssh/config"));
     assert!(shown.contains("~/.ssh/config · read-only"), "{shown}");
+    // The title names the host (no ellipsis); the keys as in the GUI.
+    assert!(shown.contains("╭ Edit web ─"), "{shown}");
+    assert!(shown.contains(" D  duplicate "), "{shown}");
+    assert!(shown.contains(" t  tags and notes"), "{shown}");
+    assert!(
+        lines
+            .get(23)
+            .is_some_and(|l| l.contains("D  duplicate  t  tags and notes  Esc  close")),
+        "{shown}"
+    );
 
     // The engine refuses to edit it, whatever the UI does.
     let refused = lab
@@ -442,6 +514,11 @@ async fn ssh_config_hosts_are_read_only_and_duplicate() {
     assert!(lab.app.dialogs.is_empty());
     let toast = lab.app.toast.clone().unwrap();
     assert_eq!(toast.hint.as_deref(), Some(READ_ONLY_HINT));
+    // The alias keeps its case: never "Web is read-only".
+    assert_eq!(toast.shown(), "web is read-only");
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains("web is read-only"), "{shown}");
+    assert!(!shown.contains("Web is read-only"), "{shown}");
 
     // `t` from the read-only view: its tags, group and notes.
     lab.app.update(Action::EditHost);
@@ -479,7 +556,11 @@ async fn delete_asks_armed_then_selects_the_neighbour() {
     let lines = screen(&mut lab.app, 80, 24);
     let shown = text(&lines);
     assert!(shown.contains("Delete host db?"), "{shown}");
-    assert!(shown.contains("~/.ssh/config is not touched."), "{shown}");
+    assert!(
+        shown.contains("Delete db (alice@10.0.0.5:22) and its tags and notes. Its")
+            && shown.contains("Open sessions stay connected. This cannot"),
+        "{shown}"
+    );
     assert!(shown.contains("n / Esc  cancel"), "{shown}");
     // Too soon: ignored. Then a key that is not an answer is ignored too,
     // and `n` cancels.
@@ -514,12 +595,13 @@ async fn delete_asks_armed_then_selects_the_neighbour() {
 
 /// The front confirmation, armed as if opened long enough ago.
 fn arm(app: &mut App) {
-    if let Some(Dialog::Confirm(c)) = app.dialogs.front_mut() {
-        c.armed = Some(
-            Instant::now()
-                .checked_sub(ARM_DELAY * 2)
-                .unwrap_or_else(Instant::now),
-        );
+    let long_ago = Instant::now()
+        .checked_sub(ARM_DELAY * 2)
+        .unwrap_or_else(Instant::now);
+    match app.dialogs.front_mut() {
+        Some(Dialog::Confirm(c)) => c.armed = Some(long_ago),
+        Some(Dialog::Secret(d)) => d.opened_at = long_ago,
+        _ => {}
     }
 }
 
@@ -557,14 +639,14 @@ async fn renders_fit_80x24() {
     let lines = screen(&mut lab.app, 80, 24);
     let shown = text(&lines);
     for needle in [
-        "Add host…",
+        " Add host ",
         "Alias",
         "HostName",
         "User",
         "Port",
         "Key",
         "ProxyJump",
-        "‹ none ›",
+        "‹ none · agent and default keys ›",
         "Tags",
         "Group",
         "Favorite",
@@ -686,13 +768,33 @@ async fn password_note_says_where_it_is_sent() {
     lab.form_key(KeyCode::Char('y'));
     assert!(lab.app.host_form.is_none());
 
-    // Edit: "Keep" says it, "Forget" does not.
+    // Edit with nothing remembered: "Set", an empty field, no Keep.
     lab.add("db", "10.0.0.5").await;
     lab.app.update(Action::EditHost);
     lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
         .await;
     let shown = text(&screen(&mut lab.app, 80, 24));
-    assert!(shown.contains("Keep"), "{shown}");
+    assert!(shown.contains("No password remembered"), "{shown}");
+    assert!(!shown.contains("Keep"), "{shown}");
+    assert!(!shown.contains(NOTE), "{shown}");
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert_eq!(form.password_mode_label(), "Set");
+    assert!(!form.fields().contains(&HostField::PasswordMode));
+    assert!(!form.dirty());
+    lab.form_key(KeyCode::Esc);
+    assert!(lab.app.host_form.is_none(), "nothing changed: closed");
+
+    // Edit with a password remembered: "Keep" says it and where it goes,
+    // "Forget" does not.
+    lab.add_with_password("pw", "10.0.0.7", "hunter2").await;
+    lab.app.update(Action::EditHost);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
+        .await;
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(
+        shown.contains("‹ Keep ›  A password is remembered"),
+        "{shown}"
+    );
     assert!(shown.contains(NOTE), "{shown}");
     assert!(shown.contains("↵  save"), "{shown}");
     lab.focus(HostField::PasswordMode);
@@ -703,4 +805,268 @@ async fn password_note_says_where_it_is_sent() {
     );
     let shown = text(&screen(&mut lab.app, 80, 24));
     assert!(!shown.contains(NOTE), "{shown}");
+    lab.form_key(KeyCode::Right);
+    // A new destination: the password is forgotten, the note says so in
+    // place of where it goes.
+    lab.focus(HostField::HostName);
+    lab.type_text("9");
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(!shown.contains(NOTE), "{shown}");
+    assert!(!shown.contains("A password is remembered"), "{shown}");
+    assert!(
+        shown.contains("Changing the server or user forgets the"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Choose Change to set one for the new"),
+        "{shown}"
+    );
+    assert!(shown.contains("↵  save"), "{shown}");
+    // Back to the same server: Keep says where it goes again.
+    lab.form_key(KeyCode::Backspace);
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains(NOTE), "{shown}");
+}
+
+fn dialog_key(lab: &mut Lab, code: KeyCode) {
+    lab.app.update(Action::DialogKey(key(code)));
+}
+
+/// B1: a password typed with no vault. The save chains to "Create the
+/// vault"; "not now" goes back to the form with the password still typed
+/// and the refusal under it; creating the vault saves the host again, its
+/// password remembered (never in `hosts.conf`).
+#[tokio::test]
+async fn a_password_with_no_vault_creates_it_then_saves() {
+    let mut lab = Lab::without_vault(USER_CONFIG).await;
+    lab.app.update(Action::AddHost);
+    lab.type_text("pw");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("10.0.0.7");
+    lab.focus(HostField::Password);
+    lab.type_text("hunter2");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| !app.dialogs.is_empty()).await;
+    let Some(Dialog::Secret(dialog)) = lab.app.dialogs.front() else {
+        panic!("the vault dialog: {:?}", lab.app.dialogs)
+    };
+    assert!(dialog.host_save);
+    assert!(matches!(
+        dialog.purpose,
+        SecretPurpose::VaultCreate { offered: true }
+    ));
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert!(form.password_typed() && !form.busy && form.error.is_none());
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    assert!(shown.contains("Create the vault"), "{shown}");
+    assert!(
+        shown.contains("This host's password is remembered in"),
+        "{shown}"
+    );
+    assert!(shown.contains("Esc  not now"), "{shown}");
+    assert!(shown.contains("create & save"), "{shown}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+
+    // "Not now": the form again, the password kept, the refusal under it.
+    arm(&mut lab.app);
+    dialog_key(&mut lab, KeyCode::Esc);
+    assert!(lab.app.dialogs.is_empty());
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert!(form.password_typed(), "the password is still typed");
+    assert_eq!(form.focus, HostField::Password);
+    assert!(matches!(
+        &form.error,
+        Some((Some(HostField::Password), e)) if e.code == "vault_missing"
+    ));
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(
+        shown.contains("Create the vault (Keys, then V) to"),
+        "{shown}"
+    );
+    // The refusal takes the notes' place: the form still fits 80×24.
+    assert!(!shown.contains("Sent automatically"), "{shown}");
+    assert!(shown.contains("↵  save"), "{shown}");
+    assert!(lab.hosts_conf().is_empty(), "nothing saved");
+
+    // Save again: the dialog again; create the vault, the save follows.
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| !app.dialogs.is_empty()).await;
+    arm(&mut lab.app);
+    for c in "correct horse battery".chars() {
+        dialog_key(&mut lab, KeyCode::Char(c));
+    }
+    dialog_key(&mut lab, KeyCode::Tab);
+    for c in "correct horse battery".chars() {
+        dialog_key(&mut lab, KeyCode::Char(c));
+    }
+    dialog_key(&mut lab, KeyCode::Enter);
+    lab.until(|app| {
+        app.host_form.is_none() && app.selected_host().is_some_and(|h| h.alias == "pw")
+    })
+    .await;
+    assert!(lab.app.dialogs.is_empty());
+    assert_eq!(
+        lab.app.toast.as_ref().map(|t| t.message.as_str()),
+        Some("Added pw · hosts.conf")
+    );
+    assert_eq!(
+        lab.env.engine.vault_status().await.unwrap(),
+        portico_core::vault::VaultStatus::Unlocked
+    );
+    let details = lab
+        .env
+        .engine
+        .managed_host_details("pw")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(details.password_remembered);
+    assert!(lab.hosts_conf().contains("HostName 10.0.0.7"));
+    assert!(!lab.hosts_conf().contains("hunter2"));
+}
+
+/// A Portico host that came from an import says so: details, the edit
+/// title, and what an edit does to later imports.
+#[tokio::test]
+async fn an_imported_portico_host_shows_its_provenance() {
+    let mut lab = Lab::new("").await;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/portico-core/tests/fixtures/termix/termix_export.json");
+    let plan = lab
+        .env
+        .engine
+        .plan_import(&fixture, portico_core::import::ImportOptions::default())
+        .await
+        .unwrap();
+    lab.env
+        .engine
+        .apply_import(plan, portico_core::import::ImportOptions::default())
+        .await
+        .unwrap();
+    lab.app.on_hosts_changed();
+    lab.until(|app| app.inventory.as_ref().is_some_and(|i| !i.hosts.is_empty()))
+        .await;
+    lab.select("hbd");
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(
+        shown.contains("Origin         Portico · from Termix"),
+        "{shown}"
+    );
+    lab.app.update(Action::EditHost);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
+        .await;
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(
+        shown.contains("╭ Edit hbd · Portico · from Termix ─"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Editing it keeps later imports from updating it."),
+        "{shown}"
+    );
+    assert!(shown.contains("↵  save"), "{shown}");
+}
+
+/// First connection to a host with a remembered password: the warning
+/// names the account (`user@host:port`), the target is `host:port`, and
+/// the status bar gives the two answers.
+#[tokio::test]
+async fn new_host_key_names_the_account_its_password_goes_to() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("bob".into(), "hunter2".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut lab = Lab::new(&target_config("other", 1, "")).await;
+    lab.app.update(Action::AddHost);
+    lab.type_text("tofu");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("127.0.0.1");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("bob");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text(&server.port.to_string());
+    lab.focus(HostField::Password);
+    lab.type_text("hunter2");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| {
+        app.host_form.is_none() && app.selected_host().is_some_and(|h| h.alias == "tofu")
+    })
+    .await;
+    lab.app.update(Action::Connect);
+    lab.until(|app| matches!(app.dialogs.front(), Some(Dialog::Prompt(_))))
+        .await;
+    let account = format!("bob@127.0.0.1:{}", server.port);
+    let Some(Dialog::Prompt(prompt)) = lab.app.dialogs.front() else {
+        unreachable!()
+    };
+    assert_eq!(prompt.account.as_deref(), Some(account.as_str()));
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    let joined = lines
+        .iter()
+        .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        shown.contains(&format!("First connection to 127.0.0.1:{}.", server.port)),
+        "{shown}"
+    );
+    assert!(
+        joined.contains(&format!(
+            "▲ The password remembered for {account} will be sent to this server once you accept its key."
+        )),
+        "{shown}"
+    );
+    assert!(
+        lines
+            .get(23)
+            .is_some_and(|l| l.contains("HOST KEY") && l.contains("y  trust  n  refuse")),
+        "{shown}"
+    );
+    // Refused: nothing sent.
+    if let Some(Dialog::Prompt(p)) = lab.app.dialogs.front_mut() {
+        p.opened_at = Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .unwrap_or_else(Instant::now);
+    }
+    lab.app.update(Action::DialogKey(key(KeyCode::Char('n'))));
+    lab.until(|app| {
+        app.session_for("tofu")
+            .is_some_and(|s| matches!(s.phase, SessionPhase::Failed { .. }))
+    })
+    .await;
+    assert_eq!(
+        server
+            .behaviour
+            .logins
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+/// A refusal that starts with an alias keeps the alias's case in the toast.
+#[test]
+fn alias_first_errors_keep_their_case() {
+    let mut app = App::new(Env::new("").engine.clone());
+    app.notify_error_as_written(ErrorSummary {
+        code: "host_in_use".into(),
+        message: "db is the ProxyJump of web".into(),
+        hint: None,
+    });
+    assert_eq!(
+        app.toast.as_ref().map(crate::app::Toast::shown).as_deref(),
+        Some("db is the ProxyJump of web")
+    );
+    app.notify_error(ErrorSummary {
+        code: "other".into(),
+        message: "something failed".into(),
+        hint: None,
+    });
+    assert_eq!(
+        app.toast.as_ref().map(crate::app::Toast::shown).as_deref(),
+        Some("Something failed")
+    );
+    assert!(ALIAS_FIRST_CODES.contains(&"host_read_only"));
 }

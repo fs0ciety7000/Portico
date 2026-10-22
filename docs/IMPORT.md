@@ -34,7 +34,14 @@ portico import ~/Downloads/termius.csv --prefix         # aperçu, alias préfix
 portico import ~/Downloads/termius.csv --apply          # écrit dans hosts.conf, puis affiche la ligne Include
 portico import termix ~/Downloads/termix.json           # Termix seulement (tout autre format est refusé)
 portico import termius ~/Downloads/termius.csv          # forme historique, toujours acceptée
+portico import --help                                   # l'aide (comme portico --help)
 ```
+
+L'aperçu aligne les hôtes sur l'alias le plus long (colonne de 32 caractères au plus), puis liste les
+enregistrements ignorés et les avertissements **dans l'ordre de l'export** : `line 5 · web eu 1 — …` pour un CSV ou
+une sortie `export-ssh-config`, `#5 · Web Prod — …` pour un export JSON (un enregistrement y est une entrée, pas une
+ligne). Le message du moteur est repris tel quel (un hôte `edited_since_import` n'est pas paraphrasé). L'aperçu se
+termine par ce qui n'a pas été importé (section « Secrets », « Not imported: … », voir plus bas).
 
 Avec un export Termix qui contient des clés privées, l'aperçu les liste (type, empreinte `SHA256:…`, hôtes qui
 l'utilisent, chiffrée ou non, « already in ~/.ssh/… (reused) » si une clé locale a la même empreinte) et rappelle
@@ -52,8 +59,9 @@ portico import termix.json --all-keys --key-passphrase --apply                  
 - `--key-passphrase` demande, **sur le terminal, sans écho, deux fois**, une passphrase qui chiffre les copies des
   clés qui ne sont pas déjà chiffrées dans l'export. Elle n'est **jamais** acceptée comme valeur
   (`--key-passphrase=…` est refusé : les arguments sont visibles dans `ps`), ne vit qu'en mémoire (`Zeroizing`,
-  `SecretString`), et n'est demandée que si une clé sélectionnée doit être écrite. `Ctrl-C` ou `Esc` arrête sans
-  rien écrire. Sans elle, les clés en clair sont écrites sans passphrase (`0600`).
+  `SecretString`), et n'est demandée que si une clé sélectionnée doit être écrite, **une fois l'aperçu affiché**
+  (on voit ce qu'elle chiffre). `Ctrl-C` ou `Esc` arrête sans rien écrire. Sans elle, les clés en clair sont écrites
+  sans passphrase (`0600`).
 
 - `--accept-redirect ALIAS` (répétable, aussi `--accept-redirect=ALIAS`) accepte le **changement de destination**
   d'un hôte importé précédemment (voir « Réimporter » plus bas). Sans elle, l'hôte n'est pas modifié. Un alias qui
@@ -66,10 +74,35 @@ déclarée par l'export), et un hôte dont la destination change s'affiche
 `web-prod   deploy@198.51.100.10 → deploy@198.51.100.99  (destination changed, skipped)` (ou `accepted` avec
 `--accept-redirect web-prod`) ; il n'est pas compté parmi les hôtes à importer tant qu'il n'est pas accepté.
 
-Le rapport liste les hôtes mis à jour, les **changements de destination non appliqués** (avec l'option qui les
-applique), les clés importées (`~/.ssh/portico/<alias>`), les clés réutilisées, le
-nombre de clés ignorées, les avertissements apparus à l'écriture, et l'action **supprimer l'export** (« Delete
-<fichier> now: … », voir plus bas).
+Après `--apply`, le rapport s'ouvre sur le résumé (« Wrote 8 hosts to … ») suivi **aussitôt** de l'action sur
+l'export, en avertissement (« ▲ Delete termix.json now: it holds 3 passwords and 5 private keys (in clear text or
+encrypted). », voir plus bas) ; la section « Secrets » de l'aperçu n'est pas répétée. Viennent ensuite la ligne
+« Metadata (group, tags, notes) updated for N hosts in hosts.toml. » (seulement si N > 0), les hôtes mis à jour, les
+**changements de destination non appliqués** (avec l'option qui les applique), les clés importées, les clés
+réutilisées, le nombre de clés ignorées, les avertissements apparus à l'écriture, la ligne `Include`, et enfin la
+version courte de l'action (« ▲ Delete termix.json now. »), en dernière ligne :
+
+```text
+Wrote 8 hosts to ~/.config/portico/hosts.conf.
+▲ Delete termix.json now: it holds 3 passwords and 5 private keys (in clear text or encrypted).
+Metadata (group, tags, notes) updated for 8 hosts in hosts.toml.
+
+Keys imported
+  ~/.ssh/portico/hbd  written · 0600 · no passphrase · used by hbd, hbd-backup
+
+2 keys not imported (not selected, or none of its hosts was imported).
+
+Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config:
+
+    Include ~/.config/portico/hosts.conf
+
+▲ Delete termix.json now.
+```
+
+Une clé écrite dit si elle est chiffrée (`encrypted` : déjà chiffrée dans l'export, ou par `--key-passphrase`) ou
+non (`no passphrase`), et quels hôtes l'utilisent. Un changement de destination accepté dont l'ancienne clé, écrite
+par un import précédent, n'est plus utilisée par aucun hôte le dit dans « Updated hosts » :
+`hbd — key ~/.ssh/portico/hbd no longer used` (le fichier reste sur le disque).
 
 **GUI** : palette (`⌘K` / `Ctrl-K`), « Import hosts… » (Termius ou Termix, reconnu par le contenu). Le fichier se
 choisit dans le sélecteur natif (la webview ne nomme jamais un chemin) ; le plan reste côté Rust, clés comprises,

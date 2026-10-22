@@ -139,7 +139,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     );
     let band = match &app.toast {
         Some(t) if panel_open => {
-            overlays::ToastBox::new(s, t.kind, &t.message, t.hint.as_deref(), status.width).height
+            overlays::ToastBox::new(s, t.kind, &t.shown(), t.hint.as_deref(), status.width).height
         }
         _ => 0,
     };

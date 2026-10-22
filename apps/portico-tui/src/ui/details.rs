@@ -14,7 +14,7 @@ use portico_core::events::SessionPhase;
 use portico_core::hosts::{HostEntry, HostOrigin};
 
 use crate::app::App;
-use crate::host_form::origin_label;
+use crate::host_form::{origin_label, origin_with_source};
 use crate::theme::Styles;
 use crate::ui::fmt::{display_path, sentence};
 
@@ -32,9 +32,13 @@ fn keyword_label(keyword: &str) -> &str {
     }
 }
 
-/// `Portico · e edits`, `~/.ssh/config · read-only`, `Imported · read-only`.
+/// `Portico · e edits`, `Portico · from Termix` (shared with the GUI; one
+/// row at 80 columns), `~/.ssh/config · read-only`, `Imported · read-only`.
 fn origin_text(app: &App, host: &HostEntry) -> String {
     match host.origin {
+        HostOrigin::Portico if host.imported_from.is_some() => {
+            origin_with_source(host.origin, host.imported_from)
+        }
         HostOrigin::Portico => format!(
             "{} · {} edits",
             origin_label(host.origin),

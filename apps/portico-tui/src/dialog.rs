@@ -73,6 +73,9 @@ pub(crate) struct PromptDialog {
     /// Typed confirmation for risky host keys (`yes`).
     pub(crate) confirm: String,
     pub(crate) opened_at: Instant,
+    /// Unknown host key that would send a remembered password: the account
+    /// it is remembered for (`user@host:port`), named in the warning.
+    pub(crate) account: Option<String>,
 }
 
 /// What a key press did to a dialog.
@@ -103,6 +106,7 @@ impl PromptDialog {
             remember_in: "the system keyring",
             confirm: String::new(),
             opened_at: Instant::now(),
+            account: None,
         }
     }
 
@@ -360,6 +364,9 @@ pub(crate) struct SecretDialog {
     /// Waiting for the engine (Argon2 takes a moment).
     pub(crate) busy: bool,
     pub(crate) opened_at: Instant,
+    /// Opened by a host save refused for want of a vault: once the vault
+    /// is ready the save runs again; "not now" returns to the form.
+    pub(crate) host_save: bool,
 }
 
 pub(crate) enum SecretOutcome {
@@ -387,6 +394,15 @@ impl SecretDialog {
             failures: 0,
             busy: false,
             opened_at: Instant::now(),
+            host_save: false,
+        }
+    }
+
+    /// Create or unlock the vault for a host's password, then save again.
+    pub(crate) fn for_host_save(purpose: SecretPurpose) -> Self {
+        Self {
+            host_save: true,
+            ..Self::new(purpose)
         }
     }
 

@@ -180,7 +180,8 @@ fn render_toast(app: &App, frame: &mut Frame<'_>, zone: Rect) {
     let Some(toast) = &app.toast else { return };
     let s = app.styles();
     let screen = frame.area();
-    let make = |width| ToastBox::new(s, toast.kind, &toast.message, toast.hint.as_deref(), width);
+    let message = toast.shown();
+    let make = |width| ToastBox::new(s, toast.kind, &message, toast.hint.as_deref(), width);
     let in_zone = make(zone.width);
     if zone.width >= 24 && in_zone.fits(zone) {
         in_zone.draw(s, frame, zone);
@@ -204,6 +205,7 @@ pub(crate) struct ToastBox {
 
 impl ToastBox {
     /// At most 72 columns (and the screen width), at most 6 text rows.
+    /// `message` is shown as given (callers make it a sentence).
     pub(crate) fn new(
         s: crate::theme::Styles,
         kind: ToastKind,
@@ -221,10 +223,7 @@ impl ToastBox {
         let text_room = usize::from(max_width.saturating_sub(4 + 3)).max(1);
         // Wrapped, not truncated; continuation lines align under the text.
         let mut lines: Vec<Line<'static>> = Vec::new();
-        for (i, part) in fmt::wrap(&fmt::sentence(message), text_room)
-            .into_iter()
-            .enumerate()
-        {
+        for (i, part) in fmt::wrap(message, text_room).into_iter().enumerate() {
             let lead = if i == 0 {
                 Span::styled(format!("{icon}  "), icon_style)
             } else {
