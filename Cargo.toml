@@ -16,7 +16,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -44,6 +44,9 @@ rand = "0.10"
 hmac = "0.13"
 sha1 = "0.11"
 base64 = "0.22"
+# Encrypted PKCS#8 parameters, read before any KDF runs (same version russh
+# pins; no new crate in Cargo.lock).
+pkcs8 = { version = "0.11", features = ["pkcs5"] }
 
 # Errors, logging
 thiserror = "2"
@@ -53,7 +56,7 @@ color-eyre = "0.6"
 
 # Data & storage
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 toml = "1"
 # Format-preserving edits of hand-editable files (hosts.toml, settings.toml).
 toml_edit = "0.25"
@@ -86,6 +89,9 @@ tauri-plugin-dialog = "=2.8.1"
 # Dev
 tempfile = "3"
 pretty_assertions = "1"
+# VT parser of alacritty_terminal (same version: no new crate in the lock),
+# for differential tests of the playback sanitiser.
+vte = { version = "0.15.0", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

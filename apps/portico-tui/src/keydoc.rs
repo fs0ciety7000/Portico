@@ -38,9 +38,36 @@ const SEARCH: Panel = Panel {
     outro: "",
 };
 
+const HOST_FORM: Panel = Panel {
+    title: "TUI : hôtes créés dans Portico",
+    intro: "« Add host… » (`a` ou `n`), « Edit host… » (`e`, hôte Portico), « Duplicate as Portico host… » (`D`) et « Delete host » (`Del`) depuis la liste. Ces hôtes vivent dans le fragment `hosts.conf` de Portico ; Portico n'écrit jamais `~/.ssh/config`. Titres : « Add host », « Edit <alias> », « Duplicate <alias> » (sans points de suspension). Champs : alias, `HostName`, `User`, `Port`, clé (choisie parmi les clés locales découvertes, ou « none · agent and default keys »), `ProxyJump` (un hôte existant, ou « none »), mot de passe facultatif juste après (masqué, mémorisé dans le trousseau ou le vault), tags, groupe, favori, notes. À l'édition, le formulaire dit « A password is remembered » (`Keep`, `Change` ou `Forget`) ou « No password remembered » (seul « Set », champ vide). Sous un mot de passe saisi ou gardé, une note dit où il part : « Sent automatically to the server that answers at this address, after its host key is verified; then tied to that key. » ; si `HostName`, `User` ou `Port` changent, elle devient « Changing the server or user forgets the remembered password. Choose Change to set one for the new destination. » Sans vault (ou vault verrouillé), enregistrer un mot de passe ouvre « Create the vault » (ou « Unlock the vault ») puis enregistre de nouveau ; `Esc` (« not now ») revient au formulaire, le mot de passe toujours saisi et le refus sous le champ. Chaque valeur est vérifiée par le moteur : un refus s'affiche sous le champ concerné (choisi par son code d'erreur), avec son hint (sauf pour le port, dont le message suffit). Un hôte Portico issu d'un import l'indique (« Portico · from Termix » dans les détails et le titre) et son formulaire précise : « Editing it keeps later imports from updating it. » Un hôte de `~/.ssh/config` s'ouvre en lecture seule : « Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it. » ; un hôte de l'ancien fichier d'import : « Imported by an earlier version of Portico (imports/termius.conf), which it never edits. Duplicate it as a Portico host to change it. » (`D` duplicate, `t` tags and notes).",
+    rows: &[
+        (
+            "Champ suivant / précédent",
+            "`Tab` / `Shift-Tab`, `↓` / `↑`",
+        ),
+        (
+            "Choisir (clé, `ProxyJump`, favori, mot de passe)",
+            "`←` / `→`, `Space` ; une lettre saute au choix suivant qui commence par elle",
+        ),
+        ("Nouvelle ligne dans les notes", "`Alt-↵`"),
+        ("Enregistrer", "`↵` (ou `Ctrl-S`)"),
+        ("Vider le champ", "`Ctrl-U`"),
+        (
+            "Annuler (avec des changements : `y` les abandonne, `n` ou `Esc` revient au formulaire, les autres touches sont ignorées)",
+            "`Esc`, `Ctrl-C`",
+        ),
+        (
+            "Supprimer (« Delete <alias> (user@host:port) and its tags and notes. Its remembered password is forgotten unless another host uses the same account. Open sessions stay connected. This cannot be undone. » ; confirmation armée : touches ignorées 400 ms, puis seul `y` supprime ; `n` ou `Esc` annule, les autres touches sont ignorées). Sur un hôte non Portico, un toast « <alias> is read-only » (casse de l'alias conservée)",
+            "`Del` depuis la liste",
+        ),
+    ],
+    outro: "Après un enregistrement, la liste se recharge (`HostsChanged`) et sélectionne l'hôte. Les hôtes Portico portent `◆` dans la liste, les hôtes importés `◇` ; les détails indiquent l'origine. Tant que `~/.ssh/config` n'inclut pas `hosts.conf`, un bandeau sous les détails propose la ligne `Include` (« Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config: » ; `y` la copie, `z` masque le bandeau jusqu'au prochain lancement).",
+};
+
 const EDIT: Panel = Panel {
-    title: "TUI : édition d'un hôte",
-    intro: "« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.",
+    title: "TUI : tags, groupe et notes d'un hôte en lecture seule",
+    intro: "« Edit <alias> » (`e` puis `t` sur un hôte de `~/.ssh/config` ou importé). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.",
     rows: &[
         (
             "Champ suivant / précédent",
@@ -91,7 +118,10 @@ const FILES: Panel = Panel {
     title: "TUI : explorateur de fichiers",
     intro: "Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet actif (ou de l'hôte sélectionné). Le panneau actif a la bordure d'accent. La file des transferts s'affiche en bas tant qu'elle n'est pas vide.",
     rows: &[
-        ("Changer de panneau", "`Tab` / `Shift-Tab`"),
+        (
+            "« Switch side (local/remote) » : changer de côté",
+            "`Tab` / `Shift-Tab`",
+        ),
         (
             "Se déplacer",
             "`j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G`",
@@ -212,16 +242,51 @@ const PANES: Panel = Panel {
     intro: "Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 cellules. Les commandes sont dans la table du préfixe (`prefix.split_*`, `prefix.pane_*`, `prefix.next_pane`, `prefix.resize_*`, `prefix.close_pane`, `prefix.zoom_pane`). Seul le panneau actif reçoit les frappes, le collage et le défilement (aucune diffusion).",
     rows: &[
         (
-            "Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split onto… », recherche vide et active, rendue ensuite)",
+            "Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split with host… », recherche vide et active, rendue ensuite)",
             "saisie pour filtrer, `↓` / `↑`, `↵` pour diviser",
         ),
         ("Annuler le choix d'hôte", "`Esc`, `Ctrl-C`"),
         (
+            "Mode `PANE` : après `Ctrl-Space` + flèche ou `Shift` + flèche, les flèches (focus) et `Shift` + flèches (« Move divider ») restent actives 600 ms sans le préfixe ; toute autre touche quitte le mode et part au panneau",
+            "`←` `↓` `↑` `→`, `Shift` + flèche",
+        ),
+        (
             "Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte)",
-            "`↵` (dans le panneau)",
+            "`↵` (dans le panneau actif ; un autre panneau en échec indique « focus to retry (Ctrl-Space ←↓↑→) »)",
         ),
     ],
-    outro: "Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin. Une division impossible est refusée avec un message (« A tab holds at most 8 panes », « Not enough room to split this pane »).",
+    outro: "Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Un panneau en échec a un point plein et sa phase en couleur d'erreur, dans son titre comme dans l'onglet ; le point creux est réservé à un panneau sans shell (sorti, fermé). Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin, et diviser un panneau zoomé dézoome puis divise. Une division impossible est refusée sur une ligne de la barre de statut, pendant 4 s, sans couvrir aucun panneau (« This tab already has 8 panes · Close a pane first. », « Each pane needs at least 20 columns × 5 rows · Enlarge the window, or close a pane. »). Depuis un onglet divisé, `?` ouvre l'aide sur la page « Panes ».",
+};
+
+const RECORDINGS: Panel = Panel {
+    title: "TUI : enregistrements et lecture",
+    intro: "« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début en heure locale sur 24 h (`22 Oct 13:34`, l'année seulement si ce n'est pas l'année en cours ; suffixe « UTC » si le fuseau local n'a pas pu être lu au démarrage), durée (`m:ss` ou `h:mm:ss`), taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` en couleur d'avertissement pour un fichier invalide (non lisible, mais supprimable : « Not a valid asciicast v2 recording: it cannot be played, it can be deleted. » s'affiche quand il est sélectionné). Le nom du fichier sélectionné s'affiche sous la liste ; les touches sont dans la barre de statut.",
+    rows: &[
+        (
+            "Se déplacer",
+            "`j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G`",
+        ),
+        ("Lire l'enregistrement", "`↵`"),
+        (
+            "Supprimer (« The file is removed from the recordings folder. This cannot be undone. » ; confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, `n` ou `Esc` garde le fichier, les autres touches sont ignorées). Un enregistrement en cours d'écriture est refusé d'emblée (« This recording is still being written » · « Stop the recording first ») et `d` n'est pas proposé sur sa ligne",
+            "`d` ou `Suppr`, puis `y`",
+        ),
+        ("Rafraîchir", "`Ctrl-R`"),
+        ("Fermer", "`Esc`, `q`, `Ctrl-C`"),
+        (
+            "Lecture : pause / reprise ; une fois terminée, rejouer depuis le début",
+            "`Espace`",
+        ),
+        ("Lecture : vitesse (×0,5 à ×8)", "`+` / `-`"),
+        ("Lecture : sauter le silence en cours", "`→`"),
+        ("Lecture : revenir de 5 s", "`←`"),
+        ("Lecture : reprendre au début", "`Home`"),
+        (
+            "Lecture : revenir à la liste",
+            "`q`, `Esc` (`Ctrl-C` ferme tout)",
+        ),
+    ],
+    outro: "Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre ; puis l'état et la vitesse), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total » (jauge en accent) et la taille, ou ce qui ne tient pas (« 2 rows hidden »). Sur un écran de 24 lignes, la ligne de titre disparaît : nom du fichier, état et vitesse passent sur la ligne de progression, et la grille gagne une ligne. `←` et `Home` rouvrent le fichier et rejouent instantanément jusqu'au point visé (l'émulateur repart de zéro). Les silences de plus de 2 s sont raccourcis. Une erreur de lecture s'affiche à la place de la jauge (message · conseil). Le statut de la session (`● alias · latence`) et `● REC` restent visibles dans la barre de statut. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.",
 };
 
 /// Fixed keys of the configurable contexts (not rebindable).
@@ -317,7 +382,17 @@ pub(crate) fn block() -> String {
         "TUI : terminal",
         "Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.",
     );
-    for panel in [&PANES, &EDIT, &DEBUG, &FILES, &TUNNELS, &KEYS, &SNIPPETS] {
+    for panel in [
+        &PANES,
+        &HOST_FORM,
+        &EDIT,
+        &DEBUG,
+        &FILES,
+        &TUNNELS,
+        &KEYS,
+        &SNIPPETS,
+        &RECORDINGS,
+    ] {
         panel_section(&mut out, panel);
     }
     // One trailing newline before the end marker.

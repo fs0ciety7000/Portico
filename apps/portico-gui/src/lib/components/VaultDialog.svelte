@@ -43,8 +43,9 @@
     busy = false;
     if (!failed) {
       const message = mode === "unlock" ? "Vault unlocked" : mode === "create" ? "Vault created and unlocked" : "Vault passphrase changed";
-      workspace.notify({ code: "vault", message, hint: null }, "info");
-      vault.dialog = null;
+      // A host form waiting on it saves again and says so itself.
+      if (reason !== "host") workspace.notify({ code: "vault", message, hint: null }, "info");
+      vault.done();
       return;
     }
     if (failed.code === "vault_wrong_passphrase") wrong++;
@@ -68,6 +69,12 @@
     {#if reason === "remember"}
       <p class="lead">
         {mode === "create" ? "There is no vault yet, so this secret was not remembered." : "The vault is locked, so this secret was not remembered."}
+      </p>
+    {:else if reason === "host"}
+      <p class="lead" data-testid="vault-for-host">
+        {mode === "create"
+          ? "There is no vault yet to remember this host's password. Create one, and the host is saved with it."
+          : "The vault is locked, so this host's password cannot be remembered. Unlock it, and the host is saved with it."}
       </p>
     {/if}
     {#if mode === "unlock"}
@@ -122,7 +129,8 @@
   {#snippet footer()}
     {#if busy}<span class="footer-note busy"><span class="spinner"></span>Deriving the key…</span>{/if}
     <button class="secondary" disabled={busy} onclick={() => vault.close()}>
-      {reason === "startup" ? "Continue without" : reason === "remember" ? "Not now" : "Cancel"} <kbd>Esc</kbd>
+      {reason === "startup" ? "Continue without" : reason === "remember" || reason === "host" ? "Not now" : "Cancel"} <kbd>Esc</kbd>
+
     </button>
     <button class="primary" disabled={!ready} onclick={submit}>
       {mode === "unlock" ? "Unlock" : mode === "create" ? "Create vault" : "Change"} <kbd>↵</kbd>

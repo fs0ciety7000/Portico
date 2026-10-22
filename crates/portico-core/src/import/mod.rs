@@ -1,74 +1,346 @@
-//! Imports from other SSH managers (Phase 5): Termius, see [`termius`].
+//! Imports from other SSH managers: Termius ([`termius`]) and Termix
+//! ([`termix`]). ADRs "Import Termius" and "Import Termix et imports vers
+//! les hôtes Portico".
 //!
 //! ## Two steps: plan, then apply
 //!
-//! [`crate::Engine::plan_termius_import`] reads an export and returns an
-//! [`ImportPlan`] without writing anything: the hosts that would be
-//! imported (alias, `HostName`, `User`, `Port`, group, tags), the records
-//! skipped and why, the warnings, and how many secrets were found and
-//! ignored. [`crate::Engine::apply_import`] then writes it and returns an
-//! [`ImportReport`].
+//! [`crate::Engine::plan_import`] (or the per-source
+//! [`crate::Engine::plan_termius_import`] / [`crate::Engine::plan_termix_import`])
+//! reads an export and returns an [`ImportPlan`] without writing anything:
+//! the hosts that would be imported (alias, `HostName`, `User`, `Port`,
+//! group, tags, favorite, key), the private keys found (type, fingerprint,
+//! hosts using them, a local copy), the records skipped and why, the
+//! warnings, and how many secrets were found. [`crate::Engine::apply_import`]
+//! then writes it with the [`ImportOptions`] chosen by the user (which keys
+//! to import, a passphrase) and returns an [`ImportReport`].
 //!
 //! ## Invariants
 //!
-//! - `~/.ssh/config` is **never** written. The hosts go to
-//!   `<config_dir>/imports/termius.conf` (atomic, `0600`, directory
-//!   `0700`), replaced in full on each import; the user adds the
-//!   [`ImportPlan::include_line`] at the top of `~/.ssh/config` themselves.
-//! - Only `Host`, `HostName`, `User` and `Port` are emitted. Every value is
-//!   checked against a strict character set before it reaches the file
-//!   (no space, line break, control character, `#`, quote or `%`): an
-//!   export can never inject a directive such as `ProxyCommand`.
-//! - No secret is imported, kept or logged: password and key cells are
-//!   only tested for emptiness (and wiped from memory, `zeroize`); a cell
-//!   that holds a private key in any other column is dropped. Counts are
-//!   reported, never values. Errors and notices never quote a cell.
-//! - Applying the same plan twice changes nothing: the file is rewritten
-//!   only when a host changed (the import date aside), and metadata is
-//!   merged (tags united, group and notes only set when missing).
-//! - An alias already defined in the user's own config (outside the import
-//!   file) is never shadowed: that record is skipped, unless the
-//!   [`ImportOptions::prefix`] option gives every alias a `termius-` prefix.
+//! - `~/.ssh/config` is **never** written. Imported hosts become **Portico
+//!   hosts** in `<config_dir>/hosts.conf` ([`crate::managed_hosts`]): the
+//!   same lock, strict reading, allowlists and events as hosts created in
+//!   the UIs. An old `imports/termius.conf` stays read as it is.
+//! - Only `Host`, `HostName`, `User`, `Port`, and for an imported key
+//!   `IdentityFile` + `IdentitiesOnly yes`, are written. Every value is
+//!   checked against a strict character set (no space, line break, control
+//!   character, `#`, quote or `%`): an export can never inject a directive.
+//! - A re-import updates only the hosts it created from the same record
+//!   (same provenance `id`) and nobody edited since (provenance and a hash
+//!   of the written values in `hosts.toml`, see [`crate::hosts`]); an alias
+//!   defined anywhere else, edited by hand or imported from another record,
+//!   is never touched: that record is skipped, unless the
+//!   [`ImportOptions::prefix`] option prefixes every alias.
+//! - A re-import never points an alias at another server silently: an
+//!   update that changes `HostName`, `User` or `Port` carries the current
+//!   values ([`PlannedHost::previous`]) and is applied only for the aliases
+//!   the user accepted ([`ImportOptions::allow_redirect`]), otherwise
+//!   skipped ([`NoticeCode::DestinationChanged`]); the old `IdentityFile`
+//!   never follows it.
+//! - An alias that would shadow a name the configuration relies on (a
+//!   host name, `localhost`, a `ProxyJump` host, a dotless `HostName`) gets
+//!   the source's prefix ([`NoticeCode::AliasLooksLikeHost`]).
+//! - No password is imported, kept or logged: password cells and fields
+//!   are only tested for emptiness (and wiped from memory, `zeroize`).
+//!   Counts are reported, never values. Errors and notices never quote a
+//!   cell or a key.
+//! - Private keys (Termix) are imported **only when the user selects
+//!   them** ([`KeySelection`]). Their text lives in `Zeroizing` memory held
+//!   by the plan ([`KeyMaterial`]: never serialized, `Debug` redacted) and
+//!   is written to `~/.ssh/portico/` only (`0600`, directory `0700`,
+//!   `create_new`, never overwritten), unless a local key with the same
+//!   fingerprint already exists. See [`private_keys`].
 
+mod apply;
+mod build;
 pub(crate) mod csv;
+pub(crate) mod private_keys;
 pub mod termius;
+pub mod termix;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use crate::error::Result;
-use crate::hosts::{HostMeta, ImportedMeta, merge_imported_meta};
 use crate::ssh_config::SshConfig;
-use crate::store::{self, Paths};
+use crate::store::{Paths, same_file};
 
-pub use termius::TermiusFormat;
+pub(crate) use apply::apply;
+pub(crate) use build::plan;
+pub use private_keys::{IMPORTED_KEYS_DIR, KeyFormat};
 
 /// Largest export file read, in bytes.
 pub const MAX_IMPORT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Most records (rows, hosts, `Host` blocks) read from one export.
+pub const MAX_IMPORT_RECORDS: usize = csv::MAX_RECORDS;
 /// Longest alias generated, in characters.
 pub const MAX_ALIAS_CHARS: usize = 64;
-/// Prefix given to every alias by [`ImportOptions::prefix`].
+/// Prefix given to every alias of a Termius import by
+/// [`ImportOptions::prefix`] (see [`ImportSource::prefix`]).
 pub const IMPORT_PREFIX: &str = "termius-";
 /// Most warnings listed in a plan or report; the rest are counted in one
 /// [`NoticeCode::NoticesTruncated`] notice.
 pub const MAX_NOTICES: usize = 500;
-/// Largest generated config file, in bytes.
-const MAX_IMPORT_CONF_BYTES: u64 = 4 * 1024 * 1024;
-/// The header line holding the import date: the only line allowed to
-/// differ for a re-import to count as unchanged.
-const DATE_LINE_PREFIX: &str = "# Imported on ";
 
-/// Import choices.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+// ── Sources and formats ─────────────────────────────────────────────────
+
+/// The tool an export comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ImportSource {
+    Termius,
+    Termix,
+}
+
+impl ImportSource {
+    /// Stable name, stored as the provenance of imported hosts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Termius => "termius",
+            Self::Termix => "termix",
+        }
+    }
+
+    /// The source named `name` ([`Self::as_str`]), if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "termius" => Some(Self::Termius),
+            "termix" => Some(Self::Termix),
+            _ => None,
+        }
+    }
+
+    /// Human name (`Termius`), also the start of generated notes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Termius => "Termius",
+            Self::Termix => "Termix",
+        }
+    }
+
+    /// Prefix of [`ImportOptions::prefix`] (`termius-`, `termix-`).
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Termius => IMPORT_PREFIX,
+            Self::Termix => "termix-",
+        }
+    }
+}
+
+/// Which kind of export a file is (detected from its content).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ImportFormat {
+    /// CSV in the layout of Termius' import template.
+    TemplateCsv,
+    /// `credentials.csv` of `termius-local-export`.
+    LocalExportCsv,
+    /// `hosts.json` of `termius-local-export`.
+    LocalExportJson,
+    /// `termius export-ssh-config` (archived CLI).
+    SshConfig,
+    /// Termix JSON export (`{"hosts":[{"name","ip",…}]}`).
+    TermixJson,
+}
+
+/// The formats of the first importer, kept as a name for compatibility.
+pub type TermiusFormat = ImportFormat;
+
+impl ImportFormat {
+    /// Human name, for reports.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TemplateCsv => "Termius CSV",
+            Self::LocalExportCsv => "termius-local-export credentials.csv",
+            Self::LocalExportJson => "termius-local-export hosts.json",
+            Self::SshConfig => "termius export-ssh-config",
+            Self::TermixJson => "Termix JSON",
+        }
+    }
+
+    /// The tool that writes this format.
+    pub fn source(self) -> ImportSource {
+        match self {
+            Self::TermixJson => ImportSource::Termix,
+            Self::TemplateCsv | Self::LocalExportCsv | Self::LocalExportJson | Self::SshConfig => {
+                ImportSource::Termius
+            }
+        }
+    }
+}
+
+// ── Keys ────────────────────────────────────────────────────────────────
+
+/// Opaque identifier of a private key of an export: its `SHA256:…`
+/// fingerprint (public, stable across re-plans of the same file).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyId(String);
+
+impl KeyId {
+    /// A key id as shown by [`PlannedKey::id`] (UIs send it back).
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for KeyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Which private keys of the plan to import ([`ImportOptions::keys`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "ids")]
+pub enum KeySelection {
+    /// No key (the default: nothing is ticked).
+    #[default]
+    None,
+    /// These keys ([`PlannedKey::id`]); unknown ids are ignored.
+    Some(BTreeSet<KeyId>),
+}
+
+impl KeySelection {
+    /// `true` when `id` is selected.
+    pub fn contains(&self, id: &KeyId) -> bool {
+        match self {
+            Self::None => false,
+            Self::Some(ids) => ids.contains(id),
+        }
+    }
+}
+
+/// A private key found in an export. Never holds key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedKey {
+    pub id: KeyId,
+    /// `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`…
+    pub algorithm: String,
+    /// `SHA256:…`, as printed by `ssh-keygen -l`.
+    pub fingerprint: String,
+    pub format: KeyFormat,
+    /// Encrypted in the export (written as it is, the passphrase is not
+    /// changed).
+    pub encrypted: bool,
+    /// `false` when [`Self::fingerprint`] was only **claimed** by the
+    /// export: an encrypted OpenSSH key carries its public half in clear,
+    /// and nothing proves it matches the encrypted private half. Such a key
+    /// is never matched with a local key ([`Self::local`] is `None`), and
+    /// the UIs should say the fingerprint is unverified.
+    pub fingerprint_verified: bool,
+    /// Aliases of the planned hosts using it.
+    pub aliases: Vec<String>,
+    /// A local private key with the same fingerprint (`~/.ssh`,
+    /// `~/.ssh/portico`): reused instead of writing a copy.
+    pub local: Option<PathBuf>,
+}
+
+/// The private keys of a plan, held in memory (`Zeroizing`) for
+/// [`crate::Engine::apply_import`]. Opaque: never serialized, `Debug`
+/// shows a count only; dropping the last clone of the plan wipes them.
+/// [`Default`] is empty (a plan built by hand imports no key).
+#[derive(Clone, Default)]
+pub struct KeyMaterial(Arc<BTreeMap<KeyId, private_keys::KeySecret>>);
+
+impl KeyMaterial {
+    pub(crate) fn new(keys: BTreeMap<KeyId, private_keys::KeySecret>) -> Self {
+        Self(Arc::new(keys))
+    }
+
+    pub(crate) fn get(&self, id: &KeyId) -> Option<&private_keys::KeySecret> {
+        self.0.get(id)
+    }
+
+    /// Number of keys held.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for KeyMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "KeyMaterial({} keys, redacted)", self.0.len())
+    }
+}
+
+impl PartialEq for KeyMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.keys().eq(other.0.keys())
+    }
+}
+
+impl Eq for KeyMaterial {}
+
+// ── Options, plan, report ───────────────────────────────────────────────
+
+/// Import choices. When planning, only [`Self::prefix`] is read; when
+/// applying, [`Self::keys`] and [`Self::key_passphrase`] (and a
+/// [`Self::prefix`] the plan did not have yet).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportOptions {
-    /// Prefix every alias with [`IMPORT_PREFIX`] (no collision with the
-    /// user's own aliases).
+    /// Prefix every alias with the source's prefix (`termius-`,
+    /// `termix-`): no collision with the user's own aliases.
     pub prefix: bool,
+    /// Private keys to import (none by default).
+    #[serde(default)]
+    pub keys: KeySelection,
+    /// Encrypts the imported keys that are not encrypted in the export
+    /// (empty: none). Never serialized.
+    #[serde(skip)]
+    pub key_passphrase: Option<SecretString>,
+    /// Aliases (as planned, lowercase) whose **destination change** the
+    /// user accepted ([`PlannedHost::previous`]): only these earlier
+    /// imported hosts may be pointed at another `HostName`, `User` or
+    /// `Port`. Any other destination change is skipped
+    /// ([`NoticeCode::DestinationChanged`]). Empty by default.
+    #[serde(default)]
+    pub allow_redirect: BTreeSet<String>,
 }
+
+impl ImportOptions {
+    /// The options a plan keeps: the prefix only.
+    pub(crate) fn for_plan(&self) -> Self {
+        Self {
+            prefix: self.prefix,
+            keys: KeySelection::None,
+            key_passphrase: None,
+            allow_redirect: BTreeSet::new(),
+        }
+    }
+
+    /// `true` when the user accepted that `alias` points elsewhere.
+    pub(crate) fn redirect_allowed(&self, alias: &str) -> bool {
+        self.allow_redirect.contains(&alias.to_lowercase()) || self.allow_redirect.contains(alias)
+    }
+}
+
+impl PartialEq for ImportOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.prefix == other.prefix
+            && self.keys == other.keys
+            && self.key_passphrase.is_some() == other.key_passphrase.is_some()
+            && self.allow_redirect == other.allow_redirect
+    }
+}
+
+impl Eq for ImportOptions {}
 
 /// One host of a plan, as it will be written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -82,14 +354,34 @@ pub struct PlannedHost {
     pub user: Option<String>,
     /// `None` for 22 (left out of the file).
     pub port: Option<u16>,
-    /// Termius group path (`Production/EU`), for `hosts.toml`.
+    /// Group path (`Production/EU`), for `hosts.toml`.
     pub group: Option<String>,
     /// Normalized tags, for `hosts.toml`.
     pub tags: Vec<String>,
-    /// `Termius: <label>` when the alias differs from the label.
+    /// `Termius: <label>` / `Termix: <label>` when the alias differs from
+    /// the label.
     pub notes: Option<String>,
     /// Line (CSV, ssh config) or position (JSON) of the record, 1-based.
     pub record: usize,
+    /// Pinned in the export: marked as a favorite when created.
+    pub favorite: bool,
+    /// The private key this host uses in the export ([`ImportPlan::keys`]),
+    /// written as its `IdentityFile` only when selected.
+    pub key: Option<KeyId>,
+    /// `true` when it updates a host an earlier import of the same source
+    /// created from the same record (and nobody edited since); `false`
+    /// when it is created.
+    pub update: bool,
+    /// For an update that **changes the destination** (`HostName`, `User`
+    /// or `Port`): the host as it is now. Such an update is applied only
+    /// when the user opts in for this alias
+    /// ([`ImportOptions::allow_redirect`]); otherwise it is skipped with
+    /// [`NoticeCode::DestinationChanged`]. `None` for a creation or an
+    /// update to the same destination.
+    pub previous: Option<crate::managed_hosts::ManagedHost>,
+    /// Stable id of the record in the export (Termix `id`, otherwise
+    /// `label:<slug of the label>`), kept as the host's provenance.
+    pub source_id: String,
 }
 
 /// Why a notice was raised (stable codes for UIs and tests).
@@ -107,7 +399,8 @@ pub enum NoticeCode {
     InvalidUser,
     /// The port is not 1–65535: left out (22).
     InvalidPort,
-    /// The alias is already defined in the user's ssh config: skipped.
+    /// The alias is already defined elsewhere (ssh config, a Portico host):
+    /// skipped.
     AliasCollision,
     /// Two records gave the same alias: a `-2`, `-3`… suffix was added.
     AliasRenamed,
@@ -132,10 +425,26 @@ pub enum NoticeCode {
     /// another field): skipped.
     ColumnCountMismatch,
     /// The alias looks like another host's name (`github.com` pointing
-    /// elsewhere): it was given the `termius-` prefix.
+    /// elsewhere): it was given the source's prefix.
     AliasLooksLikeHost,
     /// Too many notices: the rest are counted, not listed.
     NoticesTruncated,
+    /// A setting Portico does not import (Termix tunnels, SOCKS5 chain).
+    IgnoredSetting,
+    /// A private key Portico cannot read (garbage, `PuTTY`, encrypted PEM
+    /// without its passphrase): skipped, never quoted.
+    KeyUnreadable,
+    /// A key is stored for a host that does not use key authentication:
+    /// not offered.
+    KeyNotUsed,
+    /// The host was imported earlier, then edited by hand: left as it is.
+    EditedSinceImport,
+    /// A selected key could not be imported (see the message).
+    KeySkipped,
+    /// A re-import would point an alias at another server (`HostName`,
+    /// `User` or `Port` changed): not applied unless the user accepted it
+    /// for this alias ([`ImportOptions::allow_redirect`]).
+    DestinationChanged,
 }
 
 impl NoticeCode {
@@ -160,13 +469,19 @@ impl NoticeCode {
             Self::ColumnCountMismatch => "column_count_mismatch",
             Self::AliasLooksLikeHost => "alias_looks_like_host",
             Self::NoticesTruncated => "notices_truncated",
+            Self::IgnoredSetting => "ignored_setting",
+            Self::KeyUnreadable => "key_unreadable",
+            Self::KeyNotUsed => "key_not_used",
+            Self::EditedSinceImport => "edited_since_import",
+            Self::KeySkipped => "key_skipped",
+            Self::DestinationChanged => "destination_changed",
         }
     }
 }
 
 /// A skipped record or a warning. Never holds a secret: `label` is the
 /// record's label (cleaned), `message` names fields, not cell values
-/// (except tags, groups and port numbers, which are not secret).
+/// (except tags, groups, aliases and port numbers, which are not secret).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportNotice {
@@ -234,31 +549,89 @@ fn hidden_count(notice: &ImportNotice) -> usize {
     digits.parse().unwrap_or(1)
 }
 
-/// Secrets found in the export and **not** imported.
+/// Secrets found in the export. Counts only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IgnoredSecrets {
+    /// Passwords (and key passphrases) never imported.
     pub passwords: usize,
+    /// Private keys not imported, whatever the cause: the
+    /// [`Self::unticked_keys`], the [`Self::unreadable_keys`] and the others
+    /// (a key stored for a host that does not use keys, a key of a skipped
+    /// host, a key found in a Termius cell or field).
     pub keys: usize,
+    /// Of [`Self::keys`]: keys offered for import and left unticked. Always
+    /// 0 in a plan (nothing is ticked yet); counted by the report.
+    pub unticked_keys: usize,
+    /// Of [`Self::keys`]: keys Portico cannot read
+    /// ([`NoticeCode::KeyUnreadable`]).
+    pub unreadable_keys: usize,
+    /// Private keys the export holds in clear text or encrypted, whether
+    /// imported or not.
+    pub keys_in_export: usize,
 }
 
 impl IgnoredSecrets {
+    /// Secrets ignored (passwords and keys).
     pub fn total(self) -> usize {
         self.passwords.saturating_add(self.keys)
     }
 
-    /// Advice shown when the export held secrets (`None` otherwise).
+    /// What was not imported, by cause: `"Not imported: 1 password, 2
+    /// unticked keys, 1 unreadable key."`. Only the non-zero parts are
+    /// named; keys of no named cause are `"N keys"`, or `"N other keys"`
+    /// next to a named cause. `None` when nothing was left out.
     pub fn advice(self) -> Option<String> {
-        if self.total() == 0 {
-            return None;
-        }
-        let plural =
-            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-        Some(format!(
-            "{} and {} ignored (never imported). The export holds them in clear text: delete it once the import is done, and keep secrets in your keychain or ssh-agent.",
-            plural(self.passwords, "password", "passwords"),
-            plural(self.keys, "key", "keys"),
-        ))
+        let other = self
+            .keys
+            .saturating_sub(self.unticked_keys)
+            .saturating_sub(self.unreadable_keys);
+        let other_word = if self.unticked_keys > 0 || self.unreadable_keys > 0 {
+            "other key"
+        } else {
+            "key"
+        };
+        let parts: Vec<String> = [
+            (self.passwords, "password"),
+            (self.unticked_keys, "unticked key"),
+            (self.unreadable_keys, "unreadable key"),
+            (other, other_word),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, word)| plural(n, word))
+        .collect();
+        (!parts.is_empty()).then(|| format!("Not imported: {}.", parts.join(", ")))
+    }
+
+    /// The action to take on the export once imported, naming it:
+    /// `"Delete hosts.json now: it holds 1 password and 4 private keys (in
+    /// clear text or encrypted)."`. Only the non-zero counts are named;
+    /// `None` when the export held no secret. `file_name` is the export's
+    /// file name (control characters are dropped); UIs show this first.
+    pub fn delete_export_advice(self, file_name: &str) -> Option<String> {
+        let keys = self.keys_in_export.max(self.keys);
+        let held: Vec<String> = [(self.passwords, "password"), (keys, "private key")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, word)| plural(n, word))
+            .collect();
+        (!held.is_empty()).then(|| {
+            format!(
+                "Delete {} now: it holds {} (in clear text or encrypted).",
+                display_text(file_name, 255),
+                held.join(" and ")
+            )
+        })
+    }
+}
+
+/// `"1 password"`, `"2 passwords"`.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
     }
 }
 
@@ -269,7 +642,8 @@ impl IgnoredSecrets {
 pub struct ImportPlan {
     /// The export file.
     pub source: PathBuf,
-    pub format: TermiusFormat,
+    pub format: ImportFormat,
+    /// The options the plan was made with (the prefix only).
     pub options: ImportOptions,
     /// Records (rows, JSON hosts, `Host` blocks) found in the export.
     pub records: usize,
@@ -281,26 +655,81 @@ pub struct ImportPlan {
     /// `IdentityFile` paths of the export, not imported (they point to
     /// the exporting tool's own key folder).
     pub identity_files: Vec<String>,
-    /// The file the hosts are written to.
+    /// The file the hosts are written to (`hosts.conf`).
     pub target: PathBuf,
-    /// The line to add at the top of `~/.ssh/config`.
+    /// The line to add at the top of `~/.ssh/config` so OpenSSH sees them.
     pub include_line: String,
-    /// `Host` blocks already in [`Self::target`] (a previous import),
-    /// which applying this plan replaces; `None` when there are none.
+    /// Hosts of an earlier import of the same source that this plan
+    /// updates in place (same `HostName`, `User` and `Port`); `None` when
+    /// there are none. Destination changes are not counted (they are
+    /// skipped unless accepted: see [`Self::updates`]), nor hosts edited
+    /// since the import (skipped).
     pub replaces: Option<usize>,
+    /// Private keys found (Termix), offered for import; none is selected
+    /// by default.
+    pub keys: Vec<PlannedKey>,
+    /// The keys' material, for [`crate::Engine::apply_import`] only.
+    #[serde(skip)]
+    pub key_material: KeyMaterial,
+}
+
+impl ImportPlan {
+    /// The tool the export comes from.
+    pub fn source_kind(&self) -> ImportSource {
+        self.format.source()
+    }
+
+    /// Hosts of an earlier import that applying this plan with `options`
+    /// would update: the [`Self::replaces`] ones, plus the destination
+    /// changes accepted in [`ImportOptions::allow_redirect`].
+    pub fn updates(&self, options: &ImportOptions) -> usize {
+        self.hosts
+            .iter()
+            .filter(|h| h.update && (h.previous.is_none() || options.redirect_allowed(&h.alias)))
+            .count()
+    }
+
+    /// The export's file name (never its path), control characters
+    /// dropped.
+    pub fn file_name(&self) -> String {
+        self.source
+            .file_name()
+            .map(|n| display_text(&n.to_string_lossy(), 255))
+            .unwrap_or_default()
+    }
+
+    /// [`IgnoredSecrets::delete_export_advice`] for this export.
+    pub fn delete_export_advice(&self) -> Option<String> {
+        self.secrets.delete_export_advice(&self.file_name())
+    }
+}
+
+/// What happened to the keys of a plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOutcome {
+    /// Key files written (`~/.ssh/portico/<alias>`, with a `.pub`).
+    pub imported: Vec<PathBuf>,
+    /// Local keys with the same fingerprint, used instead.
+    pub reused: Vec<PathBuf>,
+    /// Keys of the plan neither imported nor reused (not selected, or
+    /// selected for hosts that were skipped).
+    pub skipped: usize,
 }
 
 /// What an applied import did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportReport {
-    pub format: TermiusFormat,
-    /// The file written.
+    pub format: ImportFormat,
+    /// The file written (`hosts.conf`).
     pub target: PathBuf,
     /// `true` when the file already held exactly these hosts (not rewritten).
     pub unchanged: bool,
-    /// Aliases written, in file order.
+    /// Aliases created or updated, in plan order.
     pub imported: Vec<String>,
+    /// The aliases of [`Self::imported`] that updated an earlier import.
+    pub updated: Vec<String>,
     pub skipped: Vec<ImportNotice>,
     pub warnings: Vec<ImportNotice>,
     pub secrets: IgnoredSecrets,
@@ -310,8 +739,9 @@ pub struct ImportReport {
     /// The line to add at the top of `~/.ssh/config`.
     pub include_line: String,
     /// `true` when `~/.ssh/config` has an `Include` that resolves to the
-    /// file (its hosts are visible): nothing left to do.
+    /// file (its hosts are visible to OpenSSH): nothing left to do.
     pub include_active: bool,
+    pub keys: KeyOutcome,
 }
 
 /// An export Portico cannot read. Messages name the file and position,
@@ -325,7 +755,7 @@ pub enum ImportError {
     TooLarge { path: PathBuf, max: u64 },
     #[error("{} is not UTF-8 or UTF-16 text", path.display())]
     Encoding { path: PathBuf },
-    #[error("{} is not a Termius export Portico recognizes", path.display())]
+    #[error("{} is not a Termius or Termix export Portico recognizes", path.display())]
     UnknownFormat { path: PathBuf },
     #[error("{}:{line}: {reason}", path.display())]
     Csv {
@@ -341,7 +771,8 @@ pub enum ImportError {
     },
     #[error("{} has more than {max} records", path.display())]
     TooManyRecords { path: PathBuf, max: usize },
-    /// `hosts.toml` was updated, then the config file could not be written.
+    /// Kept for compatibility: `hosts.toml` was updated, then the config
+    /// file could not be written.
     #[error(
         "{} was not written ({reason}); {} already holds the tags and groups of {meta_updated} imported hosts",
         target.display(),
@@ -351,6 +782,18 @@ pub enum ImportError {
         target: PathBuf,
         meta: PathBuf,
         meta_updated: usize,
+        reason: String,
+    },
+    /// The hosts were written, then `hosts.toml` (tags, groups, provenance)
+    /// could not be.
+    #[error(
+        "the hosts were written to {} but {} was not ({reason})",
+        target.display(),
+        meta.display()
+    )]
+    MetaNotWritten {
+        target: PathBuf,
+        meta: PathBuf,
         reason: String,
     },
 }
@@ -364,9 +807,7 @@ impl ImportError {
             ),
             Self::TooLarge { .. } => (
                 "import_too_large",
-                Some(
-                    "A Termius export of a few thousand hosts is far smaller: is this the right file?",
-                ),
+                Some("An export of a few thousand hosts is far smaller: is this the right file?"),
             ),
             Self::Encoding { .. } => (
                 "import_encoding",
@@ -375,7 +816,7 @@ impl ImportError {
             Self::UnknownFormat { .. } => (
                 "import_unknown_format",
                 Some(
-                    "Use a CSV with the Termius import template header (Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,…), a termius-local-export hosts.json or credentials.csv, or the output of `termius export-ssh-config`. See docs/IMPORT.md.",
+                    "Use a CSV with the Termius import template header (Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,…), a termius-local-export hosts.json or credentials.csv, the output of `termius export-ssh-config`, or a Termix JSON export. See Portico's import guide.",
                 ),
             ),
             Self::Csv { .. } => (
@@ -394,6 +835,12 @@ impl ImportError {
                 "import_conf_not_written",
                 Some(
                     "Fix the reported problem and import again: the metadata already written is merged, never duplicated.",
+                ),
+            ),
+            Self::MetaNotWritten { .. } => (
+                "import_meta_not_written",
+                Some(
+                    "The hosts are usable, but a re-import will treat them as created by hand: fix the reported problem, then edit their tags in Portico.",
                 ),
             ),
         }
@@ -467,7 +914,7 @@ pub(crate) fn slug(raw: &str, max: usize) -> String {
 }
 
 /// `true` for an alias Portico generates (and accepts back in a plan).
-fn is_valid_alias(alias: &str) -> bool {
+pub(crate) fn is_valid_alias(alias: &str) -> bool {
     !alias.is_empty()
         && alias.chars().count() <= MAX_ALIAS_CHARS
         && alias
@@ -510,12 +957,36 @@ pub(crate) fn clean_user(raw: &str) -> Option<String> {
 
 /// `true` when `alias` reads like a host name (`github.com`, `10.0.0.1`)
 /// other than `hostname`: `ssh <alias>` would then reach `hostname` for
-/// every tool reading the config. Aliases already under
-/// [`IMPORT_PREFIX`] are left alone.
-pub(crate) fn looks_like_other_host(alias: &str, hostname: &str) -> bool {
+/// every tool reading the config. Aliases already under `prefix` are left
+/// alone.
+pub(crate) fn looks_like_other_host(alias: &str, hostname: &str, prefix: &str) -> bool {
     alias.contains(['.', ':'])
         && !alias.eq_ignore_ascii_case(hostname)
-        && !alias.starts_with(IMPORT_PREFIX)
+        && !alias.starts_with(prefix)
+}
+
+/// `true` when an imported `alias` (pointing at `hostname`) would shadow a
+/// name the configuration already relies on, so it must get the source's
+/// prefix: a name that reads like another host ([`looks_like_other_host`]),
+/// `localhost`, a `ProxyJump` host used by the configuration (`ssh` would
+/// then jump through the imported server), or a dotless name other than
+/// `hostname` that the configuration uses as a `HostName`.
+pub(crate) fn shadows_a_name(
+    alias: &str,
+    hostname: &str,
+    prefix: &str,
+    occupancy: &Occupancy,
+) -> bool {
+    if alias.starts_with(prefix) {
+        return false;
+    }
+    let lower = alias.to_lowercase();
+    looks_like_other_host(alias, hostname, prefix)
+        || lower == "localhost"
+        || occupancy.jump_hosts.contains(&lower)
+        || (!lower.contains('.')
+            && !lower.eq_ignore_ascii_case(hostname)
+            && occupancy.hostnames.contains(&lower))
 }
 
 /// `true` when a cell holds private key material.
@@ -523,9 +994,10 @@ pub(crate) fn looks_like_secret(value: &str) -> bool {
     value.contains("-----BEGIN") || value.contains("PRIVATE KEY")
 }
 
-// ── Target file and Include line ────────────────────────────────────────
+// ── Files and Include line ──────────────────────────────────────────────
 
-/// `<config_dir>/imports/termius.conf`.
+/// `<config_dir>/imports/termius.conf`: where the first Termius importer
+/// wrote its hosts. Still read (origin `Imported`), never written again.
 pub fn termius_target(paths: &Paths) -> PathBuf {
     paths.config_dir.join("imports").join("termius.conf")
 }
@@ -545,243 +1017,143 @@ pub fn include_line(paths: &Paths, target: &Path) -> String {
     }
 }
 
-/// Lowercased aliases of the user's ssh config, except the occurrences
-/// declared in `exclude` (the import file itself: re-importing never
-/// collides with the previous import). Every occurrence counts, not only
-/// the first: a host the user copied into their own config *after* the
-/// `Include` is still seen, so the next import leaves it out of the file.
-pub(crate) fn existing_aliases(paths: &Paths, exclude: &Path) -> Result<HashSet<String>> {
-    let config = SshConfig::load(&paths.ssh_config(), &paths.ssh_dir)?;
-    Ok(config
-        .all_concrete_aliases()
-        .into_iter()
-        .filter(|a| !same_file(&a.source.file, exclude))
-        .map(|a| a.name.to_lowercase())
-        .collect())
-}
-
 /// `true` when the user's ssh config has an `Include` (nested ones too)
 /// that resolves to `target`, whatever the file holds.
 pub(crate) fn include_active(paths: &Paths, target: &Path) -> bool {
-    SshConfig::load(&paths.ssh_config(), &paths.ssh_dir).is_ok_and(|c| {
-        c.included_files()
-            .iter()
-            .any(|included| same_file(included, target))
-    })
+    SshConfig::load(&paths.ssh_config(), &paths.ssh_dir).is_ok_and(|c| includes(&c, target))
 }
 
-/// The number of `Host` blocks in the import file `target`, `None` when it
-/// does not exist or holds none.
-pub(crate) fn host_blocks(target: &Path) -> Result<Option<usize>> {
-    let Some(text) = store::read_capped(target, MAX_IMPORT_CONF_BYTES)? else {
-        return Ok(None);
-    };
-    let count = text
-        .lines()
-        .filter(|line| {
-            let (keyword, _) = line.trim_start().split_once(' ').unwrap_or((line, ""));
-            keyword.eq_ignore_ascii_case("host")
-        })
-        .count();
-    Ok((count > 0).then_some(count))
-}
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
-/// The config file text for `hosts` (only `Host`, `HostName`, `User`,
-/// `Port`; values already checked). The `Include` line shown in the header
-/// is computed again from `paths`, never taken from the plan.
-fn render(paths: &Paths, plan: &ImportPlan, hosts: &[PlannedHost], now: OffsetDateTime) -> String {
-    use std::fmt::Write as _;
-
-    let date = now
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
-    let source = plan
-        .source
-        .file_name()
-        .map(|n| display_text(&n.to_string_lossy(), 120))
-        .unwrap_or_default();
-    let mut text = String::new();
-    let _ = writeln!(
-        text,
-        "# Hosts imported from Termius by Portico ({source}, {}).",
-        plan.format.label()
-    );
-    let _ = writeln!(text, "{DATE_LINE_PREFIX}{date}.");
-    let _ = writeln!(
-        text,
-        "# Replaced in full on each import. To edit a host, copy it to ~/.ssh/config,"
-    );
-    let _ = writeln!(
-        text,
-        "# then import again: a host defined there is left out of this file."
-    );
-    let _ = writeln!(
-        text,
-        "# Portico never edits ~/.ssh/config: add this line at its top yourself:"
-    );
-    let _ = writeln!(text, "#   {}", include_line(paths, &termius_target(paths)));
-    for host in hosts {
-        let _ = writeln!(text, "\nHost {}", host.alias);
-        let _ = writeln!(text, "    HostName {}", host.hostname);
-        if let Some(user) = &host.user {
-            let _ = writeln!(text, "    User {user}");
-        }
-        if let Some(port) = host.port {
-            let _ = writeln!(text, "    Port {port}");
-        }
-    }
-    text
-}
-
-/// `text` without its import-date line.
-fn without_date(text: &str) -> String {
-    text.lines()
-        .filter(|l| !l.starts_with(DATE_LINE_PREFIX))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The hosts of `plan` that can be written, checked again: a value
-/// Portico does not write, a duplicate or an alias now defined in the
-/// user's config is skipped; an alias that looks like another host gets
-/// the prefix.
-fn checked_hosts(
-    plan: &ImportPlan,
-    existing: &HashSet<String>,
-    skipped: &mut Vec<ImportNotice>,
-    warnings: &mut BoundedNotices,
-) -> Vec<PlannedHost> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut hosts: Vec<PlannedHost> = Vec::new();
-    for planned in &plan.hosts {
-        let notice = |code, message: &str| ImportNotice {
-            code,
-            record: Some(planned.record),
-            label: Some(planned.label.clone()),
-            message: message.to_owned(),
-        };
-        let mut host = planned.clone();
-        if looks_like_other_host(&host.alias, &host.hostname) {
-            host.alias = slug(&format!("{IMPORT_PREFIX}{}", host.alias), MAX_ALIAS_CHARS);
-            if host.notes.is_none() {
-                host.notes = Some(format!("Termius: {}", host.label));
-            }
-            warnings.push(notice(
-                NoticeCode::AliasLooksLikeHost,
-                "this alias looks like another host's name: imported with the termius- prefix",
-            ));
-        }
-        let valid = is_valid_alias(&host.alias)
-            && seen.insert(host.alias.to_lowercase())
-            && clean_hostname(&host.hostname).as_deref() == Some(host.hostname.as_str())
-            && host
-                .user
-                .as_ref()
-                .is_none_or(|u| clean_user(u).as_deref() == Some(u.as_str()))
-            && host.port != Some(0);
-        if !valid {
-            skipped.push(notice(
-                NoticeCode::InvalidHostname,
-                "this host has a value Portico does not write",
-            ));
-        } else if existing.contains(&host.alias.to_lowercase()) {
-            skipped.push(notice(
-                NoticeCode::AliasCollision,
-                "this alias is now defined in your ssh config (import with the termius- prefix to keep both)",
-            ));
-        } else {
-            hosts.push(host);
-        }
-    }
-    hosts
-}
-
-/// Writes `plan` (blocking). Values are checked again (a plan is plain
-/// data), aliases defined in the user's config since the plan was made are
-/// skipped, and an alias that looks like another host gets the prefix.
-///
-/// All or nothing as far as Portico can tell: the existing config file is
-/// read and the new text built first, then the metadata is merged (size
-/// checked before anything is written), and the config file is written
-/// last. Should that last write fail, the error says `hosts.toml` was
-/// already updated ([`ImportError::ConfNotWritten`]).
-pub(crate) fn apply(
-    paths: &Paths,
-    plan: &ImportPlan,
-    now: OffsetDateTime,
-) -> Result<(ImportReport, Vec<(String, HostMeta)>)> {
-    let target = termius_target(paths);
-    let existing = existing_aliases(paths, &target)?;
-    let mut skipped = plan.skipped.clone();
-    let mut warnings = BoundedNotices::from_vec(plan.warnings.clone());
-    let hosts = checked_hosts(plan, &existing, &mut skipped, &mut warnings);
-
-    let text = render(paths, plan, &hosts, now);
-    let previous = store::read_capped(&target, MAX_IMPORT_CONF_BYTES)?;
-    let unchanged = previous
-        .as_deref()
-        .is_some_and(|p| without_date(p) == without_date(&text));
-    if !unchanged && u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_IMPORT_CONF_BYTES {
-        return Err(crate::Error::WriteTooLarge {
-            path: target,
-            max: MAX_IMPORT_CONF_BYTES,
-        });
-    }
-
-    let entries: Vec<ImportedMeta> = hosts
+/// `true` when `config` has an `Include` (nested ones too) that resolves
+/// to `target`.
+pub(crate) fn includes(config: &SshConfig, target: &Path) -> bool {
+    config
+        .included_files()
         .iter()
-        .map(|h| ImportedMeta {
-            alias: h.alias.clone(),
-            tags: h.tags.clone(),
-            group: h.group.clone(),
-            notes: h.notes.clone(),
-        })
-        .collect();
-    let merged = merge_imported_meta(&paths.hosts_meta(), &entries)?;
-    if !unchanged {
-        store::write_atomic_capped(&target, text.as_bytes(), MAX_IMPORT_CONF_BYTES).map_err(
-            |e| ImportError::ConfNotWritten {
-                target: target.clone(),
-                meta: paths.hosts_meta(),
-                meta_updated: merged.changed.len(),
-                reason: e.to_string(),
-            },
-        )?;
-    }
-    for alias in &merged.tags_truncated {
-        warnings.push(ImportNotice {
-            code: NoticeCode::TagsTruncated,
-            record: None,
-            label: Some(alias.clone()),
-            message: "this host already has 16 tags: some imported tags were left out".to_owned(),
-        });
-    }
+        .any(|included| same_file(included, target))
+}
 
-    let include_active = include_active(paths, &target);
-    let report = ImportReport {
-        format: plan.format,
-        target: target.clone(),
-        unchanged,
-        imported: hosts.iter().map(|h| h.alias.clone()).collect(),
-        skipped,
-        warnings: warnings.into_vec(),
-        secrets: plan.secrets,
-        identity_files: plan.identity_files.clone(),
-        meta_updated: merged.changed.len(),
-        include_line: include_line(paths, &target),
-        include_active,
-    };
-    Ok((report, merged.changed))
+// ── Who owns which alias ────────────────────────────────────────────────
+
+/// A host of `hosts.conf` an earlier import of the same source created,
+/// and nobody edited since.
+#[derive(Debug, Clone)]
+pub(crate) struct Updatable {
+    /// The record id it was imported from ([`PlannedHost::source_id`]).
+    pub(crate) id: String,
+    /// The host as it is now.
+    pub(crate) host: crate::managed_hosts::ManagedHost,
+}
+
+impl Updatable {
+    /// `true` when `planned` keeps the destination (`HostName`, `User`,
+    /// `Port`) of this host.
+    pub(crate) fn same_destination(&self, planned: &PlannedHost) -> bool {
+        same_destination(
+            &self.host,
+            &planned.hostname,
+            planned.user.as_deref(),
+            planned.port,
+        )
+    }
+}
+
+/// `true` when `hostname`, `user` and `port` are the destination of `host`
+/// (`HostName` compared ignoring case, as `known_hosts` does).
+pub(crate) fn same_destination(
+    host: &crate::managed_hosts::ManagedHost,
+    hostname: &str,
+    user: Option<&str>,
+    port: Option<u16>,
+) -> bool {
+    host.hostname.eq_ignore_ascii_case(hostname)
+        && host.user.as_deref() == user
+        && host.port == port
+}
+
+/// `user@hostname:port` of `host`, for notices (not secret).
+pub(crate) fn destination(host: &crate::managed_hosts::ManagedHost) -> String {
+    let mut out = String::new();
+    if let Some(user) = &host.user {
+        out.push_str(user);
+        out.push('@');
+    }
+    out.push_str(&host.hostname);
+    if let Some(port) = host.port {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    out
+}
+
+/// Which aliases an import of `source` may write, computed under the
+/// `hosts.conf` lock (at planning time too: the same answer as applying).
+#[derive(Debug, Default)]
+pub(crate) struct Occupancy {
+    /// Lowercased aliases an import must not write: every occurrence in
+    /// the configuration the engine loads (and the old Termius import
+    /// file), except the hosts below that it may update.
+    pub(crate) blocked: HashSet<String>,
+    /// The subset of `blocked` that an earlier import of `source` created,
+    /// then someone edited ([`NoticeCode::EditedSinceImport`]).
+    pub(crate) edited: HashSet<String>,
+    /// Lowercased aliases of `hosts.conf` that an earlier import of
+    /// `source` created and nobody edited since: updated in place when the
+    /// record id matches (and, unless the user opts in, the destination).
+    pub(crate) updatable: HashMap<String, Updatable>,
+    /// Lowercased `ProxyJump` hosts the configuration uses.
+    pub(crate) jump_hosts: HashSet<String>,
+    /// Lowercased `HostName` values of the configuration, the hosts above
+    /// aside (a re-import keeps their aliases).
+    pub(crate) hostnames: HashSet<String>,
+}
+
+impl Occupancy {
+    pub(crate) fn compute(
+        target: &crate::managed_hosts::ImportTarget<'_>,
+        paths: &Paths,
+        source: ImportSource,
+    ) -> Result<Self> {
+        let provenance = crate::hosts::load_provenance(&paths.hosts_meta())?;
+        let mut occupancy = Self::default();
+        // `ProxyJump none` means "no jump host": never an alias Portico writes.
+        occupancy.blocked.insert("none".to_owned());
+        for host in target.hosts() {
+            let Some(found) = provenance.get(&host.alias) else {
+                continue;
+            };
+            if found.source != source.as_str() {
+                continue;
+            }
+            let lower = host.alias.to_lowercase();
+            if found.values == crate::managed_hosts::values_hash(&paths.home, host) {
+                occupancy.updatable.insert(
+                    lower,
+                    Updatable {
+                        id: found.id.clone(),
+                        host: host.clone(),
+                    },
+                );
+            } else {
+                occupancy.edited.insert(lower);
+            }
+        }
+        for alias in target.every_alias()? {
+            let lower = alias.name.to_lowercase();
+            let own = same_file(&alias.source.file, target.file())
+                && occupancy.updatable.contains_key(&lower);
+            if !own {
+                occupancy.blocked.insert(lower);
+            }
+        }
+        // An updatable alias also defined elsewhere is not updatable.
+        let blocked = &occupancy.blocked;
+        occupancy.updatable.retain(|a, _| !blocked.contains(a));
+        let own: HashSet<String> = occupancy.updatable.keys().cloned().collect();
+        let (jump_hosts, hostnames) = target.routing_names(&own)?;
+        occupancy.jump_hosts = jump_hosts;
+        occupancy.hostnames = hostnames;
+        Ok(occupancy)
+    }
 }
 
 #[cfg(test)]
@@ -847,8 +1219,8 @@ mod tests {
     fn include_lines() {
         let paths = Paths::rooted(Path::new("/home/ana"));
         assert_eq!(
-            include_line(&paths, &termius_target(&paths)),
-            "Include ~/config/imports/termius.conf"
+            include_line(&paths, &paths.managed_hosts()),
+            "Include ~/config/hosts.conf"
         );
         let mac = Path::new(
             "/Users/ana/Library/Application Support/dev.Portico.portico/imports/termius.conf",
@@ -864,19 +1236,114 @@ mod tests {
         );
     }
 
-    #[test]
-    fn secrets_advice() {
-        assert_eq!(IgnoredSecrets::default().advice(), None);
-        let advice = IgnoredSecrets {
-            passwords: 2,
-            keys: 1,
+    fn secrets(
+        passwords: usize,
+        keys: usize,
+        unticked_keys: usize,
+        unreadable_keys: usize,
+        keys_in_export: usize,
+    ) -> IgnoredSecrets {
+        IgnoredSecrets {
+            passwords,
+            keys,
+            unticked_keys,
+            unreadable_keys,
+            keys_in_export,
         }
-        .advice()
-        .expect("advice");
-        assert!(
-            advice.starts_with("2 passwords and 1 key ignored"),
-            "{advice}"
+    }
+
+    #[test]
+    fn secrets_advice_details_the_causes() {
+        assert_eq!(IgnoredSecrets::default().advice(), None);
+        // Every key imported, no password: nothing was left out.
+        assert_eq!(secrets(0, 0, 0, 0, 2).advice(), None);
+        assert_eq!(
+            secrets(1, 3, 2, 1, 4).advice().as_deref(),
+            Some("Not imported: 1 password, 2 unticked keys, 1 unreadable key.")
         );
-        assert!(advice.contains("delete it"), "{advice}");
+        // Keys of no named cause: "keys", or "other keys" next to a cause.
+        assert_eq!(
+            secrets(2, 1, 0, 0, 1).advice().as_deref(),
+            Some("Not imported: 2 passwords, 1 key.")
+        );
+        assert_eq!(
+            secrets(0, 4, 1, 1, 4).advice().as_deref(),
+            Some("Not imported: 1 unticked key, 1 unreadable key, 2 other keys.")
+        );
+        assert_eq!(
+            secrets(1, 0, 0, 0, 0).advice().as_deref(),
+            Some("Not imported: 1 password.")
+        );
+    }
+
+    #[test]
+    fn delete_export_advice_names_the_file_and_what_it_holds() {
+        assert_eq!(
+            IgnoredSecrets::default().delete_export_advice("x.json"),
+            None
+        );
+        assert_eq!(
+            secrets(1, 0, 0, 0, 4)
+                .delete_export_advice("termix.json")
+                .as_deref(),
+            Some(
+                "Delete termix.json now: it holds 1 password and 4 private keys (in clear text or encrypted)."
+            )
+        );
+        // Only the non-zero counts.
+        assert_eq!(
+            secrets(2, 0, 0, 0, 0)
+                .delete_export_advice("hosts.csv")
+                .as_deref(),
+            Some("Delete hosts.csv now: it holds 2 passwords (in clear text or encrypted).")
+        );
+        assert_eq!(
+            secrets(0, 1, 0, 0, 1)
+                .delete_export_advice("a.json")
+                .as_deref(),
+            Some("Delete a.json now: it holds 1 private key (in clear text or encrypted).")
+        );
+        // A control character of the name never reaches the text.
+        assert_eq!(
+            secrets(1, 0, 0, 0, 0)
+                .delete_export_advice("evil\nname.csv")
+                .as_deref(),
+            Some("Delete evilname.csv now: it holds 1 password (in clear text or encrypted).")
+        );
+    }
+
+    #[test]
+    fn unknown_format_hint_points_to_no_file() {
+        let e = crate::Error::from(ImportError::UnknownFormat {
+            path: PathBuf::from("x.csv"),
+        });
+        let summary = e.summary();
+        assert_eq!(summary.code, "import_unknown_format");
+        let hint = summary.hint.expect("hint");
+        assert!(!hint.contains("docs/"), "{hint}");
+        assert!(hint.ends_with("See Portico's import guide."), "{hint}");
+        // Code spans only around the command (the UIs render them).
+        assert_eq!(hint.matches('`').count(), 2, "{hint}");
+        assert!(hint.contains("`termius export-ssh-config`"), "{hint}");
+    }
+
+    #[test]
+    fn options_never_serialize_the_passphrase() {
+        let options = ImportOptions {
+            prefix: true,
+            keys: KeySelection::Some([KeyId::new("SHA256:x")].into()),
+            key_passphrase: Some(SecretString::from("hunter2-passphrase")),
+            allow_redirect: ["db".to_owned()].into(),
+        };
+        let json = serde_json::to_string(&options).expect("json");
+        assert!(!json.contains("hunter2"), "{json}");
+        assert!(!format!("{options:?}").contains("hunter2"));
+        assert_eq!(
+            json,
+            r#"{"prefix":true,"keys":{"kind":"some","ids":["SHA256:x"]},"allowRedirect":["db"]}"#
+        );
+        assert_eq!(options.for_plan().keys, KeySelection::None);
+        assert!(options.for_plan().allow_redirect.is_empty());
+        assert!(options.for_plan().key_passphrase.is_none());
     }
 }

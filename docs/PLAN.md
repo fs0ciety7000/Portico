@@ -171,7 +171,7 @@ l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Ter
 propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première release taguée) ; import d'un vrai export Termius
 (fixtures synthétiques seulement à ce jour).
 
-### Phase 6 : terminal 🔄 *(décisions : `docs/STACK.md`, 2026-10-22, split panes et enregistrement)*
+### Phase 6 : terminal ✅ *(décisions : `docs/STACK.md`, 2026-10-22, split panes et enregistrement)*
 - **Split panes** : divisions horizontales et verticales dans un onglet, focus et redimensionnement au clavier, chaque
   panneau étant un terminal indépendant (même session ou autre hôte) ; TUI et GUI
 - **Enregistrement asciicast v2** (ADR du 2026-10-22 : exception encadrée à l'interdit « contenu de terminal en clair ») :
@@ -187,6 +187,24 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
   l'utilisateur et jamais résolus en silence
 
 **Sortie** : deux machines partagent métadonnées et snippets via un dossier synchronisé, conflit d'édition compris.
+
+### Phase 6b : hôtes gérés par Portico ✅ *(ADR du 2026-10-22, « Hôtes créés dans Portico »)*
+- Créer, modifier, dupliquer et supprimer des hôtes depuis la TUI et la GUI : alias, `HostName`, `User`, `Port`,
+  clé (`IdentityFile` choisie parmi les clés locales), `ProxyJump` (hôte existant), plus tags, groupe, favori et notes
+- Stockage dans `<config_dir>/hosts.conf` (fragment ssh_config de Portico), lu directement par Portico ; ligne `Include`
+  proposée pour que `ssh`, `scp` et `git` voient aussi ces hôtes. Les hôtes de `~/.ssh/config` restent en lecture seule
+- Mot de passe optionnel mémorisé dans le keyring (ou le vault), jamais dans le fichier
+
+**Sortie** : un hôte créé dans Portico s'y connecte aussitôt, sans rien éditer à la main ; une fois l'`Include` ajouté,
+`ssh <alias>` fonctionne à l'identique.
+
+Ajouté pendant la phase, à la demande du propriétaire : **import Termix** (export JSON) et **import de clés privées sur
+sélection explicite** (`~/.ssh/portico/`, jamais d'écrasement) ; les imports Termius et Termix deviennent des hôtes
+Portico modifiables (ADR « Import Termix et imports vers les hôtes Portico »).
+
+État de la sortie (2026-10-22) : vérifiée. Hôte créé puis connexion immédiate (TUI contre un vrai sshd, E2E bureau),
+`ssh -G` d'OpenSSH résout le même `HostName`/`User`/`Port` que Portico ; import Termix avec une clé cochée puis connexion
+avec cette clé (E2E bureau).
 
 ### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
 - Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
@@ -226,9 +244,32 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 | 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
 | 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
 | 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
-| 6 Split panes, asciicast | ⏳ | | | |
+| 6 Split panes, asciicast | ✅ | 548 + 50 GUI + interop (13 scénarios) + E2E bureau 15/15 | ✅ (moteur + clôture, voir ci-dessous) | ✅ (panneaux + enregistrement, 2 passes, 3 thèmes, 80×24 / 880–1200 px) |
+| 6b Hôtes Portico, import Termix | ✅ | 611 + 61 GUI + interop (13 scénarios) + E2E bureau 19/19 | ✅ (2 revues, voir ci-dessous) | ✅ (captures 3 thèmes, 80×24 / 880–1200 px, CLI) |
 | 7 Sync locale | ❌ abandonnée | | | |
 | 8 Windows | ⏳ | | | |
+
+## Revues de la phase 6b (2026-10-22)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les autres ont été traités, sauf mention.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` hôtes Portico, import Termix, clés | 3 MOYEN, 7 FAIBLE | Un réimport ne redirige plus un alias en silence (ancienne destination montrée, acceptation par hôte, clé non reprise) ; paramètres KDF des PEM chiffrées bornés avant tout déchiffrement (scrypt, PBKDF2, mémoire, nombre par plan) ; mot de passe mémorisé retenu quand la clé hôte est acceptée automatiquement (`accept-new`/`no`) et annoncé dans le prompt TOFU ; mot de passe refusé jamais lié et oublié ; index des empreintes liées ; empreintes non vérifiables jamais réutilisées ; noms de fichiers de clés sans suffixe OpenSSH ; retour arrière du mot de passe sur échec d'écriture ; secrets JSON décodés dans un tampon effaçable ; alias courts (`localhost`, hôtes de rebond) préfixés. Risques résiduels 13–15 dans `SECURITY.md` |
+| `agent-design-review` clôture 6b | 2 BLOQUANT, 9 IMPORTANT | Mot de passe sans vault : création ou déverrouillage enchaîné puis enregistrement relancé (`vault_missing` distinct de `vault_locked`) ; « Delete <fichier> now » en tête du rapport ; mot de passe mémorisé affiché (présence seulement) et texte exact quand la destination change ; provenance « Portico · from Termix » ; comptes de secrets cohérents ; touches, titres, textes de suppression et TOFU (`host:port`, compte nommé) identiques dans les deux UIs ; tokens de taille ajoutés |
+
+## Revues de la phase 6 (2026-10-22)
+
+Aucun constat CRITIQUE restant ; tous les autres ont été traités. Sortie vérifiée : quatre panneaux sur deux hôtes au clavier
+(TUI, tmux contre un vrai sshd ; GUI, mode démo et app de bureau) ; une session enregistrée sur un vrai sshd se relit
+(E2E bureau : fichier v2, `0600`, contenu rejoué dans le lecteur).
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` moteur d'enregistrement | 1 ÉLEVÉ, 7 FAIBLE | Contournements du filtre de relecture (ESC + C0/DEL, C1 en UTF-8) fermés ; invariant « aucun C1, tout ESC suivi de 0x20–0x7E » vérifié par un fuzz différentiel contre vte et un modèle de la table de xterm.js ; noms valides, démarrage annulable, thread d'écriture dédié, troncature aux lignes complètes, dimensions bornées, dossier vérifié par descripteur (propriétaire, `openat`), suppression refusée en cours d'écriture, titres sans caractères de format |
+| `agent-design-review` panneaux | 2 BLOQUANT, 7 IMPORTANT | Séparateurs TUI en `border-subtle`, statut toujours visible avec un alias long, `⌘W` ferme le panneau et `⌘⇧W` l'onglet, raccourcis Linux hors `Ctrl-Alt` (espaces de travail GNOME), mode panneau répétable (TUI), refus sur une ligne, vocabulaire commun |
+| `agent-security` clôture | 1 MOYEN, 2 FAIBLE | Un terminal qui s'ouvre tard ne vole plus le focus (onglet créé et activé à l'action) ; REC ne reste plus figé après une resynchronisation ; une lecture ouverte pendant un rechargement est refusée (époque) ; collage limité au panneau actif |
+| `agent-design-review` clôture | 1 BLOQUANT, 10 IMPORTANT | Texte de consentement exact (« les commandes tapées sont renvoyées en écho, donc enregistrées ») ; seul `y` confirme dans les deux UIs ; « Recording saved » à l'arrêt ; suppression d'un enregistrement en cours refusée d'emblée ; dates locales et durées en horloge communes ; lecteur : rejouer, −5 s, début, statut visible ; REC sur l'onglet dès qu'un panneau enregistre ; tokens `--size-bar`, `--accent-selection` |
 
 ## Revues de la phase 5 (2026-10-22)
 

@@ -37,13 +37,50 @@ pub(crate) fn render(dialog: &Dialog, s: Styles, tick: u64, frame: &mut Frame<'_
 /// Width of a yes / no question.
 const CONFIRM_WIDTH: u16 = 56;
 
+/// Width of an armed confirmation (a longer explanation).
+const ARMED_CONFIRM_WIDTH: u16 = 66;
+
 fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
-    let lines = vec![
-        Line::from(Span::styled(c.body.clone(), s.secondary())),
-        Line::from(""),
-        footer(s, &[("n / Esc", "keep"), ("y", c.confirm)]),
-    ];
-    let area = modal(frame, CONFIRM_WIDTH, wrapped_height(&lines, CONFIRM_WIDTH));
+    let width = if c.armed.is_some() {
+        ARMED_CONFIRM_WIDTH
+    } else {
+        CONFIRM_WIDTH
+    }
+    .min(frame.area().width);
+    // Wrapped here, word by word, so the height is exact.
+    let inner = usize::from(width.saturating_sub(6)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(subject) = &c.subject {
+        lines.push(Line::from(Span::styled(
+            crate::ui::fmt::truncate(subject, inner),
+            s.title(),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.extend(
+        c.body
+            .split('\n')
+            .flat_map(|paragraph| crate::ui::fmt::wrap(paragraph, inner))
+            .map(|l| Line::from(Span::styled(l, s.secondary()))),
+    );
+    lines.push(Line::from(""));
+    // An armed question: `y` stays muted until it is taken (the app wakes
+    // at that instant to redraw it in the accent; no ticking meanwhile).
+    if c.ready(std::time::Instant::now()) {
+        lines.push(footer(s, &[c.cancel_hint(), ("y", c.confirm)]));
+    } else {
+        let (key, label) = c.cancel_hint();
+        lines.push(
+            Line::from(vec![
+                Span::styled(format!(" {key} "), s.key_hint()),
+                Span::styled(format!(" {label}   "), s.muted()),
+                Span::styled(" y ", s.key_hint()),
+                Span::styled(format!(" {}", c.confirm), s.muted()),
+            ])
+            .right_aligned(),
+        );
+    }
+    let area = modal(frame, width, wrapped_height(&lines, width));
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
@@ -119,16 +156,21 @@ fn render_prompt(p: &PromptDialog, s: Styles, frame: &mut Frame<'_>) {
             algorithm,
             fingerprint,
             other_algorithms,
+            sends_remembered_password,
+            ..
         } => {
             host_key_lines(
                 p,
                 s,
                 &mut lines,
-                host,
-                *port,
-                algorithm,
-                fingerprint,
-                other_algorithms,
+                &HostKeyShown {
+                    host,
+                    port: *port,
+                    algorithm,
+                    fingerprint,
+                    other_algorithms,
+                    sends_remembered_password: *sends_remembered_password,
+                },
             );
             if other_algorithms.is_empty() {
                 (
@@ -293,6 +335,11 @@ pub(crate) fn passphrase_rule(s: Styles, typed: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Why the vault is asked for after a host save (`SecretDialog::host_save`).
+const HOST_SAVE_CREATE: &str = "This host's password is remembered in the Portico vault, encrypted under a master passphrase. Create it to save the host.";
+const HOST_SAVE_UNLOCK: &str =
+    "This host's password is remembered in the Portico vault. Unlock it to save the host.";
+
 /// Vault unlock / create / change, and a key passphrase for the agent.
 /// Explanation lines, then (title, primary action, cancel action).
 fn secret_intro(
@@ -304,6 +351,21 @@ fn secret_intro(
         lines.push(Line::from(Span::styled(t.to_owned(), style)));
     };
     match &d.purpose {
+        // A host's password waits for the vault: "not now" goes back to
+        // the form, the password still typed.
+        SecretPurpose::VaultUnlock { .. } if d.host_save => {
+            text(lines, HOST_SAVE_UNLOCK, s.secondary());
+            (" Unlock the vault ", "unlock & save", "not now")
+        }
+        SecretPurpose::VaultCreate { .. } if d.host_save => {
+            text(lines, HOST_SAVE_CREATE, s.secondary());
+            text(
+                lines,
+                "It cannot be recovered if forgotten.",
+                s.status(s.theme.status.warning),
+            );
+            (" Create the vault ", "create & save", "not now")
+        }
         SecretPurpose::VaultUnlock { startup } => {
             text(
                 lines,
@@ -467,21 +529,47 @@ fn render_secret(d: &SecretDialog, s: Styles, tick: u64, frame: &mut Frame<'_>) 
 }
 
 #[allow(clippy::too_many_arguments)] // the prompt's fields, destructured
+/// What an unknown-host-key prompt shows.
+struct HostKeyShown<'a> {
+    host: &'a str,
+    port: u16,
+    algorithm: &'a str,
+    fingerprint: &'a str,
+    other_algorithms: &'a [String],
+    /// A remembered password, not yet tied to a host key, leaves for this
+    /// server once the key is accepted (`SECURITY.md`, risk 13).
+    sends_remembered_password: bool,
+}
+
+/// Same wording as the GUI's host-key dialog: the account the password is
+/// remembered for, `user@host:port`.
+pub(crate) fn remembered_password_warning(account: &str) -> String {
+    format!(
+        "The password remembered for {account} will be sent to this server once you accept its key."
+    )
+}
+
+/// A server in prose: `host:port`, always (the `[host]:port` form is only
+/// for `known_hosts` lines).
+pub(crate) fn prose_target(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
 fn host_key_lines(
     p: &PromptDialog,
     s: Styles,
     lines: &mut Vec<Line<'static>>,
-    host: &str,
-    port: u16,
-    algorithm: &str,
-    fingerprint: &str,
-    other_algorithms: &[String],
+    shown: &HostKeyShown<'_>,
 ) {
-    let target = if port == 22 {
-        host.to_owned()
-    } else {
-        format!("{host}:{port}")
-    };
+    let HostKeyShown {
+        host,
+        port,
+        algorithm,
+        fingerprint,
+        other_algorithms,
+        sends_remembered_password,
+    } = *shown;
+    let target = prose_target(host, port);
     lines.push(Line::from(Span::styled(
         format!("First connection to {target}."),
         s.title(),
@@ -493,6 +581,17 @@ fn host_key_lines(
     lines.push(Line::from(""));
     lines.push(kv(s, 13, "Key type", algorithm.to_owned()));
     lines.push(kv(s, 13, "Fingerprint", fingerprint.to_owned()));
+    if sends_remembered_password {
+        lines.push(Line::from(""));
+        let account = p
+            .account
+            .clone()
+            .unwrap_or_else(|| prose_target(host, port));
+        lines.push(Line::from(Span::styled(
+            format!("▲ {}", remembered_password_warning(&account)),
+            s.status(s.theme.status.warning),
+        )));
+    }
     if other_algorithms.is_empty() {
         return;
     }
@@ -513,11 +612,7 @@ fn host_key_lines(
 
 fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
     let error = s.theme.status.error;
-    let target = if a.port == 22 {
-        a.host.clone()
-    } else {
-        format!("[{}]:{}", a.host, a.port)
-    };
+    let target = prose_target(&a.host, a.port);
     let lines = vec![
         Line::from(Span::styled(
             format!("The key presented by {target} does not match known_hosts."),
@@ -571,4 +666,89 @@ fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
         ),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use portico_core::events::Prompt;
+    use portico_core::ids::PromptId;
+    use portico_theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    use super::*;
+
+    /// The rows of `dialog` drawn at 80×24, and the foreground of the
+    /// first cell of `needle`.
+    fn draw(dialog: &Dialog, needle: &str) -> (String, Option<Color>) {
+        let s = Styles::new(Theme::default_theme());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(dialog, s, 0, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut colour = None;
+        let mut rows = Vec::new();
+        for y in 0..24u16 {
+            let row: String = (0..80u16)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect();
+            if row.contains(needle) {
+                let before = row.split(needle).next().unwrap().chars().count();
+                let x = u16::try_from(before).unwrap();
+                colour = buffer.cell((x, y)).map(|c| c.fg);
+            }
+            rows.push(row);
+        }
+        (rows.join("\n"), colour)
+    }
+
+    fn host_key(sends_remembered_password: bool) -> Dialog {
+        let mut dialog = PromptDialog::new(
+            Prompt {
+                id: PromptId::next(),
+                session: None,
+                kind: PromptKind::UnknownHostKey {
+                    host: "db.example.test".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: "SHA256:abc".into(),
+                    other_algorithms: vec![],
+                    sends_remembered_password,
+                },
+            },
+            Some("db".into()),
+        );
+        if sends_remembered_password {
+            dialog.account = Some("deploy@db.example.test:22".into());
+        }
+        Dialog::Prompt(dialog)
+    }
+
+    #[test]
+    fn host_key_prompt_says_a_remembered_password_will_be_sent() {
+        let (screen, colour) = draw(&host_key(true), "▲ The password remembered for");
+        // The target as `host:port` in prose, port 22 included.
+        assert!(
+            screen.contains("First connection to db.example.test:22."),
+            "{screen}"
+        );
+        // The warning names the account.
+        assert!(
+            screen.contains("▲ The password remembered for deploy@db.example.test:22"),
+            "{screen}"
+        );
+        // Wrapped in the modal: the end of the sentence on the next row.
+        assert!(screen.contains("its key."), "{screen}");
+        let s = Styles::new(Theme::default_theme());
+        assert_eq!(
+            colour,
+            s.status(s.theme.status.warning).fg,
+            "in the warning colour:\n{screen}"
+        );
+        assert!(screen.contains("trust & remember"), "{screen}");
+
+        let (screen, colour) = draw(&host_key(false), "remembered password");
+        assert_eq!(colour, None, "{screen}");
+        assert!(screen.contains("SHA256:abc"), "{screen}");
+    }
 }

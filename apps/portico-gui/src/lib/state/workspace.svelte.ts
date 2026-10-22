@@ -6,7 +6,7 @@
 // docs/STACK.md); a pane is one terminal: one more PTY channel on a session
 // (the same host's, or another host's). Exactly one pane per tab has the
 // focus, and only it receives keystrokes.
-import { asError, durationMs, type EngineEvent, type ErrorSummary, type HostKeyChanged, type Phase, type Prompt, type SessionView } from "../api";
+import { asError, describe, durationMs, type EngineEvent, type ErrorSummary, type HostKeyChanged, type Phase, type Prompt, type SessionView, type Status } from "../api";
 import { backend } from "../backend";
 import {
   layout,
@@ -16,8 +16,8 @@ import {
   nextPane,
   panesOf,
   preferredAxis,
+  parentSplit,
   removePane,
-  resizePane,
   setRatio,
   splitPane,
   toggleZoom,
@@ -69,20 +69,34 @@ export interface PaneGeometry {
   limits: Limits;
 }
 
-/** Why a split was refused, for the notice. */
+/** Why a split was refused, for the notice. Same wording as the TUI. */
 const REFUSAL: Record<SplitRefusal, ErrorSummary> = {
   max_panes: {
     code: "pane_limit",
     message: `this tab already has ${MAX_PANES} panes`,
-    hint: "Close a pane, or open a new tab.",
+    hint: "Close a pane first.",
   },
   too_small: {
     code: "pane_too_small",
-    message: "not enough room to split this pane",
-    hint: "A pane needs at least 20 columns × 5 rows: enlarge the window, or split a larger pane.",
+    message: "each pane needs at least 20 columns × 5 rows",
+    hint: "Enlarge the window, or close a pane.",
   },
   unknown_pane: { code: "pane_gone", message: "this pane is closed", hint: null },
 };
+
+/**
+ * What a pane's status dot, phase and card show. Dot grammar, shared by
+ * the pane header, the tab and the status bar: the colour is the status;
+ * a failure is a filled dot in `status-error`; the hollow dot is reserved
+ * for "no shell attached" (ended, cancelled, not opened yet).
+ */
+export interface PaneStatus {
+  status: Status;
+  label: string;
+  busy: boolean;
+  hollow: boolean;
+  failed: boolean;
+}
 
 export interface Alert extends HostKeyChanged {
   alias: string;
@@ -91,6 +105,16 @@ export interface Alert extends HostKeyChanged {
 const LIVE: Phase["phase"][] = ["resolving", "connecting", "handshake", "verifying_host_key", "authenticating", "connected"];
 
 export const isLive = (s: SessionInfo | undefined): boolean => !!s && LIVE.includes(s.phase.phase);
+
+/** See `PaneStatus`. A terminal that could not open on a live session is a failure too. */
+export function paneStatus(pane: Pane | undefined, session: SessionInfo | undefined): PaneStatus {
+  const d = describe(session);
+  if (!pane) return { ...d, hollow: true, failed: false };
+  if (pane.error && !pane.end) return { status: "error", label: "Failed", busy: false, hollow: false, failed: true };
+  const failed = d.status === "error";
+  const hollow = !failed && (!!pane.end || (!isLive(session) && pane.terminal === null));
+  return { ...d, hollow, failed };
+}
 
 let nextKey = 1;
 
@@ -398,12 +422,17 @@ class Workspace {
     if (tab) this.focusPane(nextPane(tab.root, tab.focus, delta));
   }
 
-  /** Keyboard resize around the focused pane (moves the nearest divider). */
-  resize(dir: Direction) {
+  /**
+   * "Move pane divider…": the split right above the focused pane (its
+   * nearest divider), unzooming first; null for a lone pane. The caller
+   * gives that divider the keyboard.
+   */
+  dividerOfFocus(): number | null {
     const tab = this.activeTab;
-    const geo = this.geometry;
-    if (!tab || !geo || tab.zoom !== null) return;
-    tab.root = resizePane(tab.root, tab.focus, dir, geo.rect, geo.limits);
+    if (!tab) return null;
+    const split = parentSplit(tab.root, tab.focus);
+    if (split && tab.zoom !== null) tab.zoom = null;
+    return split ? split.id : null;
   }
 
   /** Divider drag (or its arrow keys), clamped to the minimum pane size. */

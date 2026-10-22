@@ -7,10 +7,12 @@ mod edit_host;
 mod files;
 pub(crate) mod fmt;
 mod form;
+mod host_form;
 mod hosts;
 mod keys;
 mod overlays;
 mod panes;
+mod recordings;
 mod snippets;
 mod status;
 mod statusbar;
@@ -47,6 +49,13 @@ pub(crate) fn panel_rect(screen: Rect, width: u16, height: u16, band: u16) -> Re
     area
 }
 
+/// The REC badge: the error colour, reserved for meaning (a recorded
+/// terminal is a sensitive state), in bold.
+pub(crate) fn rec_style(s: crate::theme::Styles) -> ratatui::style::Style {
+    s.status(s.theme.status.error)
+        .add_modifier(ratatui::style::Modifier::BOLD)
+}
+
 /// Braille spinner, advanced by `App::tick`.
 pub(crate) const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
@@ -81,7 +90,15 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         .files
         .as_ref()
         .map(|f| files::RemoteLink::of(app.session_by_id(f.session), s));
-    if app.focus == crate::app::Focus::Files
+    if let Some(player) = app
+        .player
+        .as_ref()
+        .filter(|_| app.overlay == Some(Overlay::Player))
+    {
+        // The playback takes the whole body: it is a screen of its own.
+        recordings::render_player(player, s, tick, frame, body);
+        toast_zone = body.inner(ratatui::layout::Margin::new(1, 1));
+    } else if app.focus == crate::app::Focus::Files
         && let Some(view) = &mut app.files
     {
         let link = link.unwrap_or(files::RemoteLink::Up);
@@ -102,18 +119,27 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
                 .spacing(1)
                 .areas(body.inner(ratatui::layout::Margin::new(1, 0)));
         hosts::render(app, frame, sidebar);
-        details::render(app, frame, main);
-        toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
+        // Toasts stay over the details, never over the `Include` banner.
+        let details = details::render(app, frame, main);
+        toast_zone = details.inner(ratatui::layout::Margin::new(1, 1));
     }
     // Over a panel, the toast sits between the panel and the status bar,
     // never on the panel's frame or hints: the panel gives way if needed.
     let panel_open = matches!(
         app.overlay,
-        Some(Overlay::Keys | Overlay::Snippets | Overlay::Tunnels | Overlay::Edit | Overlay::Debug)
+        Some(
+            Overlay::Keys
+                | Overlay::Snippets
+                | Overlay::Tunnels
+                | Overlay::Edit
+                | Overlay::HostForm
+                | Overlay::Debug
+                | Overlay::Recordings
+        )
     );
     let band = match &app.toast {
         Some(t) if panel_open => {
-            overlays::ToastBox::new(s, t.kind, &t.message, t.hint.as_deref(), status.width).height
+            overlays::ToastBox::new(s, t.kind, &t.shown(), t.hint.as_deref(), status.width).height
         }
         _ => 0,
     };
@@ -135,7 +161,9 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         Some(Overlay::Keys) => keys::render(app, frame, band),
         Some(Overlay::Snippets) => snippets::render(app, frame, band),
         Some(Overlay::Edit) => edit_host::render(app, frame, band),
+        Some(Overlay::HostForm) => host_form::render(app, frame, band),
         Some(Overlay::Debug) => debug::render(app, frame, band),
+        Some(Overlay::Recordings) => recordings::render(app, frame, band),
         _ => {}
     }
     // After the panels: their scroll is clamped to what they show, so the
@@ -168,10 +196,16 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         &format!("Hosts {count}"),
         None,
         app.active.is_none(),
+        false,
     ));
     for (i, tab) in app.tabs.iter().enumerate() {
         let (label, dot) = tab_label(app, i, tab);
-        tabs.push(tab_spans(s, &label, Some(dot), app.active == Some(i)));
+        // REC when any pane of the tab is recorded (seen from any tab).
+        let rec = tab
+            .items()
+            .into_iter()
+            .any(|(_, slot)| app.recorded_in(slot));
+        tabs.push(tab_spans(s, &label, Some(dot), app.active == Some(i), rec));
     }
 
     // Window [first, last] around the active tab within the budget.
@@ -234,31 +268,17 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// `1 web-01` (`1 web-01 (3)` with three panes) and its status dot: the
-/// tab shows its focused pane.
+/// tab shows its focused pane, with the same dot as the pane's title.
 fn tab_label(
     app: &App,
     index: usize,
     tab: &crate::app_panes::Tab,
 ) -> (String, (&'static str, portico_theme::Rgb)) {
-    use crate::app_panes::PaneSlot;
     let s = app.styles();
     let Some(slot) = tab.focused() else {
         return (format!("{}", index + 1), ("○", s.theme.status.idle));
     };
-    let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
-    let dead = match slot {
-        PaneSlot::Live(view) => view.closed || view.ended.is_some(),
-        PaneSlot::Opening { .. } => false,
-        PaneSlot::Failed { .. } => true,
-    };
-    let dot = if dead {
-        "○"
-    } else if st.busy {
-        spinner(app.tick)
-    } else {
-        "●"
-    };
-    let color = if dead { s.theme.status.idle } else { st.color };
+    let panes::PaneStatus { dot, color, .. } = panes::pane_status(app, slot);
     let alias = fmt::truncate(slot.alias(), 16);
     let label = if tab.len() > 1 {
         format!("{} {alias} ({})", index + 1, tab.len())
@@ -273,6 +293,7 @@ fn tab_spans(
     label: &str,
     dot: Option<(&'static str, portico_theme::Rgb)>,
     active: bool,
+    rec: bool,
 ) -> (Vec<Span<'static>>, usize) {
     let mut spans = vec![Span::styled("│", s.border())];
     if active {
@@ -291,6 +312,20 @@ fn tab_spans(
             s.status(color)
         };
         spans.push(Span::styled(format!("{dot} "), style));
+    }
+    // `1 alpha ● · REC`: the separator keeps REC apart from the connection
+    // dot (two meanings, two marks).
+    if rec {
+        let (sep, style) = if active {
+            (
+                s.muted().patch(s.selected()),
+                rec_style(s).patch(s.selected()),
+            )
+        } else {
+            (s.muted(), rec_style(s))
+        };
+        spans.push(Span::styled("· ", sep));
+        spans.push(Span::styled("REC ", style));
     }
     let width = spans.iter().map(Span::width).sum();
     (spans, width)

@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use portico_core::engine::{PromptResponse, PtySize};
-use portico_core::hosts::HostEntry;
+use portico_core::hosts::{HostEntry, HostOrigin};
+use portico_core::import::ImportSource;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +28,11 @@ pub(crate) struct HostDto {
     /// control character, no bidi or invisible character).
     pub notes: Option<String>,
     pub source: String,
+    /// Which file declares the host: only `portico` hosts are editable.
+    pub origin: HostOrigin,
+    /// A Portico host created by an import: `termius` or `termix`
+    /// (`null` for every other host). Details show "Portico · from Termix".
+    pub imported_from: Option<ImportSource>,
     pub warnings: Vec<String>,
 }
 
@@ -48,6 +54,8 @@ impl From<&HostEntry> for HostDto {
             favorite: h.meta.favorite,
             notes: h.meta.notes.clone(),
             source: format!("{}:{}", display_path(&h.source.file), h.source.line),
+            origin: h.origin,
+            imported_from: h.imported_from,
             warnings: r.warnings.iter().map(|w| w.message.clone()).collect(),
         }
     }

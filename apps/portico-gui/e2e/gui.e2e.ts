@@ -8,7 +8,7 @@
 // restart with the vault unlocked. Screenshots go to $E2E_ROOT/shots.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -139,6 +139,46 @@ test("startup: hosts from ~/.ssh/config, no vault yet", async () => {
   assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault before it is created");
 });
 
+/** Opens "Add host", fills alias, HostName and a password (nothing saved yet). */
+async function addHostWithPassword(alias: string, password: string): Promise<void> {
+  await hostsView();
+  await press(Key.Control, Key.Shift, "N");
+  await dialog("Add host");
+  await type(alias);
+  await press(Key.Tab);
+  await type("127.0.0.1");
+  await s.exec("document.querySelector('.modal [data-field=password]').focus()");
+  await type(password);
+  await sleep(500);
+}
+
+const passwordField = () => s.exec<string>("return document.querySelector('.modal [data-field=password]')?.value ?? ''");
+
+test("B1: a password with no vault chains to the vault; Not now returns to the form", async () => {
+  const PASSWORD = "no-vault-e2e-pw";
+  await addHostWithPassword("epsilon", PASSWORD);
+  await press(Key.Enter);
+  // vault_missing: the create dialog, worded for this host.
+  await dialog("Create a vault");
+  assert.match(await modal(), /no vault yet to remember this host's password/i);
+  await capture("b1-create-vault");
+  await press(Key.Escape); // Not now
+  await dialog("Add host");
+  // Back to the form: the password still typed, the reason under it.
+  assert.equal(await passwordField(), PASSWORD, "the typed password is kept");
+  assert.match(await modal(), /Create the vault \(Keys, then V\) to remember passwords, or leave the password empty\./);
+  assert.equal(await s.exec<string>("return document.querySelector('.modal [data-field=password]').getAttribute('aria-invalid')"), "true");
+  await capture("b1-not-now");
+  assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault created");
+  const hostsConf = join(configDir, "hosts.conf");
+  assert.ok(!existsSync(hostsConf) || !/^Host epsilon$/m.test(readFileSync(hostsConf, "utf8")), "nothing written");
+  // Leave without saving (discard: `y`).
+  await press(Key.Escape);
+  await waitFor("discard asked", async () => (await modal()).includes("Discard your changes?"));
+  await type("y");
+  await noDialog();
+});
+
 test("connect: new host key, terminal command, status and latency", async () => {
   await selectHost("alpha");
   await press(Key.Enter);
@@ -155,6 +195,64 @@ test("connect: new host key, terminal command, status and latency", async () => 
   await waitFor("title from the shell", async () => (await title()) === "e2e-42");
   assert.ok(await s.find(".statusbar .rtt"), "latency shown");
   await capture("terminal");
+});
+
+test("recording: confirm, REC from the engine event, stop, list, play", async () => {
+  const recDir = join(dataDir, "recordings");
+  // Ctrl-Shift-R in the terminal: the armed confirmation, with the folder.
+  await press(Key.Control, Key.Shift, "R");
+  await dialog("Record this terminal?");
+  assert.match(await modal(), /including the commands you type \(the shell echoes them\)/);
+  assert.match(await modal(), /Keystrokes themselves are not stored/);
+  assert.match(await modal(), /recordings\/, readable only by you/);
+  await capture("record-confirm");
+  // Only `y` records: Enter does nothing.
+  await sleep(600);
+  await press(Key.Enter);
+  await sleep(300);
+  await dialog("Record this terminal?");
+  await type("y");
+  await noDialog();
+  await waitFor("REC in the status bar", async () => (await text(".statusbar")).includes("REC"));
+  assert.match(await text(".statusbar"), /Ctrl-Shift-R\s+stop/);
+  await shellReady();
+  await type("echo rec-e2e-$((6*7))");
+  await press(Key.Enter);
+  await sleep(1500);
+  await capture("recording");
+  // Stopping needs no confirmation; REC goes with the `stopped` event.
+  await press(Key.Control, Key.Shift, "R");
+  await waitFor("REC gone", async () => !(await text(".statusbar")).includes("REC"));
+  assert.equal(await s.find(".modal"), null, "no confirmation to stop");
+  await waitFor("saved notice", async () => (await text(".toast")).includes("Recording saved · alpha"));
+  assert.match(await text(".toast"), /v from the host list opens Recordings/);
+  const files = readdirSync(recDir).filter((f) => f.endsWith(".cast"));
+  assert.equal(files.length, 1, `one recording in ${recDir}`);
+  const file = join(recDir, files[0] ?? "");
+  const cast = readFileSync(file, "utf8");
+  assert.match(cast.split("\n")[0] ?? "", /"version":2/);
+  assert.ok(cast.includes("rec-e2e-42"), "the output is recorded");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  // The list, then the player (read-only, its own xterm.js instance).
+  await palette("Recordings");
+  await dialog(files[0] ?? "?");
+  assert.match(await modal(), /alpha/);
+  await capture("recordings");
+  await press(Key.Enter);
+  await waitFor("player", () => s.find(".player .xterm-screen"));
+  // The end: the play button offers "Replay".
+  await waitFor("played to the end", () => s.find(".player button[aria-label=Replay]"), 20_000);
+  // The player's own emulator (DOM renderer: its rows are readable) shows
+  // the recorded output.
+  await waitFor("recorded output in the player", async () => (await text(".player .xterm-rows")).includes("rec-e2e-42"));
+  await sleep(300);
+  await capture("player");
+  // `q` goes back to the list, like Esc.
+  await type("q");
+  await dialog("Recordings");
+  await press(Key.Escape);
+  await noDialog();
+  await shellReady();
 });
 
 test("vault: created from the keys view", async () => {
@@ -395,6 +493,241 @@ test("restart: theme kept, vault unlocked at startup, key login without prompt",
   await waitFor("gamma connected", async () => (await status()).includes("Connected"));
   assert.equal(await s.find(".modal"), null, "no passphrase prompt");
   await capture("restart");
+});
+
+test("B1: a password with a locked vault chains Unlock, then saves by itself", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const PASSWORD = "locked-vault-e2e-pw";
+  await hostsView();
+  await palette("Lock the vault");
+  await sleep(500);
+  await addHostWithPassword("epsilon", PASSWORD);
+  await press(Key.Enter);
+  // vault_locked: the unlock dialog, worded for this host.
+  await dialog("Unlock the vault");
+  assert.match(await modal(), /this host's password cannot be remembered/i);
+  await capture("b1-unlock-vault");
+  await type(VAULT_PASS);
+  await press(Key.Enter);
+  // Unlocked: the form saves again on its own and closes.
+  await noDialog();
+  await waitFor("epsilon written", () => existsSync(hostsConf) && /^Host epsilon$/m.test(readFileSync(hostsConf, "utf8")));
+  assert.ok(!readFileSync(hostsConf, "utf8").includes(PASSWORD), "never in hosts.conf");
+  assert.ok(!readFileSync(join(dataDir, "vault.toml"), "utf8").includes(PASSWORD), "encrypted in the vault");
+  // The form says a password is remembered (presence only).
+  await waitFor("epsilon selected", async () => (await text(".hosts li[aria-selected=true] .name")).includes("epsilon"));
+  await press(Key.Shift, "E");
+  await dialog("Saved in Portico");
+  assert.match(await text(".modal [data-testid=password-state]"), /A password is remembered/);
+  assert.equal(await passwordField(), "", "nothing prefilled");
+  await capture("b1-saved");
+  await press(Key.Escape);
+  await noDialog();
+  // B8: the delete confirmation, then gone.
+  await selectHost("epsilon");
+  await press(Key.Delete);
+  await dialog("Delete epsilon?");
+  assert.match(
+    await text(".modal [data-testid=delete-confirmation]"),
+    /^Delete epsilon \((?:\S+@)?127\.0\.0\.1:22\) and its tags and notes\. Its remembered password is forgotten unless another host uses the same account\. Open sessions stay connected\. This cannot be undone\.$/,
+  );
+  await type("y");
+  await noDialog();
+  await waitFor("epsilon deleted", () => !/^Host epsilon$/m.test(readFileSync(hostsConf, "utf8")));
+});
+
+
+test("Portico host: add with a key and a remembered password, connect, edit the port, delete", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const port = env("E2E_PORT");
+  const PASSWORD = "remembered-e2e-pw";
+  await hostsView();
+  await press(Key.Control, Key.Shift, "N");
+  await dialog("Add host");
+  await type("delta");
+  await press(Key.Tab);
+  await type("127.0.0.1");
+  await press(Key.Tab);
+  await type(env("E2E_USER"));
+  await press(Key.Tab);
+  await type(port);
+  // The key: one the engine discovered, by id (the webview never names a path).
+  await waitFor("keys listed", () => s.exec<boolean>("return !!document.querySelector('.modal option[value=\"key:bootstrap\"]')"));
+  await s.exec(`const sel = document.querySelector('.modal [data-field=identity]');
+    sel.value = 'key:bootstrap'; sel.dispatchEvent(new Event('change', { bubbles: true }));`);
+  await s.exec("document.querySelector('.modal [data-field=password]').focus()");
+  await type(PASSWORD);
+  await capture("host-add");
+  await press(Key.Enter);
+  await noDialog();
+  const conf = readFileSync(hostsConf, "utf8");
+  assert.match(conf, /^Host delta$/m);
+  assert.match(conf, new RegExp(`^\\s+Port ${port}$`, "m"));
+  assert.match(conf, /^\s+IdentityFile ~\/\.ssh\/bootstrap$/m);
+  assert.match(conf, /^\s+IdentitiesOnly yes$/m);
+  assert.equal(statSync(hostsConf).mode & 0o777, 0o600);
+  assert.ok(!conf.includes(PASSWORD), "never in hosts.conf");
+  assert.ok(!readFileSync(join(dataDir, "vault.toml"), "utf8").includes(PASSWORD), "encrypted in the vault");
+  assert.ok(!readFileSync(join(home, ".ssh/config"), "utf8").includes("delta"), "~/.ssh/config untouched");
+  // Selected, with its badge and the Include banner.
+  await waitFor("delta selected", async () => (await text(".hosts li[aria-selected=true] .name")).includes("delta"));
+  assert.match(await text(".hosts li[aria-selected=true] .name"), /Portico/);
+  assert.match(await text(".details .banner"), /add this line at the top of ~\/\.ssh\/config/);
+  assert.equal(
+    await s.exec<string>("return document.querySelector('.details .banner input')?.value ?? ''"),
+    `Include ${hostsConf}`,
+    "the exact line (outside the home directory here, so absolute)",
+  );
+  await capture("host-added");
+
+  // Connects at once (known host key, the chosen key): no prompt.
+  await press(Key.Enter);
+  await waitFor("delta connected", async () => {
+    const st = await status();
+    return st.includes("delta") && st.includes("Connected");
+  });
+  assert.equal(await s.find(".modal"), null, "no prompt");
+  await shellReady();
+
+  // Edit: the port to 1, then back.
+  for (const value of ["1", port]) {
+    await selectHost("delta");
+    await press(Key.Shift, "E");
+    await dialog("Saved in Portico");
+    assert.equal(await s.exec<string>("return document.querySelector('.modal [data-field=alias]').value"), "delta");
+    await s.exec("const p = document.querySelector('.modal [data-field=port]'); p.focus(); p.select();");
+    await type(value);
+    await press(Key.Enter);
+    await noDialog();
+    await waitFor(`port ${value}`, () => new RegExp(`^\\s+Port ${value}$`, "m").test(readFileSync(hostsConf, "utf8")));
+  }
+  assert.match(readFileSync(hostsConf, "utf8"), /IdentityFile ~\/\.ssh\/bootstrap/, "key kept");
+
+  // Delete (armed confirmation).
+  await selectHost("delta");
+  await press(Key.Delete);
+  await dialog("Delete delta?");
+  await capture("host-delete");
+  await type("y");
+  await noDialog();
+  await waitFor("deleted", () => !/^Host delta$/m.test(readFileSync(hostsConf, "utf8")));
+  await waitFor("gone from the list", async () => !(await text(".hosts")).includes("delta"));
+});
+
+/** Chooses `path` in the native GTK file chooser (outside WebDriver): `Ctrl-L`,
+ * the path, `Enter`, typed with xdotool on the virtual display. */
+async function pickNativeFile(path: string, title: string): Promise<void> {
+  const win = await waitFor("native file chooser", () => {
+    try {
+      return execFileSync("xdotool", ["search", "--onlyvisible", "--name", title], { encoding: "utf8" }).trim().split("\n")[0];
+    } catch {
+      return ""; // exit 1: not shown yet
+    }
+  });
+  // No window manager here: give the chooser the keyboard ourselves.
+  execFileSync("xdotool", ["windowfocus", "--sync", win]);
+  await sleep(400);
+  execFileSync("xdotool", ["key", "--clearmodifiers", "ctrl+l"]);
+  await sleep(300);
+  execFileSync("xdotool", ["type", "--delay", "5", path]);
+  await sleep(300);
+  execFileSync("xdotool", ["key", "Return"]);
+}
+
+test("Termix import: preview, one key ticked, written to ~/.ssh/portico, connect with it", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const written = join(home, ".ssh/portico/termix-box");
+  await hostsView();
+  await palette("Import hosts");
+  await pickNativeFile(env("E2E_TERMIX_EXPORT"), "Import hosts");
+  await dialog("Import from Termix");
+  const preview = await modal();
+  assert.match(preview, /1 host to import/);
+  assert.match(preview, /termix-box/);
+  assert.match(preview, /Private keys/i);
+  assert.match(preview, /Ed25519/);
+  assert.ok(!preview.includes("BEGIN OPENSSH"), "never the key text");
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal .keys input[type=checkbox]').checked"), false, "none ticked");
+  // Tick it with its digit (the focus on a button: single keys reach the dialog).
+  await type("1");
+  await waitFor("key ticked", () => s.exec<boolean>("return document.querySelector('.modal .keys input[type=checkbox]').checked"));
+  // An unencrypted key to write: the optional passphrase shows; left empty.
+  assert.ok(await s.find(".modal .passphrase input"), "passphrase field");
+  assert.match(await text(".modal footer"), /Import 1 host and 1 key/);
+  await capture("termix-preview");
+  await sleep(600);
+  await press(Key.Enter);
+  await dialog("Imported from Termix");
+  const report = await modal();
+  assert.match(report, /1 key imported/);
+  assert.match(report, /~\/\.ssh\/portico\/termix-box/);
+  assert.match(report, /written · 0600 · no passphrase · used by termix-box/);
+  // B2: the delete action comes first, right after the summary, naming the
+  // export; a short version stays in the footer.
+  const advice = "Delete termix_export.json now: it holds 1 private key (in clear text or encrypted).";
+  assert.ok(report.includes(advice), report);
+  const lower = report.toLowerCase();
+  assert.ok(lower.indexOf(advice.toLowerCase()) < lower.indexOf("private keys"), "the delete action before the keys");
+  assert.match(await text(".modal footer"), /Delete termix_export\.json now: it holds secrets\./);
+  await capture("termix-report");
+
+  assert.ok(existsSync(written), "key written");
+  assert.equal(statSync(written).mode & 0o777, 0o600);
+  assert.equal(statSync(join(home, ".ssh/portico")).mode & 0o777, 0o700);
+  assert.ok(existsSync(`${written}.pub`));
+  const conf = readFileSync(hostsConf, "utf8");
+  assert.match(conf, /^Host termix-box$/m);
+  assert.match(conf, /^\s+IdentityFile ~\/\.ssh\/portico\/termix-box$/m);
+  assert.match(conf, /^\s+IdentitiesOnly yes$/m);
+  assert.ok(!conf.includes("PRIVATE KEY"));
+  assert.ok(!readFileSync(join(home, ".ssh/config"), "utf8").includes("termix"), "~/.ssh/config untouched");
+  await press(Key.Enter);
+  await noDialog();
+
+  // Connects with the written key only (known host key, IdentitiesOnly): no prompt.
+  await waitFor("termix-box listed", async () => (await text(".hosts")).includes("termix-box"));
+  await selectHost("termix-box");
+  await press(Key.Enter);
+  await waitFor("termix-box connected", async () => {
+    const st = await status();
+    return st.includes("termix-box") && st.includes("Connected");
+  });
+  assert.equal(await s.find(".modal"), null, "no prompt");
+  await shellReady();
+  await capture("termix-connected");
+});
+
+test("Termix re-import that moves a host: skipped by default, accepted only when ticked", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const before = readFileSync(hostsConf, "utf8");
+  // The same export, now pointing the record at another address.
+  const original = env("E2E_TERMIX_EXPORT");
+  const moved = original.replace(/\.json$/, "-moved.json");
+  const data = JSON.parse(readFileSync(original, "utf8")) as { hosts: { ip: string }[] };
+  for (const h of data.hosts) h.ip = "127.0.0.2";
+  writeFileSync(moved, JSON.stringify(data), { mode: 0o600 });
+
+  await hostsView();
+  await palette("Import hosts");
+  await pickNativeFile(moved, "Import hosts");
+  await dialog("Import from Termix");
+  const preview = await modal();
+  assert.match(preview, /destination changed/i);
+  assert.match(preview, /127\.0\.0\.1:\d+/, "old destination");
+  assert.match(preview, /127\.0\.0\.2:\d+/, "new destination");
+  assert.match(preview, /0 hosts to import/);
+  assert.match(preview, /1 destination change skipped unless accepted/);
+  const accept = "document.querySelector('.modal .hosts li.changed input[type=checkbox]')";
+  assert.equal(await s.exec<boolean>(`return ${accept}.checked`), false, "not accepted by default");
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal footer button.primary').disabled"), true, "nothing to write");
+  await capture("termix-destination-changed");
+
+  // Ticking it counts the host; the dialog is then cancelled: nothing moves.
+  await s.exec(`${accept}.click()`);
+  await waitFor("redirect accepted", async () => /Import 1 host/.test(await text(".modal footer")));
+  await press(Key.Escape);
+  await noDialog();
+  assert.equal(readFileSync(hostsConf, "utf8"), before, "hosts.conf unchanged");
 });
 
 function freePort(): Promise<number> {

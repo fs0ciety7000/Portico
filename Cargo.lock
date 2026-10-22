@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "portico-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4151,6 +4151,7 @@ dependencies = [
  "hmac",
  "keyring",
  "nucleo-matcher",
+ "pkcs8",
  "pretty_assertions",
  "rand 0.10.3",
  "russh",
@@ -4168,12 +4169,13 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
+ "vte",
  "zeroize",
 ]
 
 [[package]]
 name = "portico-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "directories",
@@ -4194,14 +4196,14 @@ dependencies = [
 
 [[package]]
 name = "portico-theme"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "portico-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "bytes",

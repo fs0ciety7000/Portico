@@ -12,7 +12,7 @@
 //! Not evaluated (recorded as [`ConfigWarning`]s, treated as non-matching):
 //! `Match exec`, `canonical`, `final`, `tagged`, `localnetwork`.
 
-mod lexer;
+pub(crate) mod lexer;
 pub(crate) mod pattern;
 mod resolve;
 
@@ -184,6 +184,31 @@ impl SshConfig {
     pub(crate) fn block_index(&self) -> &BlockIndex {
         self.index.get_or_init(|| BlockIndex::build(&self.blocks))
     }
+
+    /// `prelude` read first, then `self`: exactly as if `self`'s main file
+    /// began with an `Include` of the prelude file (an `Include` at the top
+    /// of a file adds no condition, so its blocks simply come first and
+    /// first-value-wins applies across both). Used for Portico's own
+    /// `hosts.conf` (see [`crate::managed_hosts`]).
+    pub(crate) fn with_prelude(self, prelude: Self) -> Self {
+        let mut blocks = prelude.blocks;
+        blocks.extend(self.blocks);
+        let mut warnings = prelude.warnings;
+        warnings.extend(self.warnings);
+        let mut included = prelude.included;
+        included.extend(self.included);
+        Self {
+            blocks,
+            warnings,
+            included,
+            index: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Adds a non-fatal warning (a Portico file that could not be read).
+    pub(crate) fn push_warning(&mut self, warning: ConfigWarning) {
+        self.warnings.push(warning);
+    }
 }
 
 impl SshConfig {
@@ -203,8 +228,39 @@ impl SshConfig {
         let mut parser = Parser {
             ssh_dir,
             cfg: &mut cfg,
+            replace: None,
         };
         parser.parse(&text, path, &[], 0)?;
+        Ok(cfg)
+    }
+
+    /// Loads `path` like [`Self::load`], except that an `Include` resolving
+    /// to `file` reads `text` instead of the disk: the configuration as it
+    /// will be once `file` holds `text` (Portico checks a `hosts.conf` edit
+    /// before writing it, see [`crate::managed_hosts`]).
+    pub(crate) fn load_replacing(
+        path: &Path,
+        ssh_dir: &Path,
+        file: &Path,
+        text: &str,
+    ) -> Result<Self, ConfigError> {
+        let mut cfg = Self::default();
+        let main = match std::fs::read_to_string(path) {
+            Ok(main) => main,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cfg),
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
+        let mut parser = Parser {
+            ssh_dir,
+            cfg: &mut cfg,
+            replace: Some((file, text)),
+        };
+        parser.parse(&main, path, &[], 0)?;
         Ok(cfg)
     }
 
@@ -215,6 +271,7 @@ impl SshConfig {
         let mut parser = Parser {
             ssh_dir,
             cfg: &mut cfg,
+            replace: None,
         };
         parser.parse(text, origin, &[], 0)?;
         Ok(cfg)
@@ -273,6 +330,8 @@ impl SshConfig {
 struct Parser<'a> {
     ssh_dir: &'a Path,
     cfg: &'a mut SshConfig,
+    /// An included file read from this text instead of the disk.
+    replace: Option<(&'a Path, &'a str)>,
 }
 
 impl Parser<'_> {
@@ -337,7 +396,13 @@ impl Parser<'_> {
                     for arg in &line.args {
                         for path in self.expand_include(arg, &source) {
                             self.cfg.included.push(path.clone());
-                            match std::fs::read_to_string(&path) {
+                            let read = match self.replace {
+                                Some((file, text)) if crate::store::same_file(&path, file) => {
+                                    Ok(text.to_owned())
+                                }
+                                _ => std::fs::read_to_string(&path),
+                            };
+                            match read {
                                 Ok(text) => self.parse(&text, &path, &conditions, depth + 1)?,
                                 // OpenSSH silently ignores missing includes.
                                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

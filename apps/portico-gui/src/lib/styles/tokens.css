@@ -26,6 +26,18 @@
   --text-xl: 20px;
   --text-display-sm: 30px;
   --text-display: 34px;
+  --size-dot: 6px;
+  --size-dot-ring: 1.5px;
+  --size-icon-sm: 12px;
+  --size-card: 540px;
+  --size-bar: 2px;
+  --size-line-gap: 2px;
+  --size-row: 34px;
+  --size-control-sm: 30px;
+  --size-badge: 20px;
+  --size-badge-sm: 16px;
+  --size-icon-xs: 11px;
+  --tracking-caps: 0.08em;
   --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
   --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
@@ -51,6 +63,7 @@
   --accent: #c8a96b;
   --accent-strong: #ddc085;
   --text-on-accent: #14110b;
+  --accent-selection: #c8a96b55;
   --status-idle: #6c6a65;
   --status-connecting: #8aaad6;
   --status-authenticating: #b39de0;
@@ -91,6 +104,7 @@
   --accent: #b4bcc6;
   --accent-strong: #ccd3db;
   --text-on-accent: #0b121a;
+  --accent-selection: #b4bcc655;
   --status-idle: #636c78;
   --status-connecting: #6fc3d3;
   --status-authenticating: #b4a2e6;
@@ -131,6 +145,7 @@
   --accent: #c99a74;
   --accent-strong: #dcb08e;
   --text-on-accent: #1a0f09;
+  --accent-selection: #c99a7455;
   --status-idle: #756b60;
   --status-connecting: #94aecf;
   --status-authenticating: #bca3d6;

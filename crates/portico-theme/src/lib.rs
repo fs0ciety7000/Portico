@@ -135,6 +135,39 @@ pub const TYPE_SCALE: [(&str, u16); 8] = [
     ("display", 34),
 ];
 
+/// Component sizes (GUI, CSS lengths), exported as `--size-<name>`:
+/// - `dot`: the status dot, everywhere (tabs, pane headers, lists, status bar);
+/// - `dot-ring`: the ring of a hollow dot ("no shell attached");
+/// - `icon-sm`: small inline icons (pane count, close crosses);
+/// - `card`: the widest connection or failure card over a terminal;
+/// - `bar`: the accent bar of a selected row (and the focus ring width);
+/// - `line-gap`: between the two lines of a list row (title, then details);
+/// - `row`: a list row, a form control (input, select) or a checkbox line;
+/// - `control-sm`: a compact control (a small button, an inline input);
+/// - `badge`: a badge or pill (origin, count);
+/// - `badge-sm`: a compact badge, a small icon box;
+/// - `icon-xs`: the smallest inline icons (lock of an origin badge).
+pub const SIZES: [(&str, &str); 11] = [
+    ("dot", "6px"),
+    ("dot-ring", "1.5px"),
+    ("icon-sm", "12px"),
+    ("card", "540px"),
+    ("bar", "2px"),
+    ("line-gap", "2px"),
+    ("row", "34px"),
+    ("control-sm", "30px"),
+    ("badge", "20px"),
+    ("badge-sm", "16px"),
+    ("icon-xs", "11px"),
+];
+
+/// Alpha of the terminal selection (`--accent-selection`): the theme's
+/// accent at about one third, so selected text stays readable.
+pub const ACCENT_SELECTION_ALPHA: u8 = 0x55;
+
+/// Letter spacing of small capitals (badges such as ZOOM and DEMO, section labels).
+pub const TRACKING_CAPS: &str = "0.08em";
+
 /// **Obsidian**: the default. Near-black mineral, marble text, brass accent.
 pub const OBSIDIAN: Theme = Theme {
     id: "obsidian",
@@ -311,6 +344,10 @@ pub fn export_css() -> String {
     for (k, v) in TYPE_SCALE {
         let _ = writeln!(css, "  --text-{k}: {v}px;");
     }
+    for (k, v) in SIZES {
+        let _ = writeln!(css, "  --size-{k}: {v};");
+    }
+    let _ = writeln!(css, "  --tracking-caps: {TRACKING_CAPS};");
     for (k, v) in SHADOWS {
         let _ = writeln!(css, "  --shadow-{k}: {v};");
     }
@@ -350,6 +387,11 @@ pub fn export_css() -> String {
         ] {
             let _ = writeln!(css, "  --{name}: {};", c.to_hex());
         }
+        let _ = writeln!(
+            css,
+            "  --accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
+            p.accent.to_hex()
+        );
         let s = &theme.status;
         for (name, c) in [
             ("idle", s.idle),
@@ -497,6 +539,33 @@ mod tests {
     fn ids_are_unique() {
         for (i, a) in THEMES.iter().enumerate() {
             assert!(THEMES.iter().skip(i + 1).all(|b| b.id != a.id));
+        }
+    }
+
+    #[test]
+    fn every_theme_exports_its_selection_from_its_accent() {
+        let css = export_css();
+        for theme in THEMES {
+            let block = css
+                .split(&format!("[data-theme=\"{}\"]", theme.id))
+                .nth(1)
+                .unwrap_or_default();
+            let line = format!(
+                "--accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
+                theme.palette.accent.to_hex()
+            );
+            assert!(block.contains(&line), "{}: missing `{line}`", theme.id);
+        }
+        assert!(css.contains("--size-bar: 2px;"));
+        assert!(css.contains("--size-line-gap: 2px;"));
+        for line in [
+            "--size-row: 34px;",
+            "--size-control-sm: 30px;",
+            "--size-badge: 20px;",
+            "--size-badge-sm: 16px;",
+            "--size-icon-xs: 11px;",
+        ] {
+            assert!(css.contains(line), "missing `{line}`");
         }
     }
 

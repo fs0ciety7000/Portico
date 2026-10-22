@@ -12,6 +12,10 @@ import {
   type SnippetDraft,
   type VaultStatus,
   type HostMeta,
+  type HostDraft,
+  type ManagedInclude,
+  type ManagedHost,
+  type ImportApplyRequest,
   type ImportPreview,
   type ImportReport,
   type RecentHost,
@@ -30,6 +34,11 @@ import {
   type ThemeInfo,
   type TunnelInfo,
   type Upload,
+  type PlaybackControl,
+  type PlaybackFrame,
+  type PlaybackInfo,
+  type PlaybackState,
+  type Recording,
 } from "./api";
 
 export interface Backend {
@@ -89,6 +98,12 @@ export interface Backend {
   checkTags(tags: string[]): Promise<string[]>;
   setGroup(alias: string, group: string | null): Promise<HostMeta>;
   setNotes(alias: string, notes: string | null): Promise<HostMeta>;
+  createHost(draft: HostDraft): Promise<string>;
+  updateHost(alias: string, draft: HostDraft): Promise<string>;
+  deleteHost(alias: string): Promise<void>;
+  duplicateHost(alias: string, newAlias: string): Promise<string>;
+  managedInclude(): Promise<ManagedInclude>;
+  managedHost(alias: string): Promise<ManagedHost | null>;
   recentHosts(limit: number): Promise<RecentHost[]>;
   clearRecent(): Promise<void>;
   forgetRecent(alias: string): Promise<boolean>;
@@ -99,10 +114,23 @@ export interface Backend {
   getSettings(): Promise<Settings>;
   saveTheme(theme: string): Promise<void>;
   /** Native picker in Rust, then the plan; `null` when cancelled. */
-  importTermiusPick(prefix: boolean): Promise<ImportPreview | null>;
-  importTermiusReplan(token: number, prefix: boolean): Promise<ImportPreview>;
-  importApply(token: number): Promise<ImportReport>;
+  importPick(prefix: boolean): Promise<ImportPreview | null>;
+  importReplan(token: number, prefix: boolean): Promise<ImportPreview>;
+  /** Key ids are checked against the plan in Rust; the passphrase becomes a SecretString. */
+  importApply(request: ImportApplyRequest): Promise<ImportReport>;
   importCancel(): Promise<void>;
+  recordingStart(terminal: number): Promise<void>;
+  recordingStop(terminal: number): Promise<void>;
+  recordingStatus(terminal: number): Promise<boolean>;
+  recordingsFolder(): Promise<string>;
+  listRecordings(): Promise<Recording[]>;
+  deleteRecording(name: string): Promise<void>;
+  /** Frames (already sanitised) go to `onFrame`, in order. */
+  playRecording(name: string, speed: number, onFrame: (frame: PlaybackFrame) => void): Promise<PlaybackInfo>;
+  playbackControl(id: number, control: PlaybackControl): Promise<PlaybackState>;
+  playbackAck(id: number, total: number): Promise<void>;
+  playbackClose(id: number): Promise<void>;
+  onEngineLagged(cb: () => void): Promise<UnlistenFn>;
 }
 
 const tauriBackend: Backend = {
@@ -111,6 +139,11 @@ const tauriBackend: Backend = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (buf) => onData(new Uint8Array(buf));
     return api.openTerminal(session, size, channel);
+  },
+  playRecording(name, speed, onFrame) {
+    const channel = new Channel<PlaybackFrame>();
+    channel.onmessage = onFrame;
+    return api.playRecording(name, speed, channel);
   },
 };
 

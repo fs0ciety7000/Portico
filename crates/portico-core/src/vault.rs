@@ -199,6 +199,12 @@ pub enum VaultStatus {
     Unlocked,
 }
 
+/// Hint of `vault_missing` ([`VaultError::Missing`]): no vault file yet, so
+/// nothing can be remembered (a host password typed with no vault lands
+/// here).
+pub const VAULT_MISSING_HINT: &str =
+    "Create the vault (Keys, then V) to remember passwords, or leave the password empty.";
+
 /// Vault failures. Messages never contain secret material.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -259,7 +265,7 @@ impl VaultError {
                 "vault_exists",
                 Some("A vault already exists: unlock it instead of creating a new one."),
             ),
-            Self::Missing { .. } => ("vault_missing", Some("Create a vault first.")),
+            Self::Missing { .. } => ("vault_missing", Some(VAULT_MISSING_HINT)),
             Self::UnsupportedVersion { found } if *found < VAULT_VERSION => (
                 "vault_version",
                 Some(
@@ -604,7 +610,7 @@ impl VaultStore {
     fn mutate(&self, change: impl FnOnce(&mut BTreeMap<String, SecretString>)) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.is_none() {
-            return Err(VaultError::Locked.into());
+            return Err(self.not_unlocked().into());
         }
         let _file_lock = self.lock_file()?;
         let Some(unlocked) = state.as_mut() else {
@@ -790,6 +796,20 @@ impl VaultStore {
         }
     }
 
+    /// Why a locked handle cannot serve a secret: [`VaultError::Missing`]
+    /// when there is no vault file yet (`vault_missing`: create one),
+    /// [`VaultError::Locked`] otherwise (`vault_locked`: unlock it). An
+    /// unreadable directory counts as a file, as in [`Self::status`].
+    fn not_unlocked(&self) -> VaultError {
+        if self.path.try_exists().unwrap_or(true) {
+            VaultError::Locked
+        } else {
+            VaultError::Missing {
+                path: self.path.clone(),
+            }
+        }
+    }
+
     fn rollback(&self) -> VaultError {
         VaultError::Rollback {
             path: self.path.clone(),
@@ -806,8 +826,14 @@ impl VaultStore {
 impl SecretStore for VaultStore {
     fn get(&self, key: &SecretKey) -> Result<Option<SecretString>> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let unlocked = state.as_ref().ok_or(VaultError::Locked)?;
+        let unlocked = state.as_ref().ok_or_else(|| self.not_unlocked())?;
         Ok(unlocked.entries.get(&key.account()).cloned())
+    }
+
+    fn contains(&self, key: &SecretKey) -> Result<bool> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let unlocked = state.as_ref().ok_or_else(|| self.not_unlocked())?;
+        Ok(unlocked.entries.contains_key(&key.account()))
     }
 
     fn set(&self, key: &SecretKey, secret: &SecretString) -> Result<()> {
@@ -818,6 +844,11 @@ impl SecretStore for VaultStore {
     }
 
     fn delete(&self, key: &SecretKey) -> Result<()> {
+        // No vault file and none unlocked: nothing is remembered, so there
+        // is nothing to forget (deleting a host never fails for it).
+        if !self.is_unlocked() && matches!(self.not_unlocked(), VaultError::Missing { .. }) {
+            return Ok(());
+        }
         let account = key.account();
         self.mutate(|entries| {
             entries.remove(&account);
@@ -1386,6 +1417,54 @@ mod tests {
         let summary = e.summary();
         assert!(!summary.message.contains("hunter2"));
         assert!(summary.hint.is_some());
+    }
+
+    #[test]
+    fn no_vault_file_is_missing_not_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = VaultStore::open_for_tests(dir.path().join("data/vault.toml"));
+        for result in [
+            vault.get(&host_key("a")).map(|_| ()),
+            vault.contains(&host_key("a")).map(|_| ()),
+            vault.set(&host_key("a"), &pass("x")),
+        ] {
+            let e = result.expect_err("missing");
+            assert_eq!(code(&e), "vault_missing");
+            assert_eq!(e.summary().hint.as_deref(), Some(VAULT_MISSING_HINT));
+            assert_eq!(
+                VAULT_MISSING_HINT,
+                "Create the vault (Keys, then V) to remember passwords, or leave the password empty."
+            );
+        }
+        // Nothing is remembered: forgetting succeeds and writes nothing.
+        vault.delete(&host_key("a")).expect("nothing to forget");
+        assert_eq!(vault.status(), VaultStatus::Absent);
+
+        // Once the file exists, a locked handle says `vault_locked`, with
+        // the hint it always had.
+        let created = new_vault(dir.path());
+        created.lock();
+        let e = vault.set(&host_key("a"), &pass("x")).expect_err("locked");
+        assert_eq!(code(&e), "vault_locked");
+        assert_eq!(
+            e.summary().hint.as_deref(),
+            Some("Unlock the Portico vault with its master passphrase to use remembered secrets.")
+        );
+        let e = vault.delete(&host_key("a")).expect_err("locked");
+        assert_eq!(code(&e), "vault_locked");
+    }
+
+    #[test]
+    fn contains_reports_entries_without_reading_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = new_vault(dir.path());
+        assert!(!vault.contains(&host_key("a")).expect("contains"));
+        vault.set(&host_key("a"), &pass("x")).expect("set");
+        assert!(vault.contains(&host_key("a")).expect("contains"));
+        assert!(!vault.contains(&host_key("b")).expect("contains"));
+        vault.lock();
+        let e = vault.contains(&host_key("a")).expect_err("locked");
+        assert_eq!(code(&e), "vault_locked");
     }
 
     #[test]

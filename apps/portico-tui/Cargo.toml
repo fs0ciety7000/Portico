@@ -28,7 +28,9 @@ tracing-subscriber.workspace = true
 bytes.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
-time.workspace = true
+# `local-offset`: dates in local time, the offset read once at startup
+# (before the runtime's threads, see `ui::fmt::init_local_offset`).
+time = { workspace = true, features = ["local-offset"] }
 
 [dev-dependencies]
 tempfile.workspace = true

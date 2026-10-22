@@ -425,7 +425,7 @@
     left: 0;
     top: var(--space-2);
     bottom: var(--space-2);
-    width: 2px;
+    width: var(--size-bar);
     border-radius: 2px;
     background: var(--accent);
   }

@@ -1,14 +1,19 @@
 <script lang="ts">
-  // The handle between two split panes. Keyboard first: the pane commands
-  // (`pane.resize-*`) move the nearest divider from the terminal; this
-  // handle also takes the focus (click or Tab) and moves with the arrows
-  // along its axis, Home / End to the limits. The mouse drags it. Both are
+  // The handle between two split panes. Keyboard first: "Move pane
+  // divider…" (`pane.divider`) gives the focused pane's nearest divider the
+  // keyboard (as do a click and Tab); it then moves with the arrows along
+  // its axis, Home / End to the limits. The mouse drags it. Both are
   // clamped to the minimum pane size by the workspace. Enter or Esc gives
-  // the keyboard back to the focused pane.
+  // the keyboard back to the focused pane. While it has the focus it holds
+  // the only accent (`onfocuschange`: the pane gives up its own).
   import { RESIZE_STEP, type Divider } from "../panes";
   import { workspace } from "../state/workspace.svelte";
 
-  let { divider, onrelease }: { divider: Divider; onrelease: () => void } = $props();
+  let {
+    divider,
+    onrelease,
+    onfocuschange,
+  }: { divider: Divider; onrelease: () => void; onfocuschange?: (focused: boolean) => void } = $props();
 
   let el: HTMLDivElement | undefined = $state();
   let dragging = $state(false);
@@ -69,6 +74,7 @@
   class:dragging
   role="separator"
   tabindex="0"
+  data-divider={divider.id}
   aria-orientation={vertical ? "vertical" : "horizontal"}
   aria-label={vertical ? "Resize the panes side by side" : "Resize the stacked panes"}
   aria-valuemin={0}
@@ -84,6 +90,8 @@
   onpointercancel={onpointerup}
   onlostpointercapture={() => (dragging = false)}
   {onkeydown}
+  onfocus={() => onfocuschange?.(true)}
+  onblur={() => onfocuschange?.(false)}
 ></div>
 
 <style>

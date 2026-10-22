@@ -28,14 +28,21 @@ l'IPC Tauri, le moteur réel, WebKitGTK et un serveur SSH.
 
 Le scénario, dans l'ordre : démarrage (hôtes, pas de vault) ; connexion et clé hôte acceptée (`known_hosts`) ;
 commande dans le terminal, dont la sortie revient par le PTY (le shell pose un titre OSC que la barre d'état
-affiche) ; statut et latence ; création du vault ; génération d'une clé ed25519 avec passphrase ; ajout à
+affiche) ; statut et latence ; enregistrement de la session (confirmation, `REC` à l'événement du moteur, arrêt sans confirmation, fichier `0600` qui contient la sortie, liste, lecture jusqu'au bout puis fermeture) ; création du vault ; génération d'une clé ed25519 avec passphrase ; ajout à
 l'agent pour une heure puis retrait (`ssh-add -l`) ; copy-id vers `alpha`, vérification avec la clé (prompt de
 passphrase, mémorisée dans le vault) ; connexion à `gamma` avec cette seule clé, sans prompt ; téléchargement
 SFTP ; snippet avec placeholder, puis refus du collage multi-ligne sous `sh` (sans bracketed paste) et
 exécution à la place ; favori, tags, groupe et notes (`hosts.toml`), la sélection suivant l'hôte déplacé ;
 ProxyJump ; panneau de logs et configuration effective (valeur sensible masquée, absente du DOM) ; tunnel
 `-L` (affiché avec sa spec, trafic HTTP, arrêt) ; thème mémorisé (`settings.toml`) ; redémarrage : déverrouillage
-du vault au démarrage et connexion par clé sans prompt.
+du vault au démarrage et connexion par clé sans prompt ; hôte Portico (phase 6b) : « Add host… » avec la clé
+`bootstrap` choisie parmi les clés découvertes et un mot de passe mémorisé (absent de `hosts.conf`, chiffré dans
+le vault, `~/.ssh/config` intact), badge et bandeau `Include`, connexion sans prompt, port modifié puis rétabli,
+suppression confirmée ; import Termix : « Import hosts… », export JSON généré par `env.sh` (un hôte vers le `sshd`,
+avec une clé autorisée côté serveur et absente de `~/.ssh`) choisi dans le sélecteur natif avec `xdotool`, aperçu
+(aucune clé cochée, texte de la clé jamais affiché), clé cochée (`1`), rapport, clé écrite dans
+`~/.ssh/portico/` (`0600`, dossier `0700`), `IdentityFile` et `IdentitiesOnly` dans `hosts.conf`, puis connexion
+avec cette seule clé, sans prompt.
 
 Une capture est prise à chaque étape clé (et à chaque échec d'attente) dans `<racine>/shots/`. La racine
 jetable est supprimée à la fin, sauf avec `E2E_KEEP=1` ou si elle est donnée par `E2E_ROOT=<dossier>`.
@@ -43,7 +50,7 @@ jetable est supprimée à la fin, sauf avec `E2E_KEEP=1` ou si elle est donnée 
 ### Prérequis (Debian/Ubuntu)
 
 ```bash
-sudo apt install openssh-server openssh-client xvfb webkit2gtk-driver libwebkit2gtk-4.1-dev
+sudo apt install openssh-server openssh-client xvfb xdotool webkit2gtk-driver libwebkit2gtk-4.1-dev
 cargo install tauri-driver --version 2.1.0 --locked
 ```
 
@@ -67,8 +74,9 @@ e2e/run.sh --serve --no-build             # environnement prêt, WebDriver sur u
 - **Pas en CI** : il faut WebKitGTK, son driver WebDriver, `tauri-driver`, Xvfb et un `sshd` ; à lancer avant une
   release et après toute modification notable de la GUI.
 - **Linux seulement** : `tauri-driver` ne pilote pas WKWebView (macOS).
-- Le sélecteur de fichiers natif (upload SFTP, dossier de téléchargement) est un dialogue GTK hors WebDriver :
-  l'upload a été vérifié à la main (`xdotool` : `Ctrl-L`, chemin, Entrée), pas dans le test.
+- Le sélecteur de fichiers natif est un dialogue GTK hors WebDriver : l'import le pilote avec `xdotool`
+  (`Ctrl-L`, chemin, Entrée, d'où `xdotool` dans les prérequis) ; l'upload SFTP et le dossier de téléchargement
+  ont été vérifiés à la main de la même façon, pas dans le test.
 - Le contenu du terminal est rendu par xterm.js (WebGL ou canvas), illisible par WebDriver : le test observe ses
   effets (titre OSC, fichiers distants) et les captures montrent le rendu.
 - Le presse-papiers (copie des logs) se vérifie à la main sous Xvfb (`xsel -b -o`).

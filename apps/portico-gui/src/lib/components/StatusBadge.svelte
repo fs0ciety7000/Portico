@@ -21,7 +21,7 @@
 
 <span class="badge" data-status={status} role="status" aria-live="polite">
   <span class="dot" class:busy></span>
-  <span>{label ?? labels[status]}</span>
+  <span class="label">{label ?? labels[status]}</span>
   {#if (status === "connected" || status === "warning") && latencyMs !== null}
     <span class="latency mono">{formatRtt(latencyMs)}</span>
   {/if}
@@ -31,6 +31,9 @@
   .badge {
     --c: var(--status-idle);
     display: inline-flex;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
     white-space: nowrap;
     align-items: center;
     gap: var(--space-2);
@@ -50,9 +53,13 @@
   [data-status="warning"] { --c: var(--status-warning); }
   [data-status="error"] { --c: var(--status-error); }
 
+  /* A failure reads in the status colour, like the pane header's phase. */
+  [data-status="error"] .label { color: var(--status-error); }
+  .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .dot, .latency { flex: none; }
   .dot {
-    width: 7px;
-    height: 7px;
+    width: var(--size-dot);
+    height: var(--size-dot);
     border-radius: 50%;
     background: var(--c);
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent);

@@ -167,7 +167,7 @@ pub const MIN_RSA_BITS: u32 = 3072;
 /// Maximum RSA modulus (larger keys take minutes and bring nothing).
 pub const MAX_RSA_BITS: u32 = 8192;
 /// Longest key file name.
-const MAX_NAME_LEN: usize = 64;
+pub(crate) const MAX_NAME_LEN: usize = 64;
 /// Longest key comment.
 const MAX_COMMENT_LEN: usize = 256;
 
@@ -201,16 +201,7 @@ pub fn generate(ssh_dir: &Path, request: &KeyGenRequest) -> Result<LocalKey> {
         }
     }
 
-    // The OS generator itself (getrandom), as the project requires. Probed
-    // first so a broken entropy source is an error, not a panic inside
-    // `UnwrapErr`.
-    {
-        use rand::TryRng;
-        rand::rngs::SysRng
-            .try_next_u32()
-            .map_err(|e| KeyError::Generate(format!("no system randomness: {e}")))?;
-    }
-    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+    let mut rng = system_rng()?;
     let gen_err = |e: russh::keys::ssh_key::Error| KeyError::Generate(e.to_string());
     let mut key = match request.algorithm {
         KeyAlgorithm::Ed25519 => PrivateKey::random(&mut rng, Algorithm::Ed25519),
@@ -249,7 +240,18 @@ pub fn generate(ssh_dir: &Path, request: &KeyGenRequest) -> Result<LocalKey> {
     read_key(&public_path)
 }
 
-fn validate_name(name: &str) -> Result<()> {
+/// The OS generator itself (getrandom), as the project requires. Probed
+/// first so a broken entropy source is an error, not a panic inside
+/// `UnwrapErr`.
+pub(crate) fn system_rng() -> Result<rand::rand_core::UnwrapErr<rand::rngs::SysRng>> {
+    use rand::TryRng;
+    rand::rngs::SysRng
+        .try_next_u32()
+        .map_err(|e| KeyError::Generate(format!("no system randomness: {e}")))?;
+    Ok(rand::rand_core::UnwrapErr(rand::rngs::SysRng))
+}
+
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     let reason = if name.is_empty() {
         Some("empty")
     } else if name.len() > MAX_NAME_LEN {
@@ -314,7 +316,7 @@ pub(crate) fn is_bidi_control(c: char) -> bool {
     )
 }
 
-fn create_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     // `metadata` follows a symlinked ~/.ssh: what matters is the directory.
     if let Ok(meta) = std::fs::metadata(dir) {
         if !meta.is_dir() {
@@ -365,7 +367,7 @@ fn current_uid() -> Result<u32> {
 }
 
 /// Creates `path` exclusively (never follows or replaces anything).
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

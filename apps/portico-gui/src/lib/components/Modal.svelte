@@ -308,6 +308,12 @@
   .modal :global(.field input:focus),
   .modal :global(.field textarea:focus) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .modal :global(.field [aria-invalid="true"]) { border-color: var(--status-error); }
+  /* As specific as the input rule above (its `:not()`s count), so an
+     unfocused field in error keeps its error border. */
+  .modal :global(.field input[aria-invalid="true"]:not([type="checkbox"]):not([type="radio"])),
+  .modal :global(.field textarea[aria-invalid="true"]) { border-color: var(--status-error); }
+  /* Focused and in error: the error border wins over the focus accent. */
+  .modal :global(.field [aria-invalid="true"]:focus) { border-color: var(--status-error); box-shadow: 0 0 0 1px var(--status-error); }
   .modal :global(.field .help) { color: var(--text-muted); font-size: var(--text-xs); }
   .modal :global(.check) {
     display: flex;
@@ -348,7 +354,7 @@
   .modal :global(.check input:checked::after) { transform: rotate(-45deg) scale(1); }
   .modal :global(.inline-error) {
     display: grid;
-    gap: 2px;
+    gap: var(--size-line-gap);
     color: var(--status-error);
     font-size: var(--text-sm);
   }
@@ -359,7 +365,7 @@
   .modal :global(.segmented) {
     display: inline-flex;
     flex-wrap: wrap;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding: 2px;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);

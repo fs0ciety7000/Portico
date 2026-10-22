@@ -112,7 +112,8 @@ Le job de signature choisit son mode selon les secrets présents dans l'environn
 | aucun | le job ne signe rien ; la Release garde le dmg *ad hoc* du build ; annotation `warning` | `Portico_<v>_universal-unsigned.dmg` |
 
 Le mode retenu figure aussi dans le résumé du job. Sans signature, l'utilisateur doit autoriser l'app
-une fois (clic droit → Ouvrir, ou *Réglages Système → Confidentialité et sécurité*).
+une fois : *Réglages Système → Confidentialité et sécurité → Ouvrir quand même* (depuis macOS 15, le clic droit →
+Ouvrir ne suffit plus), ou `xattr -dr com.apple.quarantine /Applications/Portico.app`.
 
 ## Chaîne d'approvisionnement du workflow
 

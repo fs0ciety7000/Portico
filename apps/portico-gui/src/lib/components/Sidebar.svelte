@@ -5,6 +5,7 @@
   import { describe, type SessionView } from "../api";
   import type { Row } from "../hostlist";
   import { keymap } from "../state/keymap.svelte";
+  import OriginBadge from "./OriginBadge.svelte";
 
   let {
     rows,
@@ -17,6 +18,7 @@
     onactivate,
     onforget,
     ontoggle,
+    onadd,
   }: {
     rows: Row[];
     /** Hosts in the config (empty-state wording). */
@@ -31,6 +33,8 @@
     /** "Remove from recent" on a Recent row. */
     onforget: (alias: string) => void;
     ontoggle: (sectionId: string) => void;
+    /** "Add host…" (phase 6b). */
+    onadd: () => void;
   } = $props();
 
   let listEl: HTMLUListElement | undefined = $state();
@@ -64,20 +68,25 @@
 </script>
 
 <aside class="sidebar">
-  <label class="search">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
-    <input
-      bind:this={searchEl}
-      bind:value={query}
-      {onkeydown}
-      placeholder="Search · #tag @group *"
-      title="Fuzzy search · #tag, @group, * favorites"
-      spellcheck="false"
-      autocomplete="off"
-      aria-label="Search hosts"
-    />
-    {#if keymap.label("hosts.search")}<kbd>{keymap.label("hosts.search")}</kbd>{/if}
-  </label>
+  <div class="search-row">
+    <label class="search">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
+      <input
+        bind:this={searchEl}
+        bind:value={query}
+        {onkeydown}
+        placeholder="Search · #tag @group *"
+        title="Fuzzy search · #tag, @group, * favorites"
+        spellcheck="false"
+        autocomplete="off"
+        aria-label="Search hosts"
+      />
+      {#if keymap.label("hosts.search")}<kbd>{keymap.label("hosts.search")}</kbd>{/if}
+    </label>
+    <button class="add" onclick={onadd} title={keymap.tip("Add host…", "host.add")} aria-label="Add host">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" /></svg>
+    </button>
+  </div>
 
   {#if flat || loading}
     <div class="section-title static">{flatTitle} <span class="count">{loading ? "" : rows.length}</span></div>
@@ -95,8 +104,11 @@
         <p>No host matches this search.</p>
         <p class="muted"><kbd>Esc</kbd> clears it · <span class="mono">#tag</span>, <span class="mono">@group</span> and <span class="mono">*</span> narrow it</p>
       {:else if total === 0}
-        <p>No hosts in ~/.ssh/config yet.</p>
-        <p class="muted">Add a <span class="mono">Host</span> block, then reload{#if keymap.label("app.reload")} with <kbd>{keymap.label("app.reload")}</kbd>{/if}.</p>
+        <p>No hosts yet.</p>
+        <p class="muted">
+          Add one here{#if keymap.label("host.add")} with <kbd>{keymap.label("host.add")}</kbd>{/if}, or add a <span class="mono">Host</span> block to
+          <span class="mono">~/.ssh/config</span> and reload{#if keymap.label("app.reload")} with <kbd>{keymap.label("app.reload")}</kbd>{/if}.
+        </p>
       {/if}
     </div>
   {:else}
@@ -135,6 +147,7 @@
             <span class="name">
               <span class="alias" title={host.alias}>{host.alias}</span>
               {#if host.favorite}<span class="star" aria-label="favorite" title="Favorite">★</span>{/if}
+              {#if host.origin !== "ssh_config"}<OriginBadge origin={host.origin} compact />{/if}
             </span>
             <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
             {#if row.section.kind === "recent"}
@@ -201,6 +214,27 @@
     font: inherit;
   }
   .search input::placeholder { color: var(--text-muted); }
+  .search-row { display: flex; gap: var(--space-2); }
+  .search-row .search { flex: 1; min-width: 0; }
+  /* "Add host…": a quiet square beside the search, the accent on hover and focus. */
+  .add {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard),
+      transform var(--motion-fast) var(--ease-standard);
+  }
+  .add:hover { color: var(--accent); border-color: var(--border-strong); }
+  .add:active { transform: scale(0.95); }
+  .add:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .add svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 
   .section-title {
     display: flex;
@@ -218,7 +252,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--size-line-gap);
   }
   li {
     position: relative;
@@ -243,7 +277,7 @@
     left: 0;
     top: 8px;
     bottom: 8px;
-    width: 2px;
+    width: var(--size-bar);
     border-radius: 2px;
     background: var(--accent);
   }

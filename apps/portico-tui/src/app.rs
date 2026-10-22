@@ -2,14 +2,14 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Scroll;
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
 use portico_core::engine::{ConnectRequest, HostInventory};
-use portico_core::events::{SessionEvent, SessionPhase, TerminalEvent};
+use portico_core::events::{PromptKind, SessionEvent, SessionPhase, TerminalEvent};
 use portico_core::ids::{SessionId, TerminalId};
 use portico_core::search::{Hit, HostSearch};
 use portico_core::vault::VaultStatus;
@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
 
 use crate::action::Action;
-use crate::app_panes::{PanePick, PaneSlot, Tab};
+use crate::app_panes::{PanePick, PaneSlot, StatusNote, Tab};
 use crate::copy_job::CopyJob;
 use crate::debug::DebugPanel;
 use crate::dialog::{ChangedKeyAlert, Dialog, Outcome, PromptDialog};
@@ -55,6 +55,13 @@ pub(crate) enum Overlay {
     Edit,
     /// Session logs and effective config.
     Debug,
+    /// The recordings list (play, delete).
+    Recordings,
+    /// A recording being played (`App::player`).
+    Player,
+    /// "Add host…", "Edit host…", "Duplicate as Portico host…"
+    /// (`App::host_form`).
+    HostForm,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -65,6 +72,20 @@ pub(crate) struct Toast {
     pub(crate) hint: Option<String>,
     pub(crate) kind: ToastKind,
     pub(crate) ttl: u16,
+    /// The message starts with a host alias: shown as written, never
+    /// sentence-cased.
+    pub(crate) as_written: bool,
+}
+
+impl Toast {
+    /// The message as shown: a sentence, unless it starts with an alias.
+    pub(crate) fn shown(&self) -> String {
+        if self.as_written {
+            self.message.clone()
+        } else {
+            crate::ui::fmt::sentence(&self.message)
+        }
+    }
 }
 
 /// The `?` overlay beyond `Overlay::Help`.
@@ -143,6 +164,12 @@ pub(crate) struct App {
     pub(crate) pane_pick: Option<PanePick>,
     /// `Ctrl-Space` was pressed: the next key is a Portico command.
     pub(crate) prefix: bool,
+    /// Pane mode (like tmux's repeat-time): after `Ctrl-Space` + an arrow
+    /// or `Shift`+arrow, until this instant the arrows and `Shift`+arrows
+    /// keep moving the focus / the divider without the prefix.
+    pub(crate) pane_repeat: Option<Instant>,
+    /// A refusal on one line of the status bar (never over a pane).
+    pub(crate) note: Option<StatusNote>,
     /// Pending dialogs; the front one is shown and receives keys.
     pub(crate) dialogs: VecDeque<Dialog>,
     /// Size of the terminal area, updated on every render.
@@ -177,9 +204,54 @@ pub(crate) struct App {
     pub(crate) machine: Option<String>,
     /// OSC 52 goes to the real terminal (off in tests).
     pub(crate) clipboard: bool,
+    /// Terminals being recorded, with the file name when known. Driven by
+    /// `RecordingState::Started` / `Stopped` only (and `is_recording`
+    /// after a lagged bus), never by the result of `start_recording`.
+    pub(crate) recording: HashMap<TerminalId, Option<String>>,
+    /// The recordings panel (kept under the player, which returns to it).
+    pub(crate) recordings_panel: Option<crate::recordings::RecordingsPanel>,
+    /// The playback in progress, while `overlay == Some(Overlay::Player)`.
+    pub(crate) player: Option<crate::player::Player>,
+    /// The host form, while `overlay == Some(Overlay::HostForm)`.
+    pub(crate) host_form: Option<crate::host_form::HostForm>,
+    /// The `Include` banner of Portico's `hosts.conf`.
+    pub(crate) include: crate::app_hosts::IncludeBanner,
+    /// Host to select once the inventory is reloaded (created, edited,
+    /// or the neighbour of a deleted one).
+    pub(crate) pending_select: Option<String>,
     search: HostSearch,
     pub(crate) tx: mpsc::UnboundedSender<Action>,
     rx: mpsc::UnboundedReceiver<Action>,
+}
+
+/// Sleeps until `deadline` (forever without one).
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The playback reader's next message; never resolves without a player.
+async fn player_recv(
+    player: Option<&mut crate::player::Player>,
+) -> Option<crate::player::ReaderMsg> {
+    match player {
+        Some(player) => player.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// An engine bus message as an action: a lagged receiver resynchronises
+/// (`None` once the bus is closed).
+pub(crate) fn engine_action(
+    event: Result<EngineEvent, tokio::sync::broadcast::error::RecvError>,
+) -> Option<Action> {
+    match event {
+        Ok(event) => Some(Action::Engine(event)),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Some(Action::EngineLagged),
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+    }
 }
 
 /// Animation frame interval. Only drives spinners/toasts; idle UI does not redraw.
@@ -213,6 +285,8 @@ impl App {
             active: None,
             pane_pick: None,
             prefix: false,
+            pane_repeat: None,
+            note: None,
             dialogs: VecDeque::new(),
             term_size: GridSize {
                 cols,
@@ -233,6 +307,12 @@ impl App {
             probes: HashMap::new(),
             machine: None,
             clipboard: true,
+            recording: HashMap::new(),
+            recordings_panel: None,
+            player: None,
+            host_form: None,
+            include: crate::app_hosts::IncludeBanner::default(),
+            pending_select: None,
             search: HostSearch::default(),
             tx,
             rx,
@@ -275,11 +355,20 @@ impl App {
 
         terminal.draw(|f| ui::render(&mut self, f))?;
         while self.running {
+            // Timed states wake the loop once, when they run out (no
+            // ticking, so no redraw, in between).
+            let deadline = self.next_deadline();
+            let playing = self
+                .player
+                .as_ref()
+                .is_some_and(crate::player::Player::wants_input);
             let action = tokio::select! {
                 Some(Ok(event)) = input.next() => self.map_event(event),
                 Some(action) = self.rx.recv() => Some(action),
-                event = engine_events.recv() => event.ok().map(Action::Engine),
+                event = engine_events.recv() => engine_action(event),
+                msg = player_recv(self.player.as_mut()), if playing => Some(Action::PlayerFeed(msg)),
                 _ = ticker.tick(), if self.needs_animation() => Some(Action::Tick),
+                () = sleep_until(deadline), if deadline.is_some() => Some(Action::Expire),
             };
             if let Some(action) = action {
                 self.update(action);
@@ -298,9 +387,10 @@ impl App {
         Ok(())
     }
 
-    fn map_event(&mut self, event: Event) -> Option<Action> {
+    pub(crate) fn map_event(&mut self, event: Event) -> Option<Action> {
         match event {
             Event::Key(key) => {
+                let now = Instant::now();
                 // Help over a panel: its keys only, the panel waits below.
                 let action = if self.help.over_panel && self.dialogs.is_empty() {
                     (key.kind == crossterm::event::KeyEventKind::Press)
@@ -314,6 +404,7 @@ impl App {
                             overlay: self.overlay,
                             dialog_open: !self.dialogs.is_empty(),
                             prefix: self.prefix,
+                            pane_repeat: self.pane_repeat_active(now),
                             picking: self.pane_pick.is_some(),
                             keymap: &self.keymap,
                         },
@@ -323,6 +414,7 @@ impl App {
                 if action.is_some() && !matches!(action, Some(Action::Prefix)) {
                     self.prefix = false;
                 }
+                self.track_pane_repeat(action.as_ref(), key, now);
                 action
             }
             Event::Paste(text) => Some(Action::Paste(text)),
@@ -352,6 +444,11 @@ impl App {
                 .dialogs
                 .front()
                 .is_some_and(|d| matches!(d, Dialog::Secret(s) if s.busy))
+            || self
+                .recordings_panel
+                .as_ref()
+                .is_some_and(crate::recordings::RecordingsPanel::busy)
+            || self.host_form.as_ref().is_some_and(|f| f.busy || f.loading)
     }
 
     fn spawn_load_hosts(&self) {
@@ -404,8 +501,11 @@ impl App {
             Action::ToggleHelp => {
                 self.prefix = false;
                 self.close_panels();
-                // From the explorer, its page first.
-                self.help.page = usize::from(self.focus == Focus::Files);
+                // From the explorer, or a split tab, the page with its
+                // keys ("Files", "Panes") first.
+                let split =
+                    self.focus == Focus::Terminal && self.active_tab().is_some_and(|t| t.len() > 1);
+                self.help.page = usize::from(self.focus == Focus::Files || split);
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     _ => Some(Overlay::Help),
@@ -433,6 +533,7 @@ impl App {
                 let warnings = inv.warnings.len();
                 self.inventory = Some(inv);
                 self.refilter();
+                self.hosts_reloaded();
                 if warnings > 0 {
                     self.notify(format!("{warnings} ssh_config warning(s)"));
                 }
@@ -464,7 +565,7 @@ impl App {
                         _ => self.session_or_connect(&alias),
                     };
                     if let Some(session) = session {
-                        self.open_terminal(alias, session);
+                        self.open_tab(alias, session);
                     }
                 }
             }
@@ -493,6 +594,7 @@ impl App {
             Action::ResizePane(dir) => self.resize_pane(dir),
             Action::ClosePane => self.close_pane(),
             Action::ZoomPane => self.zoom_pane(),
+            Action::Expire => self.expire(Instant::now()),
             Action::OpenFiles => {
                 self.prefix = false;
                 self.open_files();
@@ -575,6 +677,11 @@ impl App {
         self.snippets_panel = None;
         self.edit_panel = None;
         self.debug_panel = None;
+        self.recordings_panel = None;
+        // Dropping the form wipes a typed password.
+        self.host_form = None;
+        // The playback ends with its panel (its reader thread stops).
+        self.player = None;
         self.help.over_panel = false;
     }
 
@@ -645,6 +752,14 @@ impl App {
                     panel.paste(text);
                 }
             }
+            // A password manager may paste the host's password here.
+            None if self.overlay == Some(Overlay::HostForm) => {
+                if let Some(form) = &mut self.host_form {
+                    form.paste(text);
+                }
+            }
+            // Other panels, the recordings list and the player included,
+            // take no paste: nothing reaches a terminal through them.
             None if self.overlay.is_some() => {}
             None => match (self.focus, self.active_terminal()) {
                 (Focus::Terminal, Some(view)) => view.paste(text),
@@ -902,11 +1017,14 @@ impl App {
         let Some(alias) = self.selected_host().map(|h| h.alias.clone()) else {
             return;
         };
-        // Existing live pane for this host: just switch to it.
+        // Existing live (or opening) pane for this host: just switch to it.
         let live = self.tabs.iter().enumerate().find_map(|(index, tab)| {
             tab.items()
                 .into_iter()
-                .find(|(_, slot)| slot.live() && slot.alias() == alias)
+                .find(|(_, slot)| {
+                    (slot.live() || matches!(slot, PaneSlot::Opening { .. }))
+                        && slot.alias() == alias
+                })
                 .map(|(pane, _)| (index, pane))
         });
         if let Some((index, pane)) = live {
@@ -937,13 +1055,7 @@ impl App {
                 }
             },
         };
-        self.open_terminal(alias, session);
-    }
-
-    /// Requests a shell for a new tab; served once the session is
-    /// connected.
-    fn open_terminal(&self, alias: String, session: SessionId) {
-        self.request_terminal(alias, session, None, self.term_size);
+        self.open_tab(alias, session);
     }
 
     fn disconnect_current(&mut self) {
@@ -993,6 +1105,7 @@ impl App {
                         .or_else(|| self.probes.get(&id).cloned())
                 });
                 let mut dialog = PromptDialog::new(prompt, alias);
+                dialog.account = self.remembered_account(&dialog);
                 if matches!(
                     self.vault,
                     Some(VaultStatus::Absent | VaultStatus::Locked | VaultStatus::Unlocked)
@@ -1178,13 +1291,50 @@ impl App {
         }
     }
 
+    /// An unknown host key that would send a remembered password: the
+    /// account it is remembered for, `user@host:port` (the session host's
+    /// user, else the local one; the prompt's address).
+    pub(crate) fn remembered_account(&self, dialog: &PromptDialog) -> Option<String> {
+        let PromptKind::UnknownHostKey {
+            host,
+            port,
+            sends_remembered_password: true,
+            ..
+        } = &dialog.kind
+        else {
+            return None;
+        };
+        let user = dialog
+            .alias
+            .as_ref()
+            .and_then(|alias| {
+                self.inventory
+                    .as_ref()?
+                    .hosts
+                    .iter()
+                    .find(|h| &h.alias == alias)
+            })
+            .and_then(|h| h.resolved.user.clone())
+            .unwrap_or_else(|| self.engine.config().local_user.clone());
+        Some(format!("{user}@{host}:{port}"))
+    }
+
     pub(crate) fn notify_error(&mut self, error: ErrorSummary) {
         self.toast = Some(Toast {
             message: error.message,
             hint: error.hint,
             kind: ToastKind::Error,
             ttl: 80,
+            as_written: false,
         });
+    }
+
+    /// An error whose message starts with a host alias (kept as written).
+    pub(crate) fn notify_error_as_written(&mut self, error: ErrorSummary) {
+        self.notify_error(error);
+        if let Some(toast) = &mut self.toast {
+            toast.as_written = true;
+        }
     }
 
     /// Something was ignored; Portico goes on (title, then the detail).
@@ -1194,7 +1344,16 @@ impl App {
             hint: detail,
             kind: ToastKind::Warning,
             ttl: 100,
+            as_written: false,
         });
+    }
+
+    /// A warning whose message starts with a host alias (kept as written).
+    pub(crate) fn notify_warning_as_written(&mut self, message: String, detail: Option<String>) {
+        self.notify_warning(message, detail);
+        if let Some(toast) = &mut self.toast {
+            toast.as_written = true;
+        }
     }
 
     pub(crate) fn notify(&mut self, message: String) {
@@ -1203,6 +1362,7 @@ impl App {
             hint: None,
             kind: ToastKind::Info,
             ttl: 40,
+            as_written: false,
         });
     }
 
@@ -1289,9 +1449,16 @@ impl App {
     ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         while !done(self) {
+            let playing = self
+                .player
+                .as_ref()
+                .is_some_and(crate::player::Player::wants_input);
+            let next = self.next_deadline();
             let action = tokio::select! {
                 Some(action) = self.rx.recv() => Some(action),
-                event = events.recv() => event.ok().map(Action::Engine),
+                event = events.recv() => engine_action(event),
+                msg = player_recv(self.player.as_mut()), if playing => Some(Action::PlayerFeed(msg)),
+                () = sleep_until(next), if next.is_some() => Some(Action::Expire),
                 () = tokio::time::sleep_until(deadline) => {
                     panic!("not reached in 20 s: {:?} {:?}", self.tabs, self.sessions)
                 }
@@ -1427,8 +1594,9 @@ mod render_tests {
                 );
             }
         }
-        // The only ellipsis is the one in "Ctrl-Space, then…": nothing cut.
-        for (lines, expected) in [(&first, 1), (&second, 0)] {
+        // The only ellipses are the ones in "Ctrl-Space, then…" and "Split
+        // with host…": nothing cut.
+        for (lines, expected) in [(&first, 1), (&second, 1)] {
             let ellipses = lines.iter().map(|l| l.matches('…').count()).sum::<usize>();
             assert_eq!(ellipses, expected, "{}", lines.join("\n"));
         }

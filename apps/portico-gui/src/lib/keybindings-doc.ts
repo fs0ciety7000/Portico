@@ -17,14 +17,14 @@ export const GUI_FIXED: DocTable[] = [
       "Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (tableau « Application et onglets »).",
     rows: [
       ["Reconnecter un onglet terminé ou en échec", "`↵`"],
-      ["Annuler une connexion en cours / revenir aux hôtes (onglet sans shell)", "`Esc`"],
+      ["Annuler une connexion en cours / revenir aux hôtes (onglet sans shell ; dans un onglet divisé, `Esc` annule seulement)", "`Esc`"],
       ["Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer", "`←` `→`, `Home` / `End`, `Suppr`"],
       ["Fermer un onglet (souris)", "clic milieu sur l'onglet"],
       ["Coller (Linux)", "`Ctrl-Shift-V`, `Shift-Insert`, clic milieu"],
       ["Panneaux : donner le focus à un panneau (souris)", "clic dans le panneau"],
       ["Séparation entre panneaux (souris)", "glisser"],
       [
-        "Séparation entre panneaux (focus clavier) : déplacer, aller aux limites, rendre le clavier au panneau",
+        "Séparation entre panneaux (focus clavier, par `pane.divider` ou `Tab`) : déplacer, aller aux limites, rendre le clavier au panneau",
         "`←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc`",
       ],
     ],
@@ -58,6 +58,36 @@ export const GUI_FIXED: DocTable[] = [
       ["Champ suivant", "`Tab`"],
       ["Enregistrer", "`Ctrl-S` (macOS : `⌘S`), `Ctrl-↵`, ou `↵` dans un champ d'une ligne"],
       ["Annuler", "`Esc`"],
+    ],
+  },
+  {
+    title: "Hôtes Portico (GUI) : dialogues",
+    intro:
+      "« Add host… » et « Edit host… » (hôte Portico) : alias, HostName, User, Port, clé (parmi les clés découvertes dans `~/.ssh`), " +
+      "ProxyJump (hôte existant), mot de passe, tags, groupe, favori, notes. Les erreurs du moteur s'affichent sous le champ concerné, " +
+      "avec un conseil ; le premier champ en erreur prend le focus.",
+    rows: [
+      ["Champ suivant / précédent", "`Tab` / `Shift-Tab`"],
+      ["Enregistrer (après 400 ms sans frappe)", "`↵` dans un champ d'une ligne ou une liste, `Ctrl-S` / `Ctrl-↵` (macOS : `⌘S`, `⌘↵`)"],
+      ["Mot de passe (modification) : garder, changer, oublier (« Keep » et « Forget » inactifs quand aucun n'est mémorisé)", "boutons « Keep », « Change », « Forget »"],
+      ["Mot de passe sans vault (ou vault verrouillé) : créer ou déverrouiller le vault, puis l'hôte est enregistré ; « Not now » revient au formulaire", "`↵` / `Esc`"],
+      ["Annuler ; avec des modifications, « Discard your changes? »", "`Esc`, puis `y` (abandonner) ou `n` / `Esc` (continuer)"],
+      ["Lecture seule (hôte de `~/.ssh/config` ou importé ; aussi « Delete host » sur ces hôtes) : dupliquer / éditer tags et notes", "`D` ou `↵` / `t`"],
+      ["Dupliquer : nouvel alias", "`↵`"],
+      ["Supprimer un hôte Portico : confirmer / garder", "`y` / `n`"],
+    ],
+  },
+  {
+    title: "Import d'hôtes (GUI)",
+    intro:
+      "« Import hosts… » (palette, `⌘⇧M` / `Ctrl-Shift-M`) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. " +
+      "Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.",
+    rows: [
+      ["Préfixer les alias (`termius-`, `termix-`) on/off", "`p`"],
+      ["Cocher / décocher la n-ième clé privée", "`1` … `9`, ou `Espace` sur la case"],
+      ["Importer (après 400 ms sans frappe ; si les passphrases diffèrent, le pied l'indique et `↵` montre l'erreur) ; aucun hôte à importer : choisir un autre fichier", "`↵`"],
+      ["Rapport : copier la ligne `Include`", "`c`"],
+      ["Annuler / fermer", "`Esc`"],
     ],
   },
   {
@@ -167,5 +197,23 @@ export const GUI_FIXED: DocTable[] = [
       "Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée ; la bannière « No open terminal » donne l'action " +
       "suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé). Les snippets hors portée de l'hôte " +
       "sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.",
+  },
+  {
+    title: "Enregistrements (GUI)",
+    intro:
+      "« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » (« Record this pane? » " +
+      "dans un onglet divisé) ; « Recordings… » (`v` depuis la liste des hôtes, `hosts.recordings`, ou la palette, `recordings.open`) ouvre la liste.",
+    rows: [
+      ["Confirmer l'enregistrement (seul `y`, actif après 400 ms sans frappe ; `↵` ne fait rien) / annuler", "`y` / `Esc` ou `n`"],
+      ["Arrêter l'enregistrement du panneau actif (sans confirmation ; « Recording saved · <fichier> »)", "`session.record` à nouveau, ou « Stop recording » dans la palette"],
+      ["Liste : se déplacer", "`j` / `k`, `↓` / `↑`, `Home` / `End`"],
+      ["Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde ; refusé d'emblée pendant l'écriture)", "`↵` ou double-clic / `Suppr` ou `x`"],
+      ["Liste : rafraîchir", "`Ctrl-R`"],
+      ["Lecture : pause / reprise (à la fin : rejouer depuis le début)", "`Espace`"],
+      ["Lecture : vitesse ×0,5 · ×1 · ×2 · ×4 · ×8", "`+` / `-`"],
+      ["Lecture : sauter le silence en cours / reculer de 5 s / revenir au début (aussi les boutons « ↺ 5 s » et « Restart »)", "`→` / `←` / `Home`"],
+      ["Lecture : aller à un instant", "clic sur la barre de progression"],
+      ["Fermer la lecture (retour à la liste) / fermer la liste", "`q` ou `Esc` / `Esc`"],
+    ],
   },
 ];

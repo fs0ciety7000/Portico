@@ -12,7 +12,7 @@
 //! the session's [`LogRing`] (debug panel) — never with secret material.
 
 mod auth;
-mod handler;
+pub(crate) mod handler;
 pub(crate) mod route;
 mod signer;
 mod stream;
@@ -34,7 +34,6 @@ use crate::error::{Error, Result};
 use crate::events::{CloseReason, EngineEvent, PromptKind, SessionEvent, SessionPhase};
 use crate::ids::SessionId;
 use crate::logs::{LogLevel, LogRecord, LogRing, SessionOutcome};
-use crate::ssh_config::SshConfig;
 
 use handler::ClientHandler;
 use route::Hop;
@@ -292,7 +291,7 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
     let alias = request.alias.clone();
     let user = request.user_override.clone();
     let mut hops = tokio::task::spawn_blocking(move || {
-        let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+        let ssh = crate::managed_hosts::load_config(&config.paths)?;
         route::plan(&ssh, &config, &alias, user)
     })
     .await

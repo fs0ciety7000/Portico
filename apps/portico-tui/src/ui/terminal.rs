@@ -1,5 +1,6 @@
 //! Renders an `alacritty_terminal` grid into the ratatui buffer.
 
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
@@ -35,6 +36,7 @@ pub(crate) fn render(
             term: &term,
             theme: s.theme,
             focused,
+            skip_rows: 0,
         },
         area,
     );
@@ -79,13 +81,37 @@ pub(crate) fn render(
     }
 }
 
-struct TermWidget<'a> {
-    term: &'a alacritty_terminal::Term<crate::terminal::EventProxy>,
-    theme: &'static Theme,
-    focused: bool,
+/// Draws a grid that is not a live terminal (the player): same cell
+/// mapping, `skip_rows` top rows left out (a grid taller than `area`
+/// keeps its cursor in view), the cursor shown when `cursor` is set.
+pub(crate) fn render_grid<T: EventListener>(
+    term: &alacritty_terminal::Term<T>,
+    cursor: bool,
+    skip_rows: u16,
+    s: Styles,
+    frame: &mut Frame<'_>,
+    area: Rect,
+) {
+    frame.render_widget(
+        TermWidget {
+            term,
+            theme: s.theme,
+            focused: cursor,
+            skip_rows: i32::from(skip_rows),
+        },
+        area,
+    );
 }
 
-impl Widget for TermWidget<'_> {
+struct TermWidget<'a, T> {
+    term: &'a alacritty_terminal::Term<T>,
+    theme: &'static Theme,
+    focused: bool,
+    /// Grid rows above the drawn area.
+    skip_rows: i32,
+}
+
+impl<T: EventListener> Widget for TermWidget<'_, T> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let p = &self.theme.palette;
         let base = Style::new().bg(c(p.bg_base)).fg(c(p.text_primary));
@@ -103,7 +129,7 @@ impl Widget for TermWidget<'_> {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let row = indexed.point.line.0 + offset;
+            let row = indexed.point.line.0 + offset - self.skip_rows;
             let (Ok(y), Ok(x)) = (u16::try_from(row), u16::try_from(indexed.point.column.0)) else {
                 continue;
             };
@@ -155,11 +181,14 @@ impl Widget for TermWidget<'_> {
             && cursor.shape != CursorShape::Hidden
         {
             let (Ok(y), Ok(x)) = (
-                u16::try_from(cursor.point.line.0),
+                u16::try_from(cursor.point.line.0 - self.skip_rows),
                 u16::try_from(cursor.point.column.0),
             ) else {
                 return;
             };
+            if x >= area.width || y >= area.height {
+                return;
+            }
             if let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) {
                 let accent = c(p.accent);
                 match cursor.shape {

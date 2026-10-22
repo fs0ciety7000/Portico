@@ -75,9 +75,15 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Tunnels | `p` | `hosts.tunnels` |
 | Clés (locales, agent, vault) | `i` | `hosts.keys` |
 | Snippets de l'hôte | `s` | `hosts.snippets` |
-| Éditer tags, groupe et notes de l'hôte (`hosts.toml`) | `e` | `hosts.edit` |
+| « Add host… » : créer un hôte Portico (dans `hosts.conf`, jamais dans `~/.ssh/config`) | `a`, `n` | `hosts.add` |
+| « Edit host… » : modifier un hôte Portico ; un hôte de `~/.ssh/config` (ou importé) reste en lecture seule : la vue propose de le dupliquer (`D`) ou d'éditer ses tags, groupe et notes (`t`, `hosts.toml`) | `e` | `hosts.edit` |
+| « Duplicate as Portico host… » : copie modifiable de l'hôte sélectionné, sous un nouvel alias | `D` | `hosts.duplicate` |
+| « Delete host » : supprimer un hôte Portico, ses métadonnées et son mot de passe mémorisé (confirmation armée : seul `y` supprime) | `Del` | `hosts.delete` |
+| Copier (OSC 52) la ligne `Include` à ajouter en tête de `~/.ssh/config`, quand le bandeau est affiché | `y` | `hosts.copy_include` |
+| Masquer le bandeau `Include` jusqu'au prochain lancement | `z` | `hosts.hide_include` |
 | Favori on/off | `*` | `hosts.favorite` |
 | Journaux de session (panneau debug) et config effective | `l` | `hosts.debug` |
+| « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `hosts.recordings` |
 | Retirer l'hôte des récents (ligne de la section Recent) | `x` | `hosts.forget_recent` |
 | Vider les récents (confirmation `y`) | `X` | `hosts.clear_recent` |
 | Onglet suivant | `]`, `Tab` | `hosts.next_tab` |
@@ -114,26 +120,28 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Onglet précédent | `[`, `Shift-Tab` | `prefix.prev_tab` |
 | Nouvel onglet sur le même hôte | `n` | `prefix.new_tab` |
 | Fermer l'onglet et tous ses panneaux (un hôte qui n'a plus aucun panneau est déconnecté) | `w` | `prefix.close_tab` |
-| Diviser le panneau : nouveau panneau dessous, même hôte (même session si elle est vivante) | `"`, `-` | `prefix.split_horizontal` |
-| Diviser le panneau : nouveau panneau à droite, même hôte | `%`, `\|` | `prefix.split_vertical` |
-| Diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre) | `S` | `prefix.split_host` |
-| Focus au panneau de gauche | `←` | `prefix.pane_left` |
-| Focus au panneau du dessous | `↓` | `prefix.pane_down` |
-| Focus au panneau du dessus | `↑` | `prefix.pane_up` |
-| Focus au panneau de droite | `→` | `prefix.pane_right` |
-| Panneau suivant (ordre de lecture, boucle) | `o` | `prefix.next_pane` |
-| Déplacer la séparation verticale vers la gauche (4 colonnes) | `Shift-←` | `prefix.resize_left` |
-| Déplacer la séparation horizontale vers le bas (2 lignes) | `Shift-↓` | `prefix.resize_down` |
-| Déplacer la séparation horizontale vers le haut (2 lignes) | `Shift-↑` | `prefix.resize_up` |
-| Déplacer la séparation verticale vers la droite (4 colonnes) | `Shift-→` | `prefix.resize_right` |
-| Fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte) | `x` | `prefix.close_pane` |
-| Zoom : le panneau seul dans l'onglet, ou retour à la division | `z` | `prefix.zoom_pane` |
+| « Split down » : nouveau panneau dessous, même hôte (même session si elle est vivante) | `"`, `-` | `prefix.split_horizontal` |
+| « Split right » : nouveau panneau à droite, même hôte | `%`, `\|` | `prefix.split_vertical` |
+| « Split with host… » : diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre) | `S` | `prefix.split_host` |
+| Focus au panneau de gauche (puis les flèches seules pendant 600 ms : mode `PANE`) | `←` | `prefix.pane_left` |
+| Focus au panneau du dessous (mode `PANE`) | `↓` | `prefix.pane_down` |
+| Focus au panneau du dessus (mode `PANE`) | `↑` | `prefix.pane_up` |
+| Focus au panneau de droite (mode `PANE`) | `→` | `prefix.pane_right` |
+| « Next pane » : panneau suivant (ordre de lecture, boucle) | `o` | `prefix.next_pane` |
+| « Move divider » : séparation verticale vers la gauche, 4 colonnes (puis `Shift` + flèche seul pendant 600 ms : mode `PANE`) | `Shift-←` | `prefix.resize_left` |
+| « Move divider » : séparation horizontale vers le bas, 2 lignes (mode `PANE`) | `Shift-↓` | `prefix.resize_down` |
+| « Move divider » : séparation horizontale vers le haut, 2 lignes (mode `PANE`) | `Shift-↑` | `prefix.resize_up` |
+| « Move divider » : séparation verticale vers la droite, 4 colonnes (mode `PANE`) | `Shift-→` | `prefix.resize_right` |
+| « Close pane » : fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte) | `x` | `prefix.close_pane` |
+| « Zoom pane » : le panneau seul dans l'onglet, ou retour à la division | `z` | `prefix.zoom_pane` |
 | Déconnecter cet hôte | `d` | `prefix.disconnect` |
 | Explorateur de fichiers (SFTP) | `f` | `prefix.files` |
 | Tunnels | `p` | `prefix.tunnels` |
 | Clés (locales, agent, vault) | `i` | `prefix.keys` |
 | Snippets de l'hôte de l'onglet | `s` | `prefix.snippets` |
 | Panneau debug (présélectionne la session de l'onglet) | `l` | `prefix.debug` |
+| « Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation | `R` | `prefix.record` |
+| « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `prefix.recordings` |
 | Rechercher un hôte | `/` | `prefix.search` |
 | Aide | `?` | `prefix.help` |
 | Onglet n | `1`-`9` | (fixe) |
@@ -156,15 +164,32 @@ Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 ce
 
 | Action | Touches |
 |---|---|
-| Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split onto… », recherche vide et active, rendue ensuite) | saisie pour filtrer, `↓` / `↑`, `↵` pour diviser |
+| Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split with host… », recherche vide et active, rendue ensuite) | saisie pour filtrer, `↓` / `↑`, `↵` pour diviser |
 | Annuler le choix d'hôte | `Esc`, `Ctrl-C` |
-| Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte) | `↵` (dans le panneau) |
+| Mode `PANE` : après `Ctrl-Space` + flèche ou `Shift` + flèche, les flèches (focus) et `Shift` + flèches (« Move divider ») restent actives 600 ms sans le préfixe ; toute autre touche quitte le mode et part au panneau | `←` `↓` `↑` `→`, `Shift` + flèche |
+| Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte) | `↵` (dans le panneau actif ; un autre panneau en échec indique « focus to retry (Ctrl-Space ←↓↑→) ») |
 
-Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin. Une division impossible est refusée avec un message (« A tab holds at most 8 panes », « Not enough room to split this pane »).
+Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Un panneau en échec a un point plein et sa phase en couleur d'erreur, dans son titre comme dans l'onglet ; le point creux est réservé à un panneau sans shell (sorti, fermé). Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin, et diviser un panneau zoomé dézoome puis divise. Une division impossible est refusée sur une ligne de la barre de statut, pendant 4 s, sans couvrir aucun panneau (« This tab already has 8 panes · Close a pane first. », « Each pane needs at least 20 columns × 5 rows · Enlarge the window, or close a pane. »). Depuis un onglet divisé, `?` ouvre l'aide sur la page « Panes ».
 
-### TUI : édition d'un hôte
+### TUI : hôtes créés dans Portico
 
-« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.
+« Add host… » (`a` ou `n`), « Edit host… » (`e`, hôte Portico), « Duplicate as Portico host… » (`D`) et « Delete host » (`Del`) depuis la liste. Ces hôtes vivent dans le fragment `hosts.conf` de Portico ; Portico n'écrit jamais `~/.ssh/config`. Titres : « Add host », « Edit <alias> », « Duplicate <alias> » (sans points de suspension). Champs : alias, `HostName`, `User`, `Port`, clé (choisie parmi les clés locales découvertes, ou « none · agent and default keys »), `ProxyJump` (un hôte existant, ou « none »), mot de passe facultatif juste après (masqué, mémorisé dans le trousseau ou le vault), tags, groupe, favori, notes. À l'édition, le formulaire dit « A password is remembered » (`Keep`, `Change` ou `Forget`) ou « No password remembered » (seul « Set », champ vide). Sous un mot de passe saisi ou gardé, une note dit où il part : « Sent automatically to the server that answers at this address, after its host key is verified; then tied to that key. » ; si `HostName`, `User` ou `Port` changent, elle devient « Changing the server or user forgets the remembered password. Choose Change to set one for the new destination. » Sans vault (ou vault verrouillé), enregistrer un mot de passe ouvre « Create the vault » (ou « Unlock the vault ») puis enregistre de nouveau ; `Esc` (« not now ») revient au formulaire, le mot de passe toujours saisi et le refus sous le champ. Chaque valeur est vérifiée par le moteur : un refus s'affiche sous le champ concerné (choisi par son code d'erreur), avec son hint (sauf pour le port, dont le message suffit). Un hôte Portico issu d'un import l'indique (« Portico · from Termix » dans les détails et le titre) et son formulaire précise : « Editing it keeps later imports from updating it. » Un hôte de `~/.ssh/config` s'ouvre en lecture seule : « Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it. » ; un hôte de l'ancien fichier d'import : « Imported by an earlier version of Portico (imports/termius.conf), which it never edits. Duplicate it as a Portico host to change it. » (`D` duplicate, `t` tags and notes).
+
+| Action | Touches |
+|---|---|
+| Champ suivant / précédent | `Tab` / `Shift-Tab`, `↓` / `↑` |
+| Choisir (clé, `ProxyJump`, favori, mot de passe) | `←` / `→`, `Space` ; une lettre saute au choix suivant qui commence par elle |
+| Nouvelle ligne dans les notes | `Alt-↵` |
+| Enregistrer | `↵` (ou `Ctrl-S`) |
+| Vider le champ | `Ctrl-U` |
+| Annuler (avec des changements : `y` les abandonne, `n` ou `Esc` revient au formulaire, les autres touches sont ignorées) | `Esc`, `Ctrl-C` |
+| Supprimer (« Delete <alias> (user@host:port) and its tags and notes. Its remembered password is forgotten unless another host uses the same account. Open sessions stay connected. This cannot be undone. » ; confirmation armée : touches ignorées 400 ms, puis seul `y` supprime ; `n` ou `Esc` annule, les autres touches sont ignorées). Sur un hôte non Portico, un toast « <alias> is read-only » (casse de l'alias conservée) | `Del` depuis la liste |
+
+Après un enregistrement, la liste se recharge (`HostsChanged`) et sélectionne l'hôte. Les hôtes Portico portent `◆` dans la liste, les hôtes importés `◇` ; les détails indiquent l'origine. Tant que `~/.ssh/config` n'inclut pas `hosts.conf`, un bandeau sous les détails propose la ligne `Include` (« Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config: » ; `y` la copie, `z` masque le bandeau jusqu'au prochain lancement).
+
+### TUI : tags, groupe et notes d'un hôte en lecture seule
+
+« Edit <alias> » (`e` puis `t` sur un hôte de `~/.ssh/config` ou importé). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.
 
 | Action | Touches |
 |---|---|
@@ -201,7 +226,7 @@ Deux panneaux, local à gauche et distant à droite, sur la session de l'onglet 
 
 | Action | Touches |
 |---|---|
-| Changer de panneau | `Tab` / `Shift-Tab` |
+| « Switch side (local/remote) » : changer de côté | `Tab` / `Shift-Tab` |
 | Se déplacer | `j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G` |
 | Ouvrir le dossier / remonter | `↵`, `→`, `l` / `Backspace`, `←`, `h` |
 | Copier la sélection vers l'autre panneau (download ou upload) | `c` ou `F5` |
@@ -267,22 +292,99 @@ Liste des snippets qui s'appliquent à l'hôte de l'onglet actif (portée affich
 Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante : `Esc`, puis `↵` pour se connecter.
 
 Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien), `Esc` annule.
+
+### TUI : enregistrements et lecture
+
+« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début en heure locale sur 24 h (`22 Oct 13:34`, l'année seulement si ce n'est pas l'année en cours ; suffixe « UTC » si le fuseau local n'a pas pu être lu au démarrage), durée (`m:ss` ou `h:mm:ss`), taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` en couleur d'avertissement pour un fichier invalide (non lisible, mais supprimable : « Not a valid asciicast v2 recording: it cannot be played, it can be deleted. » s'affiche quand il est sélectionné). Le nom du fichier sélectionné s'affiche sous la liste ; les touches sont dans la barre de statut.
+
+| Action | Touches |
+|---|---|
+| Se déplacer | `j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G` |
+| Lire l'enregistrement | `↵` |
+| Supprimer (« The file is removed from the recordings folder. This cannot be undone. » ; confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, `n` ou `Esc` garde le fichier, les autres touches sont ignorées). Un enregistrement en cours d'écriture est refusé d'emblée (« This recording is still being written » · « Stop the recording first ») et `d` n'est pas proposé sur sa ligne | `d` ou `Suppr`, puis `y` |
+| Rafraîchir | `Ctrl-R` |
+| Fermer | `Esc`, `q`, `Ctrl-C` |
+| Lecture : pause / reprise ; une fois terminée, rejouer depuis le début | `Espace` |
+| Lecture : vitesse (×0,5 à ×8) | `+` / `-` |
+| Lecture : sauter le silence en cours | `→` |
+| Lecture : revenir de 5 s | `←` |
+| Lecture : reprendre au début | `Home` |
+| Lecture : revenir à la liste | `q`, `Esc` (`Ctrl-C` ferme tout) |
+
+Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre ; puis l'état et la vitesse), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total » (jauge en accent) et la taille, ou ce qui ne tient pas (« 2 rows hidden »). Sur un écran de 24 lignes, la ligne de titre disparaît : nom du fichier, état et vitesse passent sur la ligne de progression, et la grille gagne une ligne. `←` et `Home` rouvrent le fichier et rejouent instantanément jusqu'au point visé (l'émulateur repart de zéro). Les silences de plus de 2 s sont raccourcis. Une erreur de lecture s'affiche à la place de la jauge (message · conseil). Le statut de la session (`● alias · latence`) et `● REC` restent visibles dans la barre de statut. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique
 
 Un onglet terminal se partage en panneaux, comme dans tmux, mais chaque panneau est un canal PTY de Portico :
-`Ctrl-Space %` (ou `|`) ouvre un panneau à droite, `Ctrl-Space "` (ou `-`) un panneau dessous, tous deux sur la
-session du panneau actif, donc sans nouvelle authentification. `Ctrl-Space S` ouvre la liste des hôtes
-(« Split onto… ») pour diviser vers un autre hôte : on tape son nom, `↵` choisit, `Esc` revient au panneau ; une session
-vivante vers cet hôte est réutilisée, sinon Portico s'y connecte. Le focus se déplace avec `Ctrl-Space` puis
-les flèches (`o` pour le panneau suivant), la séparation avec `Ctrl-Space` puis `Shift` + flèche, `z` zoome le
-panneau actif et `x` le ferme. Les lettres `h` et `l` du préfixe restant « Retour aux hôtes » et « Logs », les
-déplacements à la vim s'obtiennent en les réassignant dans `settings.toml` (par exemple `"prefix.home" = "0"`,
-`"prefix.debug" = "g"`, puis `"prefix.pane_left" = "h"`, `"prefix.pane_right" = "l"`, `"prefix.pane_down" = "j"`,
+`Ctrl-Space %` (ou `|`, « Split right ») ouvre un panneau à droite, `Ctrl-Space "` (ou `-`, « Split down ») un
+panneau dessous, tous deux sur la session du panneau actif, donc sans nouvelle authentification.
+`Ctrl-Space S` (« Split with host… ») ouvre la liste des hôtes pour diviser vers un autre hôte : on tape son nom,
+le panneau de détails annonce `↵ split with <hôte>`, `↵` choisit, `Esc` revient au panneau ; une session vivante
+vers cet hôte est réutilisée, sinon Portico s'y connecte. Le focus se déplace avec `Ctrl-Space` puis les flèches
+(`o`, « Next pane », pour le panneau suivant), la séparation avec `Ctrl-Space` puis `Shift` + flèche
+(« Move divider »), `z` zoome le panneau actif (« Zoom pane ») et `x` le ferme (« Close pane »).
+
+Comme le `repeat-time` de tmux, un déplacement ouvre le **mode `PANE`** : pendant 600 ms après `Ctrl-Space` + flèche
+(ou `Shift` + flèche), les flèches et `Shift` + flèches agissent sans repasser par le préfixe, et chaque nouveau
+déplacement relance le délai ; la barre de statut affiche `PANE`. Toute autre touche quitte le mode et part au
+panneau actif comme d'habitude : aucune frappe n'est avalée. Seules les flèches se répètent (pas les touches
+réassignées).
+
+Les lettres `h` et `l` du préfixe restant « Retour aux hôtes » et « Logs », les déplacements à la vim
+s'obtiennent en les réassignant dans `settings.toml` (par exemple `"prefix.home" = "0"`, `"prefix.debug" = "g"`,
+puis `"prefix.pane_left" = "h"`, `"prefix.pane_right" = "l"`, `"prefix.pane_down" = "j"`,
 `"prefix.pane_up" = "k"`). Seul le panneau actif reçoit le clavier ; fermer le dernier panneau d'une session la
 déconnecte, comme fermer le dernier onglet. Un panneau dont la connexion échoue affiche l'erreur, son hint et
-`↵ retry`.
+`↵ retry` quand il a le focus ; les autres indiquent « focus to retry (Ctrl-Space ←↓↑→) », puisque `↵` va au
+panneau actif. Une division refusée s'affiche sur une ligne de la barre de statut (4 s), jamais par-dessus un
+panneau ; diviser un panneau zoomé dézoome puis divise. Depuis un onglet divisé, `Ctrl-Space ?` ouvre l'aide sur
+la page « Panes ».
+
+### Ajouter un hôte dans la TUI
+
+Depuis la liste, `a` (ou `n`, « Add host… ») ouvre le formulaire : alias, `HostName`, `User` et `Port` se
+tapent, la clé se choisit parmi les clés privées découvertes dans `~/.ssh` (ou « none ») et le `ProxyJump` parmi
+les hôtes existants (ou « none ») avec `←` / `→` ; une lettre saute au choix suivant qui commence par elle.
+Viennent ensuite tags, groupe, favori, notes (`Alt-↵` pour une nouvelle ligne) et un mot de passe facultatif,
+jamais affiché (masque fixe) et mémorisé dans le trousseau du système, ou dans le vault de Portico ; Portico le
+propose à la première connexion seulement après avoir vérifié la clé du serveur. `↵` enregistre ; un refus du
+moteur s'affiche sous le champ qu'il concerne, avec quoi faire. `Esc` annule, et demande confirmation (`y`) si
+quelque chose a été saisi ; le mot de passe tapé est alors effacé. L'hôte rejoint la liste aussitôt, sélectionné,
+marqué `◆` : il vit dans le fichier `hosts.conf` de Portico, jamais dans `~/.ssh/config`. Pour que `ssh`, `scp`
+et `git` le voient aussi, un bandeau sous les détails donne la ligne `Include` à ajouter soi-même en tête de
+`~/.ssh/config` (`y` la copie, `z` masque le bandeau jusqu'au prochain lancement). `e` modifie un hôte Portico
+(renommer compris ; le mot de passe : `Keep`, `Change` ou `Forget`), `D` duplique n'importe quel hôte en hôte
+Portico sous un nouvel alias, `Del` en supprime un après une confirmation armée (seul `y` supprime). Sur un hôte
+de `~/.ssh/config`, `e` explique qu'il est en lecture seule et propose `D` pour le dupliquer, ou `t` pour éditer
+ses tags, son groupe et ses notes.
+
+### Enregistrer une session dans la TUI
+
+`Ctrl-Space R` (« Record session ») enregistre le panneau actif au format asciicast v2. Une confirmation
+« Record this terminal? » (« Record this pane? » dans un onglet partagé, avec l'alias et « pane n/N ») dit
+exactement : « Everything the terminal shows is recorded, including the commands you type (the shell echoes them)
+and any secret a command prints. Keystrokes themselves are not stored, so a password typed at a prompt that does
+not echo stays out. Saved to <dossier>, readable only by you. » Le dossier est `recordings/` des données de
+Portico, `~` pour le dossier personnel, le milieu coupé s'il est long. Les touches tapées dans les 400 ms qui
+suivent son ouverture sont ignorées (`y record` reste atténué, puis passe en accent quand il devient actif) ;
+ensuite seul `y` démarre, `n` ou `Esc` annule, et les autres touches sont ignorées. Le badge `REC` (couleur
+d'erreur) s'allume sur le titre du panneau, sur l'onglet dès qu'un de ses panneaux est enregistré
+(`1 alpha ● · REC`, séparé du point de connexion) et `● REC` dans la barre de statut, dès que le moteur annonce le
+début de l'enregistrement, et s'éteint quand il en annonce la fin (jamais sur la seule réponse de la commande). La
+même touche l'arrête, sans confirmation (« stop recording » dans la barre de statut) ; la barre le confirme
+pendant 4 s, en texte neutre : « Recording saved · <fichier> » · « Ctrl-Space v to open Recordings ». Si
+l'enregistrement s'arrête de lui-même, une ligne de la barre de statut le dit, avec quoi faire (« Recording
+stopped: the disk could not keep up », « … the file could not be written », « … size limit reached (512 MiB) »).
+Le statut de la session (`● alias · latence`) et `● REC` gardent toujours leur place à droite de la barre : sur
+une barre courte, l'alias est raccourci (12 caractères), puis les raccourcis les moins utiles disparaissent.
+`v` (liste des hôtes) ou `Ctrl-Space v` ouvre « Recordings » pour relire ou supprimer ; un enregistrement en
+cours d'écriture ne peut pas être supprimé (refus immédiat, sans question). Dans le lecteur : `Espace` pause,
+reprend, ou rejoue depuis le début une fois terminé ; `+` / `-` la vitesse ; `→` saute le silence en cours ; `←`
+revient de 5 s ; `Home` reprend au début ; `q` ou `Esc` revient à la liste. Un fichier relu est traité comme non fiable : il est rejoué dans un émulateur
+dédié dont les réponses aux requêtes, le titre et le presse-papiers ne vont nulle part, ses modes (souris,
+collage, écran alternatif) ne touchent pas le vrai terminal, et aucune touche ni aucun collage ne part vers une
+session pendant la lecture.
 
 ## Dialogues
 
@@ -334,16 +436,72 @@ theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé qua
 
 ## Panneaux (GUI) : principe
 
-Un onglet se divise en panneaux (8 au plus), chacun un terminal indépendant : « Split right » / « Split down »
-ouvrent un canal PTY de plus sur la **même session** (aucune nouvelle connexion), « Split with another host… »
-ouvre le sélecteur d'hôtes et place un terminal d'un **autre hôte** à côté. Un seul panneau a le focus (liseré
-d'accent, en-tête lumineux) et lui seul reçoit les frappes ; les autres sont atténués. Chaque panneau affiche son
-statut (phase, latence, titre distant) dans son en-tête, et la barre d'état parle du panneau actif (« pane 2/4 »).
-Une division qui laisserait un panneau sous 20 colonnes × 5 lignes, ou un neuvième panneau, est refusée par une
-notification. Les séparations se déplacent au clavier (`pane.resize-*`, ou flèches sur une séparation qui a le
-focus) ou à la souris ; chaque terminal suit sa taille (resize PTY après un court délai). Le zoom donne tout
-l'onglet au panneau actif sans fermer les autres. Fermer un panneau ferme son canal PTY ; le dernier panneau
-d'un onglet ferme l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier onglet.
+Un onglet se divise en panneaux (8 au plus), chacun un terminal indépendant : « Split pane right » / « Split pane
+down » ouvrent un canal PTY de plus sur la **même session** (aucune nouvelle connexion), « Split pane with host… »
+ouvre le sélecteur d'hôtes (récents, puis favoris, puis les autres, chacun avec son point de statut et
+`user@host` ; « reuses connection » signale un hôte dont la session vivante sera réutilisée) et place un terminal
+d'un **autre hôte** à côté. Diviser un onglet zoomé annule d'abord le zoom. Un seul panneau a le focus (liseré
+d'accent, barre d'accent en tête) et lui seul reçoit les frappes et affiche un curseur ; les autres sont atténués.
+Chaque panneau affiche son statut (point, alias, phase, latence) dans son en-tête ; un panneau en échec a un point
+plein et une phase en couleur d'erreur, et son encart propose `Retry ↵` et `Close pane`. La barre d'état parle du
+panneau actif (« pane 2/4 ») et ses indications deviennent « panes », « close pane », « split ». Une division
+impossible est refusée par une notification en haut à droite de la zone des terminaux : « This tab already has
+8 panes » (« Close a pane first. ») ou « Each pane needs at least 20 columns × 5 rows » (« Enlarge the window,
+or close a pane. »). `pane.divider` (« Move pane divider… ») donne le focus à la séparation la plus proche du
+panneau actif : flèches pour la déplacer, `Home` / `End` jusqu'aux limites, `↵` / `Esc` pour rendre le clavier ;
+la souris la fait glisser. Chaque terminal suit sa taille (resize PTY après un court délai). Le zoom donne tout
+l'onglet au panneau actif sans fermer les autres. `tab.close` (`⌘W` / `Ctrl-Shift-W`) ferme le panneau actif d'un
+onglet divisé, `tab.close-all` (`⌘⇧W` / `Ctrl-Alt-Shift-W` : sur Linux, `Ctrl-Shift-W` est déjà `tab.close`
+dans un terminal) ferme l'onglet et tous ses panneaux ; `pane.close` reste dans la palette, sans touche. Fermer un panneau ferme son canal PTY ; le dernier panneau d'un onglet ferme
+l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier onglet.
+
+## Enregistrement de sessions (GUI) : principe
+
+Enregistrer est un choix explicite, **par panneau** : « Record session » (`session.record`, `⌘⇧R` / `Ctrl-Shift-R`
+dans un terminal, ou la palette) ouvre la confirmation « Record this terminal? » (« Record this pane? » dans un
+onglet divisé, avec l'alias et « pane n/N »). Son texte, identique dans la TUI : « Everything the terminal shows is
+recorded, including the commands you type (the shell echoes them) and any secret a command prints. Keystrokes
+themselves are not stored, so a password typed at a prompt that does not echo stays out. Saved to <dossier>, readable
+only by you. » Seul `y` démarre, et seulement après 400 ms sans frappe (bouton « Record y ») ; `Esc` et `n`
+annulent, `↵` ne fait rien. Un badge `REC` (couleur d'erreur) apparaît sur l'en-tête du panneau, sur l'onglet et
+dans la barre d'état **à l'événement `started` du moteur** et disparaît à `stopped`, jamais sur la seule réponse de
+la commande ; après une perte d'événements, l'état est relu auprès du moteur (et un arrêt que le moteur dit déjà
+fait éteint `REC`). Tant que le panneau actif est enregistré, la barre d'état rappelle « `⌘⇧R` / `Ctrl-Shift-R`
+stop ». Arrêter (`session.record` à nouveau, « Stop recording ») se fait sans confirmation et affiche 4 s une notice
+neutre « Recording saved · <fichier> » (« v from the host list opens Recordings »). Un arrêt involontaire est
+signalé : « Recording stopped: the disk could not keep up », « … the file could not be written », « … size limit
+reached (512 MiB) ». « Recordings… » (`v` depuis la liste des hôtes, ou la palette) liste les fichiers (titre de
+l'en-tête **et** nom de fichier, toujours affiché car un fichier tiers peut porter n'importe quel titre ; date
+locale sur 24 h, `22 Oct 13:34`, l'année seulement si elle diffère ; durée en horloge `m:ss` / `h:mm:ss` ; taille).
+Un fichier invalide porte « invalid » en couleur d'avertissement et, sélectionné : « Not a valid asciicast v2
+recording: it cannot be played, it can be deleted. » La suppression est confirmée (« The file is removed from the
+recordings folder. This cannot be undone. ») et refusée d'emblée tant que le fichier s'écrit (« This recording is
+still being written » · « Stop the recording first » ; le bouton Delete est désactivé). La lecture se fait dans une
+instance xterm.js dédiée, en lecture seule : la sortie est assainie côté Rust (OSC hors couleurs, DCS/APC, C1
+retirés), le terminal n'a ni entrée, ni liens, ni presse-papiers, ni réponse aux requêtes (`ESC[6n`, `ESC[c`), et
+les modes que joue l'enregistrement (souris, bracketed paste, focus) restent dans le lecteur. Touches du lecteur,
+identiques dans la TUI : `Espace` lecture / pause (à la fin : rejouer), `+` / `-` vitesse, `→` sauter le silence,
+`←` reculer de 5 s, `Home` revenir au début, `q` et `Esc` fermer ; à la fin : « Space replay · q back to list ».
+« Show in folder » n'existe pas : il faudrait un plugin d'ouverture et une capability de plus.
+
+## Hôtes créés dans Portico (GUI) : principe
+
+Les hôtes créés depuis la GUI vivent dans le fichier de Portico, `hosts.conf` (ADR « Hôtes créés dans Portico ») ;
+`~/.ssh/config` n'est jamais modifié. « Add host… » (`host.add`, `⌘⇧N` / `Ctrl-Shift-N`, partout, ou le bouton
+« + » à côté de la recherche) ouvre le formulaire ; « Edit host… » (`host.edit`, `⇧E`) le rouvre pour un hôte
+Portico, et `e` (`hosts.edit`) aussi : sur un hôte Portico, il édite tout l'hôte, sur les autres seulement tags,
+groupe et notes. Sur un hôte de `~/.ssh/config` (ou importé de Termius), « Edit host… » affiche « Defined in
+~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it. » et propose « Duplicate as
+Portico host… » (`host.duplicate`, `⇧D`), qui demande un nouvel alias puis ouvre le formulaire de la copie.
+« Delete host » (`host.delete`, `⌘⌫` / `Suppr`, jamais pendant la saisie dans un champ) demande `y` / `n` ; un hôte
+qui sert de rebond est refusé avec la raison. La clé se choisit parmi celles que le moteur a trouvées dans `~/.ssh`
+(la GUI n'envoie qu'un identifiant, jamais un chemin) ; un mot de passe facultatif est confié au trousseau (ou au
+vault) et le champ est vidé après l'envoi. Origines dans la liste et le détail : badge « Portico », « Imported »,
+et « ~/.ssh/config » (cadenas) dans le détail. Tant qu'un hôte Portico existe sans que `~/.ssh/config` l'inclue, le
+détail affiche « Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config: »,
+la ligne `Include …` et « Copy » (aussi dans la palette) ; le bandeau se ferme et ne revient pas pour la même ligne.
+Sur un hôte de `~/.ssh/config` ou importé, la vue en lecture seule (aussi ouverte par « Delete host », titrée
+« <alias> can't be deleted here ») propose `D` (dupliquer) et `t` (tags et notes), comme la TUI.
 
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
@@ -363,7 +521,8 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Snippets de l'hôte (la palette liste aussi « Run: <nom> ») | `app.snippets` | `⌘⇧S` | `Ctrl-Shift-S` |
 | Journaux de session et config effective (panneau debug) | `app.logs` | `⌘⇧L` | `Ctrl-Shift-L` |
 | Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `tab.new` | `⌘T` | `Ctrl-Shift-T` |
-| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `tab.close` | `⌘W` | `Ctrl-Shift-W` |
+| Fermer l'onglet ; dans un onglet divisé, le panneau actif (le dernier panneau ferme l'onglet ; le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `tab.close` | `⌘W` | `Ctrl-Shift-W` |
+| Fermer l'onglet et tous ses panneaux | `tab.close-all` | `⌘⇧W` | `Ctrl-Alt-Shift-W` |
 | Onglet suivant | `tab.next` | `Ctrl-Tab`, `⌘]` | `Ctrl-Tab` |
 | Onglet précédent | `tab.prev` | `Ctrl-Shift-Tab`, `⌘[` | `Ctrl-Shift-Tab` |
 | Liste des hôtes | `tab.hosts` | `⌘0` | `Alt-0` |
@@ -372,32 +531,33 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Coller (macOS : `⌘V` ; Linux aussi `Shift-Insert`, clic milieu) | `tab.paste` (fixe) | — | `Ctrl-Shift-V` |
 | Reconnecter l'hôte de l'onglet | `tab.reconnect` | — | — |
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
+| Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
+| Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette | `recordings.open` | — | — |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
-| Importer depuis Termius (aperçu, puis fichier à inclure dans `~/.ssh/config`, voir `docs/IMPORT.md`) | `app.import-termius` | — | — |
+| Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`) | `app.import-termius` | `⌘⇧M` | `Ctrl-Shift-M` |
 
 ## Panneaux (GUI)
 
 Actives dans un onglet terminal (division, focus, taille, zoom, fermeture ; voir « Panneaux (GUI) : principe » plus haut). Sur Linux,
-`Ctrl-Shift-…` comme pour les actions globales ; les flèches passent par `Ctrl-Alt` (`⌘⌥` sur macOS).
+`Ctrl-Shift-…` comme pour les actions globales : le focus passe par `Ctrl-Shift` + flèches (`⌘⌥` + flèches sur macOS),
+pas par `Ctrl-Alt` + flèches, que GNOME, Cinnamon et Xfce gardent pour les espaces de travail.
 
 | Action | Identifiant | macOS | Linux |
 |---|---|---|---|
 | Diviser à droite (même session : un canal PTY de plus) | `pane.split-right` | `⌘D` | `Ctrl-Shift-D` |
-| Diviser en bas (même session) | `pane.split-down` | `⌘⇧D` | `Ctrl-Shift-E` |
+| Diviser en bas (même session) | `pane.split-down` | `⌘⇧D` | `Ctrl-Shift-O` |
 | Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas) | `pane.split-host` | — | — |
-| Focus au panneau voisin à gauche | `pane.focus-left` | `⌥⌘←` | `Ctrl-Alt-←` |
-| Focus au panneau voisin à droite | `pane.focus-right` | `⌥⌘→` | `Ctrl-Alt-→` |
-| Focus au panneau voisin vers le haut | `pane.focus-up` | `⌥⌘↑` | `Ctrl-Alt-↑` |
-| Focus au panneau voisin vers le bas | `pane.focus-down` | `⌥⌘↓` | `Ctrl-Alt-↓` |
-| Déplacer la séparation la plus proche à gauche (dans la taille minimale des panneaux) | `pane.resize-left` | `⌥⌘⇧←` | `Ctrl-Alt-Shift-←` |
-| Déplacer la séparation la plus proche à droite (dans la taille minimale des panneaux) | `pane.resize-right` | `⌥⌘⇧→` | `Ctrl-Alt-Shift-→` |
-| Déplacer la séparation la plus proche vers le haut (dans la taille minimale des panneaux) | `pane.resize-up` | `⌥⌘⇧↑` | `Ctrl-Alt-Shift-↑` |
-| Déplacer la séparation la plus proche vers le bas (dans la taille minimale des panneaux) | `pane.resize-down` | `⌥⌘⇧↓` | `Ctrl-Alt-Shift-↓` |
+| Focus au panneau voisin à gauche | `pane.focus-left` | `⌥⌘←` | `Ctrl-Shift-←` |
+| Focus au panneau voisin à droite | `pane.focus-right` | `⌥⌘→` | `Ctrl-Shift-→` |
+| Focus au panneau voisin vers le haut | `pane.focus-up` | `⌥⌘↑` | `Ctrl-Shift-↑` |
+| Focus au panneau voisin vers le bas | `pane.focus-down` | `⌥⌘↓` | `Ctrl-Shift-↓` |
+| Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau | `pane.divider` | `⌥⌘R` | `Ctrl-Alt-Shift-R` |
 | Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
 | Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
-| Fermer le panneau (son canal PTY ; le dernier panneau d'une session la déconnecte) | `pane.close` | `⌘⇧W` | `Ctrl-Shift-Q` |
+| Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif | `pane.close` | — | — |
+| Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état | `session.record` | `⌘⇧R` | `Ctrl-Shift-R` |
 
 ## Liste des hôtes (GUI)
 
@@ -411,7 +571,10 @@ Actives quand la liste des hôtes est affichée et que le focus n'est pas dans u
 | Hôte suivant | `hosts.down` | `j`, `↓` | `j`, `↓` |
 | Hôte précédent | `hosts.up` | `k`, `↑` | `k`, `↑` |
 | Se connecter (ouvre un onglet terminal, ou y revient ; aussi double-clic) | `hosts.connect` | `↵` | `↵` |
-| Éditer tags, groupe et notes de l'hôte sélectionné (depuis un onglet : palette, « Edit <alias> ») | `hosts.edit` | `e` | `e` |
+| Éditer tags, groupe et notes de l'hôte sélectionné ; un hôte Portico ouvre le formulaire complet (depuis un onglet : palette, « Edit <alias> ») | `hosts.edit` | `e` | `e` |
+| Modifier un hôte Portico ; sur un hôte de `~/.ssh/config` ou importé : lecture seule, duplication proposée | `host.edit` | `⇧E` | `Shift-E` |
+| Dupliquer l'hôte sélectionné comme hôte Portico (nouvel alias), puis le modifier | `host.duplicate` | `⇧D` | `Shift-D` |
+| Supprimer un hôte Portico (confirmation `y` / `n`) ; refusé pour les autres | `host.delete` | `⌘Backspace` | `Del` |
 | Se déconnecter (hôte sélectionné) | `hosts.disconnect` | `d` | `d` |
 | Fichiers (SFTP) de l'hôte sélectionné (se connecte au besoin) | `hosts.files` | `f` | `f` |
 | Tunnels | `hosts.tunnels` | `p` | `p` |
@@ -423,6 +586,7 @@ Actives quand la liste des hôtes est affichée et que le focus n'est pas dans u
 | Déplier le groupe | `hosts.expand` | `→` | `→` |
 | Vider « Recent » (confirmation) | `hosts.clear-recent` | `⇧X` | `Shift-X` |
 | Thème suivant (mémorisé dans `settings.toml`) | `app.theme` | `t` | `t` |
+| Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes) | `hosts.recordings` | `v` | `v` |
 
 ## Terminal (GUI) : touches fixes
 
@@ -431,13 +595,13 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (t
 | Action | Touches |
 |---|---|
 | Reconnecter un onglet terminé ou en échec | `↵` |
-| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell) | `Esc` |
+| Annuler une connexion en cours / revenir aux hôtes (onglet sans shell ; dans un onglet divisé, `Esc` annule seulement) | `Esc` |
 | Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer | `←` `→`, `Home` / `End`, `Suppr` |
 | Fermer un onglet (souris) | clic milieu sur l'onglet |
 | Coller (Linux) | `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
 | Panneaux : donner le focus à un panneau (souris) | clic dans le panneau |
 | Séparation entre panneaux (souris) | glisser |
-| Séparation entre panneaux (focus clavier) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
+| Séparation entre panneaux (focus clavier, par `pane.divider` ou `Tab`) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
 
@@ -467,6 +631,33 @@ Sans recherche, la liste montre « Recent » (les 5 derniers hôtes encore prés
 | Champ suivant | `Tab` |
 | Enregistrer | `Ctrl-S` (macOS : `⌘S`), `Ctrl-↵`, ou `↵` dans un champ d'une ligne |
 | Annuler | `Esc` |
+
+## Hôtes Portico (GUI) : dialogues
+
+« Add host… » et « Edit host… » (hôte Portico) : alias, HostName, User, Port, clé (parmi les clés découvertes dans `~/.ssh`), ProxyJump (hôte existant), mot de passe, tags, groupe, favori, notes. Les erreurs du moteur s'affichent sous le champ concerné, avec un conseil ; le premier champ en erreur prend le focus.
+
+| Action | Touches |
+|---|---|
+| Champ suivant / précédent | `Tab` / `Shift-Tab` |
+| Enregistrer (après 400 ms sans frappe) | `↵` dans un champ d'une ligne ou une liste, `Ctrl-S` / `Ctrl-↵` (macOS : `⌘S`, `⌘↵`) |
+| Mot de passe (modification) : garder, changer, oublier (« Keep » et « Forget » inactifs quand aucun n'est mémorisé) | boutons « Keep », « Change », « Forget » |
+| Mot de passe sans vault (ou vault verrouillé) : créer ou déverrouiller le vault, puis l'hôte est enregistré ; « Not now » revient au formulaire | `↵` / `Esc` |
+| Annuler ; avec des modifications, « Discard your changes? » | `Esc`, puis `y` (abandonner) ou `n` / `Esc` (continuer) |
+| Lecture seule (hôte de `~/.ssh/config` ou importé ; aussi « Delete host » sur ces hôtes) : dupliquer / éditer tags et notes | `D` ou `↵` / `t` |
+| Dupliquer : nouvel alias | `↵` |
+| Supprimer un hôte Portico : confirmer / garder | `y` / `n` |
+
+## Import d'hôtes (GUI)
+
+« Import hosts… » (palette, `⌘⇧M` / `Ctrl-Shift-M`) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.
+
+| Action | Touches |
+|---|---|
+| Préfixer les alias (`termius-`, `termix-`) on/off | `p` |
+| Cocher / décocher la n-ième clé privée | `1` … `9`, ou `Espace` sur la case |
+| Importer (après 400 ms sans frappe ; si les passphrases diffèrent, le pied l'indique et `↵` montre l'erreur) ; aucun hôte à importer : choisir un autre fichier | `↵` |
+| Rapport : copier la ligne `Include` | `c` |
+| Annuler / fermer | `Esc` |
 
 ## Journaux de session (GUI)
 
@@ -550,4 +741,21 @@ Dialogue large : clés locales de `~/.ssh`, puis identités de l'agent (seules l
 | Fermer | `Esc` |
 
 Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée ; la bannière « No open terminal » donne l'action suivante (« `Esc`, then `↵` to connect <hôte> », ou « reconnect » pour un onglet terminé). Les snippets hors portée de l'hôte sont affichés en retrait (« not for <hôte> ») et ne s'exécutent pas.
+
+## Enregistrements (GUI)
+
+« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » (« Record this pane? » dans un onglet divisé) ; « Recordings… » (`v` depuis la liste des hôtes, `hosts.recordings`, ou la palette, `recordings.open`) ouvre la liste.
+
+| Action | Touches |
+|---|---|
+| Confirmer l'enregistrement (seul `y`, actif après 400 ms sans frappe ; `↵` ne fait rien) / annuler | `y` / `Esc` ou `n` |
+| Arrêter l'enregistrement du panneau actif (sans confirmation ; « Recording saved · <fichier> ») | `session.record` à nouveau, ou « Stop recording » dans la palette |
+| Liste : se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
+| Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde ; refusé d'emblée pendant l'écriture) | `↵` ou double-clic / `Suppr` ou `x` |
+| Liste : rafraîchir | `Ctrl-R` |
+| Lecture : pause / reprise (à la fin : rejouer depuis le début) | `Espace` |
+| Lecture : vitesse ×0,5 · ×1 · ×2 · ×4 · ×8 | `+` / `-` |
+| Lecture : sauter le silence en cours / reculer de 5 s / revenir au début (aussi les boutons « ↺ 5 s » et « Restart ») | `→` / `←` / `Home` |
+| Lecture : aller à un instant | clic sur la barre de progression |
+| Fermer la lecture (retour à la liste) / fermer la liste | `q` ou `Esc` / `Esc` |
 <!-- END GENERATED: gui -->

@@ -27,7 +27,7 @@ for arg in "$@"; do
   esac
 done
 
-for tool in sshd ssh-keygen ssh-agent Xvfb WebKitWebDriver tauri-driver python3 node; do
+for tool in sshd ssh-keygen ssh-agent Xvfb xdotool WebKitWebDriver tauri-driver python3 node; do
   if ! command -v "$tool" >/dev/null && [ ! -x "/usr/sbin/$tool" ]; then
     echo "missing: $tool (see docs/TESTING.md)" >&2
     exit 1

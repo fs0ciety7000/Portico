@@ -58,7 +58,7 @@ export const MAX_PANES = 8;
 /** Smallest pane, in terminal cells (ADR). */
 export const MIN_COLS = 20;
 export const MIN_ROWS = 5;
-/** Keyboard resize: share of the split moved per key press. */
+/** Keyboard resize (arrows on a focused divider): share of the split moved per key press. */
 export const RESIZE_STEP = 0.05;
 
 /** Why a split was refused. */
@@ -279,32 +279,14 @@ export function setRatio(root: PaneNode, id: number, ratio: number, rect: Rect, 
   return withRatio(root, id, rect, limits, () => ratio);
 }
 
-/** The nearest split above `pane` along `axis`, if any. */
-export function enclosingSplit(root: PaneNode, pane: number, axis: Axis): Split | null {
-  let found: Split | null = null;
-  const walk = (n: PaneNode): boolean => {
-    if (n.kind === "leaf") return n.pane === pane;
-    if (walk(n.a) || walk(n.b)) {
-      if (!found && n.axis === axis) found = n;
-      return true;
-    }
-    return false;
-  };
-  walk(root);
-  return found;
-}
-
 /**
- * Keyboard resize: moves the nearest divider around `pane` that runs
- * across `dir` (a vertical one for ←/→) one step towards `dir`, within the
- * minimum pane size. Unchanged when there is none.
+ * The split right above `pane` (its own divider, the nearest one): what
+ * "Move pane divider…" gives the keyboard to. Null for a lone pane.
  */
-export function resizePane(root: PaneNode, pane: number, dir: Direction, rect: Rect, limits: Limits, step = RESIZE_STEP): PaneNode {
-  const axis: Axis = dir === "left" || dir === "right" ? "row" : "column";
-  const split = enclosingSplit(root, pane, axis);
-  if (!split) return root;
-  const delta = dir === "right" || dir === "down" ? step : -step;
-  return withRatio(root, split.id, rect, limits, (s) => s.ratio + delta);
+export function parentSplit(root: PaneNode, pane: number): Split | null {
+  if (root.kind === "leaf") return null;
+  if ((root.a.kind === "leaf" && root.a.pane === pane) || (root.b.kind === "leaf" && root.b.pane === pane)) return root;
+  return parentSplit(root.a, pane) ?? parentSplit(root.b, pane);
 }
 
 /**

@@ -52,6 +52,11 @@ pub enum EngineEvent {
         alias: String,
         meta: crate::hosts::HostMeta,
     },
+    /// Hosts were created, edited, renamed, duplicated or deleted in
+    /// Portico's `hosts.conf` (phase 6b): UIs reload the inventory
+    /// ([`crate::Engine::load_hosts`]). Followed by [`Self::HostMeta`] for
+    /// a host that was created or edited.
+    HostsChanged,
     /// The recent-sessions list changed (recorded, forgotten, cleared): UIs
     /// that show it call [`crate::Engine::recent`] again.
     RecentChanged,
@@ -267,6 +272,12 @@ pub enum PromptKind {
         algorithm: String,
         fingerprint: String,
         other_algorithms: Vec<String>,
+        /// Accepting this key lets the session send a remembered password
+        /// (one typed when the host was created in Portico, or one bound
+        /// to this very key): the UIs should say so, since that password
+        /// then goes to whichever server answered at this address.
+        #[serde(default)]
+        sends_remembered_password: bool,
     },
     /// `attempt` starts at 1; above 1 the previous answer was wrong.
     Password {

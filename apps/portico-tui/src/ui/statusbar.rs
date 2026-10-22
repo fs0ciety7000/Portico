@@ -7,32 +7,101 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Focus};
+use crate::app_panes::NoteTone;
 use crate::dialog::{Dialog, SecretPurpose};
 use crate::ui::{fmt, status};
 
+/// Longest alias in the right block, and how short it gets on a narrow
+/// bar before any hint goes.
+const ALIAS_MAX: usize = 24;
+const ALIAS_SHORT: usize = 12;
+
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = app.styles();
+    let width = usize::from(area.width);
     let (mode, hints) = mode_and_hints(app, frame.area());
-    let pill = if app.prefix && app.dialogs.is_empty() {
+    let pill = if (app.prefix || pane_mode(app)) && app.dialogs.is_empty() {
         s.prefix_pill()
     } else {
         s.mode_pill()
     };
     let mut spans = vec![Span::styled(mode, pill), Span::raw(" ")];
+    let lead: usize = spans.iter().map(Span::width).sum();
+    // The right block is laid out first and its room kept: the session's
+    // status and latency, then `● REC`, are never pushed out by hints. On
+    // a short bar the remote title goes, then the alias shortens, then
+    // hints are dropped.
+    let rec = rec_spans(app);
+    let right_of = |alias_max: usize, title: bool| {
+        let mut right = session_spans(app, alias_max, title);
+        right.extend(rec.iter().cloned());
+        right
+    };
+    let width_of = |spans: &[Span<'static>]| spans.iter().map(Span::width).sum::<usize>();
+
+    // A note takes the hints' place for a few seconds: one line, never
+    // over a pane (the next keys still go to the focused one).
+    if let Some(note) = app.note.as_ref().filter(|_| app.dialogs.is_empty()) {
+        let (mark, style) = match note.tone {
+            NoteTone::Warning => ("▲ ", s.status(s.theme.status.warning)),
+            NoteTone::Neutral => ("", s.secondary()),
+        };
+        let mark_width = mark.chars().count();
+        let message_width = note.message.chars().count();
+        let mut right = right_of(ALIAS_MAX, false);
+        if lead + mark_width + message_width + 1 + width_of(&right) > width {
+            right = right_of(ALIAS_SHORT, false);
+        }
+        let right_width = width_of(&right);
+        let room = width.saturating_sub(lead + mark_width + right_width + 1);
+        if !mark.is_empty() {
+            spans.push(Span::styled(mark, style));
+        }
+        spans.push(Span::styled(fmt::truncate(&note.message, room), style));
+        // ` · hint`, cut when the bar is narrow (the message comes first).
+        let used = width_of(&spans);
+        let room = width.saturating_sub(used + 3 + 1 + right_width);
+        if room >= 8 && !note.hint.is_empty() {
+            spans.push(Span::styled(" · ", s.muted()));
+            let hint_style = match note.tone {
+                NoteTone::Warning => s.secondary(),
+                NoteTone::Neutral => s.muted(),
+            };
+            spans.push(Span::styled(fmt::truncate(&note.hint, room), hint_style));
+        }
+        push_right(&mut spans, right, width);
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
+        return;
+    }
     // Hints are listed by importance: drop the tail rather than overflow.
-    // `quit` is the exception: always last, and its room is kept.
+    // `quit` (and the player's `back to list`) is the exception: always
+    // last, and its room is kept.
     let mut hints = hints;
-    let pinned = if hints.last().is_some_and(|(_, label)| *label == "quit") {
+    let pinned = if hints
+        .last()
+        .is_some_and(|(_, label)| matches!(*label, "quit" | "back to list"))
+    {
         hints.pop()
     } else {
         None
     };
     let need = |(key, label): &(String, &str)| key.chars().count() + label.chars().count() + 4;
-    let mut used: usize =
-        spans.iter().map(Span::width).sum::<usize>() + pinned.as_ref().map_or(0, need);
+    let all_hints: usize = hints.iter().chain(pinned.iter()).map(need).sum();
+    let mut right = right_of(ALIAS_MAX, true);
+    for (alias_max, title) in [(ALIAS_MAX, false), (ALIAS_SHORT, false)] {
+        if lead + all_hints + width_of(&right) <= width {
+            break;
+        }
+        right = right_of(alias_max, title);
+    }
+    if lead + width_of(&right) > width {
+        // Not even the status fits next to the mode: REC alone.
+        right.clone_from(&rec);
+    }
+    let mut used = lead + pinned.as_ref().map_or(0, need) + width_of(&right);
     let mut shown: Vec<&(String, &str)> = Vec::new();
     for hint in &hints {
-        if used + need(hint) > usize::from(area.width) {
+        if used + need(hint) > width {
             break;
         }
         used += need(hint);
@@ -43,50 +112,112 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         spans.push(Span::styled(format!(" {key} "), s.key_hint()));
         spans.push(Span::styled(format!(" {label} "), s.muted()));
     }
+    push_right(&mut spans, right, width);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
+}
 
-    // Right side: `● alias · 12 ms · remote title`, only when it fits.
-    if let Some(slot) = app
+/// `● alias · 12 ms · remote title ` for the focused pane, in a terminal
+/// (or behind a panel opened from one); empty elsewhere. `alias_max`: how
+/// much of the alias shows; `title`: with the remote title.
+fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>> {
+    let s = app.styles();
+    let mut right = Vec::new();
+    let Some(slot) = app
         .focused_slot()
         .filter(|_| matches!(app.focus, Focus::Terminal) || app.prefix)
         .filter(|_| app.focus != Focus::Files)
-    {
-        let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
-        let mut right = vec![
-            Span::styled("● ", s.status(st.color)),
-            Span::styled(fmt::truncate(slot.alias(), 24), s.secondary()),
-        ];
-        if let Some(rtt) = st.latency {
-            let style = if st.slow {
-                s.status(s.theme.status.warning)
-            } else {
-                s.muted()
-            };
-            right.push(Span::styled(" · ", s.muted()));
-            right.push(Span::styled(rtt, style));
-        }
-        if let Some(title) = slot
+    else {
+        return right;
+    };
+    let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
+    right.push(Span::styled("● ", s.status(st.color)));
+    right.push(Span::styled(
+        fmt::truncate(slot.alias(), alias_max),
+        s.secondary(),
+    ));
+    if let Some(rtt) = st.latency {
+        let style = if st.slow {
+            s.status(s.theme.status.warning)
+        } else {
+            s.muted()
+        };
+        right.push(Span::styled(" · ", s.muted()));
+        right.push(Span::styled(rtt, style));
+    }
+    if title
+        && let Some(remote) = slot
             .view()
             .and_then(crate::terminal::TerminalView::remote_title)
-        {
-            right.push(Span::styled(" · ", s.muted()));
-            right.push(Span::styled(fmt::truncate(&title, 32), s.muted()));
-        }
-        right.push(Span::raw(" "));
-        let used: usize = spans.iter().map(Span::width).sum();
-        let need: usize = right.iter().map(Span::width).sum();
-        let width = usize::from(area.width);
-        if used + need < width {
-            spans.push(Span::raw(" ".repeat(width - used - need)));
-            spans.extend(right);
-        }
+    {
+        right.push(Span::styled(" · ", s.muted()));
+        right.push(Span::styled(fmt::truncate(&remote, 32), s.muted()));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(s.base()), area);
+    right.push(Span::raw(" "));
+    right
+}
+
+/// `● REC` (`● REC 2` for two recorded terminals) in the error colour,
+/// whenever a terminal is being recorded; empty otherwise.
+fn rec_spans(app: &App) -> Vec<Span<'static>> {
+    let s = app.styles();
+    match app.recording.len() {
+        0 => Vec::new(),
+        1 => vec![Span::styled("● REC", super::rec_style(s)), Span::raw(" ")],
+        n => vec![
+            Span::styled(format!("● REC {n}"), super::rec_style(s)),
+            Span::raw(" "),
+        ],
+    }
+}
+
+/// `right`, flush right after `spans`, when it fits.
+fn push_right(spans: &mut Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) {
+    let used: usize = spans.iter().map(Span::width).sum();
+    let need: usize = right.iter().map(Span::width).sum();
+    if need > 0 && used + need <= width {
+        spans.push(Span::raw(" ".repeat(width - used - need)));
+        spans.extend(right);
+    }
 }
 
 type Hints = Vec<(String, &'static str)>;
 
+/// Pane mode is on (the arrows move between panes without the prefix);
+/// it ends with the window (`Action::Expire`) or the next other key.
+fn pane_mode(app: &App) -> bool {
+    app.pane_repeat.is_some()
+        && app.focus == Focus::Terminal
+        && app.overlay.is_none()
+        && app.dialogs.is_empty()
+        && app.active_tab().is_some()
+}
+
+/// `←↓↑→` (the effective keys of the four pane moves).
+fn pane_arrows(app: &App) -> String {
+    app.keymap.joined(&[
+        "prefix.pane_left",
+        "prefix.pane_down",
+        "prefix.pane_up",
+        "prefix.pane_right",
+    ])
+}
+
 fn owned(hints: Vec<(&'static str, &'static str)>) -> Hints {
     hints.into_iter().map(|(k, l)| (k.to_owned(), l)).collect()
+}
+
+/// `R  record` or `R  stop recording`, for the focused pane.
+fn record_hint(app: &App) -> Option<(String, &'static str)> {
+    let (key, label) = app.keymap.hint("prefix.record")?;
+    let recorded = app.focused_slot().is_some_and(|slot| app.recorded_in(slot));
+    Some((
+        key,
+        if recorded {
+            crate::app_recording::STOP_HINT
+        } else {
+            label
+        },
+    ))
 }
 
 /// Effective keys of `ids`, in order (unbound actions are left out).
@@ -110,42 +241,61 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         }
         // The same words as the dialog's own footer (`n / Esc keep`, `y clear`).
         _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => {
-            let confirm = match app.dialogs.front() {
-                Some(Dialog::Confirm(c)) => c.confirm,
-                _ => "confirm",
+            let (cancel, confirm) = match app.dialogs.front() {
+                Some(Dialog::Confirm(c)) => (c.cancel_hint(), c.confirm),
+                _ => (("n / Esc", "keep"), "confirm"),
             };
-            return (
-                " CONFIRM ",
-                owned(vec![("n / Esc", "keep"), ("y", confirm)]),
-            );
+            return (" CONFIRM ", owned(vec![cancel, ("y", confirm)]));
+        }
+        // The vault a host's password waits for: Esc goes back to the form.
+        _ if matches!(app.dialogs.front(), Some(Dialog::Secret(d)) if d.host_save) => {
+            if matches!(
+                app.dialogs.front(),
+                Some(Dialog::Secret(d)) if matches!(d.purpose, SecretPurpose::VaultCreate { .. })
+            ) {
+                (" DIALOG ", &[("↵", "create & save"), ("Esc", "not now")])
+            } else {
+                (" DIALOG ", &[("↵", "unlock & save"), ("Esc", "not now")])
+            }
+        }
+        // A new host key: the two answers (the same words as the dialog).
+        _ if matches!(
+            app.dialogs.front(),
+            Some(Dialog::Prompt(p)) if matches!(p.kind, portico_core::events::PromptKind::UnknownHostKey { .. })
+                && !p.needs_typed_confirmation()
+        ) =>
+        {
+            (" HOST KEY ", &[("y", "trust"), ("n", "refuse")])
         }
         _ if !app.dialogs.is_empty() => (" DIALOG ", &[("Esc", "cancel / close")]),
-        _ if app.prefix => {
-            let mut hints = keyed(app, &["prefix.home"]);
-            hints.push(("1-9".into(), "tab"));
-            // In a tab, the pane commands come first.
-            if app.active_tab().is_some() {
-                hints.extend(keyed(
-                    app,
-                    &["prefix.split_vertical", "prefix.split_horizontal"],
-                ));
-                let arrows = app.keymap.joined(&[
-                    "prefix.pane_left",
-                    "prefix.pane_down",
-                    "prefix.pane_up",
-                    "prefix.pane_right",
-                ]);
-                if !arrows.is_empty() {
-                    hints.push((arrows, "pane"));
-                }
-                hints.extend(keyed(
-                    app,
-                    &["prefix.close_pane", "prefix.zoom_pane", "prefix.split_host"],
-                ));
+        _ if app.prefix && app.active_tab().is_some_and(|t| t.len() > 1) => {
+            // A split tab: the pane commands first, then help, then the
+            // way out (what does not fit at 80 columns is in `?`).
+            let mut hints = Vec::new();
+            let splits = [
+                app.keymap.shown("prefix.split_vertical", 1),
+                app.keymap.shown("prefix.split_horizontal", 1),
+            ]
+            .into_iter()
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            if !splits.is_empty() {
+                hints.push((splits, "split"));
             }
+            let arrows = pane_arrows(app);
+            if !arrows.is_empty() {
+                hints.push((arrows, "pane"));
+            }
+            hints.extend(keyed(app, &["prefix.close_pane", "prefix.zoom_pane"]));
+            hints.extend(keyed(app, &["prefix.help", "prefix.home"]));
+            hints.push(("1-9".into(), "tab"));
+            hints.extend(keyed(app, &["prefix.split_host"]));
+            hints.extend(record_hint(app));
             hints.extend(keyed(
                 app,
                 &[
+                    "prefix.next_pane",
                     "prefix.files",
                     "prefix.tunnels",
                     "prefix.debug",
@@ -156,6 +306,51 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             ));
             hints.push(("Esc".into(), "cancel"));
             return (" PREFIX ", hints);
+        }
+        _ if app.prefix => {
+            let mut hints = keyed(app, &["prefix.home"]);
+            hints.push(("1-9".into(), "tab"));
+            // In a tab, the pane commands come first.
+            if app.active_tab().is_some() {
+                hints.extend(keyed(
+                    app,
+                    &["prefix.split_vertical", "prefix.split_horizontal"],
+                ));
+                hints.extend(keyed(app, &["prefix.split_host"]));
+                hints.extend(record_hint(app));
+            }
+            hints.extend(keyed(
+                app,
+                &[
+                    "prefix.recordings",
+                    "prefix.files",
+                    "prefix.tunnels",
+                    "prefix.debug",
+                    "prefix.new_tab",
+                    "prefix.close_tab",
+                    "prefix.disconnect",
+                ],
+            ));
+            hints.push(("Esc".into(), "cancel"));
+            return (" PREFIX ", hints);
+        }
+        _ if pane_mode(app) => {
+            let mut hints = Vec::new();
+            let arrows = pane_arrows(app);
+            if !arrows.is_empty() {
+                hints.push((arrows, "pane"));
+            }
+            let resize = app.keymap.joined(&[
+                "prefix.resize_left",
+                "prefix.resize_down",
+                "prefix.resize_up",
+                "prefix.resize_right",
+            ]);
+            if !resize.is_empty() {
+                hints.push((resize, "move divider"));
+            }
+            hints.push(("any key".into(), "back to the pane"));
+            return (" PANE ", hints);
         }
         _ if app.overlay == Some(crate::app::Overlay::Keys) => {
             let hints = app.keys_panel.as_ref().map_or_else(
@@ -177,6 +372,57 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 .as_ref()
                 .map_or_else(|| vec![("Esc", "close")], |p| p.hints(&app.tunnels));
             return (" TUNNELS ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Recordings) => {
+            let hints = app.recordings_panel.as_ref().map_or_else(
+                || vec![("Esc", "close")],
+                crate::recordings::RecordingsPanel::hints,
+            );
+            return (" RECORDINGS ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::Player) => {
+            // Most used first; `q back to list` is pinned (see `render`).
+            let space = match app.player.as_ref().map(crate::player::Player::state) {
+                Some(crate::player::PlayerState::Ended) => {
+                    return (
+                        " PLAYBACK ",
+                        owned(vec![("Space", "replay"), ("q", "back to list")]),
+                    );
+                }
+                Some(crate::player::PlayerState::Paused) => ("Space", "resume"),
+                _ => ("Space", "pause"),
+            };
+            let hints = vec![
+                space,
+                ("←", "back 5 s"),
+                ("→", "skip idle"),
+                ("+ -", "speed"),
+                ("Home", "restart"),
+                ("q", "back to list"),
+            ];
+            return (" PLAYBACK ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::HostForm) => {
+            let hints: &[(&'static str, &'static str)] = match &app.host_form {
+                Some(f) if matches!(f.mode, crate::host_form::FormMode::ReadOnly { .. }) => &[
+                    ("D", "duplicate"),
+                    ("t", "tags and notes"),
+                    ("Esc", "close"),
+                ],
+                Some(f) if f.confirm_discard => &[("y", "discard"), ("n / Esc", "keep editing")],
+                Some(f) if f.busy => &[],
+                Some(f) if matches!(f.mode, crate::host_form::FormMode::Duplicate { .. }) => {
+                    &[("↵", "duplicate"), ("Esc", "cancel")]
+                }
+                Some(f) if f.on_picker() => &[
+                    ("↵", "save"),
+                    ("Tab", "next field"),
+                    ("← →", "choose"),
+                    ("Esc", "cancel"),
+                ],
+                _ => &[("↵", "save"), ("Tab", "next field"), ("Esc", "cancel")],
+            };
+            return (" HOST ", owned(hints.to_vec()));
         }
         _ if app.overlay == Some(crate::app::Overlay::Edit) => (
             " EDIT ",
@@ -211,7 +457,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         {
             (
                 " FILES ",
-                &[("Tab", "local pane"), ("?", "help"), ("Esc", "back")],
+                &[("Tab", "local side"), ("?", "help"), ("Esc", "back")],
             )
         }
         Focus::Files
@@ -223,7 +469,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 " FILES ",
                 &[
                     ("↵", "reconnect"),
-                    ("Tab", "local pane"),
+                    ("Tab", "local side"),
                     ("?", "help"),
                     ("Esc", "back"),
                 ],
@@ -232,7 +478,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         Focus::Files => (
             " FILES ",
             &[
-                ("Tab", "pane"),
+                ("Tab", "switch side"),
                 ("↵", "open"),
                 ("c", "copy"),
                 ("n", "folder"),
@@ -250,6 +496,13 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             {
                 hints.push(("↵".to_owned(), "retry"));
             }
+            // A recorded pane: how to stop comes first (it names the
+            // prefix too, so it is what stays on a narrow bar).
+            if app.focused_slot().is_some_and(|slot| app.recorded_in(slot))
+                && let Some((key, _)) = app.keymap.hint("prefix.record")
+            {
+                hints.push((format!("Ctrl-Space {key}"), crate::app_recording::STOP_HINT));
+            }
             hints.push(("Ctrl-Space".to_owned(), "commands"));
             hints.extend(keyed(app, &["terminal.scroll_up"]));
             return (" TERMINAL ", hints);
@@ -257,7 +510,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         // `Ctrl-Space S`: choosing the host of a new pane.
         Focus::Hosts | Focus::Search if app.pane_pick.is_some() => {
             let hints = vec![
-                ("↵".to_owned(), "split onto host"),
+                ("↵".to_owned(), "split with host"),
                 ("↑↓".to_owned(), "move"),
                 ("Esc".to_owned(), "cancel"),
             ];
@@ -270,12 +523,14 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             }
             ids.extend([
                 "hosts.search",
+                "hosts.add",
                 "hosts.edit",
                 "hosts.favorite",
                 "hosts.debug",
                 "hosts.help",
                 "hosts.keys",
                 "hosts.snippets",
+                "hosts.recordings",
                 "hosts.theme",
                 // Always last, and always shown (see `render`).
                 "hosts.quit",

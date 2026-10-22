@@ -265,7 +265,7 @@
     0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent); }
     100% { box-shadow: 0 0 0 4px transparent; }
   }
-  .main { display: grid; gap: 2px; min-width: 0; }
+  .main { display: grid; gap: var(--size-line-gap); min-width: 0; }
   .spec { color: var(--text-primary); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sub { display: flex; flex-wrap: wrap; gap: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
   .sub > * + *::before { content: "·"; margin-right: var(--space-2); }
@@ -299,7 +299,7 @@
     left: 0;
     top: var(--space-2);
     bottom: var(--space-2);
-    width: 2px;
+    width: var(--size-bar);
     border-radius: var(--radius-pill);
     background: var(--accent);
   }

@@ -170,12 +170,52 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::OpenSnippets
     ),
     bind!(
+        "hosts.add",
+        Hosts,
+        ["a", "n"],
+        "add host",
+        "« Add host… » : créer un hôte Portico (dans `hosts.conf`, jamais dans `~/.ssh/config`)",
+        Action::AddHost
+    ),
+    bind!(
         "hosts.edit",
         Hosts,
         ["e"],
         "edit",
-        "Éditer tags, groupe et notes de l'hôte (`hosts.toml`)",
+        "« Edit host… » : modifier un hôte Portico ; un hôte de `~/.ssh/config` (ou importé) reste en lecture seule : la vue propose de le dupliquer (`D`) ou d'éditer ses tags, groupe et notes (`t`, `hosts.toml`)",
         Action::EditHost
+    ),
+    bind!(
+        "hosts.duplicate",
+        Hosts,
+        ["D"],
+        "duplicate",
+        "« Duplicate as Portico host… » : copie modifiable de l'hôte sélectionné, sous un nouvel alias",
+        Action::DuplicateHost
+    ),
+    bind!(
+        "hosts.delete",
+        Hosts,
+        ["delete"],
+        "delete",
+        "« Delete host » : supprimer un hôte Portico, ses métadonnées et son mot de passe mémorisé (confirmation armée : seul `y` supprime)",
+        Action::DeleteHost
+    ),
+    bind!(
+        "hosts.copy_include",
+        Hosts,
+        ["y"],
+        "copy Include",
+        "Copier (OSC 52) la ligne `Include` à ajouter en tête de `~/.ssh/config`, quand le bandeau est affiché",
+        Action::CopyInclude
+    ),
+    bind!(
+        "hosts.hide_include",
+        Hosts,
+        ["z"],
+        "hide Include",
+        "Masquer le bandeau `Include` jusqu'au prochain lancement",
+        Action::HideInclude
     ),
     bind!(
         "hosts.favorite",
@@ -192,6 +232,14 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "logs",
         "Journaux de session (panneau debug) et config effective",
         Action::OpenDebug
+    ),
+    bind!(
+        "hosts.recordings",
+        Hosts,
+        ["v"],
+        "recordings",
+        "« Recordings » : enregistrements de sessions (relire, supprimer)",
+        Action::OpenRecordings
     ),
     bind!(
         "hosts.forget_recent",
@@ -301,8 +349,8 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "prefix.split_horizontal",
         Prefix,
         ["\"", "-"],
-        "split below",
-        "Diviser le panneau : nouveau panneau dessous, même hôte (même session si elle est vivante)",
+        "split down",
+        "« Split down » : nouveau panneau dessous, même hôte (même session si elle est vivante)",
         Action::SplitPane(Split::Horizontal)
     ),
     bind!(
@@ -310,15 +358,15 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["%", "|"],
         "split right",
-        "Diviser le panneau : nouveau panneau à droite, même hôte",
+        "« Split right » : nouveau panneau à droite, même hôte",
         Action::SplitPane(Split::Vertical)
     ),
     bind!(
         "prefix.split_host",
         Prefix,
         ["S"],
-        "split host",
-        "Diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre)",
+        "split with host…",
+        "« Split with host… » : diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre)",
         Action::SplitPaneHost
     ),
     bind!(
@@ -326,7 +374,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["left"],
         "pane left",
-        "Focus au panneau de gauche",
+        "Focus au panneau de gauche (puis les flèches seules pendant 600 ms : mode `PANE`)",
         Action::FocusPane(Dir::Left)
     ),
     bind!(
@@ -334,7 +382,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["down"],
         "pane below",
-        "Focus au panneau du dessous",
+        "Focus au panneau du dessous (mode `PANE`)",
         Action::FocusPane(Dir::Down)
     ),
     bind!(
@@ -342,7 +390,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["up"],
         "pane above",
-        "Focus au panneau du dessus",
+        "Focus au panneau du dessus (mode `PANE`)",
         Action::FocusPane(Dir::Up)
     ),
     bind!(
@@ -350,7 +398,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["right"],
         "pane right",
-        "Focus au panneau de droite",
+        "Focus au panneau de droite (mode `PANE`)",
         Action::FocusPane(Dir::Right)
     ),
     bind!(
@@ -358,39 +406,39 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["o"],
         "next pane",
-        "Panneau suivant (ordre de lecture, boucle)",
+        "« Next pane » : panneau suivant (ordre de lecture, boucle)",
         Action::NextPane
     ),
     bind!(
         "prefix.resize_left",
         Prefix,
         ["shift-left"],
-        "resize ←",
-        "Déplacer la séparation verticale vers la gauche (4 colonnes)",
+        "move divider ←",
+        "« Move divider » : séparation verticale vers la gauche, 4 colonnes (puis `Shift` + flèche seul pendant 600 ms : mode `PANE`)",
         Action::ResizePane(Dir::Left)
     ),
     bind!(
         "prefix.resize_down",
         Prefix,
         ["shift-down"],
-        "resize ↓",
-        "Déplacer la séparation horizontale vers le bas (2 lignes)",
+        "move divider ↓",
+        "« Move divider » : séparation horizontale vers le bas, 2 lignes (mode `PANE`)",
         Action::ResizePane(Dir::Down)
     ),
     bind!(
         "prefix.resize_up",
         Prefix,
         ["shift-up"],
-        "resize ↑",
-        "Déplacer la séparation horizontale vers le haut (2 lignes)",
+        "move divider ↑",
+        "« Move divider » : séparation horizontale vers le haut, 2 lignes (mode `PANE`)",
         Action::ResizePane(Dir::Up)
     ),
     bind!(
         "prefix.resize_right",
         Prefix,
         ["shift-right"],
-        "resize →",
-        "Déplacer la séparation verticale vers la droite (4 colonnes)",
+        "move divider →",
+        "« Move divider » : séparation verticale vers la droite, 4 colonnes (mode `PANE`)",
         Action::ResizePane(Dir::Right)
     ),
     bind!(
@@ -398,7 +446,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["x"],
         "close pane",
-        "Fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte)",
+        "« Close pane » : fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte)",
         Action::ClosePane
     ),
     bind!(
@@ -406,7 +454,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["z"],
         "zoom",
-        "Zoom : le panneau seul dans l'onglet, ou retour à la division",
+        "« Zoom pane » : le panneau seul dans l'onglet, ou retour à la division",
         Action::ZoomPane
     ),
     bind!(
@@ -456,6 +504,22 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "logs",
         "Panneau debug (présélectionne la session de l'onglet)",
         Action::OpenDebug
+    ),
+    bind!(
+        "prefix.record",
+        Prefix,
+        ["R"],
+        "record",
+        "« Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation",
+        Action::ToggleRecording
+    ),
+    bind!(
+        "prefix.recordings",
+        Prefix,
+        ["v"],
+        "recordings",
+        "« Recordings » : enregistrements de sessions (relire, supprimer)",
+        Action::OpenRecordings
     ),
     bind!(
         "prefix.search",
@@ -853,7 +917,8 @@ type HelpRows = &'static [(&'static [HelpKey], &'static str)];
 /// `(title, page, rows)` of the `?` overlay. Keys of the *same* action are
 /// separated by a space (`c F5`); keys of *different* actions by ` · `,
 /// matched in order by the description (`g · G` → `First · last`).
-/// Descriptions stay within 19 columns so two columns fit 80×24 (tested).
+/// Descriptions stay within 19 columns so two columns fit 80×24 (tested);
+/// a row without keys continues the description above it.
 /// When everything does not fit at once, the overlay shows one page at a
 /// time (0: hosts, sessions, edit, logs; 1: the explorer and the panels).
 const HELP: &[(&str, usize, HelpRows)] = &[
@@ -877,10 +942,17 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                 "Keys · snippets",
             ),
             (
+                &[Id("hosts.add", 2), Id("hosts.duplicate", 1)],
+                "Add · duplicate",
+            ),
+            (
                 &[Id("hosts.edit", 1), Id("hosts.favorite", 1)],
                 "Edit · favorite",
             ),
-            (&[Id("hosts.debug", 1)], "Session logs"),
+            (
+                &[Id("hosts.debug", 1), Id("hosts.recordings", 1)],
+                "Logs · recordings",
+            ),
             (
                 &[Id("hosts.forget_recent", 1), Id("hosts.clear_recent", 1)],
                 "Forget recent · all",
@@ -897,7 +969,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                 &[Id("hosts.reload", 1), Id("hosts.theme", 1)],
                 "Reload · theme",
             ),
-            (&[Id("hosts.quit", 1)], "Quit"),
+            (
+                &[Id("hosts.delete", 1), Id("hosts.quit", 1)],
+                "Delete host · quit",
+            ),
         ],
     ),
     (
@@ -929,6 +1004,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                 &[Id("prefix.keys", 1), Id("prefix.snippets", 1)],
                 "Keys · snippets",
             ),
+            (
+                &[Id("prefix.record", 1), Id("prefix.recordings", 1)],
+                "Record · recordings",
+            ),
             (&[Fixed("Ctrl-Space")], "Send it to remote"),
         ],
     ),
@@ -949,20 +1028,22 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         ],
     ),
     (
-        "Edit host",
+        "Host form",
         0,
         &[
             (&[Fixed("Tab · S-Tab")], "Next · prev field"),
-            (&[Fixed("Ctrl-S")], "Save"),
-            (&[Fixed("Ctrl-U")], "Clear field"),
-            (&[Fixed("↵")], "New line in notes"),
+            (&[Fixed("↵ · Esc")], "Save · cancel"),
+            (&[Fixed("← → Space")], "Pick key, jump"),
+            (&[Fixed("Alt-↵")], "New line in notes"),
         ],
     ),
     (
         "Files",
         1,
         &[
-            (&[Fixed("Tab")], "Switch pane"),
+            // "Switch side (local/remote)", over two rows (19 columns).
+            (&[Fixed("Tab")], "Switch side"),
+            (&[], "(local/remote)"),
             (&[Fixed("↵ · Bksp")], "Open · parent"),
             (&[Fixed("c F5")], "Copy across"),
             (&[Fixed("n F7")], "New folder"),
@@ -999,17 +1080,21 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         ],
     ),
     (
+        "Recordings",
+        1,
+        &[
+            (&[Fixed("↵ · d")], "Play · delete"),
+            (&[Fixed("Space · + -")], "Pause · speed"),
+            (&[Fixed("→ · q")], "Skip idle · close"),
+        ],
+    ),
+    (
         "Panes (Ctrl-Space)",
         1,
         &[
-            (
-                &[
-                    Id("prefix.split_horizontal", 1),
-                    Id("prefix.split_vertical", 1),
-                ],
-                "Split below · right",
-            ),
-            (&[Id("prefix.split_host", 1)], "Split onto a host"),
+            (&[Id("prefix.split_vertical", 1)], "Split right"),
+            (&[Id("prefix.split_horizontal", 1)], "Split down"),
+            (&[Id("prefix.split_host", 1)], "Split with host…"),
             (
                 &[
                     Joined(&[
@@ -1029,20 +1114,18 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                     "prefix.resize_up",
                     "prefix.resize_right",
                 ])],
-                "Resize",
+                "Move divider",
             ),
-            (
-                &[Id("prefix.close_pane", 1), Id("prefix.zoom_pane", 1)],
-                "Close · zoom",
-            ),
+            (&[Id("prefix.close_pane", 1)], "Close pane"),
+            (&[Id("prefix.zoom_pane", 1)], "Zoom pane"),
         ],
     ),
     (
-        "Import from Termius (shell)",
+        "Import Termius / Termix (shell)",
         1,
         &[
-            (&[Fixed("portico")], "import termius FILE"),
-            (&[Fixed("--prefix")], "termius- aliases"),
+            (&[Fixed("portico")], "import FILE"),
+            (&[Fixed("--key SHA256")], "Import key (opt-in)"),
             (&[Fixed("--apply")], "Write (preview 1st)"),
             (&[Fixed("docs")], "IMPORT.md"),
         ],
@@ -1085,15 +1168,41 @@ pub(crate) fn help(keymap: &Keymap) -> Vec<HelpSection> {
 // ── dispatch ────────────────────────────────────────────────────────────
 
 /// What the dispatcher needs to know about the app.
+// A snapshot of independent app flags, read once per key: not a state
+// machine to model.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeyContext<'a> {
     pub(crate) focus: Focus,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) dialog_open: bool,
     pub(crate) prefix: bool,
+    /// Pane mode: shortly after `Ctrl-Space` + arrow, the arrows and
+    /// `Shift`+arrows move the focus / the divider without the prefix.
+    pub(crate) pane_repeat: bool,
     /// The host list picks the host of a new pane (`Ctrl-Space S`).
     pub(crate) picking: bool,
     pub(crate) keymap: &'a Keymap,
+}
+
+/// In pane mode, an arrow (or `Shift`+arrow) bound to a pane move in the
+/// prefix table does it again. Anything else is not taken here: it goes
+/// where it always goes (the remote program), so no key is swallowed.
+/// Only in a terminal with nothing over it (the caller has already given
+/// dialogs and the prefix their keys).
+fn pane_repeat_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
+    let arrow = matches!(
+        key.code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+    );
+    let plain_or_shift = (key.modifiers - KeyModifiers::SHIFT).is_empty();
+    let active = cx.pane_repeat && cx.focus == Focus::Terminal && cx.overlay.is_none();
+    if !active || !arrow || !plain_or_shift {
+        return None;
+    }
+    cx.keymap
+        .lookup(Context::Prefix, &key)
+        .filter(|a| matches!(a, Action::FocusPane(_) | Action::ResizePane(_)))
 }
 
 /// While picking a pane's host, the list only moves, searches and chooses.
@@ -1108,6 +1217,9 @@ const PICKING_KEYS: &[&str] = &[
     "hosts.help",
 ];
 
+// One flat priority list (dialog, help, panel, prefix, pane mode, focus):
+// split up, the order that decides who gets a key would be hidden.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     let KeyContext {
         focus,
@@ -1116,6 +1228,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         prefix,
         picking,
         keymap,
+        ..
     } = cx;
     let overlay_open = overlay.is_some();
     if key.kind == KeyEventKind::Release {
@@ -1147,6 +1260,9 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     // The prefix works from every view, so tab commands are the same everywhere.
     if prefix {
         return Some(prefix_command(key, is_prefix_key, focus, keymap));
+    }
+    if let Some(action) = pane_repeat_key(key, cx) {
+        return Some(action);
     }
     if focus == Focus::Files && !overlay_open {
         return Some(match key.code {
@@ -1247,10 +1363,21 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
         Overlay::Keys => Action::KeysKey,
         Overlay::Snippets => Action::SnippetsKey,
         Overlay::Edit => Action::EditKey,
+        Overlay::HostForm => Action::HostFormKey,
         Overlay::Debug => Action::DebugKey,
+        Overlay::Recordings => Action::RecordingsKey,
+        // Every key drives the player's controls; none goes further.
+        Overlay::Player => Action::PlayerKey,
         Overlay::Help => return None,
     };
     if ctrl && key.code == KeyCode::Char('c') {
+        // The host form asks before dropping typed changes, like `Esc`.
+        if overlay == Some(Overlay::HostForm) {
+            return Some(Action::HostFormKey(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )));
+        }
         return Some(Action::CloseOverlay);
     }
     Some(wrap(key))
@@ -1296,6 +1423,7 @@ mod tests {
             overlay,
             dialog_open: dialog,
             prefix,
+            pane_repeat: false,
             picking: false,
             keymap,
         }
@@ -1396,12 +1524,12 @@ mod tests {
         ));
         // Several keys, swapped keys: no conflict.
         let (map, ignored) = overrides(&[
-            ("hosts.down", "n down"),
+            ("hosts.down", "J down"),
             ("hosts.files", "p"),
             ("hosts.tunnels", "f"),
         ]);
         assert!(ignored.is_empty(), "{ignored:?}");
-        assert_eq!(map.shown("hosts.down", 4), "n ↓");
+        assert_eq!(map.shown("hosts.down", 4), "J ↓");
         assert_eq!(map.shown("hosts.tunnels", 1), "f");
     }
 
@@ -1551,6 +1679,67 @@ mod tests {
     }
 
     #[test]
+    fn host_commands_and_the_host_form() {
+        for (code, m) in [
+            (KeyCode::Char('a'), KeyModifiers::NONE),
+            (KeyCode::Char('n'), KeyModifiers::NONE),
+        ] {
+            assert!(matches!(
+                map(code, m, Focus::Hosts, false),
+                Some(Action::AddHost)
+            ));
+        }
+        assert!(matches!(
+            map(KeyCode::Char('D'), KeyModifiers::SHIFT, Focus::Hosts, false),
+            Some(Action::DuplicateHost)
+        ));
+        assert!(matches!(
+            map(KeyCode::Delete, KeyModifiers::NONE, Focus::Hosts, false),
+            Some(Action::DeleteHost)
+        ));
+        assert!(matches!(
+            map(KeyCode::Char('y'), KeyModifiers::NONE, Focus::Hosts, false),
+            Some(Action::CopyInclude)
+        ));
+        // Picking a pane's host: none of them.
+        let keymap = Keymap::defaults();
+        let picking = KeyContext {
+            picking: true,
+            ..cx(Focus::Hosts, None, false, false, &keymap)
+        };
+        for code in [KeyCode::Char('a'), KeyCode::Char('D'), KeyCode::Delete] {
+            assert!(map_key(key(code, KeyModifiers::NONE), picking).is_none());
+        }
+        // The form takes every key; Ctrl-C asks like Esc.
+        let form = cx(Focus::Hosts, Some(Overlay::HostForm), false, false, &keymap);
+        assert!(matches!(
+            map_key(key(KeyCode::Char('q'), KeyModifiers::NONE), form),
+            Some(Action::HostFormKey(_))
+        ));
+        let Some(Action::HostFormKey(k)) =
+            map_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL), form)
+        else {
+            panic!("ctrl-c goes to the form");
+        };
+        assert_eq!(k.code, KeyCode::Esc);
+        // No two actions of one context share a default key.
+        let defaults = Keymap::defaults();
+        for (i, a) in BINDINGS.iter().enumerate() {
+            for b in BINDINGS
+                .iter()
+                .skip(i + 1)
+                .filter(|b| b.context == a.context)
+            {
+                let shared = defaults
+                    .keys(a.id)
+                    .iter()
+                    .any(|k| defaults.keys(b.id).contains(k));
+                assert!(!shared, "{} and {} share a key", a.id, b.id);
+            }
+        }
+    }
+
+    #[test]
     fn files_and_tunnels_capture_their_keys() {
         let keymap = Keymap::defaults();
         assert!(matches!(
@@ -1621,17 +1810,25 @@ mod tests {
             "{hosts:?}"
         );
         assert!(
+            hosts.contains(&("a n · D".to_owned(), "Add · duplicate")),
+            "{hosts:?}"
+        );
+        assert!(
             hosts.contains(&("e · *".to_owned(), "Edit · favorite")),
             "{hosts:?}"
         );
         assert!(
-            hosts.contains(&("L".to_owned(), "Session logs")),
+            hosts.contains(&("Del · q".to_owned(), "Delete host · quit")),
+            "{hosts:?}"
+        );
+        assert!(
+            hosts.contains(&("L · v".to_owned(), "Logs · recordings")),
             "{hosts:?}"
         );
         let defaults = help(&Keymap::defaults());
         // The logs panel and the edit form have their own sections.
         let titles: Vec<&str> = defaults.iter().map(|s| s.title).collect();
-        assert!(titles.contains(&"Session logs") && titles.contains(&"Edit host"));
+        assert!(titles.contains(&"Session logs") && titles.contains(&"Host form"));
         // Never "star": the word is "favorite" everywhere.
         assert!(
             defaults
@@ -1653,10 +1850,94 @@ mod tests {
             .find(|s| s.title == "Panes (Ctrl-Space)")
             .map(|s| s.rows.clone())
             .unwrap_or_default();
-        assert!(panes.contains(&("\" · %".to_owned(), "Split below · right")));
-        assert!(panes.contains(&("←↓↑→ · o".to_owned(), "Focus · next pane")));
-        assert!(panes.contains(&("Shift-←↓↑→".to_owned(), "Resize")));
-        assert!(panes.contains(&("x · z".to_owned(), "Close · zoom")));
+        // The GUI's words.
+        for row in [
+            ("%", "Split right"),
+            ("\"", "Split down"),
+            ("S", "Split with host…"),
+            ("←↓↑→ · o", "Focus · next pane"),
+            ("Shift-←↓↑→", "Move divider"),
+            ("x", "Close pane"),
+            ("z", "Zoom pane"),
+        ] {
+            assert!(
+                panes.contains(&(row.0.to_owned(), row.1)),
+                "{row:?}: {panes:?}"
+            );
+        }
+        let files = defaults
+            .iter()
+            .find(|s| s.title == "Files")
+            .map(|s| s.rows.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            files.first().zip(files.get(1)),
+            Some((
+                &("Tab".to_owned(), "Switch side"),
+                &(String::new(), "(local/remote)")
+            ))
+        );
+    }
+
+    #[test]
+    fn pane_mode_repeats_arrows_and_lets_every_other_key_through() {
+        let keymap = Keymap::defaults();
+        let repeat = KeyContext {
+            pane_repeat: true,
+            ..cx(Focus::Terminal, None, false, false, &keymap)
+        };
+        let at = |code, m| map_key(key(code, m), repeat);
+        assert!(matches!(
+            at(KeyCode::Left, KeyModifiers::NONE),
+            Some(Action::FocusPane(Dir::Left))
+        ));
+        assert!(matches!(
+            at(KeyCode::Up, KeyModifiers::NONE),
+            Some(Action::FocusPane(Dir::Up))
+        ));
+        assert!(matches!(
+            at(KeyCode::Right, KeyModifiers::SHIFT),
+            Some(Action::ResizePane(Dir::Right))
+        ));
+        assert!(matches!(
+            at(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(Action::ResizePane(Dir::Down))
+        ));
+        // Anything else goes to the remote program: nothing is swallowed.
+        for (code, m) in [
+            (KeyCode::Char('l'), KeyModifiers::NONE),
+            (KeyCode::Char('x'), KeyModifiers::NONE),
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Left, KeyModifiers::CONTROL),
+            (KeyCode::Left, KeyModifiers::ALT),
+        ] {
+            assert!(
+                matches!(at(code, m), Some(Action::TerminalKey(_))),
+                "{code:?} {m:?}"
+            );
+        }
+        // The prefix still opens the command mode.
+        assert!(matches!(
+            at(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            Some(Action::Prefix)
+        ));
+        // Out of a terminal (or under an overlay) the mode does nothing.
+        let hosts = KeyContext {
+            focus: Focus::Hosts,
+            ..repeat
+        };
+        assert!(!matches!(
+            map_key(key(KeyCode::Left, KeyModifiers::NONE), hosts),
+            Some(Action::FocusPane(_))
+        ));
+        let help = KeyContext {
+            overlay: Some(Overlay::Help),
+            ..repeat
+        };
+        assert!(!matches!(
+            map_key(key(KeyCode::Left, KeyModifiers::NONE), help),
+            Some(Action::FocusPane(_))
+        ));
     }
 
     #[test]

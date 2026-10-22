@@ -691,6 +691,17 @@ jobs:
           tapgit clone --quiet --depth 1 "https://github.com/$TAP_REPO.git" "$work"
           cd "$work"
           branch="portico-$VERSION"
+          # The pull request needs a base: an empty tap has none, and pushing
+          # the release branch there would make it the default branch.
+          if ! git rev-parse --verify --quiet HEAD >/dev/null; then
+            echo "::error::$TAP_REPO is empty: push a first commit (e.g. a README) to its default branch, then re-run (docs/RELEASE.md)"
+            exit 1
+          fi
+          base=$(git symbolic-ref --short HEAD)
+          if [ "$base" = "$branch" ]; then
+            echo "::error::the default branch of $TAP_REPO is $branch: rename it (e.g. to main), then re-run"
+            exit 1
+          fi
           git switch --quiet -c "$branch"
           mkdir -p Formula Casks
           cp "$dist/homebrew/Formula/portico.rb" Formula/portico.rb
@@ -707,7 +718,7 @@ jobs:
           export GH_TOKEN="$TOKEN"
           pr=$(gh pr list --repo "$TAP_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')
           if [ -z "$pr" ]; then
-            pr=$(gh pr create --repo "$TAP_REPO" --head "$branch" --title "portico $VERSION" \
+            pr=$(gh pr create --repo "$TAP_REPO" --base "$base" --head "$branch" --title "portico $VERSION" \
               --body "Formula and cask for Portico $VERSION, rendered by the Release workflow of $GITHUB_SERVER_URL/$GITHUB_REPOSITORY (run $GITHUB_RUN_ID) from the release's SHA256SUMS.")
           fi
           echo "Homebrew: $pr" >> "$GITHUB_STEP_SUMMARY"

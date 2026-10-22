@@ -19,7 +19,63 @@ export interface Host {
   /** Free text from hosts.toml (`\n` allowed, nothing else invisible). */
   notes: string | null;
   source: string;
+  /** Which file declares the host: only `portico` hosts are editable. */
+  origin: HostOrigin;
+  /** A Portico host created by an import: the tool it came from (`null` otherwise). */
+  importedFrom: ImportSource | null;
   warnings: string[];
+}
+
+/** Mirrors `portico_core::hosts::HostOrigin`. */
+export type HostOrigin = "ssh_config" | "portico" | "imported";
+
+/** Mirrors `portico_core::import::ImportSource` (serde snake_case). */
+export type ImportSource = "termius" | "termix";
+
+/** Mirrors `hosts::ManagedHostDto`: what hosts.conf itself holds, nothing
+ * inherited and nothing hidden by an earlier value elsewhere. */
+export interface ManagedHost {
+  alias: string;
+  hostname: string;
+  user: string | null;
+  port: number | null;
+  proxyJump: string | null;
+  /** The key as a discovered key's id (the form's choice), when it is one. */
+  keyId: string | null;
+  /** `~/…`, display only (the "(current)" choice): never sent back. */
+  identityFile: string | null;
+  /** A password is remembered for its `user@host:port` (presence only;
+   * `false` also when the store cannot tell: vault locked or missing). */
+  passwordRemembered: boolean;
+  /** The import it was created by, still set once edited. */
+  importedFrom: ImportSource | null;
+}
+
+/** Mirrors `hosts::IdentityChoiceDto`: a discovered key by id, never a path. */
+export type IdentityChoice = { kind: "none" } | { kind: "keep" } | { kind: "key"; id: string };
+
+/** Mirrors `hosts::PasswordChangeDto`: `value` becomes a SecretString in Rust. */
+export type PasswordChange = { kind: "keep" } | { kind: "set"; value: string } | { kind: "forget" };
+
+/** Mirrors `hosts::HostDraftDto` (validated by the engine). */
+export interface HostDraft {
+  alias: string;
+  hostname: string;
+  user: string | null;
+  port: number | null;
+  identity: IdentityChoice;
+  proxyJump: string | null;
+  tags: string[];
+  group: string | null;
+  favorite: boolean;
+  notes: string | null;
+  password: PasswordChange;
+}
+
+/** Mirrors `hosts::ManagedIncludeDto`. */
+export interface ManagedInclude {
+  line: string;
+  active: boolean;
 }
 
 export interface ThemeInfo {
@@ -65,10 +121,26 @@ export interface Duration {
 
 /** Mirrors `portico_core::events::PromptKind`. */
 export type PromptKind =
-  | { kind: "unknown_host_key"; host: string; port: number; algorithm: string; fingerprint: string; other_algorithms: string[] }
+  | {
+      kind: "unknown_host_key";
+      host: string;
+      port: number;
+      algorithm: string;
+      fingerprint: string;
+      other_algorithms: string[];
+      /** Accepting the key lets the session send a remembered password
+       * (risk 13 of SECURITY.md): the dialog says so. */
+      sends_remembered_password: boolean;
+    }
   | { kind: "password"; user: string; host: string; attempt: number; attempts: number }
   | { kind: "key_passphrase"; key_path: string; attempt: number; attempts: number }
   | { kind: "keyboard_interactive"; name: string; instructions: string; prompts: { text: string; echo: boolean }[] };
+
+/** Shown on a new host key when `sends_remembered_password` is set (same
+ * wording as the TUI): names the account, `host:port` in prose. */
+export function sendsRememberedPassword(user: string | null, host: string, port: number): string {
+  return `The password remembered for ${user ? `${user}@` : ""}${host}:${port} will be sent to this server once you accept its key.`;
+}
 
 export interface Prompt {
   id: number;
@@ -133,8 +205,21 @@ export type EngineEvent =
   | { type: "log"; session: number | null }
   /** `hosts.toml` changed for `alias`: update the host in place. */
   | { type: "host_meta"; alias: string; meta: HostMeta }
+  /** Portico's hosts.conf changed (created, edited, deleted): reload the inventory. */
+  | { type: "hosts_changed" }
   /** The recent-sessions list changed: fetch it again if shown. */
-  | { type: "recent_changed" };
+  | { type: "recent_changed" }
+  /** A terminal recording started or stopped: `REC` shows between the two. */
+  | { type: "recording"; terminal: number; session: number; state: RecordingState };
+
+/** Mirrors `portico_core::recording::RecordingStopReason`. */
+export type RecordingStopReason = "requested" | "terminal_closed" | "queue_full" | "write_failed" | "size_limit";
+
+/** Mirrors `portico_core::events::RecordingState`. The view never sends
+ * `path` back (requests name recordings by `name` only) nor shows it. */
+export type RecordingState =
+  | { state: "started"; name: string; path: string }
+  | { state: "stopped"; reason: RecordingStopReason; name: string; path: string; bytes: number; duration: Duration };
 
 /** Mirrors `portico_core::hosts::HostMeta` (as serialized in events). */
 export interface HostMeta {
@@ -326,11 +411,59 @@ export interface Snippet {
 /** What `save_snippet` takes (an empty id creates). */
 export type SnippetDraft = Omit<Snippet, "placeholders">;
 
+/** Mirrors `recordings::RecordingDto`. `name` is the only id sent back
+ * (play, delete); `alias` comes from the file header (escaped in Rust). */
+export interface Recording {
+  name: string;
+  alias: string;
+  /** Unix ms. */
+  started: number | null;
+  size: number;
+  /** Seconds. */
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+  valid: boolean;
+}
+
+/** Mirrors `recordings::PlaybackDto`. */
+export interface PlaybackInfo {
+  id: number;
+  name: string;
+  title: string | null;
+  cols: number;
+  rows: number;
+  paused: boolean;
+  speed: number;
+}
+
+/** Mirrors `recordings::PlaybackStateDto`. */
+export interface PlaybackState {
+  paused: boolean;
+  speed: number;
+}
+
+/** Mirrors `recordings::PlaybackControlDto`. */
+export type PlaybackControl =
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "speed"; value: number }
+  | { kind: "skip" }
+  | { kind: "seek"; time: number };
+
+/** Mirrors `recordings::PlaybackFrame`: output is already sanitised in Rust. */
+export type PlaybackFrame =
+  | { kind: "output"; data: string; size: number; time: number }
+  | { kind: "resize"; cols: number; rows: number; time: number }
+  | { kind: "reset"; time: number }
+  | { kind: "end"; time: number }
+  | { kind: "error"; error: ErrorSummary };
+
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
 /** Mirrors `portico_core::import::ImportNotice` (never a secret). */
 export interface ImportNotice {
-  /** `unsupported_protocol`, `missing_hostname`, `invalid_hostname`, `alias_collision`, `tag_normalized`… */
+  /** `unsupported_protocol`, `missing_hostname`, `alias_collision`, `edited_since_import`, `key_unreadable`… */
   code: string;
   record: number | null;
   label: string | null;
@@ -349,12 +482,59 @@ export interface PlannedHost {
   tags: string[];
   notes: string | null;
   record: number;
+  /** Pinned in the export: a favorite when created. */
+  favorite: boolean;
+  /** Id of the private key it uses in the export (`ImportPreview.keys`). */
+  key: string | null;
+  /** Updates a host an earlier import created (and nobody edited since). */
+  update: boolean;
+  /** Set when this update points the alias at another server: where it
+   * points now. Applied only when accepted (`ImportApplyRequest.redirect`),
+   * skipped otherwise (`destination_changed`). */
+  previous: ImportDestination | null;
+  sourceId: string;
 }
 
-/** Secrets found in the export and ignored (counts only). */
+/** Mirrors `import::DestinationDto`: an earlier imported host's destination. */
+export interface ImportDestination {
+  hostname: string;
+  user: string | null;
+  /** `null` for 22. */
+  port: number | null;
+  /** `~/…` (computed in Rust): never kept by a redirect. */
+  identityFile: string | null;
+}
+
+/** Mirrors `import::PlannedKeyDto`: a private key of the export (never its material). */
+export interface PlannedKey {
+  /** Its `SHA256:…` fingerprint, sent back to select it. */
+  id: string;
+  /** `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`… */
+  algorithm: string;
+  fingerprint: string;
+  format: "open_ssh" | "pem";
+  /** Encrypted in the export: written as it is. */
+  encrypted: boolean;
+  /** `false`: the fingerprint is only claimed by the export (encrypted
+   * OpenSSH key), so the key is never matched with a local one. */
+  fingerprintVerified: boolean;
+  /** Hosts of the plan using it. */
+  aliases: string[];
+  /** A local key with the same fingerprint (`~/…`): reused, nothing written. */
+  local: string | null;
+}
+
+/** Mirrors `portico_core::import::IgnoredSecrets` (counts only). */
 export interface IgnoredSecrets {
   passwords: number;
+  /** Keys not imported, whatever the cause. */
   keys: number;
+  /** Of `keys`: offered and left unticked (always 0 in a plan). */
+  untickedKeys: number;
+  /** Of `keys`: keys Portico cannot read. */
+  unreadableKeys: number;
+  /** Private keys the export holds, imported or not. */
+  keysInExport: number;
 }
 
 /** Mirrors `import::ImportPreviewDto`: a plan kept in Rust under `token`. */
@@ -362,36 +542,82 @@ export interface ImportPreview {
   token: number;
   /** File name only: the path stays in Rust. */
   fileName: string;
+  /** The detected tool: `Termius` or `Termix`. */
+  source: string;
   format: string;
+  /** The source's alias prefix (`termius-`, `termix-`). */
+  prefixText: string;
   records: number;
   prefix: boolean;
   hosts: PlannedHost[];
   skipped: ImportNotice[];
   warnings: ImportNotice[];
   secrets: IgnoredSecrets;
+  /** "Not imported: 1 password, 2 unticked keys." (`IgnoredSecrets::advice`). */
   secretsAdvice: string | null;
+  /** "Delete <file> now: it holds …" (`ImportPlan::delete_export_advice`). */
+  deleteExportAdvice: string | null;
   identityFiles: string[];
   target: string;
   includeLine: string;
-  /** `Host` blocks already in `target` (a previous import) that this one replaces. */
+  /** Hosts of an earlier import updated in place (destination changes
+   * count once accepted: the dialog adds them). */
   replaces: number | null;
+  /** Private keys found (Termix); none is ticked by default. */
+  keys: PlannedKey[];
+  /** Where a ticked key is written (`~/.ssh/portico/`). */
+  keysDir: string;
+}
+
+/** Mirrors `import::ImportApplyDto`: `passphrase` becomes a SecretString in Rust. */
+export interface ImportApplyRequest {
+  token: number;
+  prefix: boolean;
+  /** `PlannedKey.id`s, checked against the plan in Rust. */
+  keys: string[];
+  /** Aliases whose destination change was accepted (`PlannedHost.previous`),
+   * checked against the plan in Rust. */
+  redirect: string[];
+  passphrase: string | null;
 }
 
 /** Mirrors `import::ImportReportDto` (`portico_core::import::ImportReport`). */
 export interface ImportReport {
   formatLabel: string;
+  source: string;
+  /** The export's file name (never its path). */
+  fileName: string;
+  /** `~/…` (computed in Rust). */
   target: string;
   unchanged: boolean;
+  /** Aliases created or updated. */
   imported: string[];
+  /** The aliases of `imported` that updated an earlier import. */
+  updated: string[];
   skipped: ImportNotice[];
   warnings: ImportNotice[];
   secrets: IgnoredSecrets;
   secretsAdvice: string | null;
+  /** "Delete <file> now: it holds …": shown first. */
+  deleteExportAdvice: string | null;
   identityFiles: string[];
   metaUpdated: number;
   includeLine: string;
   includeActive: boolean;
+  /** Key files written and reused (`~/…`, computed in Rust). */
+  keys: { imported: string[]; written: WrittenKey[]; reused: string[]; skipped: number };
 }
+
+/** Mirrors `import::WrittenKeyDto`: a key file the import wrote. */
+export interface WrittenKey {
+  /** `~/…`. */
+  path: string;
+  /** Encrypted on disk; `null` when unknown. */
+  encrypted: boolean | null;
+  /** Imported hosts using it, in plan order. */
+  usedBy: string[];
+}
+
 
 export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),
@@ -460,6 +686,15 @@ export const api = {
   checkTags: (tags: string[]) => invoke<string[]>("check_tags", { tags }),
   setGroup: (alias: string, group: string | null) => invoke<HostMeta>("set_group", { alias, group }),
   setNotes: (alias: string, notes: string | null) => invoke<HostMeta>("set_notes", { alias, notes }),
+  /** Returns the alias as written (the engine validates everything). */
+  createHost: (draft: HostDraft) => invoke<string>("create_host", { draft }),
+  /** Returns the new alias (a rename included). */
+  updateHost: (alias: string, draft: HostDraft) => invoke<string>("update_host", { alias, draft }),
+  deleteHost: (alias: string) => invoke<void>("delete_host", { alias }),
+  duplicateHost: (alias: string, newAlias: string) => invoke<string>("duplicate_host", { alias, newAlias }),
+  managedInclude: () => invoke<ManagedInclude>("managed_include"),
+  /** What hosts.conf holds for a Portico host (`null`: not one any more). */
+  managedHost: (alias: string) => invoke<ManagedHost | null>("managed_host", { alias }),
   recentHosts: (limit: number) => invoke<RecentHost[]>("recent_hosts", { limit }),
   clearRecent: () => invoke<void>("clear_recent"),
   forgetRecent: (alias: string) => invoke<boolean>("forget_recent", { alias }),
@@ -471,10 +706,28 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
   /** Native file picker (Rust side), then the plan; `null` when cancelled. */
-  importTermiusPick: (prefix: boolean) => invoke<ImportPreview | null>("import_termius_pick", { prefix }),
-  importTermiusReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_termius_replan", { token, prefix }),
-  importApply: (token: number) => invoke<ImportReport>("import_apply", { token }),
+  importPick: (prefix: boolean) => invoke<ImportPreview | null>("import_pick", { prefix }),
+  importReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_replan", { token, prefix }),
+  importApply: (request: ImportApplyRequest) => invoke<ImportReport>("import_apply", { request }),
   importCancel: () => invoke<void>("import_cancel"),
+  /** Starts recording a terminal; `REC` shows from the `started` event only. */
+  recordingStart: (terminal: number) => invoke<void>("recording_start", { terminal }),
+  recordingStop: (terminal: number) => invoke<void>("recording_stop", { terminal }),
+  /** Resync after a lagged event stream only. */
+  recordingStatus: (terminal: number) => invoke<boolean>("recording_status", { terminal }),
+  /** The recordings folder for display (`~/…`), built in Rust. */
+  recordingsFolder: () => invoke<string>("recordings_folder"),
+  listRecordings: () => invoke<Recording[]>("list_recordings"),
+  /** `name` from `listRecordings` only (validated again in Rust). */
+  deleteRecording: (name: string) => invoke<void>("delete_recording", { name }),
+  playRecording: (name: string, speed: number, frames: Channel<PlaybackFrame>) =>
+    invoke<PlaybackInfo>("play_recording", { name, speed, frames }),
+  playbackControl: (id: number, control: PlaybackControl) => invoke<PlaybackState>("playback_control", { id, control }),
+  /** Flow control: `total` bytes of playback output were parsed by the player. */
+  playbackAck: (id: number, total: number) => invoke<void>("playback_ack", { id, total }),
+  playbackClose: (id: number) => invoke<void>("playback_close", { id }),
+  /** The engine event stream lost events: resync what is derived from them. */
+  onEngineLagged: (cb: () => void): Promise<UnlistenFn> => listen<number>("portico://engine-lagged", () => cb()),
   /** Files dropped on the window, already registered as upload tokens. */
   onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
     listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),

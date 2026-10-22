@@ -1,21 +1,23 @@
 <script lang="ts">
   // Tabs in the title bar: Hosts (pinned), then one tab per terminal with its
   // live status dot. A tab speaks for its focused pane: its alias first, its
-  // remote title on the active tab only, and the number of panes when the
-  // tab is split.
+  // remote title on the active tab only (unless split: alias and pane count
+  // are enough there), and the number of panes when the tab is split.
   //
-  // Dot grammar (shared with the status bar and the ended bar): the colour is
-  // the session's status, the fill says whether a shell is attached.
+  // Dot grammar (`paneStatus`, shared with the pane header and the status
+  // bar): the colour is the status, a failure is a filled error dot, the
+  // hollow dot means "no shell attached".
   //
   // Keyboard: one tab stop (roving tabindex); ←/→ move, Home/End jump,
   // Delete closes.
   import { flip } from "svelte/animate";
   import { fly } from "svelte/transition";
-  import { describe } from "../api";
   import { keymap } from "../state/keymap.svelte";
   import { dur } from "../motion";
   import { panesOf } from "../panes";
-  import { isLive, workspace, type Pane } from "../state/workspace.svelte";
+  import { paneStatus, workspace, type Pane } from "../state/workspace.svelte";
+  import { recordings } from "../state/recordings.svelte";
+  import RecBadge from "./RecBadge.svelte";
 
   let { hostCount }: { hostCount: number } = $props();
 
@@ -44,9 +46,7 @@
   });
 
   function dotOf(pane: Pane | undefined) {
-    const session = pane ? workspace.sessions[pane.session] : undefined;
-    const d = describe(session);
-    return { status: d.status, busy: d.busy, hollow: !pane || !!pane.end || (!isLive(session) && pane.terminal === null) };
+    return paneStatus(pane, pane ? workspace.sessions[pane.session] : undefined);
   }
 
   function focusTab(index: number) {
@@ -105,13 +105,15 @@
       {@const count = panesOf(tab.root).length}
       {@const dot = dotOf(focus)}
       {@const selected = workspace.active === tab.key}
+      <!-- Any pane of the tab recording: REC on the tab (the header says which). -->
+      {@const rec = workspace.panesIn(tab).some((p) => recordings.isRecording(p.terminal))}
       <div
         class="tab"
         role="tab"
         tabindex={selected ? 0 : -1}
         data-key={tab.key}
         aria-selected={selected}
-        title={`${title ? `${alias} — ${title}` : alias}${count > 1 ? ` · ${count} panes` : ""}`}
+        title={count > 1 ? `${alias} · ${count} panes` : title ? `${alias} — ${title}` : alias}
         animate:flip={{ duration: dur("base") }}
         in:fly={{ y: -4, duration: dur("base") }}
         onclick={() => (workspace.active = tab.key)}
@@ -120,7 +122,8 @@
       >
         <span class="dot" data-status={dot.status} class:busy={dot.busy} class:hollow={dot.hollow}></span>
         <span class="alias">{alias}</span>
-        {#if title && selected}<span class="remote">{title}</span>{/if}
+        {#if rec}<RecBadge compact title="A pane of this tab is being recorded" />{/if}
+        {#if title && selected && count < 2}<span class="remote">{title}</span>{/if}
         {#if count > 1}
           <span class="panes" aria-label={`${count} panes`}>
             <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><path d="M8 3v10" /></svg>
@@ -202,7 +205,7 @@
     left: var(--space-3);
     right: var(--space-3);
     bottom: 0;
-    height: 2px;
+    height: var(--size-bar);
     border-radius: 2px;
     background: var(--accent);
   }
@@ -225,7 +228,7 @@
     font-variant-numeric: tabular-nums;
     color: var(--text-muted);
   }
-  .panes svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+  .panes svg { width: var(--size-icon-sm); height: var(--size-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.5; }
   .count, .index {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
@@ -267,7 +270,7 @@
     transition: opacity var(--motion-fast) var(--ease-standard),
       background var(--motion-fast) var(--ease-standard);
   }
-  .close svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .close svg { width: var(--size-icon-sm); height: var(--size-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
   .tab:hover .close, .tab[aria-selected="true"] .close { opacity: 1; }
   .tab:hover .index, .tab[aria-selected="true"] .index { opacity: 0; }
   .close:hover { background: var(--bg-elevated); color: var(--text-primary); }
@@ -275,12 +278,12 @@
   .dot {
     --c: var(--status-idle);
     flex: 0 0 auto;
-    width: 7px;
-    height: 7px;
+    width: var(--size-dot);
+    height: var(--size-dot);
     border-radius: 50%;
     background: var(--c);
   }
-  .dot.hollow { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+  .dot.hollow { background: transparent; box-shadow: inset 0 0 0 var(--size-dot-ring) var(--c); }
   .dot[data-status="connecting"] { --c: var(--status-connecting); }
   .dot[data-status="authenticating"] { --c: var(--status-authenticating); }
   .dot[data-status="connected"] { --c: var(--status-connected); }

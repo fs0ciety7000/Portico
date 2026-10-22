@@ -11,9 +11,10 @@ use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 
 use portico_core::effective::SENSITIVE_KEYWORDS;
 use portico_core::events::SessionPhase;
-use portico_core::hosts::HostEntry;
+use portico_core::hosts::{HostEntry, HostOrigin};
 
 use crate::app::App;
+use crate::host_form::{origin_label, origin_with_source};
 use crate::theme::Styles;
 use crate::ui::fmt::{display_path, sentence};
 
@@ -31,8 +32,92 @@ fn keyword_label(keyword: &str) -> &str {
     }
 }
 
-pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
+/// `Portico · e edits`, `Portico · from Termix` (shared with the GUI; one
+/// row at 80 columns), `~/.ssh/config · read-only`, `Imported · read-only`.
+fn origin_text(app: &App, host: &HostEntry) -> String {
+    match host.origin {
+        HostOrigin::Portico if host.imported_from.is_some() => {
+            origin_with_source(host.origin, host.imported_from)
+        }
+        HostOrigin::Portico => format!(
+            "{} · {} edits",
+            origin_label(host.origin),
+            app.keymap.shown("hosts.edit", 1)
+        ),
+        other => format!("{} · read-only", origin_label(other)),
+    }
+}
+
+/// The `Include` banner (under the details): what to add to
+/// `~/.ssh/config`, that Portico never edits it, and its keys.
+fn include_lines(app: &App, s: Styles, w: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = crate::ui::fmt::wrap(crate::app_hosts::INCLUDE_BANNER, w)
+        .into_iter()
+        .map(|l| Line::from(Span::styled(l, s.secondary())))
+        .collect();
+    // The line itself, cut nowhere (wrapped by characters if it must).
+    let line: Vec<char> = app.include.line.chars().collect();
+    for chunk in line.chunks(w.max(1)) {
+        lines.push(Line::from(Span::styled(
+            chunk.iter().collect::<String>(),
+            s.title(),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "Portico never edits that file.",
+        s.muted(),
+    )));
+    let mut keys = Vec::new();
+    for (id, label) in [
+        ("hosts.copy_include", "copy"),
+        ("hosts.hide_include", "hide"),
+    ] {
+        let key = app.keymap.shown(id, 1);
+        if !key.is_empty() {
+            keys.push(Span::styled(format!(" {key} "), s.key_hint()));
+            keys.push(Span::styled(format!(" {label}   "), s.muted()));
+        }
+    }
+    lines.push(Line::from(keys));
+    lines
+}
+
+/// The `Include` banner at the bottom of `area`, when shown; returns what
+/// is left for the details.
+fn render_banner(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
     let s = app.styles();
+    if app.include_banner() {
+        let w = usize::from(area.width.saturating_sub(4));
+        let lines = include_lines(app, s, w);
+        let height = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(2);
+        let [details, banner] = ratatui::layout::Layout::vertical([
+            ratatui::layout::Constraint::Min(6),
+            ratatui::layout::Constraint::Length(height),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(s.border())
+                    .title(Line::from(Span::styled(" ssh · scp · git ", s.secondary())))
+                    .padding(Padding::horizontal(1))
+                    .style(s.surface()),
+            ),
+            banner,
+        );
+        details
+    } else {
+        area
+    }
+}
+
+/// Returns the area of the details (above the `Include` banner, if any).
+pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
+    let s = app.styles();
+    let area = render_banner(app, frame, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(s.border())
@@ -49,7 +134,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             .block(block),
             area,
         );
-        return;
+        return area;
     };
 
     let r = &host.resolved;
@@ -102,6 +187,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     if let Some(group) = &host.meta.group {
         row("Group", crate::form::display_safe(group));
     }
+    row("Origin", origin_text(app, host));
     row(
         "Defined in",
         format!(
@@ -133,6 +219,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             .block(block),
         area,
     );
+    area
 }
 
 /// `Jump  You → bastion → web`, then the sensitive commands, masked (the
@@ -191,7 +278,10 @@ fn status_lines(app: &App, host: &HostEntry, s: Styles) -> Vec<Line<'static>> {
     }
     let phase = view.map(|v| &v.phase);
     let logs = app.keymap.shown("hosts.debug", 1);
+    // Picking the host of a new pane: `↵` splits (the only action then).
+    let split_with = format!("split with {}", crate::ui::fmt::truncate(&host.alias, 24));
     let hint: Vec<(&str, &str)> = match phase {
+        _ if app.pane_pick.is_some() => vec![("↵", split_with.as_str())],
         Some(SessionPhase::Connected) => vec![("↵", "open terminal"), ("d", "disconnect")],
         Some(_) if view.is_some_and(crate::app::SessionView::in_flight) => vec![("d", "cancel")],
         // What went wrong is in the session's records.

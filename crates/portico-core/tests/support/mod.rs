@@ -58,6 +58,9 @@ pub struct Behaviour {
     pub banner: Option<String>,
     /// keyboard-interactive asks a second question (PAM password + OTP).
     pub kbd_two_steps: bool,
+    /// keyboard-interactive asks "Password:" again after a wrong answer
+    /// (in the same exchange, like PAM) instead of failing.
+    pub kbd_reask: bool,
     /// Counts accepted logins (for assertions).
     pub logins: AtomicUsize,
     /// Counts TCP connections accepted.
@@ -248,6 +251,10 @@ impl russh::server::Handler for ServerHandler {
                     self.kbd_step = 1;
                     self.kbd_first_ok = correct;
                     return Ok(question("Verification code: "));
+                }
+                if self.b.kbd_reask && !correct && self.kbd_step < 3 {
+                    self.kbd_step = self.kbd_step.saturating_add(1);
+                    return Ok(question("Password: "));
                 }
                 let ok = if self.b.kbd_two_steps {
                     self.kbd_first_ok

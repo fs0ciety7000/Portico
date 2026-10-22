@@ -6,7 +6,7 @@
   import { isMac } from "./lib/keys";
   import { dur } from "./lib/motion";
   import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
-  import { isLive, workspace, type Tab } from "./lib/state/workspace.svelte";
+  import { isLive, paneStatus, workspace, type Tab } from "./lib/state/workspace.svelte";
   import { layout, minPanePx, MAX_PANES, panesOf, type Direction, type Layout } from "./lib/panes";
   import PaneDivider from "./lib/components/PaneDivider.svelte";
   import { files } from "./lib/state/files.svelte";
@@ -29,8 +29,14 @@
   import FilesPanel from "./lib/components/FilesPanel.svelte";
   import TunnelsDialog from "./lib/components/TunnelsDialog.svelte";
   import EditHostDialog from "./lib/components/EditHostDialog.svelte";
+  import HostDialog from "./lib/components/HostDialog.svelte";
+  import HostActionDialog from "./lib/components/HostActionDialog.svelte";
   import LogsDialog from "./lib/components/LogsDialog.svelte";
   import ImportDialog from "./lib/components/ImportDialog.svelte";
+  import RecordingsDialog from "./lib/components/RecordingsDialog.svelte";
+  import RecordConfirm from "./lib/components/RecordConfirm.svelte";
+  import RecBadge from "./lib/components/RecBadge.svelte";
+  import { recordings } from "./lib/state/recordings.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -64,12 +70,17 @@
   /** The focused pane of the active tab: files, snippets, logs, copy and paste act on it. */
   const pane = $derived(workspace.activePane);
   const tabSession = $derived(pane ? workspace.sessions[pane.session] : undefined);
-  const tabStatus = $derived(describe(tabSession));
+  /** Same dot grammar as the pane header and the tab (`paneStatus`). */
+  const tabStatus = $derived(paneStatus(pane, tabSession));
   const prompt = $derived(workspace.prompts[0]);
   const alert = $derived(workspace.alerts[0]);
   const conflict = $derived(files.conflicts[0]);
   const editing = $derived(hosts.editing ? hosts.byAlias[hosts.editing] : undefined);
+  /** The host a host dialog is about (phase 6b): shown once the list has it. */
+  const dialogHost = $derived(hosts.dialog && hosts.dialog.kind !== "create" ? hosts.byAlias[hosts.dialog.alias] : undefined);
+  const hostDialogOpen = $derived(!!hosts.dialog && (hosts.dialog.kind === "create" || !!dialogHost));
   const modalOpen = $derived(
+    hostDialogOpen ||
     !!prompt ||
       !!alert ||
       !!conflict ||
@@ -80,8 +91,22 @@
       !!editing ||
       hosts.confirmClear ||
       logs.open ||
-      importer.open,
+      importer.open ||
+      !!recordings.confirm ||
+      recordings.open,
   );
+  /** Terminals being recorded (any tab): REC in the status bar. */
+  const recCount = $derived(Object.keys(recordings.active).length);
+  const recHere = $derived(recordings.isRecording(pane?.terminal ?? null));
+  /** Hint of the focused pane's failure: a short split pane shows only the
+   * message (TerminalView's compact card), the status bar the hint. */
+  const paneHint = $derived.by(() => {
+    if (!pane) return undefined;
+    const error = tabSession?.phase.phase === "failed" ? tabSession.phase.error : pane.error;
+    if (!error) return undefined;
+    return error.code === "host_key_changed" ? "Fix known_hosts only once the administrator confirms the new key." : (error.hint ?? undefined);
+  });
+
   /** Favorite, edit: the active pane's host, else the selected one. */
   const targetAlias = $derived(pane ? pane.alias : selectedHost?.alias);
   const targetHost = $derived(targetAlias ? hosts.byAlias[targetAlias] : undefined);
@@ -107,6 +132,52 @@
   });
   /** First host row (the list starts with a section header when grouped). */
   const firstHost = () => Math.max(0, rows.findIndex((r) => r.kind === "host"));
+
+  // After a create, rename or duplicate: once the reloaded list has the
+  // host, it gets the selection, in the host list, with nothing focused
+  // (so its shortcuts act at once).
+  $effect(() => {
+    const alias = hosts.pendingSelect;
+    if (!alias) return;
+    const now = rows;
+    untrack(() => {
+      const at = now.findIndex((r) => r.kind === "host" && r.section.kind !== "recent" && r.host.alias === alias);
+      const host = hosts.byAlias[alias];
+      if (at < 0) {
+        if (!host) return;
+        // Hidden by the search or a folded section: show it.
+        if (searching) query = "";
+        else hosts.toggleSection(host.group ? `group:${host.group}` : "other", false);
+        return;
+      }
+      hosts.pendingSelect = null;
+      workspace.active = null;
+      selected = at;
+      anchor = now[at];
+      requestAnimationFrame(() => {
+        const el = document.activeElement;
+        if (el instanceof HTMLElement && !el.closest(".modal")) el.blur();
+      });
+    });
+  });
+
+  /** Palette: the Include line for ~/.ssh/config (Portico never writes it). */
+  async function copyInclude() {
+    const line = hosts.include?.line;
+    if (!line) return;
+    try {
+      await navigator.clipboard.writeText(line);
+      workspace.notify({ code: "include_copied", message: "Include line copied", hint: "Paste it at the top of ~/.ssh/config." }, "info");
+    } catch {
+      workspace.notify({ code: "clipboard", message: "The clipboard is not available here", hint: `Copy it from the host details: ${line}` });
+    }
+  }
+
+  /** "Edit": the whole host for a Portico host, its metadata otherwise. */
+  function editHost(alias: string) {
+    if (hosts.byAlias[alias]?.origin === "portico") void hosts.openEdit(alias);
+    else hosts.editing = alias;
+  }
 
   /** Where snippets run: the active pane's shell. */
   const snippetTarget: SnippetTarget | null = $derived(
@@ -303,7 +374,7 @@
     const px = (name: string) => Number.parseFloat(css.getPropertyValue(name)) || 0;
     paneGap = px("--space-2");
     panePad = px("--space-1");
-    const fontSize = px("--text-base") || 13;
+    const fontSize = px("--text-base");
     const ctx = document.createElement("canvas").getContext("2d");
     if (ctx) ctx.font = `${fontSize}px ${css.getPropertyValue("--font-mono").trim()}`;
     const cell = { w: ctx?.measureText("W").width || fontSize * 0.6, h: Math.ceil(fontSize * 1.2) };
@@ -323,11 +394,13 @@
   }
 
   const paneCount = $derived(tab ? panesOf(tab.root).length : 0);
-  /** Split panes (only with a terminal tab). */
+  /** In a split tab `tab.close` closes the focused pane: its key, unless `pane.close` has one. */
+  const closePaneKey = $derived(k("pane.close") ?? k("tab.close"));
+  /** Split panes (only with a terminal tab). Titles always say "pane" (as in the TUI). */
   const paneCommands: Command[] = $derived([
-    { id: "pane.split-right", title: "Split right", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-right"), run: () => void workspace.split("row") },
-    { id: "pane.split-down", title: "Split down", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-down"), run: () => void workspace.split("column") },
-    { id: "pane.split-host", title: "Split with another host…", hint: "host picker", shortcut: k("pane.split-host"), run: openHostPicker },
+    { id: "pane.split-right", title: "Split pane right", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-right"), run: () => void workspace.split("row") },
+    { id: "pane.split-down", title: "Split pane down", hint: pane ? `new pane on ${pane.alias}` : undefined, shortcut: k("pane.split-down"), run: () => void workspace.split("column") },
+    { id: "pane.split-host", title: "Split pane with host…", hint: "host picker", shortcut: k("pane.split-host"), run: openHostPicker },
     ...(paneCount > 1
       ? [
           { id: "pane.next", title: "Next pane", shortcut: k("pane.next"), run: () => workspace.focusNext() },
@@ -337,32 +410,56 @@
             shortcut: k(`pane.focus-${d}`),
             run: () => workspace.focusDirection(d),
           })),
-          ...(["left", "right", "up", "down"] as const).map((d) => ({
-            id: `pane.resize-${d}`,
-            title: `Move divider ${d}`,
-            hint: "resize panes",
-            shortcut: k(`pane.resize-${d}`),
-            run: () => workspace.resize(d),
-          })),
+          { id: "pane.divider", title: "Move pane divider…", hint: "arrows, Home / End, ↵ when done", shortcut: k("pane.divider"), run: focusDivider },
           { id: "pane.zoom", title: tab?.zoom != null ? "Unzoom pane" : "Zoom pane", shortcut: k("pane.zoom"), run: () => workspace.toggleZoom() },
-          { id: "pane.close", title: `Close pane (${pane?.alias ?? ""})`, shortcut: k("pane.close"), run: () => void workspace.closePane() },
+          { id: "pane.close", title: "Close pane", hint: pane?.alias, shortcut: closePaneKey, run: () => void workspace.closePane() },
+          { id: "tab.close-all", title: "Close tab and its panes", hint: `${paneCount} panes`, shortcut: k("tab.close-all"), run: () => void workspace.close() },
         ]
       : []),
   ]);
+
+  /** A divider has the keyboard: it holds the accent, the focused pane a neutral ring. */
+  let dividerFocused = $state(false);
+
+  /** "Move pane divider…": the focused pane's nearest divider takes the keyboard. */
+  function focusDivider() {
+    const id = workspace.dividerOfFocus();
+    if (id === null) return;
+    // After the unzoom (if any) has laid the dividers out.
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`.stage [data-divider="${id}"]`)?.focus());
+  }
 
   /** "Split with another host…": the palette, listing hosts. */
   let pickerOpen = $state(false);
   function openHostPicker() {
     if (pane) pickerOpen = true;
   }
-  const hostChoices: Command[] = $derived(
-    hosts.all.map((h) => ({
-      id: `split-host-${h.alias}`,
-      title: h.alias,
-      hint: [h.user && `${h.user}@`, h.hostname].filter(Boolean).join("") || undefined,
-      run: () => void workspace.split(null, h.alias),
-    })),
-  );
+  /** Recent hosts first, then favourites, then the rest (configuration order). */
+  const hostChoices: Command[] = $derived.by(() => {
+    const recent = hosts.recent.flatMap((r) => {
+      const h = hosts.byAlias[r.alias];
+      return h ? [h] : [];
+    });
+    const seen = new Set(recent.map((h) => h.alias));
+    const favorites = hosts.all.filter((h) => h.favorite && !seen.has(h.alias));
+    for (const h of favorites) seen.add(h.alias);
+    const ordered = [...recent, ...favorites, ...hosts.all.filter((h) => !seen.has(h.alias))];
+    return ordered.map((h) => {
+      const session = workspace.byAlias[h.alias];
+      const d = describe(session);
+      return {
+        id: `split-host-${h.alias}`,
+        title: h.alias,
+        favorite: h.favorite,
+        status: { status: d.status, busy: d.busy },
+        // The split reuses the host's live session: no new connection, no prompt.
+        note: isLive(session) ? "reuses connection" : undefined,
+        hint: [h.user && `${h.user}@`, h.hostname].filter(Boolean).join("") || undefined,
+        mono: true,
+        run: () => void workspace.split(null, h.alias),
+      };
+    });
+  });
 
   // Ids are the stable action ids of `shortcuts.ts` (bindable in settings.toml).
   const commands: Command[] = $derived([
@@ -376,9 +473,16 @@
     ...(pane
       ? [
           { id: "tab.new", title: `New tab on ${pane.alias}`, shortcut: k("tab.new"), run: () => void workspace.duplicate() },
-          { id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() },
+          ...(paneCount > 1 ? [] : [{ id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() }]),
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
+          ...(recordings.recordable(pane)
+            ? [
+                recordings.isRecording(pane.terminal)
+                  ? { id: "session.record", title: "Stop recording", hint: pane.alias, shortcut: k("session.record"), run: () => void recordings.toggle(pane) }
+                  : { id: "session.record", title: "Record session", hint: `${pane.alias} · output only, asks first`, shortcut: k("session.record"), run: () => void recordings.toggle(pane) },
+              ]
+            : []),
           { id: "tab.reconnect", title: `Reconnect ${pane.alias}`, shortcut: k("tab.reconnect"), run: () => void workspace.reconnect(pane.key) },
           { id: "tab.disconnect", title: `Disconnect ${pane.alias}`, shortcut: k("tab.disconnect"), run: () => void workspace.disconnect(pane.alias) },
           ...paneCommands,
@@ -404,11 +508,32 @@
           {
             id: "hosts.edit",
             title: `Edit ${targetHost.alias}`,
-            hint: "tags, group, notes",
+            hint: targetHost.origin === "portico" ? "Portico host: every field" : "tags, group, notes",
             shortcut: pane ? undefined : k("hosts.edit"),
-            run: () => (hosts.editing = targetHost.alias),
+            run: () => editHost(targetHost.alias),
           },
+          {
+            id: "host.edit",
+            title: "Edit host…",
+            hint: targetHost.origin === "portico" ? targetHost.alias : `${targetHost.alias} · read-only, can be duplicated`,
+            shortcut: pane ? undefined : k("host.edit"),
+            run: () => void hosts.openEdit(targetHost.alias),
+          },
+          {
+            id: "host.duplicate",
+            title: "Duplicate as Portico host…",
+            hint: targetHost.alias,
+            shortcut: pane ? undefined : k("host.duplicate"),
+            run: () => (hosts.dialog = { kind: "duplicate", alias: targetHost.alias }),
+          },
+          ...(targetHost.origin === "portico"
+            ? [{ id: "host.delete", title: "Delete host", hint: targetHost.alias, shortcut: pane ? undefined : k("host.delete"), run: () => hosts.openDelete(targetHost.alias) }]
+            : []),
         ]
+      : []),
+    { id: "host.add", title: "Add host…", hint: "saved in Portico's hosts.conf", shortcut: k("host.add"), run: () => (hosts.dialog = { kind: "create" }) },
+    ...(hosts.showBanner && hosts.include
+      ? [{ id: "host.copy-include", title: "Copy the Include line for Portico hosts", hint: "for ~/.ssh/config", run: () => void copyInclude() }]
       : []),
     { id: "app.logs", title: "Session logs", hint: "debug panel, effective config", shortcut: k("app.logs"), run: showLogs },
     ...(recentRow
@@ -460,6 +585,14 @@
       run: () => (tunnelsOpen = true),
     },
     {
+      id: "recordings.open",
+      title: "Recordings…",
+      hint: recCount ? `${recCount} recording now` : "play or delete recorded sessions",
+      // `v` only listens in the host list.
+      shortcut: k("recordings.open") ?? (pane ? undefined : k("hosts.recordings")),
+      run: () => recordings.show(),
+    },
+    {
       id: "files.download-dir",
       title: "Change download folder",
       hint: files.downloadDir || undefined,
@@ -468,8 +601,8 @@
     },
     {
       id: "app.import-termius",
-      title: "Import from Termius…",
-      hint: "Termius CSV, JSON or ssh-config export · previewed before writing",
+      title: "Import hosts…",
+      hint: "Termius or Termix export, detected from the content · previewed before writing",
       shortcut: k("app.import-termius"),
       run: () => void importer.start(),
     },
@@ -496,11 +629,8 @@
   function runAction(id: string) {
     const goto = /^tab\.goto-(\d)$/.exec(id);
     if (goto?.[1]) return workspace.go(Number(goto[1]) - 1);
-    const arrow = /^pane\.(focus|resize)-(left|right|up|down)$/.exec(id);
-    if (arrow?.[2]) {
-      const dir = arrow[2] as Direction;
-      return arrow[1] === "focus" ? workspace.focusDirection(dir) : workspace.resize(dir);
-    }
+    const arrow = /^pane\.focus-(left|right|up|down)$/.exec(id);
+    if (arrow?.[1]) return workspace.focusDirection(arrow[1] as Direction);
     switch (id) {
       case "app.palette":
         paletteOpen = !paletteOpen;
@@ -509,6 +639,9 @@
       case "tab.new":
         return pane ? void workspace.duplicate() : connectSelected();
       case "tab.close":
+        // In a split tab: the focused pane (the last one closes the tab).
+        return void (pane ? workspace.closePane() : workspace.close());
+      case "tab.close-all":
         return void workspace.close();
       case "tab.hosts":
         workspace.active = null;
@@ -545,7 +678,19 @@
         if (targetAlias) void hosts.toggleFavorite(targetAlias);
         return;
       case "hosts.edit":
-        if (targetAlias) hosts.editing = targetAlias;
+        if (targetAlias) editHost(targetAlias);
+        return;
+      case "host.add":
+        hosts.dialog = { kind: "create" };
+        return;
+      case "host.edit":
+        if (targetAlias) void hosts.openEdit(targetAlias);
+        return;
+      case "host.duplicate":
+        if (targetAlias) hosts.dialog = { kind: "duplicate", alias: targetAlias };
+        return;
+      case "host.delete":
+        if (targetAlias) hosts.openDelete(targetAlias);
         return;
       case "hosts.search":
         return searchEl?.focus();
@@ -579,6 +724,13 @@
         return workspace.toggleZoom();
       case "pane.close":
         return void workspace.closePane();
+      case "pane.divider":
+        return focusDivider();
+      case "session.record":
+        return void recordings.toggle(pane);
+      case "recordings.open":
+      case "hosts.recordings":
+        return recordings.show();
       default:
         // Palette-only actions bound in settings.toml run their command.
         commands.find((c) => c.id === id)?.run();
@@ -596,6 +748,8 @@
     // In a field (search, xterm's textarea) or the palette, plain keys type.
     const id = keymap.match(e, pane ? "terminal" : "hosts", paletteOpen || pickerOpen || isField(e.target));
     if (!id) return;
+    // ⌘⌫ (macOS "Delete host") deletes text in a field, never a host.
+    if (id === "host.delete" && isField(e.target)) return;
     e.preventDefault();
     if ((paletteOpen || pickerOpen) && id !== "app.palette") return;
     runAction(id);
@@ -628,6 +782,8 @@
     hadModal = open;
   });
   let toastHeight = $state(0);
+  /** A terminal is on screen (no dialog): notices go to the stage's top-right corner. */
+  const toastOnStage = $derived(!!pane && !modalOpen);
   $effect(() => {
     const room = modalOpen && workspace.toast && toastHeight ? `calc(${toastHeight}px + var(--space-4))` : "0px";
     document.documentElement.style.setProperty("--toast-room", room);
@@ -640,6 +796,8 @@
   onMount(() => {
     // New aliases (and their metadata) show up once the Include line is in place.
     importer.onimported = () => void load();
+    // hosts.conf changed (here or in another UI): reload, keeping the selection.
+    hosts.onchanged = () => void load();
     measurePanes();
     // The mono font may arrive after the first measure.
     void document.fonts.ready.then(measurePanes);
@@ -649,6 +807,7 @@
     const unlisten = [
       backend.onEngineEvent((ev) => {
         workspace.onEvent(ev);
+        recordings.onEvent(ev);
         hosts.onEvent(ev);
         logs.onEvent(ev);
         if (ev.type === "sftp") files.onEvent(ev.session, ev.event);
@@ -656,6 +815,12 @@
         else if (ev.type === "session" && ev.event.kind === "phase" && ["closed", "failed"].includes(ev.event.phase)) {
           files.forget(ev.id);
         }
+      }),
+      // Events were lost: REC is resynchronised from the engine.
+      backend.onEngineLagged(() => {
+        void recordings.resync();
+        // A `hosts_changed` may be among the lost events.
+        void load();
       }),
       backend.onDragging((d) => (files.dragging = d)),
       backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
@@ -665,17 +830,37 @@
     };
   });
 
+  /** "⌥⌘←→" / "Ctrl-Shift-←→": the focus keys of the panes, in one hint. */
+  function arrowsLabel(): string | undefined {
+    const left = k("pane.focus-left");
+    const right = k("pane.focus-right");
+    if (left?.endsWith("←") && right === `${left.slice(0, -1)}→`) return `${left}→`;
+    return left ?? k("pane.next");
+  }
+
   // Status-bar hints, most useful first: when the bar runs out of room
   // they give way from the end of each list (the palette hint stays last).
-  const tabHints = [
-    ["tab.hosts", "hosts"],
-    ["tab.new", "new tab"],
-    ["pane.split-right", "split"],
-    ["tab.close", "close"],
-    ["app.files", "files"],
-    ["app.logs", "logs"],
-    ["app.snippets", "snippets"],
-  ] as const;
+  // A split tab speaks of its panes first.
+  const tabHints: [string | undefined, string][] = $derived(
+    paneCount > 1
+      ? [
+          [arrowsLabel(), "panes"],
+          [closePaneKey, "close pane"],
+          [k("pane.split-right"), "split"],
+          [k("tab.hosts"), "hosts"],
+          [k("app.files"), "files"],
+          [k("app.logs"), "logs"],
+        ]
+      : [
+          [k("tab.hosts"), "hosts"],
+          [k("tab.new"), "new tab"],
+          [k("pane.split-right"), "split"],
+          [k("tab.close"), "close"],
+          [k("app.files"), "files"],
+          [k("app.logs"), "logs"],
+          [k("app.snippets"), "snippets"],
+        ],
+  );
   const hostHints = [
     ["hosts.connect", "connect"],
     ["hosts.search", "search"],
@@ -684,6 +869,7 @@
     ["hosts.files", "files"],
     ["app.logs", "logs"],
     ["hosts.snippets", "snippets"],
+    ["hosts.recordings", "recordings"],
     ["app.theme", "theme"],
   ] as const;
 </script>
@@ -716,6 +902,7 @@
         onactivate={activate}
         onforget={(alias) => void hosts.forgetRecent(alias)}
         ontoggle={(id) => hosts.toggleSection(id)}
+        onadd={() => (hosts.dialog = { kind: "create" })}
       />
       <HostDetails
         host={selectedHost}
@@ -724,8 +911,10 @@
         onconnect={(h) => workspace.open(h.alias)}
         ondisconnect={(h) => workspace.disconnect(h.alias)}
         onfavorite={(h) => void hosts.toggleFavorite(h.alias)}
-        onedit={(h) => (hosts.editing = h.alias)}
+        onedit={(h) => editHost(h.alias)}
         onlogs={showLogs}
+        onduplicate={(h) => (hosts.dialog = { kind: "duplicate", alias: h.alias })}
+        ondelete={(h) => hosts.openDelete(h.alias)}
       />
     </div>
     <div class="stage" bind:clientWidth={stageW} bind:clientHeight={stageH}>
@@ -747,6 +936,7 @@
             focused={t.focus === p.key}
             split={panesOf(t.root).length > 1}
             zoomed={t.zoom === p.key}
+            demoted={dividerFocused && t.key === workspace.active}
             themeId={settings.themeId}
             autofocus={!showFiles}
             onfocusin={() => workspace.focusPane(p.key)}
@@ -754,8 +944,11 @@
         </div>
       {/each}
       {#each paneLayout.dividers as d (d.id)}
-        <PaneDivider divider={d} onrelease={() => pane && views[pane.key]?.focus()} />
+        <PaneDivider divider={d} onrelease={() => pane && views[pane.key]?.focus()} onfocuschange={(f) => (dividerFocused = f)} />
       {/each}
+      {#if workspace.toast && toastOnStage}
+        {@render toastView(workspace.toast)}
+      {/if}
     </div>
     {#if showFiles && pane}
       {#key pane.session}
@@ -769,26 +962,36 @@
       <!-- The status (dot, alias, phase, latency) never shrinks; only the
            terminal title does, then the hints give way (see .hints). -->
       <span class="session" data-status={tabStatus.status}>
-        <span class="dot" class:busy={tabStatus.busy} class:hollow={!!pane.end}></span>
-        <span class="alias">{pane.alias}</span>
+        <span class="dot" class:busy={tabStatus.busy} class:hollow={tabStatus.hollow}></span>
+        <span class="alias" title={pane.alias}>{pane.alias}</span>
         {#if tab && paneCount > 1}
           <span class="pane-pos">pane <span class="mono">{panesOf(tab.root).indexOf(pane.key) + 1}/{paneCount}</span>{tab.zoom !== null ? ", zoomed" : ""}</span>
         {/if}
         {#if pane.end}<span class="ended">{pane.end.kind === "closed" ? "Shell closed" : "Shell exited"}</span>{/if}
         <span class="phase">{pane.end ? `session ${tabStatus.label.toLowerCase()}` : tabStatus.label}</span>
-        {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected"}
+        {#if tabSession?.latencyMs != null && tabSession.phase.phase === "connected" && !tabStatus.failed}
           <span class="rtt mono" class:slow={tabStatus.status === "warning"}>{formatRtt(tabSession.latencyMs)}</span>
         {/if}
-        {#if pane.title}<span class="title" title={pane.title}>{pane.title}</span>{/if}
+        <!-- Split: each pane header shows its own title already. -->
+        {#if pane.title && paneCount < 2}<span class="title" title={pane.title}>{pane.title}</span>
+        {:else if paneHint && paneCount > 1}<span class="title" title={paneHint}>{paneHint}</span>{/if}
       </span>
+      {#if recCount}
+        <RecBadge role="status" title={recHere ? "This pane's output is being recorded" : `${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
+      {/if}
       <span class="hints">
+        <!-- First: the hints give way from the end. -->
+        {#if recHere && k("session.record")}<span><kbd>{k("session.record")}</kbd> stop</span>{/if}
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
-        {#each tabHints as [id, label] (id)}
-          {#if k(id)}<span><kbd>{k(id)}</kbd> {label}</span>{/if}
+        {#each tabHints as [key, label] (label)}
+          {#if key}<span><kbd>{key}</kbd> {label}</span>{/if}
         {/each}
       </span>
     {:else}
       <span class="counts">{hosts.all.length} hosts · {workspace.tabs.length} open</span>
+      {#if recCount}
+        <RecBadge role="status" title={`${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
+      {/if}
       <span class="hints">
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
         {#each hostHints as [id, label] (id)}
@@ -807,8 +1010,8 @@
 <CommandPalette
   bind:open={pickerOpen}
   commands={hostChoices}
-  label="Split with another host"
-  placeholder={pane ? `Split ${pane.alias} with…` : "Split with…"}
+  label="Split pane with host"
+  placeholder={pane ? `Split ${pane.alias}'s pane with…` : "Split pane with…"}
   empty="No host found"
 />
 
@@ -877,6 +1080,16 @@
     host={tunnelSession ? hosts.byAlias[tunnelSession.alias] : undefined}
     onclose={() => (tunnelsOpen = false)}
   />
+{:else if hostDialogOpen && hosts.dialog}
+  {#key hosts.dialog}
+    {#if hosts.dialog.kind === "create"}
+      <HostDialog />
+    {:else if hosts.dialog.kind === "edit" && dialogHost}
+      <HostDialog host={dialogHost} managed={hosts.dialog.managed} />
+    {:else if dialogHost && hosts.dialog.kind !== "edit"}
+      <HostActionDialog dialog={hosts.dialog} host={dialogHost} />
+    {/if}
+  {/key}
 {:else if editing}
   {#key editing.alias}
     <EditHostDialog host={editing} onclose={() => (hosts.editing = null)} />
@@ -906,18 +1119,30 @@
   <LogsDialog />
 {:else if importer.open}
   <ImportDialog />
+{:else if recordings.confirm}
+  {#key recordings.confirm}
+    <RecordConfirm alias={recordings.confirm.alias} folder={recordings.confirm.folder} pane={recordings.confirm.pane} />
+  {/key}
+{:else if recordings.open}
+  <RecordingsDialog themeId={settings.themeId} />
 {/if}
 
-{#if workspace.toast}
-  {@const toast = workspace.toast}
-  <!-- Above an open dialog, the notice goes to the top, in the room the dialog leaves it. -->
+{#if workspace.toast && !toastOnStage}
+  {@render toastView(workspace.toast)}
+{/if}
+
+{#snippet toastView(toast: NonNullable<typeof workspace.toast>)}
+  <!-- Above an open dialog, the notice goes to the top, in the room the
+       dialog leaves it. Over a terminal it goes to the stage's top-right
+       corner, compact: the active pane's input line stays in sight. -->
   <div
     class="toast"
     class:top={modalOpen}
+    class:on-stage={toastOnStage}
     data-tone={toast.tone}
     role={toast.tone === "error" ? "alert" : "status"}
     bind:offsetHeight={toastHeight}
-    transition:fly={{ y: modalOpen ? -12 : 12, duration: dur("base") }}
+    transition:fly={{ y: modalOpen || toastOnStage ? -12 : 12, duration: dur("base") }}
   >
     <svg viewBox="0 0 16 16" aria-hidden="true">
       {#if toast.tone === "error"}<circle cx="8" cy="8" r="6.25" /><path d="M8 4.75v3.75M8 11.1v.1" />
@@ -929,12 +1154,14 @@
       {#if toast.hint}<span>{toast.hint}</span>{/if}
     </div>
   </div>
-{/if}
+{/snippet}
 
 <style>
   .shell {
+    --titlebar-h: 44px;
+    --statusbar-h: 28px;
     display: grid;
-    grid-template-rows: 44px 1fr 28px;
+    grid-template-rows: var(--titlebar-h) 1fr var(--statusbar-h);
     height: 100%;
   }
   .titlebar {
@@ -1038,11 +1265,12 @@
   .session[data-status="connected"] { --c: var(--status-connected); }
   .session[data-status="warning"] { --c: var(--status-warning); }
   .session[data-status="error"] { --c: var(--status-error); }
-  .session .dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
-  .session .dot.hollow { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+  .session .dot { flex: 0 0 auto; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; background: var(--c); }
+  .session .dot.hollow { background: transparent; box-shadow: inset 0 0 0 var(--size-dot-ring) var(--c); }
   .session .dot.busy { animation: pulse var(--motion-loop) var(--ease-standard) infinite; }
   .session .ended { color: var(--text-primary); }
-  .session .alias { color: var(--text-primary); font-weight: 550; }
+  .session .alias { max-width: 24ch; overflow: hidden; color: var(--text-primary); font-weight: 550; text-overflow: ellipsis; }
+  .session[data-status="error"] .phase { color: var(--status-error); }
   .rtt { color: var(--text-muted); }
   .pane-pos .mono { font-variant-numeric: tabular-nums; }
   .rtt.slow { color: var(--status-warning); }
@@ -1077,6 +1305,17 @@
     width: fit-content;
     margin-inline: auto;
   }
+  /* Below the first row of pane headers, clear of every input line. */
+  .toast.on-stage {
+    position: absolute;
+    top: var(--space-7);
+    right: var(--space-3);
+    bottom: auto;
+    gap: var(--space-2);
+    max-width: min(var(--size-card), calc(100% - var(--space-6)));
+    padding: var(--space-2) var(--space-3);
+  }
+  .toast.on-stage .toast-text { gap: 0; }
   .toast[data-tone="warning"] { --c: var(--status-warning); }
   .toast[data-tone="info"] { --c: var(--border-strong); }
   .toast svg {
@@ -1099,7 +1338,7 @@
     padding: 0 var(--space-2);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-pill);
-    letter-spacing: 0.08em;
+    letter-spacing: var(--tracking-caps);
     text-transform: uppercase;
   }
 </style>

@@ -85,6 +85,29 @@ Host gamma
 EOF
 chmod 600 "$home/.ssh/config"
 
+# A Termix export for the import test: one host on the local sshd, with a
+# key of its own (authorized on the server, never in ~/.ssh: the import
+# writes it to ~/.ssh/portico/). Outside ~/.ssh, like a downloaded export.
+mkdir -p "$root/export"
+ssh-keygen -q -t ed25519 -N "" -C e2e-termix -f "$root/export/termix_key"
+cat "$root/export/termix_key.pub" >>"$srv/authorized_keys"
+python3 - "$root/export/termix_key" "$port" "$user" "$root/export/termix_export.json" <<'PY'
+import json, sys
+key_path, port, user, out = sys.argv[1:]
+with open(key_path) as f:
+    key = f.read()
+host = {
+    "id": 1, "name": "Termix Box", "ip": "127.0.0.1", "port": int(port), "username": user,
+    "authType": "key", "password": None, "key": key, "keyPassword": None, "keyType": None,
+    "folder": "Imported", "tags": ["termix"], "pin": False, "enableTerminal": True,
+    "enableTunnel": False, "enableFileManager": True, "defaultPath": "/",
+    "tunnelConnections": [], "socks5ProxyChain": [],
+}
+with open(out, "w") as f:
+    json.dump({"hosts": [host]}, f)
+PY
+rm -f "$root/export/termix_key" "$root/export/termix_key.pub"
+
 # A Unix socket path is limited to ~108 bytes: a short directory of its own,
 # removed by the caller (listed in <root>/dirs).
 sock_dir=$(mktemp -d /tmp/portico-agent.XXXXXX)
@@ -106,6 +129,7 @@ export E2E_PORT=$port
 export E2E_WEB_PORT=$web_port
 export E2E_REMOTE_HOME=$remote
 export E2E_USER=$user
+export E2E_TERMIX_EXPORT=$root/export/termix_export.json
 export USER=$user
 EOF
 

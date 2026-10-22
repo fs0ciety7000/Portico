@@ -9,7 +9,9 @@ use portico_core::forward::ForwardSpec;
 use portico_core::hosts::HostMeta;
 use portico_core::ids::{SessionId, TerminalId, TunnelId};
 use portico_core::keys::LocalKey;
+use portico_core::managed_hosts::{HostSummary, ManagedHostDetails};
 use portico_core::recent::RecentHost;
+use portico_core::recording::RecordingEntry;
 use portico_core::settings::Settings;
 use portico_core::snippets::Snippet;
 use portico_core::vault::VaultStatus;
@@ -17,6 +19,7 @@ use portico_core::{AgentKey, CopyIdOutcome, EngineEvent, ErrorSummary};
 
 use crate::files::FilesEvent;
 use crate::panes::{Dir, PaneId, Split};
+use crate::player::{PlaybackStart, ReaderMsg};
 
 #[derive(Debug)]
 pub(crate) enum Action {
@@ -82,6 +85,8 @@ pub(crate) enum Action {
     ResizePane(Dir),
     ClosePane,
     ZoomPane,
+    /// A timed state ran out (pane repeat window, status-bar note).
+    Expire,
     // SFTP explorer
     OpenFiles,
     FilesKey(KeyEvent),
@@ -167,4 +172,64 @@ pub(crate) enum Action {
     // Settings
     SettingsLoaded(Result<Settings, ErrorSummary>),
     ThemeSaved(Result<(), ErrorSummary>),
+    /// The engine bus dropped events for us: state is resynchronised
+    /// through requests.
+    EngineLagged,
+    // Session recording (phase 6)
+    /// "Record session" / "Stop recording" on the focused pane.
+    ToggleRecording,
+    /// `start_recording` answered. Never turns the REC badge on: only
+    /// `RecordingState::Started` does.
+    RecordingStart(Result<(), ErrorSummary>),
+    OpenRecordings,
+    RecordingsKey(KeyEvent),
+    RecordingsLoaded(Result<Vec<RecordingEntry>, ErrorSummary>),
+    RecordingDeleted {
+        name: String,
+        result: Result<(), ErrorSummary>,
+    },
+    /// A recording opened for playback (its reader thread is running).
+    PlaybackOpened {
+        name: String,
+        total: Option<f64>,
+        result: Result<PlaybackStart, ErrorSummary>,
+    },
+    PlayerKey(KeyEvent),
+    /// The recording reopened for a seek (`←`, `Home`, replay): the
+    /// player starts over and fast-replays to the target. `generation`
+    /// tells a stale reopening from the last one asked.
+    PlaybackSeek {
+        generation: u64,
+        result: Result<PlaybackStart, ErrorSummary>,
+    },
+    /// Next message of the playback reader (`None`: the reader is gone).
+    PlayerFeed(Option<ReaderMsg>),
+    // Hosts created in Portico (phase 6b)
+    /// "Add host…".
+    AddHost,
+    /// "Duplicate as Portico host…" on the selected host.
+    DuplicateHost,
+    /// "Delete host" on the selected host (asks first).
+    DeleteHost,
+    HostFormKey(KeyEvent),
+    /// Local keys for the form's key picker.
+    HostFormKeys(Result<Vec<LocalKey>, ErrorSummary>),
+    /// "Edit host…": the values `hosts.conf` holds for `alias`
+    /// (`Engine::managed_host_details`; `None`: no longer in that file).
+    HostFormManaged {
+        alias: String,
+        result: Result<Option<ManagedHostDetails>, ErrorSummary>,
+    },
+    /// A create, edit or duplicate came back.
+    HostSaved(Result<HostSummary, ErrorSummary>),
+    HostDeleted {
+        alias: String,
+        result: Result<(), ErrorSummary>,
+    },
+    /// Whether `~/.ssh/config` already includes `hosts.conf`.
+    IncludeChecked(Result<bool, ErrorSummary>),
+    /// Copies the proposed `Include` line (OSC 52).
+    CopyInclude,
+    /// Hides the `Include` banner until Portico restarts.
+    HideInclude,
 }

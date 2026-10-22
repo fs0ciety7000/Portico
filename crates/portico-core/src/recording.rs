@@ -12,15 +12,25 @@
 //!   terminal task, after the bytes were handed to the UI.
 //! - **Minimal header**: `version`, `width`, `height`, `timestamp`,
 //!   `title` = alias, `env` = `{TERM}` only.
-//! - **Private files**: `<data_dir>/recordings/` (`0700`, a symlinked folder
-//!   is refused), `<alias>-<UTC timestamp>.cast` created `0600` with
-//!   `create_new` (a planted file or symlink is never opened).
+//! - **Private files**: `<data_dir>/recordings/` (`0700`, owned by the
+//!   current user; a symlinked folder or one owned by someone else is
+//!   refused; on Unix the folder is opened once with `O_NOFOLLOW` and checked
+//!   and tightened through that descriptor), `<alias>-<UTC timestamp>.cast`
+//!   created `0600` with `O_CREAT|O_EXCL|O_NOFOLLOW` relative to it (a
+//!   planted file or symlink is never opened). Every created name passes
+//!   [`validate_name`], so it can be listed, played and deleted.
 //! - **The PTY never waits for the disk**: the terminal task pushes events
-//!   with `try_send` into a bounded queue drained by a dedicated blocking
-//!   writer. A full queue or a failed write **stops** the recording with a
+//!   with `try_send` into a bounded queue drained by a dedicated writer
+//!   thread (`portico-rec`, one per recording, never a `spawn_blocking`
+//!   slot). A full queue or a failed write **stops** the recording with a
 //!   reason ([`RecordingStopReason`]) rather than leaving a file with holes.
+//! - **Complete lines only**: the writer hands the file whole lines; after a
+//!   failed write (disk full) the file is cut back to the last line that was
+//!   fully written ([`truncate_to_committed`]).
 //! - **Capped** at [`MAX_RECORDING_BYTES`]: the writer stops cleanly, the file
 //!   ends on a complete line.
+//! - **Playable**: widths and heights are clamped to
+//!   [`MAX_PLAYBACK_DIMENSION`] when written, as when read.
 //! - Times are seconds (`f64`) since the start, from a monotonic clock, never
 //!   decreasing.
 //! - No log line, event or error message carries recorded bytes: only
@@ -32,7 +42,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -76,6 +86,9 @@ const MAX_NAME_BYTES: usize = 255;
 const MAX_LISTED: usize = 10_000;
 /// Bytes read from the end of a file to find its duration.
 const TAIL_PROBE_BYTES: u64 = 64 * 1024;
+/// Bytes buffered by [`CastWriter`] before they are handed to the file (whole
+/// lines only).
+const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// Output text per `o` event: even fully escaped (`\u001b` = 6 bytes per
 /// byte) a line stays well under [`MAX_LINE_BYTES`].
 const MAX_OUTPUT_PER_EVENT: usize = 64 * 1024;
@@ -105,6 +118,10 @@ pub enum RecordingError {
     NotFound { name: String },
     #[error("{} is a symlink or not a regular file or folder: refused", path.display())]
     UnsafePath { path: PathBuf },
+    #[error("{} is not owned by the current user: refused", path.display())]
+    ForeignOwner { path: PathBuf },
+    #[error("recording {name} is still being written")]
+    Active { name: String },
     #[error("cannot create the recording {}: {source}", path.display())]
     Create {
         path: PathBuf,
@@ -166,6 +183,16 @@ impl RecordingError {
                 Some(
                     "Portico refuses symlinks in its recordings folder: replace the link with a regular folder or file.",
                 ),
+            ),
+            Self::ForeignOwner { .. } => (
+                "recording_foreign_owner",
+                Some(
+                    "Another user owns the recordings folder: remove it or give it back to your account.",
+                ),
+            ),
+            Self::Active { .. } => (
+                "recording_active",
+                Some("Stop the recording first, then delete it."),
             ),
             Self::Create { .. } => (
                 "recording_create_failed",
@@ -316,19 +343,21 @@ pub struct TimedEvent {
 // ── Names and paths ─────────────────────────────────────────────────────
 
 /// `alias` made safe for a file name: `[A-Za-z0-9._-]` kept, anything else
-/// becomes `_`, no leading `.` or `-`, at most 64 characters, `session` if
-/// nothing is left.
+/// becomes `_`, runs of `.` collapse to one (a name never holds `..`, which
+/// [`validate_name`] refuses), no leading `.` or `-`, at most 64 characters,
+/// `session` if nothing is left.
 pub fn sanitize_alias(alias: &str) -> String {
-    let mapped: String = alias
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let mut mapped = String::with_capacity(alias.len());
+    for c in alias.chars() {
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            c
+        } else {
+            '_'
+        };
+        if !(c == '.' && mapped.ends_with('.')) {
+            mapped.push(c);
+        }
+    }
     let trimmed: String = mapped
         .trim_start_matches(['.', '-'])
         .chars()
@@ -387,23 +416,98 @@ fn check_dir(dir: &Path) -> Result<bool> {
     }
 }
 
+/// The recordings folder, checked. On Unix it is held open: the checks and
+/// the `chmod` go through the descriptor (never a path that could be swapped
+/// meanwhile), and files are created relative to it.
+#[derive(Debug)]
+struct PrivateDir {
+    path: PathBuf,
+    #[cfg(unix)]
+    fd: std::os::fd::OwnedFd,
+}
+
 /// Creates the recordings folder (`0700`) or checks the existing one: a
-/// symlink is refused, loose permissions are tightened.
-fn ensure_private_dir(dir: &Path) -> Result<()> {
+/// symlink, a non-folder or a folder owned by another user is refused, loose
+/// permissions are tightened.
+fn ensure_private_dir(dir: &Path) -> Result<PrivateDir> {
     if !check_dir(dir)? {
         crate::store::create_private_dir_all(dir)?;
-        check_dir(dir)?;
     }
+    open_private_dir(dir)
+}
+
+#[cfg(unix)]
+fn open_private_dir(dir: &Path) -> Result<PrivateDir> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    let unsafe_path = || {
+        rec_err(RecordingError::UnsafePath {
+            path: dir.to_path_buf(),
+        })
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = match rustix::fs::open(dir, flags, Mode::empty()) {
+        Ok(fd) => fd,
+        // A symlink (`ELOOP`) or not a folder: swapped after the check.
+        Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => return Err(unsafe_path()),
+        Err(e) => return Err(Error::io(dir, e.into())),
+    };
+    let stat = rustix::fs::fstat(&fd).map_err(|e| Error::io(dir, e.into()))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return Err(unsafe_path());
+    }
+    if stat.st_uid != rustix::process::geteuid().as_raw() {
+        return Err(rec_err(RecordingError::ForeignOwner {
+            path: dir.to_path_buf(),
+        }));
+    }
+    if Mode::from_raw_mode(stat.st_mode).intersects(Mode::RWXG | Mode::RWXO) {
+        rustix::fs::fchmod(&fd, Mode::RWXU).map_err(|e| Error::io(dir, e.into()))?;
+    }
+    Ok(PrivateDir {
+        path: dir.to_path_buf(),
+        fd,
+    })
+}
+
+#[cfg(not(unix))]
+fn open_private_dir(dir: &Path) -> Result<PrivateDir> {
+    if !check_dir(dir)? {
+        return Err(rec_err(RecordingError::UnsafePath {
+            path: dir.to_path_buf(),
+        }));
+    }
+    Ok(PrivateDir {
+        path: dir.to_path_buf(),
+    })
+}
+
+impl PrivateDir {
+    /// A new `0600` file `name` in the folder, `O_EXCL` (never an existing
+    /// file nor a symlink).
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::symlink_metadata(dir).map_err(|e| Error::io(dir, e))?;
-        if meta.permissions().mode() & 0o077 != 0 {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| Error::io(dir, e))?;
-        }
+    fn create_new(&self, name: &str) -> std::io::Result<File> {
+        use rustix::fs::{Mode, OFlags};
+        let flags =
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(&self.fd, name, flags, Mode::RUSR | Mode::WUSR)?;
+        Ok(File::from(fd))
     }
-    Ok(())
+
+    #[cfg(not(unix))]
+    fn create_new(&self, name: &str) -> std::io::Result<File> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.path.join(name))
+    }
+
+    /// Removes `name` from the folder (best effort: cleanup after a failure).
+    fn remove(&self, name: &str) {
+        #[cfg(unix)]
+        let _ = rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty());
+        #[cfg(not(unix))]
+        let _ = std::fs::remove_file(self.path.join(name));
+    }
 }
 
 /// Opens an existing file for reading without following a symlink and
@@ -420,29 +524,17 @@ fn open_nofollow(path: &Path) -> std::io::Result<File> {
     opts.open(path)
 }
 
-/// A new `0600` file, `O_EXCL` (never an existing file nor a symlink).
-fn create_new_private(path: &Path) -> std::io::Result<File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-        let flags = rustix::fs::OFlags::NOFOLLOW;
-        opts.custom_flags(i32::try_from(flags.bits()).unwrap_or(0));
-    }
-    opts.open(path)
-}
-
 /// A freshly created recording file, header written.
 #[derive(Debug)]
 pub(crate) struct NewRecording {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
-    pub(crate) writer: CastWriter<BufWriter<File>>,
+    pub(crate) writer: CastWriter<File>,
 }
 
-/// Creates `<dir>/<alias>-<timestamp>.cast` and writes its header.
+/// Creates `<dir>/<alias>-<timestamp>.cast` and writes its header. The name
+/// always passes [`validate_name`] (checked: a name the listing would hide
+/// is never created).
 pub(crate) fn create_recording(
     dir: &Path,
     alias: &str,
@@ -450,7 +542,7 @@ pub(crate) fn create_recording(
     size: PtySize,
     max_bytes: u64,
 ) -> Result<NewRecording> {
-    ensure_private_dir(dir)?;
+    let folder = ensure_private_dir(dir)?;
     let base = format!("{}-{}", sanitize_alias(alias), name_timestamp(at));
     let mut attempt = 1u32;
     let (name, path, file) = loop {
@@ -459,8 +551,9 @@ pub(crate) fn create_recording(
         } else {
             format!("{base}-{attempt}.{CAST_EXTENSION}")
         };
-        let path = dir.join(&name);
-        match create_new_private(&path) {
+        validate_name(&name).map_err(rec_err)?;
+        let path = folder.path.join(&name);
+        match folder.create_new(&name) {
             Ok(file) => break (name, path, file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < NAME_ATTEMPTS => {
                 attempt = attempt.saturating_add(1);
@@ -468,11 +561,11 @@ pub(crate) fn create_recording(
             Err(source) => return Err(rec_err(RecordingError::Create { path, source })),
         }
     };
-    let mut writer = CastWriter::new(BufWriter::new(file), max_bytes);
+    let mut writer = CastWriter::new(file, max_bytes);
     let header = header_line(alias, size, at);
     if let Err(source) = writer.write_line(&header).and_then(|()| writer.flush()) {
         drop(writer);
-        let _ = std::fs::remove_file(&path);
+        folder.remove(&name);
         return Err(rec_err(RecordingError::Create {
             path,
             source: source.into_io(),
@@ -481,12 +574,18 @@ pub(crate) fn create_recording(
     Ok(NewRecording { name, path, writer })
 }
 
+/// A width or height as written: within `1..=MAX_PLAYBACK_DIMENSION`, so
+/// that the reader (which refuses more) can always play the file back.
+fn playable(dimension: u16) -> u16 {
+    dimension.clamp(1, MAX_PLAYBACK_DIMENSION)
+}
+
 /// The JSON header line (no newline).
 fn header_line(alias: &str, size: PtySize, at: OffsetDateTime) -> String {
     let header = serde_json::json!({
         "version": 2,
-        "width": size.cols.max(1),
-        "height": size.rows.max(1),
+        "width": playable(size.cols),
+        "height": playable(size.rows),
         "timestamp": at.unix_timestamp(),
         "title": alias,
         "env": { "TERM": crate::session::terminal::TERM },
@@ -592,9 +691,17 @@ impl Utf8Stream {
 }
 
 /// Writes asciicast lines, counting bytes against the cap.
+///
+/// Lines are gathered in a buffer of whole lines and handed to the sink with
+/// one `write_all` per batch: [`CastWriter::written`] counts the bytes of
+/// the batches that reached the sink entirely, so it always ends on a line
+/// boundary, even after a failed write.
 pub(crate) struct CastWriter<W: Write> {
     sink: W,
-    written: u64,
+    /// Complete lines not yet handed to the sink.
+    pending: Vec<u8>,
+    /// Bytes that reached the sink (whole lines).
+    committed: u64,
     max_bytes: u64,
     utf8: Utf8Stream,
     /// Time of the last event written.
@@ -604,7 +711,8 @@ pub(crate) struct CastWriter<W: Write> {
 impl<W: Write> fmt::Debug for CastWriter<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CastWriter")
-            .field("written", &self.written)
+            .field("committed", &self.committed)
+            .field("pending", &self.pending.len())
             .field("max_bytes", &self.max_bytes)
             .field("last_time", &self.last_time)
             .finish_non_exhaustive()
@@ -620,11 +728,16 @@ fn round_time(at: f64) -> f64 {
     }
 }
 
+fn byte_len(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 impl<W: Write> CastWriter<W> {
     pub(crate) fn new(sink: W, max_bytes: u64) -> Self {
         Self {
             sink,
-            written: 0,
+            pending: Vec::new(),
+            committed: 0,
             max_bytes,
             utf8: Utf8Stream::default(),
             last_time: 0.0,
@@ -635,19 +748,43 @@ impl<W: Write> CastWriter<W> {
         self.last_time
     }
 
+    /// Bytes of complete lines that reached the sink.
+    pub(crate) fn written(&self) -> u64 {
+        self.committed
+    }
+
+    /// The sink, without writing what is still buffered.
+    pub(crate) fn into_sink(self) -> W {
+        self.sink
+    }
+
     /// One line plus `\n`, refused whole if it would pass the cap.
     fn write_line(&mut self, line: &str) -> std::result::Result<(), WriteStop> {
-        let len = u64::try_from(line.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        if self.written.saturating_add(len) > self.max_bytes {
+        let len = byte_len(line.len()).saturating_add(1);
+        let total = self
+            .committed
+            .saturating_add(byte_len(self.pending.len()))
+            .saturating_add(len);
+        if total > self.max_bytes {
             return Err(WriteStop::SizeLimit);
         }
-        self.sink
-            .write_all(line.as_bytes())
-            .and_then(|()| self.sink.write_all(b"\n"))
-            .map_err(WriteStop::Io)?;
-        self.written = self.written.saturating_add(len);
+        self.pending.extend_from_slice(line.as_bytes());
+        self.pending.push(b'\n');
+        if self.pending.len() >= WRITE_BUFFER_BYTES {
+            self.write_pending()?;
+        }
+        Ok(())
+    }
+
+    /// Hands the buffered lines to the sink. On failure part of them may
+    /// have reached it: [`CastWriter::written`] does not count them.
+    fn write_pending(&mut self) -> std::result::Result<(), WriteStop> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let batch = std::mem::take(&mut self.pending);
+        self.sink.write_all(&batch).map_err(WriteStop::Io)?;
+        self.committed = self.committed.saturating_add(byte_len(batch.len()));
         Ok(())
     }
 
@@ -677,7 +814,8 @@ impl<W: Write> CastWriter<W> {
             }
             TapEvent::Resize { at, cols, rows } => {
                 let at = round_time(at).max(self.last_time);
-                let line = serde_json::to_string(&(at, "r", format!("{cols}x{rows}")))
+                let size = format!("{}x{}", playable(cols), playable(rows));
+                let line = serde_json::to_string(&(at, "r", size))
                     .map_err(|e| WriteStop::Io(std::io::Error::other(e)))?;
                 self.write_line(&line)?;
                 self.last_time = at;
@@ -687,22 +825,51 @@ impl<W: Write> CastWriter<W> {
     }
 
     pub(crate) fn flush(&mut self) -> std::result::Result<(), WriteStop> {
+        self.write_pending()?;
         self.sink.flush().map_err(WriteStop::Io)
     }
 
-    /// Writes what the UTF-8 decoder still holds, flushes, returns the sink.
-    pub(crate) fn finish(mut self) -> (W, std::result::Result<(), WriteStop>) {
+    /// Writes what the UTF-8 decoder still holds and flushes. After an
+    /// `Io` error, cut the file back with [`truncate_to_committed`].
+    pub(crate) fn finish_in_place(&mut self) -> std::result::Result<(), WriteStop> {
         let tail = self.utf8.finish();
-        let mut result = match tail {
+        let result = match tail {
             Some(text) => self.write_output(self.last_time, &text),
             None => Ok(()),
         };
         let flushed = self.flush();
-        if result.is_ok() {
-            result = flushed;
-        }
+        result.and(flushed)
+    }
+
+    /// [`CastWriter::finish_in_place`], then returns the sink.
+    #[cfg(test)]
+    pub(crate) fn finish(mut self) -> (W, std::result::Result<(), WriteStop>) {
+        let result = self.finish_in_place();
         (self.sink, result)
     }
+}
+
+/// A sink that can be cut back to a length (`ftruncate` for a file).
+pub(crate) trait Truncate {
+    fn truncate_to(&mut self, len: u64) -> std::io::Result<()>;
+}
+
+impl Truncate for File {
+    fn truncate_to(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+}
+
+/// After a failed write (disk full…): drops what is still buffered and cuts
+/// the sink back to the complete lines that reached it, so a partly written
+/// last line never remains. Returns the sink.
+pub(crate) fn truncate_to_committed<W: Write + Truncate>(
+    writer: CastWriter<W>,
+) -> std::io::Result<W> {
+    let written = writer.written();
+    let mut sink = writer.into_sink();
+    sink.truncate_to(written)?;
+    Ok(sink)
 }
 
 /// Drains `rx` into `writer` until the queue closes (`None`) or the writer
@@ -834,8 +1001,13 @@ impl TerminalTap {
         });
     }
 
-    /// Reserves the terminal for a new recording; returns its current size.
-    pub(crate) fn begin(&self, id: TerminalId) -> std::result::Result<PtySize, RecordingError> {
+    /// Reserves the terminal for a new recording. The reservation releases
+    /// the terminal when dropped unless it was activated: an error or a
+    /// cancelled start never leaves the terminal stuck in "starting".
+    pub(crate) fn begin(
+        self: &Arc<Self>,
+        id: TerminalId,
+    ) -> std::result::Result<StartReservation, RecordingError> {
         let mut state = self.lock();
         if state.closed {
             return Err(RecordingError::UnknownTerminal(id));
@@ -846,11 +1018,14 @@ impl TerminalTap {
         }
         state.active = None;
         state.starting = true;
-        Ok(state.size)
+        Ok(StartReservation {
+            tap: Some(Arc::clone(self)),
+            size: state.size,
+        })
     }
 
     /// Releases a reservation that did not lead to a recording.
-    pub(crate) fn abort_start(&self) {
+    fn abort_start(&self) {
         self.lock().starting = false;
     }
 
@@ -858,7 +1033,7 @@ impl TerminalTap {
     /// a resize that happened meanwhile is recorded at time 0. Returns
     /// `false` if the terminal closed meanwhile (`tx` is dropped, so the
     /// writer ends with `terminal_closed`).
-    pub(crate) fn activate(
+    fn activate(
         &self,
         tx: mpsc::Sender<TapEvent>,
         stop: Arc<StopCell>,
@@ -918,20 +1093,81 @@ impl TerminalTap {
     }
 }
 
+/// A terminal reserved for a recording being started (RAII): dropped without
+/// [`StartReservation::activate`] (creation failed, start cancelled, engine
+/// shut down), it releases the terminal.
+#[derive(Debug)]
+pub(crate) struct StartReservation {
+    tap: Option<Arc<TerminalTap>>,
+    size: PtySize,
+}
+
+impl StartReservation {
+    /// The terminal size when reserved (written in the header).
+    pub(crate) fn size(&self) -> PtySize {
+        self.size
+    }
+
+    /// Starts feeding `tx` (see [`TerminalTap`]): `false` if the terminal
+    /// closed meanwhile. Consumes the reservation, so it is never released
+    /// twice.
+    pub(crate) fn activate(mut self, tx: mpsc::Sender<TapEvent>, stop: Arc<StopCell>) -> bool {
+        match self.tap.take() {
+            Some(tap) => tap.activate(tx, stop, self.size),
+            None => false,
+        }
+    }
+}
+
+impl Drop for StartReservation {
+    fn drop(&mut self) {
+        if let Some(tap) = self.tap.take() {
+            tap.abort_start();
+        }
+    }
+}
+
 // ── Reader ──────────────────────────────────────────────────────────────
 
-/// Control characters (C0, DEL, C1) and bidi overrides replaced, at most
-/// `max` characters: a header field is shown in lists.
+/// Unicode general category `Cf` (format characters: bidi marks and
+/// overrides, zero-width characters, invisible operators, tags…), as of
+/// Unicode 16. They are invisible yet change how a label reads.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// A header field shown in lists: control characters (C0, DEL, C1)
+/// replaced, format characters (`Cf`: bidi marks and overrides, zero-width
+/// characters) and line / paragraph separators (U+2028, U+2029) dropped, at
+/// most `max` characters kept.
 fn sanitize_label(text: &str, max: usize) -> String {
     text.chars()
+        .filter(|c| !is_format_char(*c) && !matches!(c, '\u{2028}' | '\u{2029}'))
         .take(max)
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
-                '\u{FFFD}'
-            } else {
-                c
-            }
-        })
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
         .collect()
 }
 
@@ -1267,7 +1503,8 @@ impl PlaybackTiming {
 enum SanitizerState {
     #[default]
     Ground,
-    /// After ESC.
+    /// After ESC (not emitted yet: it is emitted with the character that
+    /// completes it, or dropped).
     Esc,
     /// Inside an OSC. `keep`: `None` until the number is read.
     Osc {
@@ -1280,16 +1517,31 @@ enum SanitizerState {
 }
 
 /// Neutralises, in **untrusted** playback output, the escape sequences that
-/// act outside the terminal grid, keeping state across chunks:
+/// act outside the terminal grid, keeping state across chunks. It is an
+/// **allowlist**:
 ///
 /// - every OSC is dropped (clipboard 52, titles 0/1/2, hyperlinks 8 (the
 ///   link text stays), notifications 9/777, cwd 7, iTerm 1337…), except the
 ///   colour *settings* 4, 10, 11, 12, 104, 110, 111, 112 (queries with `?`
-///   dropped too, the player has nobody to answer);
+///   dropped too, the player has nobody to answer); a kept OSC is re-emitted
+///   from what was parsed (C0 inside it, ignored by emulators, removed);
 /// - DCS, SOS, PM and APC strings are dropped (tmux passthrough, `DECRQSS`
-///   queries, sixel);
-/// - 7-bit and C1 (U+009D, U+0090…) introducers alike; an OSC ends on BEL,
-///   ST (`ESC \` or U+009C), and is aborted by CAN, SUB or another ESC.
+///   queries, and sixel images too);
+/// - C1 controls (U+0080–U+009F) are **never emitted**: in any state a C1
+///   aborts the current sequence; U+009D opens an OSC, U+0090, U+0098,
+///   U+009E, U+009F a dropped string, U+009C ends a string, any other one
+///   is dropped;
+/// - an OSC ends on BEL or ST (`ESC \` or U+009C), and is aborted by CAN,
+///   SUB, another ESC or a C1;
+/// - after ESC, like xterm.js and vte, C0 controls are executed (emitted)
+///   while the escape stays pending, DEL is ignored; CAN and SUB cancel it;
+///   a non-ASCII character cancels it (the character is kept as text).
+///
+/// **Invariant** of the output: every ESC is immediately followed by a
+/// character in `0x20..=0x7E`, and the only ESC + `]` are the kept colour
+/// OSCs (no ESC + `P`, `X`, `^`, `_`); no C1 is ever emitted. So the output
+/// cannot leave the parser of xterm.js or vte in an escape, OSC or string
+/// state that the sanitiser did not see, whatever the chunking.
 ///
 /// Everything else (text, SGR colours, cursor moves, CSI, modes) passes
 /// unchanged. The player must not feed emulator replies back anywhere.
@@ -1303,6 +1555,19 @@ fn osc_allowed(number: &str) -> bool {
         number,
         "4" | "10" | "11" | "12" | "104" | "110" | "111" | "112"
     )
+}
+
+/// U+0080–U+009F.
+fn is_c1(c: char) -> bool {
+    matches!(c, '\u{80}'..='\u{9f}')
+}
+
+fn new_osc() -> SanitizerState {
+    SanitizerState::Osc {
+        body: String::new(),
+        keep: None,
+        esc: false,
+    }
 }
 
 impl PlaybackSanitizer {
@@ -1324,43 +1589,41 @@ impl PlaybackSanitizer {
         self.state = SanitizerState::Ground;
     }
 
+    /// What a C1 does, in any state: the current sequence is aborted and the
+    /// C1 is never emitted.
+    fn c1(c: char) -> SanitizerState {
+        match c {
+            '\u{9d}' => new_osc(),
+            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => SanitizerState::StringDrop { esc: false },
+            _ => SanitizerState::Ground,
+        }
+    }
+
     fn step(&mut self, c: char, out: &mut String) {
         let mut next = Some(c);
         while let Some(c) = next.take() {
             let state = std::mem::take(&mut self.state);
+            // U+009C (ST) ends a string normally; any other C1 aborts.
+            let ends_string = c == '\u{9c}'
+                && matches!(
+                    state,
+                    SanitizerState::Osc { esc: false, .. }
+                        | SanitizerState::StringDrop { esc: false }
+                );
+            if is_c1(c) && !ends_string {
+                self.state = Self::c1(c);
+                continue;
+            }
             self.state = match state {
-                SanitizerState::Ground => match c {
-                    '\x1b' => SanitizerState::Esc,
-                    '\u{9d}' => SanitizerState::Osc {
-                        body: String::new(),
-                        keep: None,
-                        esc: false,
-                    },
-                    '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                        SanitizerState::StringDrop { esc: false }
-                    }
-                    _ => {
+                SanitizerState::Ground => {
+                    if c == '\x1b' {
+                        SanitizerState::Esc
+                    } else {
                         out.push(c);
                         SanitizerState::Ground
                     }
-                },
-                SanitizerState::Esc => match c {
-                    ']' => SanitizerState::Osc {
-                        body: String::new(),
-                        keep: None,
-                        esc: false,
-                    },
-                    'P' | 'X' | '^' | '_' => SanitizerState::StringDrop { esc: false },
-                    // ESC ESC restarts the escape (VT parser), and a bare ST
-                    // (no string to end) does nothing: both dropped.
-                    '\x1b' => SanitizerState::Esc,
-                    '\\' => SanitizerState::Ground,
-                    _ => {
-                        out.push('\x1b');
-                        out.push(c);
-                        SanitizerState::Ground
-                    }
-                },
+                }
+                SanitizerState::Esc => Self::esc(c, out, &mut next),
                 SanitizerState::Osc { body, keep, esc } => {
                     Self::osc(c, body, keep, esc, out, &mut next)
                 }
@@ -1379,6 +1642,34 @@ impl PlaybackSanitizer {
                     _ => SanitizerState::StringDrop { esc: false },
                 },
             };
+        }
+    }
+
+    /// The character after a (pending, unemitted) ESC.
+    fn esc(c: char, out: &mut String, next: &mut Option<char>) -> SanitizerState {
+        match c {
+            ']' => new_osc(),
+            'P' | 'X' | '^' | '_' => SanitizerState::StringDrop { esc: false },
+            // ESC ESC restarts the escape (VT parser), DEL is ignored there.
+            '\x1b' | '\x7f' => SanitizerState::Esc,
+            // A bare ST (no string to end) does nothing; CAN and SUB cancel.
+            '\\' | '\x18' | '\x1a' => SanitizerState::Ground,
+            // Other C0: executed by the emulator, the escape stays pending.
+            '\0'..='\x1f' => {
+                out.push(c);
+                SanitizerState::Esc
+            }
+            ' '..='~' => {
+                out.push('\x1b');
+                out.push(c);
+                SanitizerState::Ground
+            }
+            // Non-ASCII: xterm.js cancels the escape, vte ignores the bytes
+            // and stays in it. The ESC is dropped, the character is text.
+            _ => {
+                *next = Some(c);
+                SanitizerState::Ground
+            }
         }
     }
 
@@ -1417,6 +1708,14 @@ impl PlaybackSanitizer {
                 };
             }
             '\x18' | '\x1a' => return SanitizerState::Ground,
+            // Other C0 inside an OSC: ignored by xterm.js and vte.
+            '\0'..='\x1f' => {
+                return SanitizerState::Osc {
+                    body,
+                    keep,
+                    esc: false,
+                };
+            }
             _ => {}
         }
         match keep {

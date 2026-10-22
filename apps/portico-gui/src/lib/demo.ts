@@ -5,19 +5,35 @@
 // new host key, `db-prod` goes through a jump host and asks for a password
 // (anything but "wrong" works), `staging` presents a changed host key.
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
+import type { EngineEvent, ErrorSummary, Host, HostOrigin, ImportSource, Phase, PromptAnswer, PromptKind, RemoteEntry, ThemeInfo, TunnelInfo, Upload } from "./api";
 import type { Backend } from "./backend";
+import { demoHostsBackend, demoPorticoHosts } from "./demo-hosts";
 import { demoKeys } from "./demo-keys";
 import { demoMeta } from "./demo-meta";
 import { demoImport } from "./demo-import";
+import { demoRecording } from "./demo-recording";
 
-const base = { identityFiles: [], localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [], group: null as string | null, notes: null as string | null };
+const base = {
+  identityFiles: [],
+  localForwards: [],
+  remoteForwards: [],
+  dynamicForwards: [] as string[],
+  warnings: [],
+  group: null as string | null,
+  notes: null as string | null,
+  origin: "ssh_config" as HostOrigin,
+  importedFrom: null as ImportSource | null,
+};
 
 // `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).
 const grouped = new URLSearchParams(location.search).get("groups") !== "none";
 const group = (name: string) => (grouped ? name : null);
 
+const created = demoPorticoHosts();
+
 export const demoHosts: Host[] = [
+  // hosts.conf is read before ~/.ssh/config (as if included at its top).
+  ...created.filter((h) => h.origin === "portico"),
   {
     ...base,
     alias: "db-prod",
@@ -41,6 +57,8 @@ export const demoHosts: Host[] = [
   ...(new URLSearchParams(location.search).get("long") === "1"
     ? [{ ...base, alias: "analytics-warehouse-replica-eu-west-3-standby", hostname: "10.0.7.31", user: "analyst", port: 22, proxyJump: ["bastion"], tags: ["analytics"], favorite: true, group: group("Production"), source: "~/.ssh/config:44" }]
     : []),
+  // The Termius import file, included at the end of ~/.ssh/config.
+  ...created.filter((h) => h.origin === "imported"),
 ];
 
 export const demoThemes: ThemeInfo[] = [
@@ -135,7 +153,9 @@ async function run(id: number, host: Host) {
       hint: "Do not connect. Verify the new key with the server administrator; if legitimate, remove the old line from known_hosts.",
     });
   }
-  if (host.alias === "web-01") {
+  // `nas` is a Portico host created with a password: accepting its first
+  // key sends that password (`sends_remembered_password`).
+  if (host.alias === "web-01" || host.alias === "nas") {
     const a = await ask(id, {
       kind: "unknown_host_key",
       host: host.hostname,
@@ -143,6 +163,7 @@ async function run(id: number, host: Host) {
       algorithm: "ssh-ed25519",
       fingerprint: "SHA256:q2Xn8kD0bT1sV9cXr4mJ7yPwZ3aLhE5uGfN6oKiRtYs",
       other_algorithms: [],
+      sends_remembered_password: host.alias === "nas",
     });
     if (a.kind !== "accept_host_key") {
       return fail(id, { code: "host_key_rejected", message: `host key for ${host.hostname} was not trusted`, hint: null });
@@ -205,9 +226,14 @@ function exec(id: number, t: DemoTerminal, cmd: string) {
     case "uptime":
       out(" 17:42:08 up 41 days,  3:12,  1 user,  load average: 0.08, 0.11, 0.09\r\n");
       break;
+    case "flood":
+      for (let i = 0; i < 40; i++) out(`\x1b[2m${String(i).padStart(4, "0")}\x1b[0m GET /api/orders?page=${i} 200 ${12 + (i % 7)} ms\r\n`);
+      rec.flood(id);
+      break;
     case "exit":
       out("logout\r\n");
       terminals.delete(id);
+      rec.terminalClosed(id);
       emit({ type: "terminal", id, session: t.session, event: { kind: "exited", status: 0, signal: null } });
       emit({ type: "terminal", id, session: t.session, event: { kind: "closed" } });
       return;
@@ -343,6 +369,14 @@ const keyDemo = demoKeys({
 
 const meta = demoMeta({ emit, hosts: demoHosts });
 
+const rec = demoRecording({
+  emit,
+  terminal: (id) => {
+    const t = terminals.get(id);
+    return t ? { alias: t.host.alias, session: t.session } : undefined;
+  },
+});
+
 /** Rough stand-in for portico-core's search: words, `#tag`, `@group`, `*`. */
 function demoSearch(q: string): Host[] {
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -356,11 +390,16 @@ function demoSearch(q: string): Host[] {
   );
 }
 
+const managed = demoHostsBackend({ emit, hosts: demoHosts, keys: () => keyDemo.listKeys(), vaultStatus: () => keyDemo.vaultStatus() });
+
 export const demoBackend: Backend = {
   ...keyDemo,
   ...meta.backend,
   ...demoImport,
-  listHosts: async () => demoHosts,
+  ...rec.backend,
+  ...managed,
+  // Copies: the UI's state never aliases the simulation's own objects.
+  listHosts: async () => demoHosts.map((h) => structuredClone(h)),
   searchHosts: async (q) => demoSearch(q),
   listThemes: async () => demoThemes,
   homeDir: async () => "/home/demo",
@@ -382,6 +421,7 @@ export const demoBackend: Backend = {
     for (const [tid, t] of terminals) {
       if (t.session === id) {
         terminals.delete(tid);
+        rec.terminalClosed(tid);
         emit({ type: "terminal", id: tid, session: id, event: { kind: "closed" } });
       }
     }
@@ -404,7 +444,16 @@ export const demoBackend: Backend = {
     const host = demoHosts.find((h) => h.alias === s.alias);
     if (!host) throw { code: "unknown_host", message: "unknown host", hint: null } satisfies ErrorSummary;
     const id = nextId++;
-    const t: DemoTerminal = { session, host, onData, line: "" };
+    const t: DemoTerminal = {
+      session,
+      host,
+      // Output counts towards a demo recording's size.
+      onData: (b) => {
+        rec.output(id, b.length);
+        onData(b);
+      },
+      line: "",
+    };
     terminals.set(id, t);
     setTimeout(() => {
       onData(enc.encode(`\x1b]0;${host.user}@${host.alias}: ~\x07`));
@@ -442,6 +491,7 @@ export const demoBackend: Backend = {
     const t = terminals.get(id);
     if (!t) return;
     terminals.delete(id);
+    rec.terminalClosed(id);
     emit({ type: "terminal", id, session: t.session, event: { kind: "closed" } });
   },
   async onEngineEvent(cb): Promise<UnlistenFn> {

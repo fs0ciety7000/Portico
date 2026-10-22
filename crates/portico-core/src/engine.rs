@@ -38,7 +38,7 @@ use crate::logs::{LogRecord, LogRing};
 use crate::secrets::SecretStore;
 use crate::session::{self, Attached, SessionCommand, SessionCtx};
 use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
-use crate::ssh_config::{ConfigWarning, ResolveContext, SshConfig};
+use crate::ssh_config::{ConfigWarning, ResolveContext};
 use crate::store::Paths;
 
 /// Capacity of the control-plane broadcast channel. Slow subscribers get
@@ -256,6 +256,9 @@ struct Inner {
     /// queue) alive; if they are dropped without closing, the writer ends.
     terminals:
         Mutex<HashMap<TerminalId, (SessionId, std::sync::Weak<crate::recording::TerminalTap>)>>,
+    /// Names of the recordings whose file is still open for writing (they
+    /// cannot be deleted).
+    recordings_active: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 #[derive(Debug)]
@@ -290,6 +293,7 @@ impl Engine {
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 terminals: Mutex::default(),
+                recordings_active: Arc::default(),
             }),
         }
     }
@@ -303,13 +307,16 @@ impl Engine {
         self.inner.events.subscribe()
     }
 
-    /// Parses `~/.ssh/config` (+ includes) and merges Portico metadata.
+    /// Parses `~/.ssh/config` (+ includes) with Portico's `hosts.conf`
+    /// (see [`crate::managed_hosts`]) and merges Portico metadata. Each
+    /// host says which file it comes from ([`crate::hosts::HostOrigin`]).
     pub async fn load_hosts(&self) -> Result<HostInventory> {
         let config = self.inner.config.clone();
         tokio::task::spawn_blocking(move || {
-            let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+            let ssh = crate::managed_hosts::load_config(&config.paths)?;
             let (meta, meta_warnings) = crate::hosts::load_meta(&config.paths.hosts_meta())?;
-            let hosts = inventory(&ssh, &meta, &config.resolve_context(None));
+            let mut hosts = inventory(&ssh, &meta, &config.resolve_context(None));
+            crate::managed_hosts::mark_origins(&config.paths, &mut hosts);
             let mut warnings = ssh.warnings().to_vec();
             warnings.extend(meta_warnings);
             warnings.extend(
@@ -1022,7 +1029,7 @@ impl Engine {
         let config = self.inner.config.clone();
         let alias = alias.to_owned();
         tokio::task::spawn_blocking(move || {
-            let ssh = SshConfig::load(&config.paths.ssh_config(), &config.paths.ssh_dir)?;
+            let ssh = crate::managed_hosts::load_config(&config.paths)?;
             Ok(crate::effective::compute(&ssh, &config, &alias, None))
         })
         .await
@@ -1149,49 +1156,235 @@ impl Drop for WithdrawPrompt<'_> {
 // ════ Phase 5: imports (additive block) ═══════════════════════════════════
 
 impl Engine {
-    /// Reads a Termius export and returns what importing it would do.
-    /// Nothing is written (see [`crate::import`]).
+    /// Reads an export (Termius CSV, `hosts.json`, `credentials.csv`,
+    /// `termius export-ssh-config`, or Termix JSON: detected from the
+    /// content) and returns what importing it would do. Nothing is written
+    /// (see [`crate::import`]). Only [`crate::import::ImportOptions::prefix`]
+    /// is read.
+    pub async fn plan_import(
+        &self,
+        path: impl Into<PathBuf>,
+        options: crate::import::ImportOptions,
+    ) -> Result<crate::import::ImportPlan> {
+        self.plan_import_from(path.into(), options, None).await
+    }
+
+    /// [`Self::plan_import`], kept under its first name: every format is
+    /// detected (a Termix export too).
     pub async fn plan_termius_import(
         &self,
         path: impl Into<PathBuf>,
         options: crate::import::ImportOptions,
     ) -> Result<crate::import::ImportPlan> {
-        let paths = self.inner.config.paths.clone();
-        let path = path.into();
-        tokio::task::spawn_blocking(move || crate::import::termius::plan(&paths, &path, options))
+        self.plan_import_from(path.into(), options, None).await
+    }
+
+    /// [`Self::plan_import`] for a Termix export only: any other file is
+    /// refused with `import_unknown_format`.
+    pub async fn plan_termix_import(
+        &self,
+        path: impl Into<PathBuf>,
+        options: crate::import::ImportOptions,
+    ) -> Result<crate::import::ImportPlan> {
+        self.plan_import_from(
+            path.into(),
+            options,
+            Some(crate::import::ImportSource::Termix),
+        )
+        .await
+    }
+
+    async fn plan_import_from(
+        &self,
+        path: PathBuf,
+        options: crate::import::ImportOptions,
+        only: Option<crate::import::ImportSource>,
+    ) -> Result<crate::import::ImportPlan> {
+        let config = self.inner.config.clone();
+        tokio::task::spawn_blocking(move || crate::import::plan(&config, &path, &options, only))
             .await
             .map_err(|_| Error::EngineClosed)?
     }
 
-    /// Writes `plan`: `<config_dir>/imports/termius.conf` (replaced in
-    /// full) and the metadata in `hosts.toml` (merged). Emits
-    /// [`EngineEvent::HostMeta`] for each alias whose metadata changed;
-    /// UIs reload the inventory afterwards (new aliases appear once
-    /// `~/.ssh/config` includes the file, see [`crate::import::ImportReport`]).
+    /// Writes `plan` as Portico hosts in `hosts.conf` (created, or updated
+    /// when an earlier import of the same source created them and nobody
+    /// edited them since), merges the metadata in `hosts.toml`, and writes
+    /// the private keys selected in `options` to `~/.ssh/portico/` (or
+    /// reuses a local key with the same fingerprint). Emits
+    /// [`EngineEvent::HostsChanged`] when `hosts.conf` changed, then
+    /// [`EngineEvent::HostMeta`] for each alias whose metadata changed.
     pub async fn apply_import(
         &self,
         plan: crate::import::ImportPlan,
+        options: crate::import::ImportOptions,
     ) -> Result<crate::import::ImportReport> {
-        let paths = self.inner.config.paths.clone();
-        let now = time::OffsetDateTime::now_utc();
-        let (report, changed) =
-            tokio::task::spawn_blocking(move || crate::import::apply(&paths, &plan, now))
+        let config = self.inner.config.clone();
+        let applied =
+            tokio::task::spawn_blocking(move || crate::import::apply(&config, &plan, &options))
                 .await
                 .map_err(|_| Error::EngineClosed)??;
-        for (alias, meta) in changed {
+        if applied.hosts_changed {
+            self.emit(EngineEvent::HostsChanged);
+        }
+        for (alias, meta) in applied.meta {
             self.emit(EngineEvent::HostMeta { alias, meta });
         }
-        Ok(report)
+        Ok(applied.report)
     }
 }
 
 // ════ end Phase 5 ════════════════════════════════════════════════════════
 
+// ════ Phase 6b: hosts created in Portico (additive block) ════════════════
+//
+// `hosts.conf` edits run on `spawn_blocking` under its lock (file I/O,
+// keyring); see `crate::managed_hosts`.
+
+impl Engine {
+    /// Creates a host in Portico's `hosts.conf`, with its metadata and,
+    /// when given, a password to remember. Emits
+    /// [`EngineEvent::HostsChanged`], then [`EngineEvent::HostMeta`].
+    pub async fn create_host(
+        &self,
+        draft: crate::managed_hosts::HostDraft,
+    ) -> Result<crate::managed_hosts::HostSummary> {
+        let config = self.inner.config.clone();
+        let summary =
+            tokio::task::spawn_blocking(move || crate::managed_hosts::create(&config, &draft))
+                .await
+                .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(Some(&summary));
+        Ok(summary)
+    }
+
+    /// Replaces the Portico host `alias` (renaming allowed: its metadata
+    /// moves too). A host of `~/.ssh/config` is refused with
+    /// `host_read_only`. Emits [`EngineEvent::HostsChanged`], then
+    /// [`EngineEvent::HostMeta`].
+    pub async fn update_host(
+        &self,
+        alias: &str,
+        draft: crate::managed_hosts::HostDraft,
+    ) -> Result<crate::managed_hosts::HostSummary> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        let summary = tokio::task::spawn_blocking(move || {
+            crate::managed_hosts::update(&config, &alias, &draft)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(Some(&summary));
+        Ok(summary)
+    }
+
+    /// The values `hosts.conf` itself holds for the Portico host `alias`
+    /// (alias matched without case), or `None` when it is not a Portico
+    /// host. Edit forms prefill from this, never from the resolved config:
+    /// an earlier value elsewhere in `~/.ssh/config` (an `Include` placed
+    /// lower down) must not hide, then erase, a value of the file.
+    pub async fn managed_host(
+        &self,
+        alias: &str,
+    ) -> Result<Option<crate::managed_hosts::ManagedHost>> {
+        let paths = self.inner.config.paths.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::managed_hosts::read_hosts(&paths).map(|hosts| {
+                hosts
+                    .into_iter()
+                    .find(|host| host.alias.eq_ignore_ascii_case(&alias))
+            })
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Like [`Self::managed_host`], plus what an edit form shows besides
+    /// the values: whether a password is remembered for the host's account
+    /// ([`crate::managed_hosts::ManagedHostDetails::password_remembered`],
+    /// presence only) and the import it comes from. `None` when `alias` is
+    /// not a Portico host.
+    pub async fn managed_host_details(
+        &self,
+        alias: &str,
+    ) -> Result<Option<crate::managed_hosts::ManagedHostDetails>> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || crate::managed_hosts::details(&config, &alias))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Deletes the Portico host `alias`, its metadata and its remembered
+    /// password. Emits [`EngineEvent::HostsChanged`].
+    pub async fn delete_host(&self, alias: &str) -> Result<()> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || crate::managed_hosts::delete(&config, &alias))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(None);
+        Ok(())
+    }
+
+    /// Copies the effective `HostName`, `User`, `Port`, `IdentityFile` and
+    /// `ProxyJump` of any host (one of `~/.ssh/config` included) into a new
+    /// Portico host `new_alias`. Emits [`EngineEvent::HostsChanged`], then
+    /// [`EngineEvent::HostMeta`].
+    pub async fn duplicate_as_managed(
+        &self,
+        alias: &str,
+        new_alias: &str,
+    ) -> Result<crate::managed_hosts::HostSummary> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        let new_alias = new_alias.to_owned();
+        let summary = tokio::task::spawn_blocking(move || {
+            crate::managed_hosts::duplicate(&config, &alias, &new_alias)
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)??;
+        self.hosts_changed(Some(&summary));
+        Ok(summary)
+    }
+
+    /// The line to add at the top of `~/.ssh/config` so `ssh`, `scp` and
+    /// `git` see the hosts created in Portico (Portico never adds it).
+    pub fn managed_include_line(&self) -> String {
+        crate::managed_hosts::include_line_for(&self.inner.config.paths)
+    }
+
+    /// `true` when `~/.ssh/config` already has an `Include` resolving to
+    /// `hosts.conf`.
+    pub async fn managed_include_active(&self) -> Result<bool> {
+        let paths = self.inner.config.paths.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::import::include_active(&paths, &paths.managed_hosts())
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)
+    }
+
+    fn hosts_changed(&self, summary: Option<&crate::managed_hosts::HostSummary>) {
+        self.emit(EngineEvent::HostsChanged);
+        if let Some(summary) = summary {
+            self.emit(EngineEvent::HostMeta {
+                alias: summary.host.alias.clone(),
+                meta: summary.meta.clone(),
+            });
+        }
+    }
+}
+
+// ════ end Phase 6b ═══════════════════════════════════════════════════════
+
 // ════ Phase 6: session recording (additive block) ════════════════════════
 //
 // The file side lives in `crate::recording`; here: the terminal registry and
-// the public commands. File I/O runs on `spawn_blocking`, the writer on a
-// tracked blocking thread (so `shutdown_and_wait` waits for the flush).
+// the public commands. Short file I/O runs on `spawn_blocking`; each
+// recording's writer runs on its own `portico-rec` thread (never a blocking
+// slot of the runtime), whose end is tracked so `shutdown_and_wait` waits
+// for the flush.
 
 impl Engine {
     /// Called by a terminal when it opens: makes it recordable.
@@ -1261,8 +1454,14 @@ impl Engine {
     /// [`RecordingState::Stopped`] (stop requested, terminal closed, writer
     /// behind, write error or size cap).
     ///
+    /// Cancel-safe: the start runs as a tracked task. If the caller stops
+    /// waiting before the file exists, the file is removed and the terminal
+    /// released; once the recording is active (`Started` emitted) it stays
+    /// active.
+    ///
     /// Errors: `recording_unknown_terminal`, `recording_already_active`,
-    /// `recording_unsafe_path` (symlinked folder), `recording_create_failed`.
+    /// `recording_unsafe_path` (symlinked folder), `recording_foreign_owner`,
+    /// `recording_create_failed`.
     ///
     /// [`RecordingState::Started`]: crate::events::RecordingState::Started
     /// [`RecordingState::Stopped`]: crate::events::RecordingState::Stopped
@@ -1270,41 +1469,99 @@ impl Engine {
         &self,
         terminal: TerminalId,
     ) -> Result<crate::recording::RecordingInfo> {
-        use crate::recording::{MAX_RECORDING_BYTES, NewRecording, RecordingInfo};
-
+        if self.inner.shutdown.is_cancelled() {
+            return Err(Error::EngineClosed);
+        }
         let (session, tap) = self.terminal_tap(terminal)?;
-        let size = tap.begin(terminal).map_err(Error::Recording)?;
+        // Released when dropped, whatever ends the start (error, cancel).
+        let reservation = tap.begin(terminal).map_err(Error::Recording)?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let engine = self.clone();
+        self.inner.tasks.spawn(async move {
+            let result = engine
+                .run_start(terminal, session, reservation, &reply_tx)
+                .await;
+            let _ = reply_tx.send(result);
+        });
+        reply_rx.await.map_err(|_| Error::EngineClosed)?
+    }
+
+    /// The body of [`Engine::start_recording`], on a tracked task.
+    async fn run_start(
+        &self,
+        terminal: TerminalId,
+        session: SessionId,
+        reservation: crate::recording::StartReservation,
+        reply: &oneshot::Sender<Result<crate::recording::RecordingInfo>>,
+    ) -> Result<crate::recording::RecordingInfo> {
+        use crate::recording::{
+            MAX_RECORDING_BYTES, NewRecording, RECORDING_QUEUE_CAPACITY, RecordingError,
+            RecordingInfo, StopCell,
+        };
+
+        let size = reservation.size();
         let alias = self
             .session_alias(session)
             .unwrap_or_else(|| "session".to_owned());
-        let dir = self.inner.config.paths.recordings();
+        let dir = self.recordings_dir();
         let started = time::OffsetDateTime::now_utc();
-        let created = tokio::task::spawn_blocking(move || {
+        let NewRecording { name, path, writer } = tokio::task::spawn_blocking(move || {
             crate::recording::create_recording(&dir, &alias, started, size, MAX_RECORDING_BYTES)
         })
         .await
-        .map_err(|_| Error::EngineClosed)
-        .and_then(|created| created);
-        let NewRecording { name, path, writer } = match created {
-            Ok(created) => created,
-            Err(e) => {
-                tap.abort_start();
-                return Err(e);
-            }
-        };
-        let info = RecordingInfo {
+        .map_err(|_| Error::EngineClosed)??;
+        if reply.is_closed() {
+            // The caller stopped waiting: no recording it would not know of.
+            // The file goes first, then the reservation (on return).
+            drop(writer);
+            remove_orphan(path).await;
+            return Err(Error::EngineClosed);
+        }
+
+        let (tx, rx) = mpsc::channel(RECORDING_QUEUE_CAPACITY);
+        let stop = Arc::new(StopCell::default());
+        let path_text = path.display().to_string();
+        let job = RecordingJob {
             terminal,
             session,
             name: name.clone(),
             path: path.clone(),
+            path_text: path_text.clone(),
+            active: ActiveName::register(&self.inner.recordings_active, &name),
+        };
+        // A dedicated thread per recording: it lives as long as the
+        // recording, so it must not hold one of the runtime's blocking slots.
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let engine = self.clone();
+        let job_stop = Arc::clone(&stop);
+        let spawned = std::thread::Builder::new()
+            .name(RECORDING_THREAD_NAME.to_owned())
+            .spawn(move || {
+                job.run(&engine, rx, writer, &job_stop);
+                drop(done_tx);
+            });
+        if let Err(source) = spawned {
+            // The closure (file, job) is dropped with the error.
+            remove_orphan(path.clone()).await;
+            return Err(Error::Recording(RecordingError::Create { path, source }));
+        }
+        // `shutdown_and_wait` waits for the writer to flush and close.
+        self.inner.tasks.spawn(async move {
+            let _ = done_rx.await;
+        });
+
+        let info = RecordingInfo {
+            terminal,
+            session,
+            name: name.clone(),
+            path,
             started,
         };
-        let path_text = path.display().to_string();
         self.emit(EngineEvent::Recording {
             terminal,
             session,
             state: crate::events::RecordingState::Started {
-                name: name.clone(),
+                name,
                 path: path_text.clone(),
             },
         });
@@ -1314,23 +1571,9 @@ impl Engine {
             "recording",
             format!("terminal {terminal}: recording to {path_text}"),
         );
-
-        let (tx, rx) = mpsc::channel(crate::recording::RECORDING_QUEUE_CAPACITY);
-        let stop = Arc::new(crate::recording::StopCell::default());
         // A terminal closed meanwhile drops `tx`: the writer then ends at
         // once with `terminal_closed`, after the header.
-        tap.activate(tx, Arc::clone(&stop), size);
-        let engine = self.clone();
-        let job = RecordingJob {
-            terminal,
-            session,
-            name,
-            path,
-            path_text,
-        };
-        self.inner
-            .tasks
-            .spawn_blocking(move || job.run(&engine, rx, writer, &stop));
+        reservation.activate(tx, stop);
         Ok(info)
     }
 
@@ -1368,8 +1611,21 @@ impl Engine {
     }
 
     /// Deletes the recording `name` (a file name from the listing). Paths,
-    /// `..`, symlinks and anything outside the recordings folder are refused.
+    /// `..`, symlinks and anything outside the recordings folder are refused,
+    /// and so is a recording still being written (`recording_active`: stop
+    /// it first).
     pub async fn delete_recording(&self, name: &str) -> Result<()> {
+        let active = self
+            .inner
+            .recordings_active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(name);
+        if active {
+            return Err(Error::Recording(crate::recording::RecordingError::Active {
+                name: name.to_owned(),
+            }));
+        }
         let dir = self.recordings_dir();
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || crate::recording::delete(&dir, &name))
@@ -1390,7 +1646,48 @@ impl Engine {
     }
 }
 
-/// The writer side of one recording (runs on a blocking thread).
+/// Name of the writer thread of a recording.
+const RECORDING_THREAD_NAME: &str = "portico-rec";
+
+/// Removes a recording file that will not be used (best effort, off the
+/// runtime).
+async fn remove_orphan(path: PathBuf) {
+    let removed = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+    if !matches!(removed, Ok(Ok(()))) {
+        tracing::warn!("cannot remove an abandoned recording file");
+    }
+}
+
+/// A recording name registered as being written (RAII: unregistered on
+/// drop).
+#[derive(Debug)]
+struct ActiveName {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl ActiveName {
+    fn register(set: &Arc<Mutex<std::collections::HashSet<String>>>, name: &str) -> Self {
+        set.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned());
+        Self {
+            set: Arc::clone(set),
+            name: name.to_owned(),
+        }
+    }
+}
+
+impl Drop for ActiveName {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.name);
+    }
+}
+
+/// The writer side of one recording (runs on its own thread).
 #[derive(Debug)]
 struct RecordingJob {
     terminal: TerminalId,
@@ -1398,6 +1695,7 @@ struct RecordingJob {
     name: String,
     path: PathBuf,
     path_text: String,
+    active: ActiveName,
 }
 
 impl RecordingJob {
@@ -1405,25 +1703,53 @@ impl RecordingJob {
         self,
         engine: &Engine,
         mut rx: mpsc::Receiver<crate::recording::TapEvent>,
-        mut writer: crate::recording::CastWriter<std::io::BufWriter<std::fs::File>>,
+        mut writer: crate::recording::CastWriter<std::fs::File>,
         stop: &crate::recording::StopCell,
     ) {
-        use crate::recording::RecordingStopReason as Reason;
+        use crate::recording::{RecordingStopReason as Reason, WriteStop};
 
+        let Self {
+            terminal,
+            session,
+            name,
+            path,
+            path_text,
+            active,
+        } = self;
         let failed = crate::recording::run_writer(&mut rx, &mut writer);
         drop(rx);
         let duration = writer.last_time();
-        let (sink, finished) = writer.finish();
-        let synced = sink
-            .into_inner()
-            .map_err(std::io::IntoInnerError::into_error)
-            .and_then(|file| file.sync_all());
-        let reason = match (failed, finished, synced) {
-            (Some(stop), _, _) | (None, Err(stop), _) => stop.reason(),
-            (None, Ok(()), Err(_)) => Reason::WriteFailed,
-            (None, Ok(()), Ok(())) => stop.get().unwrap_or(Reason::TerminalClosed),
+        let finished = match failed {
+            Some(WriteStop::Io(e)) => Err(WriteStop::Io(e)),
+            Some(WriteStop::SizeLimit) => {
+                // The cap: what fits is written (the decoder's tail may not).
+                let _ = writer.finish_in_place();
+                Err(WriteStop::SizeLimit)
+            }
+            None => writer.finish_in_place(),
         };
-        let bytes = std::fs::symlink_metadata(&self.path).map_or(0, |m| m.len());
+        let reason = match finished {
+            Err(WriteStop::Io(_)) => {
+                // Disk full or I/O error: no flush retried, the file is cut
+                // back to its complete lines.
+                if crate::recording::truncate_to_committed(writer).is_err() {
+                    tracing::warn!("cannot cut a failed recording back to complete lines");
+                }
+                Reason::WriteFailed
+            }
+            Err(stopped) => {
+                // The cap: the file ends on a complete line.
+                let _ = writer.into_sink().sync_all();
+                stopped.reason()
+            }
+            Ok(()) => match writer.into_sink().sync_all() {
+                Ok(()) => stop.get().unwrap_or(Reason::TerminalClosed),
+                Err(_) => Reason::WriteFailed,
+            },
+        };
+        let bytes = std::fs::symlink_metadata(&path).map_or(0, |m| m.len());
+        // The file is closed: it may be deleted from now on.
+        drop(active);
         let duration = Duration::try_from_secs_f64(duration).unwrap_or(Duration::ZERO);
         let level = if matches!(reason, Reason::Requested | Reason::TerminalClosed) {
             LogLevel::Info
@@ -1431,23 +1757,22 @@ impl RecordingJob {
             LogLevel::Warn
         };
         engine.session_log(
-            self.session,
+            session,
             level,
             "recording",
             format!(
-                "terminal {}: recording stopped ({}), {bytes} bytes, {:.1} s",
-                self.terminal,
+                "terminal {terminal}: recording stopped ({}), {bytes} bytes, {:.1} s",
                 reason.code(),
                 duration.as_secs_f64()
             ),
         );
         engine.emit(EngineEvent::Recording {
-            terminal: self.terminal,
-            session: self.session,
+            terminal,
+            session,
             state: crate::events::RecordingState::Stopped {
                 reason,
-                name: self.name,
-                path: self.path_text,
+                name,
+                path: path_text,
                 bytes,
                 duration,
             },
@@ -1771,5 +2096,149 @@ mod tests {
         let port = view.options.iter().find(|o| o.key == "port").expect("port");
         assert_eq!(port.values, ["2200"]);
         assert_eq!(view.route.len(), 1);
+    }
+
+    // ── Phase 6: recording (security review) ──
+
+    /// A recordable terminal without SSH: the tap a terminal task holds.
+    fn fake_terminal(engine: &Engine) -> (TerminalId, Arc<crate::recording::TerminalTap>) {
+        let id = TerminalId::next();
+        let tap = Arc::new(crate::recording::TerminalTap::new(PtySize {
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        }));
+        engine.register_terminal(id, SessionId::next(), &tap);
+        (id, tap)
+    }
+
+    async fn wait_stopped(events: &mut broadcast::Receiver<EngineEvent>, terminal: TerminalId) {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("event in time")
+                .expect("event stream open");
+            if let EngineEvent::Recording {
+                terminal: t,
+                state: crate::events::RecordingState::Stopped { .. },
+                ..
+            } = event
+                && t == terminal
+            {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_start_recording_releases_the_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path());
+        let mut events = engine.subscribe();
+        let (id, tap) = fake_terminal(&engine);
+        // Dropped right after its first poll. The detached start then either
+        // gives up (the terminal is released and its file removed) or wins
+        // the race and records: the caller learns it from `Started`, and a
+        // stop releases the terminal. Both outcomes are legitimate; neither
+        // may leave the terminal stuck in "starting".
+        let first = tokio::time::timeout(Duration::ZERO, engine.start_recording(id)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut kept = Vec::new();
+        let info = loop {
+            if engine.is_recording(id) {
+                let name = engine
+                    .list_recordings()
+                    .await
+                    .expect("list")
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>();
+                kept = name;
+                engine.stop_recording(id).expect("stop the start that won");
+                wait_stopped(&mut events, id).await;
+            }
+            match engine.start_recording(id).await {
+                Ok(info) => break info,
+                Err(e)
+                    if e.summary().code == "recording_already_active"
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(e) => panic!("the terminal stays reserved: {e}"),
+            }
+        };
+        assert!(
+            first.is_err() || !kept.is_empty(),
+            "a completed start is recording"
+        );
+        // No abandoned file: only the new recording and, if the first start
+        // won, its complete recording.
+        let entries = engine.list_recordings().await.expect("list");
+        assert!(entries.iter().all(|entry| entry.valid), "no torn file");
+        let mut names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+        names.sort();
+        let mut expected = kept;
+        expected.push(info.name);
+        expected.sort();
+        assert_eq!(names, expected);
+        tap.close();
+        assert!(engine.shutdown_and_wait(Duration::from_secs(5)).await);
+    }
+
+    #[test]
+    fn many_recordings_do_not_starve_spawn_blocking() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let engine = engine(dir.path());
+            let mut taps = Vec::new();
+            for _ in 0..4 {
+                let (id, tap) = fake_terminal(&engine);
+                engine.start_recording(id).await.expect("start");
+                taps.push(tap);
+            }
+            // As many recordings as blocking threads: the runtime still
+            // has room for short blocking work.
+            let listed = tokio::time::timeout(Duration::from_secs(1), engine.list_recordings())
+                .await
+                .expect("list_recordings answers within 1 s")
+                .expect("list");
+            assert_eq!(listed.len(), 4);
+            for tap in &taps {
+                tap.close();
+            }
+            assert!(engine.shutdown_and_wait(Duration::from_secs(5)).await);
+        });
+    }
+
+    #[tokio::test]
+    async fn deleting_an_active_recording_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path());
+        let mut events = engine.subscribe();
+        let (id, tap) = fake_terminal(&engine);
+        let info = engine.start_recording(id).await.expect("start");
+        let err = engine
+            .delete_recording(&info.name)
+            .await
+            .expect_err("still being written");
+        assert_eq!(err.summary().code, "recording_active");
+        assert!(info.path.exists());
+
+        engine.stop_recording(id).expect("stop");
+        wait_stopped(&mut events, id).await;
+        engine
+            .delete_recording(&info.name)
+            .await
+            .expect("deleted once stopped");
+        assert!(!info.path.exists());
+        tap.close();
     }
 }

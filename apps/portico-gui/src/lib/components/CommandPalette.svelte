@@ -1,8 +1,18 @@
 <script lang="ts" module>
+  import type { Status } from "../api";
+
   export interface Command {
     id: string;
     title: string;
     hint?: string;
+    /** The hint is technical data (`user@host`): mono. */
+    mono?: boolean;
+    /** A status dot before the title (host picker). */
+    status?: { status: Status; busy: boolean };
+    /** A short note after the title ("reuses connection"). */
+    note?: string;
+    /** A favourite host (host picker): `★` after the title. */
+    favorite?: boolean;
     shortcut?: string;
     run: () => void;
   }
@@ -67,8 +77,9 @@
     <ul>
       {#each filtered as cmd, i (cmd.id)}
         <li class:active={i === active} onmouseenter={() => (active = i)} onclick={() => run(cmd)} onkeydown={() => {}} role="option" aria-selected={i === active}>
-          <span class="title">{cmd.title}</span>
-          {#if cmd.hint}<span class="hint">{cmd.hint}</span>{/if}
+          {#if cmd.status}<span class="dot" data-status={cmd.status.status} class:busy={cmd.status.busy}></span>{/if}
+          <span class="title">{cmd.title}{#if cmd.favorite}<span class="star" title="Favorite" aria-label="favorite">★</span>{/if}{#if cmd.note}<span class="note">{cmd.note}</span>{/if}</span>
+          {#if cmd.hint}<span class="hint" class:mono={cmd.mono}>{cmd.hint}</span>{/if}
           {#if cmd.shortcut}<kbd>{cmd.shortcut}</kbd>{/if}
         </li>
       {:else}
@@ -120,8 +131,44 @@
     padding: 0 var(--space-3);
     border-radius: var(--radius-md);
   }
+  li { position: relative; }
   li.active { background: var(--bg-selected); }
-  .title { flex: 1; }
-  .hint { color: var(--text-muted); font-size: var(--text-sm); }
+  /* The selection grammar of every list: background and accent bar. */
+  li.active:not(.empty)::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: var(--space-2);
+    bottom: var(--space-2);
+    width: var(--size-bar);
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+  }
+  .star { margin-left: var(--space-1); color: var(--accent); }
+  /* The title is never cut while the description can give way: the
+     description takes what is left and ellipsizes first. */
+  .title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note { margin-left: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
+  .hint { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  li > :global(kbd) { flex: none; }
+  .hint.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+  .dot {
+    --c: var(--status-idle);
+    flex: none;
+    width: var(--size-dot);
+    height: var(--size-dot);
+    border-radius: 50%;
+    background: var(--c);
+  }
+  .dot[data-status="connecting"] { --c: var(--status-connecting); }
+  .dot[data-status="authenticating"] { --c: var(--status-authenticating); }
+  .dot[data-status="connected"] { --c: var(--status-connected); }
+  .dot[data-status="warning"] { --c: var(--status-warning); }
+  .dot[data-status="error"] { --c: var(--status-error); }
+  .dot.busy { animation: pulse var(--motion-loop) var(--ease-standard) infinite; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 60%, transparent); }
+    100% { box-shadow: 0 0 0 4px transparent; }
+  }
   .empty { color: var(--text-muted); }
 </style>

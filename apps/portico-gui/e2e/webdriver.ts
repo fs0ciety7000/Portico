@@ -17,6 +17,7 @@ export const Key = {
   Alt: "",
   Down: "",
   Up: "",
+  Delete: "",
 } as const;
 
 export class Session {

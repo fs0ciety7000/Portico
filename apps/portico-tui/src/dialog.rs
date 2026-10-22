@@ -73,6 +73,9 @@ pub(crate) struct PromptDialog {
     /// Typed confirmation for risky host keys (`yes`).
     pub(crate) confirm: String,
     pub(crate) opened_at: Instant,
+    /// Unknown host key that would send a remembered password: the account
+    /// it is remembered for (`user@host:port`), named in the warning.
+    pub(crate) account: Option<String>,
 }
 
 /// What a key press did to a dialog.
@@ -103,6 +106,7 @@ impl PromptDialog {
             remember_in: "the system keyring",
             confirm: String::new(),
             opened_at: Instant::now(),
+            account: None,
         }
     }
 
@@ -236,19 +240,85 @@ pub(crate) struct ChangedKeyAlert {
 }
 
 /// What a confirmation dialog confirms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConfirmAction {
     ClearRecent,
+    /// "Record session": start recording this terminal.
+    StartRecording(portico_core::ids::TerminalId),
+    /// "Delete host": remove this Portico host from `hosts.conf`.
+    DeleteHost(String),
 }
 
 /// A yes / no question: `y` confirms, `n` or `Esc` keeps things as they are.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfirmDialog {
     pub(crate) title: String,
+    /// What the question is about, on its own line above the body
+    /// (`web-01 · pane 2/3`), when the title alone is not enough.
+    pub(crate) subject: Option<String>,
     pub(crate) body: String,
     /// Label of the confirming action (`y`).
     pub(crate) confirm: &'static str,
     pub(crate) action: ConfirmAction,
+    /// `Some(opened)`: an **armed** confirmation. Keys are ignored for
+    /// [`ARM_DELAY`] after `opened` (they were typed for the shell), then
+    /// only a plain `y` confirms, `n` and `Esc` cancel, and any other key
+    /// is ignored (it is not an answer).
+    pub(crate) armed: Option<Instant>,
+}
+
+/// What a key does to a [`ConfirmDialog`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmOutcome {
+    /// Ignored (not armed yet, or not an answer).
+    None,
+    Confirm,
+    Cancel,
+}
+
+impl ConfirmDialog {
+    pub(crate) fn handle_key(&self, key: KeyEvent) -> ConfirmOutcome {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return ConfirmOutcome::None;
+        }
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match self.armed {
+            Some(opened) if opened.elapsed() < ARM_DELAY => ConfirmOutcome::None,
+            Some(_) => match key.code {
+                KeyCode::Char('y') if plain => ConfirmOutcome::Confirm,
+                KeyCode::Char('n') if plain => ConfirmOutcome::Cancel,
+                KeyCode::Esc => ConfirmOutcome::Cancel,
+                _ => ConfirmOutcome::None,
+            },
+            None => match key.code {
+                KeyCode::Char('y' | 'Y') => ConfirmOutcome::Confirm,
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => ConfirmOutcome::Cancel,
+                _ => ConfirmOutcome::None,
+            },
+        }
+    }
+
+    /// When an armed confirmation starts taking `y` (`None`: not armed, it
+    /// always does).
+    pub(crate) fn arms_at(&self) -> Option<Instant> {
+        self.armed.map(|opened| opened + ARM_DELAY)
+    }
+
+    /// `y` is taken at `now`.
+    pub(crate) fn ready(&self, now: Instant) -> bool {
+        self.arms_at().is_none_or(|at| now >= at)
+    }
+
+    /// The footer's cancel key and label.
+    pub(crate) fn cancel_hint(&self) -> (&'static str, &'static str) {
+        if self.armed.is_some() {
+            ("n / Esc", "cancel")
+        } else {
+            ("n / Esc", "keep")
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -294,6 +364,9 @@ pub(crate) struct SecretDialog {
     /// Waiting for the engine (Argon2 takes a moment).
     pub(crate) busy: bool,
     pub(crate) opened_at: Instant,
+    /// Opened by a host save refused for want of a vault: once the vault
+    /// is ready the save runs again; "not now" returns to the form.
+    pub(crate) host_save: bool,
 }
 
 pub(crate) enum SecretOutcome {
@@ -321,6 +394,15 @@ impl SecretDialog {
             failures: 0,
             busy: false,
             opened_at: Instant::now(),
+            host_save: false,
+        }
+    }
+
+    /// Create or unlock the vault for a host's password, then save again.
+    pub(crate) fn for_host_save(purpose: SecretPurpose) -> Self {
+        Self {
+            host_save: true,
+            ..Self::new(purpose)
         }
     }
 
@@ -486,6 +568,7 @@ mod tests {
                     algorithm: "ssh-ed25519".into(),
                     fingerprint: "SHA256:x".into(),
                     other_algorithms: vec![],
+                    sends_remembered_password: false,
                 },
             },
             None,
@@ -525,6 +608,7 @@ mod tests {
             algorithm: "a".into(),
             fingerprint: "f".into(),
             other_algorithms: vec!["b".into()],
+            sends_remembered_password: false,
         });
         hk.paste("yes");
         assert!(hk.confirm.is_empty());
@@ -561,6 +645,7 @@ mod tests {
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:x".into(),
             other_algorithms: vec![],
+            sends_remembered_password: false,
         });
         assert!(matches!(
             d.handle_key(key(KeyCode::Enter)),
@@ -577,6 +662,7 @@ mod tests {
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:x".into(),
             other_algorithms: vec!["ecdsa-sha2-nistp256".into()],
+            sends_remembered_password: false,
         });
         assert!(matches!(
             risky.handle_key(key(KeyCode::Char('y'))),

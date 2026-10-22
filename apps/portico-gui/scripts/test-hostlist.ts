@@ -14,11 +14,13 @@ const host = (alias: string, group: string | null = null): Host => ({
   identityFiles: [],
   localForwards: [],
   remoteForwards: [],
+  dynamicForwards: [],
   tags: [],
   group,
   favorite: false,
   notes: null,
   source: "~/.ssh/config:1",
+  origin: "ssh_config",
   warnings: [],
 });
 const recent = (...aliases: string[]): RecentHost[] => aliases.map((alias, i) => ({ alias, last: 100 - i, count: 1 }));

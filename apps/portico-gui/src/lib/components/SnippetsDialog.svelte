@@ -389,7 +389,7 @@
   .filter input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text-primary); font: inherit; }
   .banner {
     display: grid;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding: var(--space-2) var(--space-3);
     border-left: 2px solid var(--border-strong);
     border-radius: var(--radius-sm);
@@ -397,14 +397,14 @@
     font-size: var(--text-sm);
   }
   .banner strong { color: var(--text-primary); font-weight: 550; }
-  .list { display: grid; gap: 2px; outline: none; border-radius: var(--radius-md); }
+  .list { display: grid; gap: var(--size-line-gap); outline: none; border-radius: var(--radius-md); }
   /* Focus shows on the selected row, not around the whole list. */
   .list:focus-visible { outline: none; }
-  .list:focus-visible .row.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+  .list:focus-visible .row.selected { box-shadow: inset 0 0 0 var(--size-bar) var(--accent); }
   .row {
     position: relative;
     display: grid;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
     transition: background var(--motion-fast) var(--ease-standard);
@@ -417,7 +417,7 @@
     left: 0;
     top: var(--space-2);
     bottom: var(--space-2);
-    width: 2px;
+    width: var(--size-bar);
     border-radius: var(--radius-pill);
     background: var(--accent);
   }
@@ -480,10 +480,4 @@
   .scope input { flex: 1; min-width: 180px; }
   .optional { color: var(--text-muted); font-weight: 450; }
   .focus-sink { position: absolute; width: 1px; height: 1px; padding: 0 !important; border: 0; opacity: 0; }
-  :global(.modal button.danger) {
-    border: 0;
-    background: var(--status-error);
-    color: var(--text-on-accent);
-    font-weight: 600;
-  }
 </style>

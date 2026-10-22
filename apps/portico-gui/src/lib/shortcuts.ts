@@ -61,32 +61,32 @@ const arrows = ["left", "right", "up", "down"] as const;
 const towards = { left: "à gauche", right: "à droite", up: "vers le haut", down: "vers le bas" } as const;
 const arrowKey = { left: "Left", right: "Right", up: "Up", down: "Down" } as const;
 
-/** Split panes (ADR "Split panes", docs/STACK.md): only in a terminal tab. */
+/** Split panes (ADR "Split panes", docs/STACK.md): only in a terminal tab.
+ * Palette titles always say "pane" (same wording as the TUI). */
 const panes: ActionDef[] = [
-  { id: "pane.split-right", title: "Split right", doc: "Diviser à droite (même session : un canal PTY de plus)", scope: "terminal", defaults: both("Mod+D") },
-  { id: "pane.split-down", title: "Split down", doc: "Diviser en bas (même session)", scope: "terminal", defaults: per(["Mod+Shift+D"], ["Mod+E"]) },
-  { id: "pane.split-host", title: "Split with another host…", doc: "Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas)", scope: "terminal", defaults: both() },
+  { id: "pane.split-right", title: "Split pane right", doc: "Diviser à droite (même session : un canal PTY de plus)", scope: "terminal", defaults: both("Mod+D") },
+  { id: "pane.split-down", title: "Split pane down", doc: "Diviser en bas (même session)", scope: "terminal", defaults: per(["Mod+Shift+D"], ["Mod+O"]) },
+  { id: "pane.split-host", title: "Split pane with host…", doc: "Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas)", scope: "terminal", defaults: both() },
   ...arrows.map(
     (d): ActionDef => ({
       id: `pane.focus-${d}`,
       title: `Focus pane ${d}`,
       doc: `Focus au panneau voisin ${towards[d]}`,
       scope: "terminal",
-      defaults: per([`Mod+Alt+${arrowKey[d]}`], [`Ctrl+Alt+${arrowKey[d]}`]),
+      // Linux: not Ctrl-Alt-arrows, which GNOME, Cinnamon and Xfce keep for workspaces.
+      defaults: per([`Mod+Alt+${arrowKey[d]}`], [`Mod+${arrowKey[d]}`]),
     }),
   ),
-  ...arrows.map(
-    (d): ActionDef => ({
-      id: `pane.resize-${d}`,
-      title: `Move divider ${d}`,
-      doc: `Déplacer la séparation la plus proche ${towards[d]} (dans la taille minimale des panneaux)`,
-      scope: "terminal",
-      defaults: per([`Mod+Alt+Shift+${arrowKey[d]}`], [`Ctrl+Alt+Shift+${arrowKey[d]}`]),
-    }),
-  ),
+  {
+    id: "pane.divider",
+    title: "Move pane divider…",
+    doc: "Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau",
+    scope: "terminal",
+    defaults: both("Mod+Alt+R"),
+  },
   { id: "pane.next", title: "Next pane", doc: "Panneau suivant (ordre de lecture)", scope: "terminal", defaults: per(["Mod+Alt+N"], ["Ctrl+Alt+N"]) },
   { id: "pane.zoom", title: "Zoom pane", doc: "Zoom on/off : le panneau actif occupe tout l'onglet", scope: "terminal", defaults: both("Mod+Shift+Enter") },
-  { id: "pane.close", title: "Close pane", doc: "Fermer le panneau (son canal PTY ; le dernier panneau d'une session la déconnecte)", scope: "terminal", defaults: per(["Mod+Shift+W"], ["Mod+Q"]) },
+  { id: "pane.close", title: "Close pane", doc: "Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif", scope: "terminal", defaults: both() },
 ];
 
 /**
@@ -103,7 +103,9 @@ export const ACTIONS: ActionDef[] = [
   { id: "app.logs", title: "Session logs", doc: "Journaux de session et config effective (panneau debug)", scope: "global", defaults: both("Mod+Shift+L") },
   { id: "app.favorite", title: "Toggle favorite", doc: "Favori on/off de l'hôte sélectionné (depuis un onglet : palette, « Add <alias> to favorites » ; dans un terminal, `Mod+D` divise le panneau)", scope: "hosts", defaults: both("Mod+D") },
   { id: "tab.new", title: "New tab", doc: "Nouvel onglet sur le même hôte (depuis la liste : se connecter)", scope: "global", defaults: both("Mod+T") },
-  { id: "tab.close", title: "Close tab", doc: "Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler)", scope: "global", defaults: both("Mod+W") },
+  { id: "tab.close", title: "Close tab", doc: "Fermer l'onglet ; dans un onglet divisé, le panneau actif (le dernier panneau ferme l'onglet ; le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler)", scope: "global", defaults: both("Mod+W") },
+  // Linux: Mod+Shift+W is Ctrl-Shift-W in a terminal, i.e. `tab.close` there.
+  { id: "tab.close-all", title: "Close tab and its panes", doc: "Fermer l'onglet et tous ses panneaux", scope: "global", defaults: per(["Mod+Shift+W"], ["Mod+Alt+W"]) },
   { id: "tab.next", title: "Next tab", doc: "Onglet suivant", scope: "global", defaults: per(["Ctrl+Tab", "Mod+]"], ["Ctrl+Tab"]) },
   { id: "tab.prev", title: "Previous tab", doc: "Onglet précédent", scope: "global", defaults: per(["Ctrl+Shift+Tab", "Mod+["], ["Ctrl+Shift+Tab"]) },
   { id: "tab.hosts", title: "Go to hosts", doc: "Liste des hôtes", scope: "global", defaults: per(["Mod+0"], ["Alt+0"]) },
@@ -117,7 +119,15 @@ export const ACTIONS: ActionDef[] = [
   { id: "hosts.down", title: "Next host", doc: "Hôte suivant", scope: "hosts", defaults: both("J", "Down") },
   { id: "hosts.up", title: "Previous host", doc: "Hôte précédent", scope: "hosts", defaults: both("K", "Up") },
   { id: "hosts.connect", title: "Connect", doc: "Se connecter (ouvre un onglet terminal, ou y revient ; aussi double-clic)", scope: "hosts", defaults: both("Enter") },
-  { id: "hosts.edit", title: "Edit host", doc: "Éditer tags, groupe et notes de l'hôte sélectionné (depuis un onglet : palette, « Edit <alias> »)", scope: "hosts", defaults: both("E") },
+  { id: "hosts.edit", title: "Edit host", doc: "Éditer tags, groupe et notes de l'hôte sélectionné ; un hôte Portico ouvre le formulaire complet (depuis un onglet : palette, « Edit <alias> »)", scope: "hosts", defaults: both("E") },
+  // Hosts created in Portico (phase 6b, ADR "Hôtes créés dans Portico"). Same
+  // palette wording as the TUI. Linux: not Mod+N, which the search field
+  // keeps for "next host" (Ctrl-N).
+  { id: "host.add", title: "Add host…", doc: "Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste", scope: "global", defaults: both("Mod+Shift+N") },
+  { id: "host.edit", title: "Edit host…", doc: "Modifier un hôte Portico ; sur un hôte de `~/.ssh/config` ou importé : lecture seule, duplication proposée", scope: "hosts", defaults: both("Shift+E") },
+  { id: "host.duplicate", title: "Duplicate as Portico host…", doc: "Dupliquer l'hôte sélectionné comme hôte Portico (nouvel alias), puis le modifier", scope: "hosts", defaults: both("Shift+D") },
+  // macOS: ⌘⌫ as in Finder; never while typing in a field (App.svelte).
+  { id: "host.delete", title: "Delete host", doc: "Supprimer un hôte Portico (confirmation `y` / `n`) ; refusé pour les autres", scope: "hosts", defaults: per(["Mod+Backspace"], ["Delete"]) },
   { id: "hosts.disconnect", title: "Disconnect selected host", doc: "Se déconnecter (hôte sélectionné)", scope: "hosts", defaults: both("D") },
   { id: "hosts.files", title: "Files on selected host", doc: "Fichiers (SFTP) de l'hôte sélectionné (se connecte au besoin)", scope: "hosts", defaults: both("F") },
   { id: "hosts.tunnels", title: "Tunnels", doc: "Tunnels", scope: "hosts", defaults: both("P") },
@@ -130,10 +140,18 @@ export const ACTIONS: ActionDef[] = [
   { id: "hosts.clear-recent", title: "Clear recent", doc: "Vider « Recent » (confirmation)", scope: "hosts", defaults: both("Shift+X") },
   { id: "app.theme", title: "Next theme", doc: "Thème suivant (mémorisé dans `settings.toml`)", scope: "hosts", defaults: both("T") },
   ...panes,
+  // Recording (ADR "Enregistrement de sessions, asciicast v2"). Linux: Ctrl-Shift-R
+  // in a terminal; `app.reload` (Mod+R) only listens in the host list.
+  { id: "session.record", title: "Record session", doc: "Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état", scope: "terminal", defaults: both("Mod+Shift+R") },
+  { id: "recordings.open", title: "Recordings…", doc: "Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette", scope: "global", defaults: both() },
+  // Same id and key as the TUI's host list.
+  { id: "hosts.recordings", title: "Recordings…", doc: "Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes)", scope: "hosts", defaults: both("V") },
   { id: "keys.new", title: "New key", doc: "Nouvelle clé", scope: "global", defaults: both() },
   { id: "snippets.new", title: "New snippet", doc: "Nouveau snippet", scope: "global", defaults: both() },
   { id: "files.download-dir", title: "Change download folder", doc: "Changer de dossier de téléchargement", scope: "global", defaults: both() },
-  { id: "app.import-termius", title: "Import from Termius…", doc: "Importer depuis Termius (aperçu, puis fichier à inclure dans `~/.ssh/config`, voir `docs/IMPORT.md`)", scope: "global", defaults: both() },
+  // The id predates Termix: kept, so a rebound key still applies.
+  // Free on both platforms and in a terminal (Linux: Ctrl-Shift-M), checked by test-shortcuts.
+  { id: "app.import-termius", title: "Import hosts…", doc: "Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`)", scope: "global", defaults: both("Mod+Shift+M") },
 ];
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));

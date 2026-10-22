@@ -14,6 +14,7 @@ use crate::error::{Error, HostKeyError, Result};
 use crate::events::{PromptKind, SessionEvent, SessionPhase};
 use crate::known_hosts::{self, HostKeyVerdict, KnownHosts};
 use crate::logs::LogLevel;
+use crate::secrets::SecretKey;
 use crate::ssh_config::StrictHostKeyChecking;
 
 /// Everything needed to run the handshake for one hop.
@@ -36,6 +37,40 @@ pub(crate) struct HostIdentity {
     pub(crate) port: u16,
     /// SHA256 fingerprint of the accepted host key (or certified key).
     pub(crate) fingerprint: String,
+    /// How the key came to be trusted.
+    pub(crate) trust: HostTrust,
+}
+
+/// How a host key was trusted for this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostTrust {
+    /// A `known_hosts` line matched.
+    KnownHostsMatch,
+    /// A host certificate signed by a `@cert-authority` of `known_hosts`.
+    Certificate,
+    /// Unknown key, accepted by the user (Trust On First Use prompt).
+    UserAccepted,
+    /// Unknown key, accepted without asking
+    /// (`StrictHostKeyChecking accept-new` or `no`): no user gesture vouches
+    /// for this server, so a password never bound to a key is withheld.
+    AutoAccepted,
+}
+
+/// The name and port `resolved` is looked up under in `known_hosts`: the
+/// `HostKeyAlias` (port 22: OpenSSH ignores the port for it) or the
+/// lowercased `HostName` and port. Remembered passwords are bound to it.
+pub(crate) fn known_hosts_name(resolved: &crate::ssh_config::ResolvedHost) -> (String, u16) {
+    match resolved.options.get("hostkeyalias").and_then(|v| v.first()) {
+        // OpenSSH takes a single alias and ignores the port for it.
+        Some((args, _)) if !args.is_empty() => (
+            args.first()
+                .map(|a| a.to_ascii_lowercase())
+                .unwrap_or_default(),
+            22,
+        ),
+        // known_hosts names are lowercase (OpenSSH lowercases before hashing).
+        _ => (resolved.hostname.to_ascii_lowercase(), resolved.port),
+    }
 }
 
 /// Where and how to verify the server key.
@@ -49,6 +84,8 @@ struct HostCheck {
     policy: StrictHostKeyChecking,
     /// `HashKnownHosts yes`: record new keys with hashed names.
     hash_names: bool,
+    /// The user logging in (remembered passwords are looked up for it).
+    user: String,
 }
 
 pub(crate) struct ClientHandler {
@@ -57,6 +94,8 @@ pub(crate) struct ClientHandler {
     failure: Arc<Mutex<Option<HostKeyError>>>,
     closed: CancellationToken,
     identity: Arc<Mutex<Option<HostIdentity>>>,
+    /// How the presented key was trusted, set by [`Self::verify`].
+    trust: Option<HostTrust>,
     /// Only the final hop may deliver `-R` connections (a jump host never
     /// received a `tcpip-forward` request from us).
     is_target: bool,
@@ -101,25 +140,7 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop, is_target: bool) -> Resul
         ctx.log(LogLevel::Warn, "known_hosts", w.clone());
     }
 
-    let (name, port) = match hop
-        .resolved
-        .options
-        .get("hostkeyalias")
-        .and_then(|v| v.first())
-    {
-        // OpenSSH takes a single alias and ignores the port for it.
-        Some((args, _)) if !args.is_empty() => (
-            args.first()
-                .map(|a| a.to_ascii_lowercase())
-                .unwrap_or_default(),
-            22,
-        ),
-        // known_hosts names are lowercase (OpenSSH lowercases before hashing).
-        _ => (
-            hop.resolved.hostname.to_ascii_lowercase(),
-            hop.resolved.port,
-        ),
-    };
+    let (name, port) = known_hosts_name(&hop.resolved);
     known_hosts::validate_host_name(&name)?;
 
     let mut preferred = russh::Preferred::default();
@@ -172,10 +193,12 @@ pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop, is_target: bool) -> Resul
                     .and_then(|v| v.first())
                     .and_then(|(args, _)| args.first())
                     .is_some_and(|v| v.eq_ignore_ascii_case("yes")),
+                user: hop.user.clone(),
             },
             failure: Arc::clone(&failure),
             closed: closed.clone(),
             identity: Arc::clone(&identity),
+            trust: None,
             is_target,
         },
         config,
@@ -232,6 +255,7 @@ impl ClientHandler {
                         file.display()
                     ),
                 );
+                self.trust = Some(HostTrust::KnownHostsMatch);
                 Ok(true)
             }
             HostKeyVerdict::TrustedCertificate { ca_fingerprint } => {
@@ -240,6 +264,7 @@ impl ClientHandler {
                     "hostkey",
                     format!("host certificate signed by trusted CA {ca_fingerprint}"),
                 );
+                self.trust = Some(HostTrust::Certificate);
                 Ok(true)
             }
             HostKeyVerdict::Revoked { file, line } => {
@@ -308,8 +333,10 @@ impl ClientHandler {
                         "accepting new host key {algorithm} {fingerprint} (StrictHostKeyChecking)"
                     ),
                 );
+                self.trust = Some(HostTrust::AutoAccepted);
             }
             StrictHostKeyChecking::Ask => {
+                let sends_remembered_password = self.has_remembered_password(&fingerprint).await;
                 let answer = self
                     .ctx
                     .ask(PromptKind::UnknownHostKey {
@@ -318,6 +345,7 @@ impl ClientHandler {
                         algorithm: algorithm.clone(),
                         fingerprint: fingerprint.clone(),
                         other_algorithms,
+                        sends_remembered_password,
                     })
                     .await?;
                 if !matches!(answer, PromptResponse::AcceptHostKey) {
@@ -328,10 +356,37 @@ impl ClientHandler {
                     "hostkey",
                     format!("user trusted {algorithm} {fingerprint}"),
                 );
+                self.trust = Some(HostTrust::UserAccepted);
             }
         }
         self.remember(key).await;
         Ok(true)
+    }
+
+    /// `true` when the secret store holds a password the session would send
+    /// once this key is accepted: one bound to this key, or one typed when
+    /// the host was created and never bound yet. Blocking lookup off the
+    /// runtime; a store error counts as "none".
+    async fn has_remembered_password(&self, fingerprint: &str) -> bool {
+        let store = Arc::clone(&self.ctx.engine.config().secrets);
+        let bound = SecretKey::HostPassword {
+            user: self.check.user.clone(),
+            host: self.check.name.clone(),
+            port: self.check.port,
+            host_key: fingerprint.to_owned(),
+        };
+        let unbound = SecretKey::UnboundHostPassword {
+            user: self.check.user.clone(),
+            host: self.check.name.clone(),
+            port: self.check.port,
+        };
+        tokio::task::spawn_blocking(move || {
+            [bound, unbound]
+                .iter()
+                .any(|key| matches!(store.get(key), Ok(Some(_))))
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Appends the key to `known_hosts`. A write failure is logged, not fatal
@@ -393,6 +448,8 @@ impl client::Handler for ClientHandler {
                         name: self.check.name.clone(),
                         port: self.check.port,
                         fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+                        // Never unset after `Ok(true)`; the safest reading otherwise.
+                        trust: self.trust.unwrap_or(HostTrust::AutoAccepted),
                     });
                 Ok(true)
             }

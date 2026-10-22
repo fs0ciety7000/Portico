@@ -90,7 +90,8 @@ fn joined_output(text: &str) -> String {
 #[test]
 fn alias_is_sanitised_for_a_file_name() {
     assert_eq!(sanitize_alias("web-1.prod"), "web-1.prod");
-    assert_eq!(sanitize_alias("../../etc/passwd"), "_.._etc_passwd");
+    // Runs of dots collapse: the old `_.._etc_passwd` failed `validate_name`.
+    assert_eq!(sanitize_alias("../../etc/passwd"), "_._etc_passwd");
     assert_eq!(sanitize_alias("a b/c\\d"), "a_b_c_d");
     assert_eq!(sanitize_alias("-rf"), "rf");
     assert_eq!(sanitize_alias(".hidden"), "hidden");
@@ -99,7 +100,13 @@ fn alias_is_sanitised_for_a_file_name() {
     assert_eq!(sanitize_alias("..."), "session");
     assert_eq!(sanitize_alias(&"x".repeat(200)).len(), 64);
     // Whatever goes in, the result is a valid recording name stem.
-    for alias in ["../x", "a\nb", "\u{202e}evil", "x".repeat(300).as_str()] {
+    for alias in [
+        "../x",
+        "a..b",
+        "a\nb",
+        "\u{202e}evil",
+        "x".repeat(300).as_str(),
+    ] {
         let name = format!("{}-{}.cast", sanitize_alias(alias), name_timestamp(at(0)));
         validate_name(&name).unwrap();
     }
@@ -309,13 +316,14 @@ fn a_failed_write_stops_the_recording() {
 
 #[test]
 fn tap_is_inert_until_activated_and_refuses_a_second_start() {
-    let tap = TerminalTap::new(size(80, 24));
+    let tap = Arc::new(TerminalTap::new(size(80, 24)));
     let id = TerminalId::next();
     tap.output(&Bytes::from_static(b"ignored"));
     assert!(!tap.is_recording());
     assert!(!tap.stop(RecordingStopReason::Requested));
 
-    assert_eq!(tap.begin(id).unwrap(), size(80, 24));
+    let reservation = tap.begin(id).unwrap();
+    assert_eq!(reservation.size(), size(80, 24));
     // Reserved while the file is being created.
     assert!(matches!(
         tap.begin(id),
@@ -323,7 +331,7 @@ fn tap_is_inert_until_activated_and_refuses_a_second_start() {
     ));
     let (tx, mut rx) = mpsc::channel(8);
     let stop = Arc::new(StopCell::default());
-    assert!(tap.activate(tx, Arc::clone(&stop), size(80, 24)));
+    assert!(reservation.activate(tx, Arc::clone(&stop)));
     assert!(tap.is_recording());
     assert!(matches!(
         tap.begin(id),
@@ -355,11 +363,11 @@ fn tap_is_inert_until_activated_and_refuses_a_second_start() {
 
 #[test]
 fn a_resize_during_start_is_recorded_at_time_zero() {
-    let tap = TerminalTap::new(size(80, 24));
-    let header_size = tap.begin(TerminalId::next()).unwrap();
+    let tap = Arc::new(TerminalTap::new(size(80, 24)));
+    let reservation = tap.begin(TerminalId::next()).unwrap();
     tap.resize(size(132, 43));
     let (tx, mut rx) = mpsc::channel(8);
-    assert!(tap.activate(tx, Arc::new(StopCell::default()), header_size));
+    assert!(reservation.activate(tx, Arc::new(StopCell::default())));
     match rx.try_recv().unwrap() {
         TapEvent::Resize { cols, rows, .. } => assert_eq!((cols, rows), (132, 43)),
         other @ TapEvent::Output { .. } => panic!("{other:?}"),
@@ -368,12 +376,12 @@ fn a_resize_during_start_is_recorded_at_time_zero() {
 
 #[test]
 fn closing_the_terminal_stops_and_refuses_recordings() {
-    let tap = TerminalTap::new(size(80, 24));
+    let tap = Arc::new(TerminalTap::new(size(80, 24)));
     let id = TerminalId::next();
-    tap.begin(id).unwrap();
+    let reservation = tap.begin(id).unwrap();
     let (tx, rx) = mpsc::channel(8);
     let stop = Arc::new(StopCell::default());
-    tap.activate(tx, Arc::clone(&stop), size(80, 24));
+    reservation.activate(tx, Arc::clone(&stop));
     tap.close();
     assert_eq!(stop.get(), Some(RecordingStopReason::TerminalClosed));
     assert!(rx.is_closed() || rx.is_empty());
@@ -383,22 +391,22 @@ fn closing_the_terminal_stops_and_refuses_recordings() {
     ));
 
     // Closed between `begin` and `activate`.
-    let tap = TerminalTap::new(size(80, 24));
-    tap.begin(id).unwrap();
+    let tap = Arc::new(TerminalTap::new(size(80, 24)));
+    let reservation = tap.begin(id).unwrap();
     tap.close();
     let (tx, _rx) = mpsc::channel(8);
     let stop = Arc::new(StopCell::default());
-    assert!(!tap.activate(tx, Arc::clone(&stop), size(80, 24)));
+    assert!(!reservation.activate(tx, Arc::clone(&stop)));
     assert_eq!(stop.get(), Some(RecordingStopReason::TerminalClosed));
 }
 
 #[test]
 fn a_full_queue_stops_the_recording_without_waiting() {
-    let tap = TerminalTap::new(size(80, 24));
-    tap.begin(TerminalId::next()).unwrap();
+    let tap = Arc::new(TerminalTap::new(size(80, 24)));
+    let reservation = tap.begin(TerminalId::next()).unwrap();
     let (tx, rx) = mpsc::channel(4); // never drained: a stuck writer
     let stop = Arc::new(StopCell::default());
-    tap.activate(tx, Arc::clone(&stop), size(80, 24));
+    reservation.activate(tx, Arc::clone(&stop));
     let started = Instant::now();
     for _ in 0..10_000 {
         tap.output(&Bytes::from_static(b"flood"));
@@ -429,10 +437,10 @@ impl Write for SlowSink {
 #[test]
 fn a_slow_writer_stops_the_recording_and_never_stalls_the_terminal() {
     let tap = Arc::new(TerminalTap::new(size(80, 24)));
-    tap.begin(TerminalId::next()).unwrap();
+    let reservation = tap.begin(TerminalId::next()).unwrap();
     let (tx, mut rx) = mpsc::channel(16);
     let stop = Arc::new(StopCell::default());
-    tap.activate(tx, Arc::clone(&stop), size(80, 24));
+    reservation.activate(tx, Arc::clone(&stop));
     let writer = std::thread::spawn(move || {
         let mut writer = CastWriter::new(SlowSink(Vec::new()), MAX_RECORDING_BYTES);
         writer.write_line(HEADER).unwrap();
@@ -937,7 +945,7 @@ fn benign_sequences_pass_unchanged() {
         "\x1b[H\x1b[2J\x1b[10;20H\x1b[?25l\x1b[?1049h\x1b[K\x1b[A\x1b[3C",
         "\x1b7saved\x1b8\x1bM\x1b(B\x1b=\x1b>",
         "\x1b[?2004h bracketed \x1b[200~",
-        "tab\tbell\x07 backspace\x08 é 😀 \u{9b}31m",
+        "tab\tbell\x07 backspace\x08 é 😀",
         "\x1b]4;1;rgb:ff/00/00\x07\x1b]104\x07",
         "\x1b]11;#202020\x1b\\",
     ] {
@@ -1026,4 +1034,616 @@ fn kept_osc_bodies_are_bounded() {
     assert_eq!(sanitize_playback(&huge), "ok");
     let digits = format!("\x1b]{}0;t\x07ok", "1".repeat(50));
     assert_eq!(sanitize_playback(&digits), "ok");
+}
+
+// ── sanitiser against real parsers (security review) ────────────────────
+
+/// What vte (the parser of `alacritty_terminal`, so of the TUI) dispatches.
+#[derive(Debug, Default)]
+struct VteRecorder {
+    /// Parameters of every dispatched OSC.
+    oscs: Vec<Vec<Vec<u8>>>,
+    /// DCS hooks (`DECRQSS`, sixel, tmux passthrough…).
+    hooks: usize,
+}
+
+impl vte::Perform for VteRecorder {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.oscs
+            .push(params.iter().map(|param| param.to_vec()).collect());
+    }
+
+    fn hook(&mut self, _: &vte::Params, _: &[u8], _: bool, _: char) {
+        self.hooks += 1;
+    }
+}
+
+/// The OSC numbers [`PlaybackSanitizer`] lets through.
+const ALLOWED_OSC: [&str; 8] = ["4", "10", "11", "12", "104", "110", "111", "112"];
+
+/// Feeds `output` to vte, cut into byte chunks at `cuts` (sorted), and
+/// checks nothing acting outside the grid is dispatched.
+fn assert_inert_in_vte(output: &str, cuts: &[usize], input: &str) {
+    let mut parser = vte::Parser::new();
+    let mut seen = VteRecorder::default();
+    let bytes = output.as_bytes();
+    let mut from = 0;
+    for &cut in cuts.iter().chain(std::iter::once(&bytes.len())) {
+        let cut = cut.clamp(from, bytes.len());
+        parser.advance(&mut seen, &bytes[from..cut]);
+        from = cut;
+    }
+    assert_eq!(seen.hooks, 0, "vte DCS hook for {input:?} -> {output:?}");
+    for params in &seen.oscs {
+        let number = params
+            .first()
+            .map(|p| String::from_utf8_lossy(p).into_owned());
+        assert!(
+            number.as_deref().is_some_and(|n| ALLOWED_OSC.contains(&n)),
+            "vte OSC {number:?} for {input:?} -> {output:?}"
+        );
+        assert!(
+            !params.iter().any(|p| p.contains(&b'?')),
+            "vte OSC query for {input:?} -> {output:?}"
+        );
+    }
+}
+
+/// States of the xterm.js 6 parser (`EscapeSequenceParser.ts`,
+/// `VT500_TRANSITION_TABLE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Xterm {
+    Ground,
+    Escape,
+    EscapeIntermediate,
+    CsiEntry,
+    CsiParam,
+    CsiIntermediate,
+    CsiIgnore,
+    OscString,
+    DcsEntry,
+    DcsParam,
+    DcsIntermediate,
+    DcsIgnore,
+    DcsPassthrough,
+    SosPmApcString,
+}
+
+/// What the model of the xterm.js parser saw.
+#[derive(Debug, Default)]
+struct XtermSeen {
+    /// Data of every OSC ended successfully (BEL, ST, ESC).
+    oscs: Vec<String>,
+    hooks: usize,
+    /// DCS / SOS / PM / APC strings entered (dropped by the sanitiser, so
+    /// never expected).
+    strings: usize,
+}
+
+fn xterm_executable(c: u32) -> bool {
+    matches!(c, 0x00..=0x17 | 0x19 | 0x1c..=0x1f)
+}
+
+/// A transcription of the xterm.js 6 transition table, by code point
+/// (`code < 0xA0 ? code : NON_ASCII_PRINTABLE`), with the actions that
+/// matter here: OSC start / put / end, DCS hook, string entry. Executes,
+/// prints, CSI and ESC dispatches only change state.
+// One arm per row of the table, as written there: easier to check against
+// the source than a shorter, merged version.
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
+fn xterm_model(text: &str) -> XtermSeen {
+    use Xterm as S;
+    let mut seen = XtermSeen::default();
+    let mut state = S::Ground;
+    let mut osc = String::new();
+    for ch in text.chars() {
+        let code = u32::from(ch);
+        let c = if code < 0xa0 { code } else { 0xa0 };
+        // OSC_STRING and DCS_PASSTHROUGH terminators override "anywhere".
+        if state == S::OscString && matches!(c, 0x9c | 0x1b | 0x18 | 0x1a | 0x07) {
+            if c != 0x18 && c != 0x1a {
+                seen.oscs.push(std::mem::take(&mut osc));
+            }
+            state = if c == 0x1b { S::Escape } else { S::Ground };
+            continue;
+        }
+        if state == S::DcsPassthrough && matches!(c, 0x1b | 0x9c | 0x18 | 0x1a) {
+            state = if c == 0x1b { S::Escape } else { S::Ground };
+            continue;
+        }
+        // "Anywhere" rules (C1 and CAN, SUB, ESC), in every state.
+        let anywhere = match c {
+            0x18 | 0x1a | 0x99 | 0x9a | 0x80..=0x8f | 0x91..=0x97 | 0x9c => Some(S::Ground),
+            0x1b => Some(S::Escape),
+            0x9d => {
+                osc.clear();
+                Some(S::OscString)
+            }
+            0x98 | 0x9e | 0x9f => Some(S::SosPmApcString),
+            0x9b => Some(S::CsiEntry),
+            0x90 => Some(S::DcsEntry),
+            _ => None,
+        };
+        if let Some(next) = anywhere {
+            if matches!(next, S::SosPmApcString | S::DcsEntry) {
+                seen.strings += 1;
+            }
+            state = next;
+            continue;
+        }
+        let exec = xterm_executable(c);
+        state = match state {
+            S::Ground => S::Ground,
+            S::Escape => match c {
+                _ if exec => S::Escape,
+                0x7f => S::Escape,
+                0x20..=0x2f => S::EscapeIntermediate,
+                0x5d => {
+                    osc.clear();
+                    S::OscString
+                }
+                0x58 | 0x5e | 0x5f => {
+                    seen.strings += 1;
+                    S::SosPmApcString
+                }
+                0x5b => S::CsiEntry,
+                0x50 => {
+                    seen.strings += 1;
+                    S::DcsEntry
+                }
+                _ => S::Ground,
+            },
+            S::EscapeIntermediate => match c {
+                _ if exec => S::EscapeIntermediate,
+                0x7f | 0x20..=0x2f => S::EscapeIntermediate,
+                _ => S::Ground,
+            },
+            S::CsiEntry => match c {
+                _ if exec => S::CsiEntry,
+                0x7f => S::CsiEntry,
+                0x30..=0x3f => S::CsiParam,
+                0x20..=0x2f => S::CsiIntermediate,
+                _ => S::Ground,
+            },
+            S::CsiParam => match c {
+                _ if exec => S::CsiParam,
+                0x7f | 0x30..=0x3b => S::CsiParam,
+                0x3c..=0x3f => S::CsiIgnore,
+                0x20..=0x2f => S::CsiIntermediate,
+                _ => S::Ground,
+            },
+            S::CsiIntermediate => match c {
+                _ if exec => S::CsiIntermediate,
+                0x7f | 0x20..=0x2f => S::CsiIntermediate,
+                0x30..=0x3f => S::CsiIgnore,
+                _ => S::Ground,
+            },
+            S::CsiIgnore => match c {
+                0x40..=0x7e => S::Ground,
+                _ => S::CsiIgnore,
+            },
+            S::OscString => {
+                if matches!(c, 0x20..=0x7f | 0xa0) {
+                    osc.push(ch);
+                }
+                S::OscString
+            }
+            S::DcsEntry | S::DcsParam | S::DcsIntermediate => match (state, c) {
+                (_, 0x40..=0x7e) => {
+                    seen.hooks += 1;
+                    S::DcsPassthrough
+                }
+                (_, 0xa0) => S::Ground,
+                (S::DcsIntermediate, 0x30..=0x3f) | (_, 0x3c..=0x3f) => S::DcsIgnore,
+                (_, 0x20..=0x2f) => S::DcsIntermediate,
+                (_, 0x30..=0x3b) => S::DcsParam,
+                _ => state,
+            },
+            S::DcsIgnore => S::DcsIgnore,
+            S::DcsPassthrough => S::DcsPassthrough,
+            S::SosPmApcString => S::SosPmApcString,
+        };
+    }
+    seen
+}
+
+fn assert_inert_in_xterm(output: &str, input: &str) {
+    let seen = xterm_model(output);
+    assert_eq!(
+        seen.hooks, 0,
+        "xterm.js DCS hook for {input:?} -> {output:?}"
+    );
+    assert_eq!(
+        seen.strings, 0,
+        "xterm.js string entered for {input:?} -> {output:?}"
+    );
+    for data in &seen.oscs {
+        let number = data.split(';').next().unwrap_or_default();
+        assert!(
+            ALLOWED_OSC.contains(&number),
+            "xterm.js OSC {data:?} for {input:?} -> {output:?}"
+        );
+        assert!(!data.contains('?'), "xterm.js OSC query for {input:?}");
+    }
+}
+
+/// The structural invariant of the sanitiser's output.
+fn assert_output_invariant(output: &str, input: &str) {
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        assert!(!is_c1(c), "C1 {c:?} emitted for {input:?} -> {output:?}");
+        if c == '\x1b' {
+            assert!(
+                chars.peek().is_some_and(|n| matches!(n, ' '..='~')),
+                "ESC not followed by ' '..='~' for {input:?} -> {output:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_xterm_js_model_reproduces_the_reviewed_bypasses() {
+    // On raw (unsanitised) input, the model sees what the review saw in
+    // xterm.js.
+    assert_eq!(xterm_model("\x1b\n]0;PWNED\x07").oscs, ["0;PWNED"]);
+    assert_eq!(xterm_model("\x1b\u{9d}0;PWNED\x07").oscs, ["0;PWNED"]);
+    assert_eq!(xterm_model("\x1b\u{90}$qm\x1b\\").hooks, 1);
+    assert_eq!(xterm_model("\x1b\x08P$qm\x1b\\").hooks, 1);
+    assert_eq!(
+        xterm_model("\x1b]4;1;\u{9d}52;c;aGk=\x07").oscs,
+        ["52;c;aGk="]
+    );
+    assert!(xterm_model("\x1b]0;t\x18").oscs.is_empty(), "CAN aborts");
+    assert!(xterm_model("\x1b[31m\x1b(Bx").oscs.is_empty());
+}
+
+#[test]
+fn no_sequence_can_be_smuggled_past_the_sanitizer() {
+    // Confirmed by the review: ESC + C0 / DEL, ESC + C1, C1 in a kept OSC.
+    let reviewed = [
+        "\x1b\n]0;PWNED\x07",
+        "\x1b\r]8;;http://x/\x07",
+        "\x1b\x08P$qm\x1b\\",
+        "\x1b]52;c;x\x1b\n]2;T\x07",
+        "\x1b\u{9d}0;PWNED\x07",
+        "\x1b\u{90}$qm\x1b\\",
+        "\x1b]4;1;\u{9d}52;c;aGk=\x07",
+        "\x1b\x7f]0;PWNED\x07",
+        "\x1bP$q\x1b\x0b\x1b]2;T\x07",
+    ];
+    for input in reviewed {
+        let output = sanitize_all_splits(input);
+        assert_output_invariant(&output, input);
+        for forbidden in ["]0;", "]2;", "]8;", "]52;", "P$q"] {
+            assert!(
+                !output.contains(forbidden),
+                "{forbidden:?} survives in {input:?} -> {output:?}"
+            );
+        }
+        assert_inert_in_vte(&output, &[], input);
+        assert_inert_in_xterm(&output, input);
+    }
+    // Found while checking vte: after ESC it ignores the bytes of a
+    // non-ASCII character and stays in ESCAPE (xterm.js goes back to
+    // ground). The ESC is dropped, so a following `]` is plain text in both.
+    for input in [
+        "\x1bé]0;PWNED\x07",
+        "\x1b\u{a0}]52;c;eA==\x07",
+        "\x1b(\u{9d}0;T\x07",
+        "\x1b[\u{9d}0;T\x07",
+        "\x1b]0;a\x1b\u{9c}]2;T\x07",
+        "\x1bP\u{98}x\u{9c}\x1b]0;T\x07",
+        "\u{9b}\x1b\u{9d}2;T\x07",
+    ] {
+        let output = sanitize_all_splits(input);
+        assert_output_invariant(&output, input);
+        assert!(!output.contains("\x1b]"), "{input:?} -> {output:?}");
+        assert_inert_in_vte(&output, &[], input);
+        assert_inert_in_xterm(&output, input);
+    }
+    // Text and the kept sequences still pass.
+    assert_eq!(sanitize_all_splits("\x1b\n[1mx"), "\n\x1b[1mx");
+    assert_eq!(sanitize_all_splits("\x1bé"), "é");
+    assert_eq!(
+        sanitize_all_splits("\x1b]4;1;\nrgb:ff/00/00\x07"),
+        "\x1b]4;1;rgb:ff/00/00\x07"
+    );
+}
+
+/// xorshift64*: deterministic, no dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+    }
+}
+
+/// The fuzzing alphabet: every introducer, terminator and abort of the
+/// sequences the sanitiser handles, in 7-bit, C1 and edge forms.
+const FUZZ_ALPHABET: [char; 17] = [
+    '\x1b', ']', 'P', '\\', '\x07', '\n', '\x7f', '\u{9d}', '\u{90}', '\u{9c}', '0', '2', '4', '5',
+    ';', '?', 'a',
+];
+
+/// Sanitises `input` whole and cut in random chunks (same result), then
+/// checks the output against the invariant, vte (fed in random byte chunks)
+/// and the xterm.js model.
+fn fuzz_one(input: &str, rng: &mut Rng) {
+    let whole = sanitize_playback(input);
+    let boundaries: Vec<usize> = (0..=input.len())
+        .filter(|i| input.is_char_boundary(*i))
+        .collect();
+    let mut cuts: Vec<usize> = (0..2)
+        .map(|_| boundaries[rng.below(boundaries.len())])
+        .collect();
+    cuts.sort_unstable();
+    let mut sanitizer = PlaybackSanitizer::new();
+    let mut chunked = String::new();
+    let mut from = 0;
+    for cut in cuts.iter().copied().chain(std::iter::once(input.len())) {
+        chunked.push_str(&sanitizer.sanitize(&input[from..cut]));
+        from = cut;
+    }
+    assert_eq!(chunked, whole, "chunking changed {input:?}");
+    assert_output_invariant(&whole, input);
+    let byte_cuts = [rng.below(whole.len() + 1)];
+    assert_inert_in_vte(&whole, &byte_cuts, input);
+    assert_inert_in_xterm(&whole, input);
+}
+
+/// Every string over [`FUZZ_ALPHABET`] up to `max_len` characters, after
+/// `prefix`. Returns how many were checked.
+fn fuzz_exhaustive(prefix: &str, max_len: u32, rng: &mut Rng) -> usize {
+    let base = FUZZ_ALPHABET.len();
+    let mut count = 0;
+    let mut input = String::new();
+    for len in 0..=max_len {
+        for mut n in 0..base.pow(len) {
+            input.clear();
+            input.push_str(prefix);
+            for _ in 0..len {
+                input.push(FUZZ_ALPHABET[n % base]);
+                n /= base;
+            }
+            fuzz_one(&input, rng);
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Differential fuzzing against vte 0.15 (the version `alacritty_terminal`
+/// uses, so what the TUI runs) and the xterm.js model: no input over the
+/// alphabet makes either dispatch an OSC outside the colour allowlist, an
+/// OSC query, or a DCS.
+///
+/// Exhaustive over all strings of up to 5 characters (1.5 M inputs), and of
+/// up to 4 characters after prefixes that put the sanitiser in each of its
+/// states (OSC number being read, kept OSC, dropped OSC, string, pending
+/// ESC). Length 8 (7·10⁹ inputs) is far beyond a unit test: 300 000 random
+/// strings of 6 to 12 characters cover longer interleavings instead.
+#[test]
+fn sanitized_output_never_dispatches_a_forbidden_osc_in_vte() {
+    let mut rng = Rng(0x5eed_0f19_0171_c0de);
+    let mut count = fuzz_exhaustive("", 5, &mut rng);
+    for prefix in [
+        "\x1b",
+        "\x1b]",
+        "\x1b]1",
+        "\x1b]4;",
+        "\x1b]4;1;",
+        "\x1b]52;",
+        "\x1bP",
+        "\u{9d}4;",
+        "\x1b]4;1;x\x1b",
+    ] {
+        count += fuzz_exhaustive(prefix, 4, &mut rng);
+    }
+    let mut input = String::new();
+    for _ in 0..300_000 {
+        input.clear();
+        let len = 6 + rng.below(7);
+        for _ in 0..len {
+            input.push(FUZZ_ALPHABET[rng.below(FUZZ_ALPHABET.len())]);
+        }
+        fuzz_one(&input, &mut rng);
+        count += 1;
+    }
+    assert!(count > 2_000_000, "{count}");
+}
+
+// ── names, files, writer (security review, low findings) ────────────────
+
+#[test]
+fn every_created_name_is_valid() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("recordings");
+    let seventy_dots = ".".repeat(70);
+    let aliases = [
+        "a..b",
+        "..",
+        "a.",
+        "x...y",
+        "é..ß",
+        "-.-..",
+        seventy_dots.as_str(),
+    ];
+    let mut created = Vec::new();
+    for alias in aliases {
+        let recording = create_recording(&dir, alias, at(1_700_000_000), size(80, 24), 1024)
+            .unwrap_or_else(|e| panic!("{alias:?}: {e}"));
+        validate_name(&recording.name).unwrap_or_else(|e| panic!("{alias:?}: {e}"));
+        created.push(recording.name);
+    }
+    let listed: Vec<String> = list(&dir).unwrap().into_iter().map(|e| e.name).collect();
+    for name in &created {
+        assert!(listed.contains(name), "{name} is not listed: {listed:?}");
+        delete(&dir, name).unwrap();
+    }
+    assert!(list(&dir).unwrap().is_empty());
+    assert_eq!(sanitize_alias("a..b"), "a.b");
+    assert_eq!(sanitize_alias("é..ß"), "_._");
+    assert_eq!(sanitize_alias(&seventy_dots), "session");
+}
+
+/// Accepts `limit` bytes (cutting a write short), then fails like a full
+/// disk.
+#[derive(Debug)]
+struct FullDisk {
+    data: Vec<u8>,
+    limit: usize,
+}
+
+impl Write for FullDisk {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = self.limit.saturating_sub(self.data.len());
+        if room == 0 {
+            return Err(std::io::Error::other("no space left on device"));
+        }
+        let n = room.min(buf.len());
+        self.data.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Truncate for FullDisk {
+    fn truncate_to(&mut self, len: u64) -> std::io::Result<()> {
+        self.data.truncate(usize::try_from(len).unwrap());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_failed_write_leaves_complete_lines_only() {
+    for limit in [1, 150, 70_000, 200_001] {
+        let (tx, mut rx) = mpsc::channel(4096);
+        for i in 0..3000_u32 {
+            tx.try_send(TapEvent::Output {
+                at: f64::from(i) / 100.0,
+                bytes: Bytes::from(format!("line {i} \x1b[1m{}\x1b[0m\r\n", "x".repeat(60))),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        let mut writer = CastWriter::new(
+            FullDisk {
+                data: Vec::new(),
+                limit,
+            },
+            MAX_RECORDING_BYTES,
+        );
+        writer.write_line(HEADER).unwrap();
+        let stop = run_writer(&mut rx, &mut writer).expect("the disk fills up");
+        assert_eq!(stop.reason(), RecordingStopReason::WriteFailed);
+        let written = usize::try_from(writer.written()).unwrap();
+        assert!(written <= limit);
+        let disk = truncate_to_committed(writer).unwrap();
+        assert_eq!(disk.data.len(), written, "limit {limit}");
+        if written > 0 {
+            assert_eq!(disk.data.last(), Some(&b'\n'), "limit {limit}");
+            let text = String::from_utf8(disk.data).unwrap();
+            assert!(
+                events(&text).iter().all(Result::is_ok),
+                "limit {limit}: every line parses"
+            );
+        }
+    }
+}
+
+#[test]
+fn truncate_to_committed_cuts_a_file_back_to_its_complete_lines() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("t.cast");
+    let file = File::create(&path).unwrap();
+    let mut writer = CastWriter::new(file, MAX_RECORDING_BYTES);
+    writer.write_line(HEADER).unwrap();
+    writer.flush().unwrap();
+    // A torn line reached the file (a partial write before ENOSPC), and a
+    // complete line is still buffered.
+    let mut raw = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    raw.write_all(b"[0.5, \"o\", \"tor").unwrap();
+    writer.write_line("[1.0, \"o\", \"buffered\"]").unwrap();
+    truncate_to_committed(writer).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text, format!("{HEADER}\n"));
+}
+
+#[test]
+fn recordings_of_huge_terminals_stay_playable() {
+    let header = header_line("big", size(5000, 3000), at(1_700_000_000));
+    let mut writer = CastWriter::new(Vec::new(), MAX_RECORDING_BYTES);
+    writer.write_line(&header).unwrap();
+    for (cols, rows) in [(2000, 2000), (0, 0), (1000, 1), (u16::MAX, 40)] {
+        writer
+            .write_event(TapEvent::Resize {
+                at: 0.5,
+                cols,
+                rows,
+            })
+            .unwrap();
+    }
+    let (sink, done) = writer.finish();
+    done.unwrap();
+    let text = String::from_utf8(sink).unwrap();
+    let reader = CastReader::new(Cursor::new(text.clone().into_bytes()), "big.cast").unwrap();
+    assert_eq!(
+        (reader.header().width, reader.header().height),
+        (MAX_PLAYBACK_DIMENSION, MAX_PLAYBACK_DIMENSION)
+    );
+    let sizes: Vec<(u16, u16)> = ok_events(&text)
+        .into_iter()
+        .map(|e| match e.event {
+            CastEvent::Resize { cols, rows } => (cols, rows),
+            CastEvent::Output(_) => panic!("unexpected output"),
+        })
+        .collect();
+    assert_eq!(sizes, [(1000, 1000), (1, 1), (1000, 1), (1000, 40)]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recordings_folder_owned_by_someone_else_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    if !rustix::process::geteuid().is_root() {
+        // Only root can give a folder away: nothing to check otherwise.
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("recordings");
+    std::fs::create_dir(&dir).unwrap();
+    std::os::unix::fs::chown(&dir, Some(4242), Some(4242)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let err = create_recording(&dir, "web", at(0), size(80, 24), 1024).unwrap_err();
+    assert_eq!(code(&err), "recording_foreign_owner");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "nothing created"
+    );
+    assert_eq!(mode(&dir), 0o777, "someone else's folder is never chmod-ed");
+}
+
+#[test]
+fn header_title_drops_format_characters() {
+    let header = "{\"version\":2,\"width\":80,\"height\":24,\"title\":\"a\u{200e}b\u{200f}c\u{061c}d\u{200b}e\u{2060}f\u{feff}g\u{2028}h\u{2029}i\u{202e}j\u{2066}k\u{00ad}l\u{e0041}m\"}";
+    let reader = CastReader::new(Cursor::new(header.as_bytes().to_vec()), "t").unwrap();
+    assert_eq!(reader.header().title.as_deref(), Some("abcdefghijklm"));
+    // Control characters are still replaced, visibly.
+    let header = br#"{"version":2,"width":80,"height":24,"title":"a\u0007b"}"#;
+    let reader = CastReader::new(Cursor::new(header.to_vec()), "t").unwrap();
+    assert_eq!(reader.header().title.as_deref(), Some("a\u{FFFD}b"));
 }
