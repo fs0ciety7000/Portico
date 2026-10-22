@@ -6,7 +6,7 @@
   import { fly } from "svelte/transition";
   import { describe, sentence, type Host, type LocalKey } from "../api";
   import { backend } from "../backend";
-  import { dur } from "../motion";
+  import { COPIED_FEEDBACK_MS, dur } from "../motion";
   import { COPY_STEP_LABEL, keys, type CopyStep } from "../state/keys.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
@@ -83,7 +83,7 @@
     try {
       await navigator.clipboard.writeText(identity);
       copied = true;
-      setTimeout(() => (copied = false), 1600);
+      setTimeout(() => (copied = false), COPIED_FEEDBACK_MS);
     } catch {
       // The text stays selectable.
     }

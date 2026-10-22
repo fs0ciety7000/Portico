@@ -97,6 +97,8 @@ pub(crate) struct ImportPreviewDto {
     /// Where the hosts will be written (Portico's own folder).
     target: String,
     include_line: String,
+    /// `Host` blocks already in the target, replaced by this import.
+    replaces: Option<usize>,
 }
 
 impl ImportPreviewDto {
@@ -121,6 +123,7 @@ impl ImportPreviewDto {
             secrets: plan.secrets,
             target: plan.target.display().to_string(),
             include_line: plan.include_line,
+            replaces: plan.replaces,
             hosts: plan.hosts,
             skipped: plan.skipped,
             warnings: plan.warnings,
@@ -240,6 +243,7 @@ mod tests {
             identity_files: Vec::new(),
             target: portico_core::import::termius_target(&paths),
             include_line: "Include x".into(),
+            replaces: None,
         };
         let imports = Imports::default();
         let first = imports.keep("a".into(), plan.clone());

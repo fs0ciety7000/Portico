@@ -844,6 +844,16 @@ const HELP: &[(&str, usize, HelpRows)] = &[
             (&[Fixed("Ctrl-D")], "Delete (asks)"),
         ],
     ),
+    (
+        "Import from Termius (shell)",
+        1,
+        &[
+            (&[Fixed("portico")], "import termius FILE"),
+            (&[Fixed("--prefix")], "termius- aliases"),
+            (&[Fixed("--apply")], "Write (preview 1st)"),
+            (&[Fixed("docs")], "IMPORT.md"),
+        ],
+    ),
 ];
 
 /// A section of the `?` overlay, with the effective keys.

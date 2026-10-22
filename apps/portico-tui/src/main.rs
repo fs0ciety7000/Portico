@@ -139,7 +139,8 @@ fn main() -> Result<ExitCode> {
                     print!("{text}");
                     ExitCode::SUCCESS
                 }
-                Err(summary) => {
+                Err(import_cli::Failure { stdout, summary }) => {
+                    print!("{stdout}");
                     eprintln!("portico: {}", summary.message);
                     if let Some(hint) = summary.hint {
                         eprintln!("  {hint}");
@@ -149,7 +150,7 @@ fn main() -> Result<ExitCode> {
             });
         }
         Command::Usage(message) => {
-            eprintln!("portico: {message}\n\n{USAGE}");
+            eprintln!("portico: {message}. Try `portico --help`.");
             return Ok(ExitCode::from(2));
         }
         Command::Run => {}

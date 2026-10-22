@@ -33,7 +33,12 @@ portico import termius ~/Downloads/termius.csv --apply    # écrit, puis affiche
 
 **GUI** : palette (`⌘K` / `Ctrl-K`), « Import from Termius… ». Le fichier se choisit dans le sélecteur natif ;
 l'aperçu liste les hôtes, les enregistrements ignorés, les avertissements et les secrets ignorés. « Import » écrit,
-puis la ligne `Include` s'affiche avec un bouton de copie.
+puis la ligne `Include` s'affiche avec un bouton de copie. La TUI n'a pas d'écran d'import : son aide `?` rappelle la
+commande ci-dessus.
+
+Un nouvel import **remplace** les hôtes du précédent : l'aperçu l'annonce (« Replaces the 6 hosts of … », bouton
+« Replace with N hosts »). Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse avec
+« nothing to import: termius.conf left as is », le bouton est désactivé) : l'import précédent reste en place.
 
 ## 3. Ajouter la ligne `Include`
 
