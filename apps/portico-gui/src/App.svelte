@@ -1003,6 +1003,7 @@
       {#if !isTauri()}<span class="demo" title="Browser preview with a simulated engine">Demo</span>{/if}
       {settings.theme?.name ?? ""}
     </span>
+    <span class="version" title="Portico version">v{__APP_VERSION__}</span>
   </footer>
 </div>
 
@@ -1250,6 +1251,7 @@
   .hints > span { display: flex; align-items: center; gap: var(--space-1); height: 100%; }
   .counts { flex: 0 0 auto; }
   .theme-name { flex: 0 0 auto; padding-left: var(--space-3); border-left: 1px solid var(--border-subtle); }
+  .version { flex: 0 0 auto; }
   .session {
     --c: var(--status-idle);
     display: flex;

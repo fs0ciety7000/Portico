@@ -45,12 +45,51 @@ const EXIT_GRACE: Duration = Duration::from_millis(500);
 
 #[allow(clippy::missing_panics_doc)] // Tauri's builder reports fatal startup errors itself
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    let restart = webkit_env::apply();
     // First, before any secret can be in memory: no core dumps, no ptrace
     // (logged once tracing is up).
     let hardening = portico_core::hardening::harden_process();
     init_tracing();
     hardening.log();
+    #[cfg(target_os = "linux")]
+    if let Some(err) = restart {
+        tracing::warn!("could not restart with {}=1: {err}", webkit_env::DMABUF);
+    }
     run_app();
+}
+
+/// `WebKitGTK` workarounds that must be in the environment before it
+/// starts. `std::env::set_var` is unsafe in a threaded process (and unsafe
+/// code is forbidden here), so the process re-executes itself once with the
+/// variable set.
+#[cfg(target_os = "linux")]
+mod webkit_env {
+    use std::ffi::OsStr;
+    use std::os::unix::process::CommandExt;
+
+    /// The DMA-BUF renderer crashes on some Wayland compositors and drivers
+    /// (`Error 71 (Protocol error) dispatching to Wayland display`) and
+    /// makes input lag on others. Any value the user set, `0` included, wins.
+    pub(crate) const DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
+    /// Returns only when nothing had to change, or when the restart failed
+    /// (then the app starts as is and the error is logged).
+    pub(crate) fn apply() -> Option<std::io::Error> {
+        if std::env::var_os(DMABUF).is_some() {
+            return None;
+        }
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(err) => return Some(err),
+        };
+        Some(
+            std::process::Command::new(exe)
+                .args(std::env::args_os().skip(1))
+                .env(DMABUF, OsStr::new("1"))
+                .exec(),
+        )
+    }
 }
 
 fn init_tracing() {
