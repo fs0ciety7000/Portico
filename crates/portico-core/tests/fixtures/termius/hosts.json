@@ -1,0 +1,9 @@
+{
+  "generatedAt": "2026-10-01T10:00:00Z",
+  "includeSecrets": true,
+  "hosts": [
+    {"alias": "api-eu", "label": "API EU", "address": "203.0.113.30", "port": 22, "username": "svc", "password": "FAKEPASS123", "identityFile": "", "group": "Production/EU", "local_id": 1, "id": 11},
+    {"alias": "bastion", "label": "bastion", "address": "2001:db8::20", "port": "2022", "username": "ops", "password": "", "identityFile": "/home/user/.termius/keys/bastion", "group": null, "local_id": 2, "id": 12},
+    {"alias": "broken", "label": "broken", "address": "", "port": 22, "username": "x", "password": null, "identityFile": null, "group": "Lab", "local_id": 3, "id": 13}
+  ]
+}

@@ -12,6 +12,8 @@ import {
   type SnippetDraft,
   type VaultStatus,
   type HostMeta,
+  type ImportPreview,
+  type ImportReport,
   type RecentHost,
   type SessionLogInfo,
   type LogLine,
@@ -96,6 +98,11 @@ export interface Backend {
   effectiveConfig(alias: string): Promise<EffectiveConfig>;
   getSettings(): Promise<Settings>;
   saveTheme(theme: string): Promise<void>;
+  /** Native picker in Rust, then the plan; `null` when cancelled. */
+  importTermiusPick(prefix: boolean): Promise<ImportPreview | null>;
+  importTermiusReplan(token: number, prefix: boolean): Promise<ImportPreview>;
+  importApply(token: number): Promise<ImportReport>;
+  importCancel(): Promise<void>;
 }
 
 const tauriBackend: Backend = {

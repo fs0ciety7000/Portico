@@ -328,6 +328,69 @@ export type SnippetDraft = Omit<Snippet, "placeholders">;
 
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
+/** Mirrors `portico_core::import::ImportNotice` (never a secret). */
+export interface ImportNotice {
+  /** `unsupported_protocol`, `missing_hostname`, `invalid_hostname`, `alias_collision`, `tag_normalized`… */
+  code: string;
+  record: number | null;
+  label: string | null;
+  message: string;
+}
+
+/** Mirrors `portico_core::import::PlannedHost`. */
+export interface PlannedHost {
+  alias: string;
+  label: string;
+  hostname: string;
+  user: string | null;
+  /** `null` for 22. */
+  port: number | null;
+  group: string | null;
+  tags: string[];
+  notes: string | null;
+  record: number;
+}
+
+/** Secrets found in the export and ignored (counts only). */
+export interface IgnoredSecrets {
+  passwords: number;
+  keys: number;
+}
+
+/** Mirrors `import::ImportPreviewDto`: a plan kept in Rust under `token`. */
+export interface ImportPreview {
+  token: number;
+  /** File name only: the path stays in Rust. */
+  fileName: string;
+  format: string;
+  records: number;
+  prefix: boolean;
+  hosts: PlannedHost[];
+  skipped: ImportNotice[];
+  warnings: ImportNotice[];
+  secrets: IgnoredSecrets;
+  secretsAdvice: string | null;
+  identityFiles: string[];
+  target: string;
+  includeLine: string;
+}
+
+/** Mirrors `import::ImportReportDto` (`portico_core::import::ImportReport`). */
+export interface ImportReport {
+  formatLabel: string;
+  target: string;
+  unchanged: boolean;
+  imported: string[];
+  skipped: ImportNotice[];
+  warnings: ImportNotice[];
+  secrets: IgnoredSecrets;
+  secretsAdvice: string | null;
+  identityFiles: string[];
+  metaUpdated: number;
+  includeLine: string;
+  includeActive: boolean;
+}
+
 export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),
   searchHosts: (query: string) => invoke<Host[]>("search_hosts", { query }),
@@ -405,6 +468,11 @@ export const api = {
   effectiveConfig: (alias: string) => invoke<EffectiveConfig>("effective_config", { alias }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
+  /** Native file picker (Rust side), then the plan; `null` when cancelled. */
+  importTermiusPick: (prefix: boolean) => invoke<ImportPreview | null>("import_termius_pick", { prefix }),
+  importTermiusReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_termius_replan", { token, prefix }),
+  importApply: (token: number) => invoke<ImportReport>("import_apply", { token }),
+  importCancel: () => invoke<void>("import_cancel"),
   /** Files dropped on the window, already registered as upload tokens. */
   onDropped: (cb: (files: Upload[]) => void): Promise<UnlistenFn> =>
     listen<Upload[]>("portico://dropped", (e) => cb(e.payload)),

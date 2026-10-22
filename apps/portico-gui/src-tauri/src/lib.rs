@@ -9,6 +9,7 @@ mod commands;
 mod debug;
 mod dto;
 mod files;
+mod import;
 mod keys;
 mod meta;
 mod settings;
@@ -23,6 +24,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::files::Files;
+use crate::import::Imports;
 use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
@@ -67,6 +69,7 @@ fn run_app() {
             app.manage(engine);
             app.manage(Arc::new(Terminals::default()));
             app.manage(Files::default());
+            app.manage(Imports::default());
             Ok(())
         })
         // Dropped files become upload tokens; their paths stay in Rust.
@@ -140,6 +143,10 @@ fn run_app() {
             debug::effective_config,
             settings::get_settings,
             settings::save_theme,
+            import::import_termius_pick,
+            import::import_termius_replan,
+            import::import_apply,
+            import::import_cancel,
         ])
         .build(tauri::generate_context!());
 
@@ -175,13 +182,17 @@ fn run_app() {
     });
 }
 
-/// Closes what a (re)loading page opened: terminals, upload tokens, sessions.
+/// Closes what a (re)loading page opened: terminals, upload tokens, a
+/// pending import, sessions.
 fn release_page(webview: &tauri::Webview) {
     if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
         terminals.close_all();
     }
     if let Some(files) = webview.try_state::<Files>() {
         files.clear();
+    }
+    if let Some(imports) = webview.try_state::<Imports>() {
+        imports.clear();
     }
     if let Some(engine) = webview.try_state::<Engine>() {
         engine.disconnect_all();

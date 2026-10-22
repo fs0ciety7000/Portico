@@ -136,6 +136,10 @@ pub enum Error {
 
     #[error(transparent)]
     Settings(#[from] crate::settings::SettingsError),
+
+    // ── Phase 5: imports ────────────────────────────────────────────────
+    #[error(transparent)]
+    Import(#[from] crate::import::ImportError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -308,6 +312,9 @@ impl Error {
             ),
             Self::HostMeta(e) => e.code_and_hint(),
             Self::Settings(e) => e.code_and_hint(),
+
+            // ── Phase 5 ──
+            Self::Import(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),

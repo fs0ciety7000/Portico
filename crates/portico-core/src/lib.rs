@@ -28,6 +28,7 @@ pub mod forward;
 pub mod hardening;
 pub mod hosts;
 pub mod ids;
+pub mod import;
 pub mod keys;
 pub mod known_hosts;
 pub mod logs;
