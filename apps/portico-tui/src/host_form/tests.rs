@@ -364,3 +364,60 @@ fn a_key_kept_from_the_host_stays_listed() {
     form.paste("x");
     assert_eq!(form.key, 2);
 }
+
+#[test]
+fn managed_values_fill_the_edit_form_whatever_comes_first() {
+    let home = Path::new("/home/alice");
+    let entry = crate::host_list::test_host("web", None);
+    let managed = ManagedHost {
+        alias: "web".into(),
+        hostname: "203.0.113.10".into(),
+        user: Some("deploy".into()),
+        port: Some(2222),
+        identity_file: Some(PathBuf::from("/home/alice/.ssh/id_ed25519")),
+        proxy_jump: Some("Bastion".into()),
+    };
+    let aliases = vec!["bastion".to_owned(), "web".to_owned()];
+    // Values first, then the keys.
+    let mut form = HostForm::edit(&entry, &aliases);
+    assert!(form.loading);
+    form.handle_key(k(KeyCode::Char('x')));
+    form.paste("y");
+    assert_eq!(form.alias, "web", "nothing typed while loading");
+    form.set_managed(&managed, home);
+    assert!(!form.loading && !form.dirty());
+    assert_eq!(
+        (
+            form.hostname.as_str(),
+            form.user.as_str(),
+            form.port.as_str()
+        ),
+        ("203.0.113.10", "deploy", "2222")
+    );
+    assert_eq!(form.jumps.get(form.jump), Some(&Some("bastion".to_owned())));
+    form.set_keys(&[key("id_rsa"), key("id_ed25519")], home);
+    assert_eq!(
+        form.keys.get(form.key).and_then(|c| c.path.clone()),
+        managed.identity_file
+    );
+    // Keys first, then the values.
+    let mut form = HostForm::edit(&entry, &aliases);
+    form.set_keys(&[key("id_rsa"), key("id_ed25519")], home);
+    form.set_managed(&managed, home);
+    assert_eq!(form.keys.len(), 3);
+    assert_eq!(
+        form.keys.get(form.key).map(|c| c.label.as_str()),
+        Some("~/.ssh/id_ed25519")
+    );
+    assert!(!form.dirty());
+    // A key that is not discovered stays listed, and says so.
+    let mut form = HostForm::edit(&entry, &aliases);
+    form.set_keys(&[key("id_rsa")], home);
+    form.set_managed(&managed, home);
+    assert_eq!(
+        form.keys
+            .get(form.key)
+            .map(|c| (c.label.as_str(), c.note.as_str())),
+        Some(("~/.ssh/id_ed25519", "not discovered"))
+    );
+}

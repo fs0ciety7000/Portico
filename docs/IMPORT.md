@@ -29,10 +29,34 @@ Portico ne lit **pas** la base locale chiffrée de l'application Termius.
 **TUI / ligne de commande**
 
 ```bash
-portico import termius ~/Downloads/termius.csv            # aperçu : rien n'est écrit
-portico import termius ~/Downloads/termius.csv --prefix   # aperçu, alias préfixés par termius-
-portico import termius ~/Downloads/termius.csv --apply    # écrit, puis affiche la ligne Include
+portico import ~/Downloads/termius.csv                  # aperçu : rien n'est écrit (format reconnu au contenu)
+portico import ~/Downloads/termius.csv --prefix         # aperçu, alias préfixés (termius- ou termix-)
+portico import ~/Downloads/termius.csv --apply          # écrit dans hosts.conf, puis affiche la ligne Include
+portico import termix ~/Downloads/termix.json           # Termix seulement (tout autre format est refusé)
+portico import termius ~/Downloads/termius.csv          # forme historique, toujours acceptée
 ```
+
+Avec un export Termix qui contient des clés privées, l'aperçu les liste (type, empreinte `SHA256:…`, hôtes qui
+l'utilisent, chiffrée ou non, « already in ~/.ssh/… (reused) » si une clé locale a la même empreinte) et rappelle
+comment les sélectionner. **Aucune clé n'est importée sans sélection explicite** :
+
+```bash
+portico import termix.json --key SHA256:fAtep8ghWl7Uqy2Puv62F3OqOuzAcVZ7KpQw2C21KOM          # aperçu, clé cochée
+portico import termix.json --key SHA256:fAte… --key SHA256:6ktW… --apply                    # deux clés (option répétable)
+portico import termix.json --all-keys --key-passphrase --apply                              # toutes, chiffrées
+```
+
+- `--key SHA256:…` (répétable, aussi `--key=SHA256:…`) choisit une clé par son empreinte ; une empreinte absente de
+  l'export est refusée (`import_unknown_key`), rien n'est écrit.
+- `--all-keys` choisit toutes les clés de l'export.
+- `--key-passphrase` demande, **sur le terminal, sans écho, deux fois**, une passphrase qui chiffre les copies des
+  clés qui ne sont pas déjà chiffrées dans l'export. Elle n'est **jamais** acceptée comme valeur
+  (`--key-passphrase=…` est refusé : les arguments sont visibles dans `ps`), ne vit qu'en mémoire (`Zeroizing`,
+  `SecretString`), et n'est demandée que si une clé sélectionnée doit être écrite. `Ctrl-C` ou `Esc` arrête sans
+  rien écrire. Sans elle, les clés en clair sont écrites sans passphrase (`0600`).
+
+Le rapport liste les hôtes mis à jour, les clés importées (`~/.ssh/portico/<alias>`), les clés réutilisées, le
+nombre de clés ignorées, les avertissements apparus à l'écriture, puis rappelle de **supprimer l'export**.
 
 **GUI** : palette (`⌘K` / `Ctrl-K`), « Import from Termius… ». Le fichier se choisit dans le sélecteur natif ;
 l'aperçu liste les hôtes, les enregistrements ignorés, les avertissements et les secrets ignorés. « Import » écrit,
@@ -40,7 +64,7 @@ puis la ligne `Include` s'affiche avec un bouton de copie. La TUI n'a pas d'écr
 commande ci-dessus.
 
 Un nouvel import **met à jour** les hôtes que le précédent a créés et que personne n'a modifiés : l'aperçu les compte
-(`replaces`). Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse, le bouton est
+(« Updates N hosts from an earlier import », `replaces`) et les marque `(update)`. Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse, le bouton est
 désactivé) : les hôtes déjà importés restent en place.
 
 ## 3. Ajouter la ligne `Include`
@@ -88,8 +112,8 @@ alias ne sont jamais masqués par un nouvel import.
 enregistrement refusé est **ignoré en entier**, jamais importé à moitié. Une ligne CSV qui n'a pas le même nombre de
 cellules que l'en-tête est ignorée dès qu'une colonne contient un secret (une ligne décalée pourrait placer un mot de
 passe dans `User`) ; sans colonne secrète, seules les cellules manquantes en fin de ligne sont tolérées : un export piégé ne peut pas injecter
-`ProxyCommand` ou une autre directive. Portico n'écrit jamais `ProxyCommand`, `StrictHostKeyChecking` ni
-`IdentityFile`.
+`ProxyCommand` ou une autre directive. Portico n'écrit jamais `ProxyCommand` ni `StrictHostKeyChecking`, et
+`IdentityFile` seulement vers une clé que vous avez sélectionnée (Termix).
 
 **Collisions** : un alias déjà défini dans votre configuration (sans tenir compte de la casse) n'est pas importé,
 avec un avertissement, pour ne pas masquer votre propre entrée. L'option `--prefix` (case « Prefix every alias with
