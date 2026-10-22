@@ -7,7 +7,8 @@
 //!
 //! Command line: `--help`, `--version`, `--print-keybindings` (the TUI
 //! tables of `docs/KEYBINDINGS.md`) and `--write-keybindings <file>`
-//! (regenerates that block in place). Without a terminal on stdin and
+//! (regenerates that block in place), and `import termius FILE [--prefix]
+//! [--apply]` (see [`import_cli`]). Without a terminal on stdin and
 //! stdout, Portico says so and exits with status 1.
 
 mod action;
@@ -21,6 +22,7 @@ mod edit_host;
 mod files;
 mod form;
 mod host_list;
+mod import_cli;
 mod keydoc;
 mod keymap;
 mod keys;
@@ -40,6 +42,7 @@ const USAGE: &str = "\
 Portico: SSH sessions, keyboard-first.
 
 Usage: portico [OPTION]
+       portico import termius FILE [--prefix] [--apply]
 
 Options:
   -h, --help                   Show this help
@@ -47,6 +50,16 @@ Options:
       --print-keybindings      Print the TUI keyboard shortcuts (Markdown)
       --write-keybindings FILE Regenerate the TUI block of FILE
                                (docs/KEYBINDINGS.md)
+
+Import from Termius (see docs/IMPORT.md):
+  import termius FILE          Show what importing FILE would do (a Termius
+                               CSV, termius-local-export hosts.json or
+                               credentials.csv, or `termius export-ssh-config`
+                               output). Nothing is written.
+      --prefix                 Prefix every alias with `termius-`
+      --apply                  Write the hosts to Portico's imports/termius.conf
+                               and print the Include line to add to
+                               ~/.ssh/config yourself (never edited by Portico)
 
 Without an option, Portico opens in the current terminal. Settings live in
 settings.toml (theme, [keymap.tui]); see docs/KEYBINDINGS.md.
@@ -60,6 +73,8 @@ enum Command {
     Version,
     PrintKeybindings,
     WriteKeybindings(std::path::PathBuf),
+    /// `import termius FILE [--prefix] [--apply]`.
+    Import(import_cli::ImportArgs),
     /// Unknown option or missing value: message for stderr.
     Usage(String),
 }
@@ -67,12 +82,16 @@ enum Command {
 fn parse_args(args: &[String]) -> Command {
     match args {
         [] => Command::Run,
-        [one] => match one.as_str() {
+        [one] if one != "import" => match one.as_str() {
             "-h" | "--help" => Command::Help,
             "-V" | "--version" => Command::Version,
             "--print-keybindings" => Command::PrintKeybindings,
             "--write-keybindings" => Command::Usage("--write-keybindings needs a file".into()),
             other => Command::Usage(format!("unknown option: {other}")),
+        },
+        [command, rest @ ..] if command == "import" => match import_cli::parse(rest) {
+            Ok(args) => Command::Import(args),
+            Err(message) => Command::Usage(message),
         },
         [flag, path] if flag == "--write-keybindings" => {
             Command::WriteKeybindings(std::path::PathBuf::from(path))
@@ -106,6 +125,25 @@ fn main() -> Result<ExitCode> {
                 }
                 Err(e) => {
                     eprintln!("portico: {e}");
+                    ExitCode::FAILURE
+                }
+            });
+        }
+        Command::Import(args) => {
+            let outcome = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(import_cli::run(args));
+            return Ok(match outcome {
+                Ok(text) => {
+                    print!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(summary) => {
+                    eprintln!("portico: {}", summary.message);
+                    if let Some(hint) = summary.hint {
+                        eprintln!("  {hint}");
+                    }
                     ExitCode::FAILURE
                 }
             });
@@ -249,6 +287,16 @@ mod tests {
             Command::WriteKeybindings("doc.md".into())
         );
         assert!(matches!(parse_args(&args(&["--nope"])), Command::Usage(_)));
+        assert!(matches!(
+            parse_args(&args(&["import", "termius", "x.csv", "--apply"])),
+            Command::Import(import_cli::ImportArgs { apply: true, .. })
+        ));
+        assert!(matches!(parse_args(&args(&["import"])), Command::Usage(_)));
+        assert!(matches!(
+            parse_args(&args(&["import", "termius"])),
+            Command::Usage(_)
+        ));
+        assert!(USAGE.contains("portico import termius FILE [--prefix] [--apply]"));
         assert!(matches!(
             parse_args(&args(&["--write-keybindings"])),
             Command::Usage(_)
