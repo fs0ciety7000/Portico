@@ -285,6 +285,9 @@ pub struct ImportPlan {
     pub target: PathBuf,
     /// The line to add at the top of `~/.ssh/config`.
     pub include_line: String,
+    /// `Host` blocks already in [`Self::target`] (a previous import),
+    /// which applying this plan replaces; `None` when there are none.
+    pub replaces: Option<usize>,
 }
 
 /// What an applied import did.
@@ -306,8 +309,8 @@ pub struct ImportReport {
     pub meta_updated: usize,
     /// The line to add at the top of `~/.ssh/config`.
     pub include_line: String,
-    /// `true` when `~/.ssh/config` already includes the file (its hosts
-    /// are visible): nothing left to do.
+    /// `true` when `~/.ssh/config` has an `Include` that resolves to the
+    /// file (its hosts are visible): nothing left to do.
     pub include_active: bool,
 }
 
@@ -557,6 +560,32 @@ pub(crate) fn existing_aliases(paths: &Paths, exclude: &Path) -> Result<HashSet<
         .collect())
 }
 
+/// `true` when the user's ssh config has an `Include` (nested ones too)
+/// that resolves to `target`, whatever the file holds.
+pub(crate) fn include_active(paths: &Paths, target: &Path) -> bool {
+    SshConfig::load(&paths.ssh_config(), &paths.ssh_dir).is_ok_and(|c| {
+        c.included_files()
+            .iter()
+            .any(|included| same_file(included, target))
+    })
+}
+
+/// The number of `Host` blocks in the import file `target`, `None` when it
+/// does not exist or holds none.
+pub(crate) fn host_blocks(target: &Path) -> Result<Option<usize>> {
+    let Some(text) = store::read_capped(target, MAX_IMPORT_CONF_BYTES)? else {
+        return Ok(None);
+    };
+    let count = text
+        .lines()
+        .filter(|line| {
+            let (keyword, _) = line.trim_start().split_once(' ').unwrap_or((line, ""));
+            keyword.eq_ignore_ascii_case("host")
+        })
+        .count();
+    Ok((count > 0).then_some(count))
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -738,11 +767,7 @@ pub(crate) fn apply(
         });
     }
 
-    let include_active = SshConfig::load(&paths.ssh_config(), &paths.ssh_dir).is_ok_and(|c| {
-        c.host_aliases()
-            .iter()
-            .any(|a| same_file(&a.source.file, &target))
-    });
+    let include_active = include_active(paths, &target);
     let report = ImportReport {
         format: plan.format,
         target: target.clone(),

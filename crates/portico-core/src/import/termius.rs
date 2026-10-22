@@ -39,7 +39,7 @@ use super::csv;
 use super::{
     BoundedNotices, IMPORT_PREFIX, IgnoredSecrets, ImportError, ImportNotice, ImportOptions,
     ImportPlan, MAX_ALIAS_CHARS, MAX_IMPORT_FILE_BYTES, NoticeCode, PlannedHost, clean_hostname,
-    clean_user, display_text, existing_aliases, include_line, looks_like_other_host,
+    clean_user, display_text, existing_aliases, host_blocks, include_line, looks_like_other_host,
     looks_like_secret, slug, termius_target,
 };
 use crate::error::{Error, Result};
@@ -166,6 +166,7 @@ pub(crate) fn plan(paths: &Paths, source: &Path, options: ImportOptions) -> Resu
         secrets: collected.secrets,
         identity_files: collected.identity_files,
         include_line: include_line(paths, &target),
+        replaces: host_blocks(&target)?,
         target,
     })
 }
@@ -793,9 +794,7 @@ impl Builder<'_> {
             let prefixed = slug(&format!("{IMPORT_PREFIX}{base}"), MAX_ALIAS_CHARS);
             self.warnings.push(notice(
                 NoticeCode::AliasLooksLikeHost,
-                format!(
-                    "`{base}` looks like another host's name: imported as `{prefixed}` so `ssh {base}` keeps reaching {base}"
-                ),
+                format!("`{base}` looks like another host's name: imported as `{prefixed}`"),
             ));
             base = prefixed;
         }

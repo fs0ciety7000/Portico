@@ -914,3 +914,58 @@ async fn unreadable_exports_are_typed_errors() {
     std::fs::write(&latin1, b"Label,Hostname/IP\ncaf\xe9,192.0.2.1\n").expect("w");
     assert_eq!(plan(latin1).await.code, "import_encoding");
 }
+
+#[tokio::test]
+async fn a_second_import_says_what_it_replaces_and_the_include_is_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let engine = engine(root);
+    let plan = engine
+        .plan_termius_import(fixture("termius_template.csv"), ImportOptions::default())
+        .await
+        .expect("plan");
+    assert_eq!(plan.replaces, None, "nothing imported yet");
+    let report = engine.apply_import(plan).await.expect("apply");
+    assert!(!report.include_active);
+
+    let again = engine
+        .plan_termius_import(fixture("termius_template.csv"), ImportOptions::default())
+        .await
+        .expect("plan again");
+    assert_eq!(again.replaces, Some(6));
+
+    // An export where every record is skipped: the plan says it would
+    // replace the 6 hosts with none.
+    let csv = root.join("nothing.csv");
+    std::fs::write(
+        &csv,
+        "Label,Hostname/IP,Protocol\nswitch,192.0.2.9,telnet\n",
+    )
+    .expect("w");
+    let empty = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan empty");
+    assert!(empty.hosts.is_empty());
+    assert_eq!(empty.replaces, Some(6));
+
+    // The Include is found from the directive itself, even when the file
+    // it names holds no host at all.
+    std::fs::create_dir_all(root.join(".ssh")).expect("mkdir");
+    std::fs::write(
+        root.join(".ssh/config"),
+        format!(
+            "{}\n\nHost mine\n    HostName 10.0.0.1\n",
+            report.include_line
+        ),
+    )
+    .expect("config");
+    let report = engine.apply_import(empty).await.expect("apply empty");
+    assert!(report.imported.is_empty());
+    assert!(report.include_active, "Include present, file empty");
+    let after = engine
+        .plan_termius_import(&csv, ImportOptions::default())
+        .await
+        .expect("plan after");
+    assert_eq!(after.replaces, None, "the file holds no host now");
+}

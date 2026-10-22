@@ -117,6 +117,8 @@ pub struct HostAlias {
 pub struct SshConfig {
     pub(crate) blocks: Vec<Block>,
     warnings: Vec<ConfigWarning>,
+    /// Every file an `Include` resolved to (existing or not), in order.
+    included: Vec<PathBuf>,
     /// Built on first use (blocks are complete by then).
     index: std::sync::OnceLock<BlockIndex>,
 }
@@ -223,6 +225,13 @@ impl SshConfig {
         &self.warnings
     }
 
+    /// Every file an `Include` directive resolved to, nested ones
+    /// included, in reading order (a missing file is listed too: OpenSSH
+    /// ignores it silently, but the directive is there).
+    pub fn included_files(&self) -> &[PathBuf] {
+        &self.included
+    }
+
     /// Concrete host aliases in declaration order, de-duplicated.
     pub fn host_aliases(&self) -> Vec<HostAlias> {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -327,6 +336,7 @@ impl Parser<'_> {
                     current.conditions.clone_from(&conditions);
                     for arg in &line.args {
                         for path in self.expand_include(arg, &source) {
+                            self.cfg.included.push(path.clone());
                             match std::fs::read_to_string(&path) {
                                 Ok(text) => self.parse(&text, &path, &conditions, depth + 1)?,
                                 // OpenSSH silently ignores missing includes.
