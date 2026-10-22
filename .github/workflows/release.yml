@@ -3,6 +3,10 @@ name: Release
 # Builds every distributable and publishes them in a *draft* GitHub Release.
 # - push of a tag `v<version>` (must match the workspace version): build + sign + draft release
 # - workflow_dispatch: build only (dry run, unsigned), artifacts attached to the run
+# - release *published* (never a draft, never a pre-release), or workflow_dispatch
+#   with `distribute: vX.Y.Z`: render the Homebrew tap and AUR files from that
+#   release's SHA256SUMS, open a PR on the tap and push to the AUR. Nothing is
+#   built; each target is skipped (with a warning) when its secret is missing.
 # Procedure, secrets and verification: docs/RELEASE.md.
 #
 # Supply chain rules (docs/RELEASE.md, "Chaîne d'approvisionnement"):
@@ -12,12 +16,24 @@ name: Release
 # - Apple secrets live in the `release` environment and are only exposed to
 #   `gui-macos-sign`, which runs on tags, after the builds, and runs no
 #   third-party tool;
-# - AppImage tooling is pinned and checked by SHA-256 before the build.
+# - AppImage tooling is pinned and checked by SHA-256 before the build;
+# - distribution secrets (HOMEBREW_TAP_TOKEN, AUR_SSH_PRIVATE_KEY) live in the
+#   `distribution` environment, each one exposed only to the job that pushes
+#   to its target; those jobs run system tools only (no action but
+#   download-artifact, no package manager, no repository script).
 
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      distribute:
+        description: "Tag of a PUBLISHED release to (re)send to Homebrew and the AUR, e.g. v0.2.0. Empty: dry-run build."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -35,6 +51,9 @@ env:
 jobs:
   version:
     name: version check
+    # Builds run on a tag push or a plain dry run, never for distribution
+    # (every build job needs this one, so they are skipped with it).
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.distribute == '')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -513,3 +532,248 @@ jobs:
             --draft --verify-tag \
             --title "Portico $VERSION" \
             --notes "Draft built by the Release workflow from $GITHUB_SHA. Verify downloads with SHA256SUMS (see docs/RELEASE.md)."
+
+  # ---- Distribution: Homebrew tap and AUR, from a PUBLISHED release --------
+  # Runs on `release: published` (a draft never triggers it, a pre-release is
+  # skipped) or by hand with `distribute: vX.Y.Z` to retry. This job holds no
+  # secret: it checks the release's assets against its SHA256SUMS, renders the
+  # files and hands them over as an artifact. The jobs that hold a secret run
+  # no repository code: they only copy that artifact into their target.
+  dist-render:
+    name: distribution files (Homebrew, AUR)
+    if: >-
+      (github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease)
+      || (github.event_name == 'workflow_dispatch' && inputs.distribute != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # read the published release and download its assets
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.distribute }}
+    steps:
+      - id: release
+        name: The release is published and final
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::the tag to distribute must be a final release tag (vX.Y.Z)"; exit 1; }
+          # A draft is invisible to a read-only token: `view` fails on it.
+          state=$(gh release view "$TAG" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
+          test "$state" = "false false" || {
+            echo "::error::$TAG is a draft or a pre-release (draft, prerelease = $state): not distributed"; exit 1; }
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging
+      - name: License files as they are at the tag (AUR checksums)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.TAG }}
+          path: at-tag
+          sparse-checkout: |
+            LICENSE-MIT
+            LICENSE-APACHE
+          sparse-checkout-cone-mode: false
+      - name: Download the assets and check them against SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/assets"
+          mkdir -p "$assets"
+          gh release download "$TAG" --dir "$assets" --pattern SHA256SUMS \
+            --pattern "portico-$VERSION-*-unknown-linux-gnu.tar.gz" \
+            --pattern "portico-$VERSION-*-apple-darwin.tar.gz" \
+            --pattern "Portico_${VERSION}_*.deb" \
+            --pattern "Portico_${VERSION}_universal*.dmg"
+          cd "$assets"
+          ls -l
+          # 4 TUI tarballs (gnu, darwin), 2 .deb, 1 dmg: every one must be
+          # listed in SHA256SUMS and match it.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort > "$RUNNER_TEMP/names"
+          awk 'NR == FNR { want[$0] = 1; next } { n = $2; sub(/^\*/, "", n) } n in want' \
+            "$RUNNER_TEMP/names" SHA256SUMS > "$RUNNER_TEMP/subset"
+          test "$(wc -l < "$RUNNER_TEMP/names")" -eq 7
+          test "$(wc -l < "$RUNNER_TEMP/subset")" -eq 7
+          sha256sum --strict -c "$RUNNER_TEMP/subset"
+      - name: Render the tap and AUR files
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          PORTICO_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          AUR_MAINTAINER: ${{ vars.AUR_MAINTAINER }}
+        run: |
+          set -euo pipefail
+          sums="$RUNNER_TEMP/assets/SHA256SUMS"
+          packaging/homebrew/render.sh "$VERSION" "$sums" dist/homebrew
+          LICENSE_DIR=at-tag packaging/aur/render.sh "$VERSION" "$sums" dist/aur
+          ruby -c dist/homebrew/Formula/portico.rb
+          ruby -c dist/homebrew/Casks/portico.rb
+          if grep -qE '_universal-(unsigned|not-notarized)\.dmg' dist/homebrew/Casks/portico.rb; then
+            echo "::warning::the cask points to a dmg that is not notarized: a Gatekeeper caveat was added"
+          fi
+          # A tarball keeps .SRCINFO (an artifact upload drops hidden files).
+          tar -C dist -cf distribution.tar homebrew aur
+          {
+            echo "### Distribution files for $TAG"
+            echo '```'
+            tar -tf distribution.tar | grep -v '/$'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distribution
+          path: distribution.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  homebrew:
+    name: homebrew tap (pull request)
+    needs: dist-render
+    runs-on: ubuntu-latest
+    # HOMEBREW_TAP_TOKEN lives in this environment only: a fine-grained token
+    # restricted to the tap repository (Contents and Pull requests: write).
+    environment: distribution
+    permissions: {}
+    env:
+      VERSION: ${{ needs.dist-render.outputs.version }}
+      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || format('{0}/homebrew-portico', github.repository_owner) }}
+    steps:
+      - id: mode
+        name: Token present
+        env:
+          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set in the distribution environment: the Homebrew tap is not updated"
+            echo "Homebrew: skipped (no HOMEBREW_TAP_TOKEN)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/dist
+      - name: Open or update the pull request on the tap
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          tar -C "$dist" -xf "$dist/distribution.tar"
+          # The token goes in a per-command header, never in a remote URL or
+          # in .git/config.
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          tapgit() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+          work="$RUNNER_TEMP/tap"
+          tapgit clone --quiet --depth 1 "https://github.com/$TAP_REPO.git" "$work"
+          cd "$work"
+          branch="portico-$VERSION"
+          git switch --quiet -c "$branch"
+          mkdir -p Formula Casks
+          cp "$dist/homebrew/Formula/portico.rb" Formula/portico.rb
+          cp "$dist/homebrew/Casks/portico.rb" Casks/portico.rb
+          git add Formula/portico.rb Casks/portico.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew: $TAP_REPO already at $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898333+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "portico $VERSION"
+          tapgit push --quiet --force origin "HEAD:refs/heads/$branch"
+          export GH_TOKEN="$TOKEN"
+          pr=$(gh pr list --repo "$TAP_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --repo "$TAP_REPO" --head "$branch" --title "portico $VERSION" \
+              --body "Formula and cask for Portico $VERSION, rendered by the Release workflow of $GITHUB_SERVER_URL/$GITHUB_REPOSITORY (run $GITHUB_RUN_ID) from the release's SHA256SUMS.")
+          fi
+          echo "Homebrew: $pr" >> "$GITHUB_STEP_SUMMARY"
+
+  aur:
+    name: aur (portico-bin, portico-gui-bin)
+    needs: dist-render
+    runs-on: ubuntu-latest
+    # AUR_SSH_PRIVATE_KEY lives in this environment only: a key dedicated to
+    # the AUR account that maintains the two packages.
+    environment: distribution
+    permissions: {}
+    env:
+      VERSION: ${{ needs.dist-render.outputs.version }}
+      # Published on https://aur.archlinux.org (home page, "SSH fingerprints").
+      AUR_ED25519_FINGERPRINT: "SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
+    steps:
+      - id: mode
+        name: Key present
+        env:
+          HAS_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AUR_SSH_PRIVATE_KEY is not set in the distribution environment: the AUR is not updated"
+            echo "AUR: skipped (no AUR_SSH_PRIVATE_KEY)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/dist
+      - name: SSH key and pinned AUR host key
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          ssh_dir="$RUNNER_TEMP/aur-ssh"
+          umask 077
+          mkdir -p "$ssh_dir"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/id"
+          # Trust the scanned key only if it is the published one.
+          ssh-keyscan -t ed25519 aur.archlinux.org > "$ssh_dir/scanned" 2> /dev/null
+          fingerprints=$(ssh-keygen -l -E sha256 -f "$ssh_dir/scanned" | awk '{ print $2 }' | sort -u)
+          test "$fingerprints" = "$AUR_ED25519_FINGERPRINT" || {
+            echo "::error::the host key of aur.archlinux.org does not match its published fingerprint"; exit 1; }
+          mv "$ssh_dir/scanned" "$ssh_dir/known_hosts"
+          echo "GIT_SSH_COMMAND=ssh -i $ssh_dir/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts" >> "$GITHUB_ENV"
+      - name: Push portico-bin and portico-gui-bin
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          GIT_NAME: ${{ vars.AUR_GIT_NAME || 'Portico release workflow' }}
+          GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL || '41898333+github-actions[bot]@users.noreply.github.com' }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          tar -C "$dist" -xf "$dist/distribution.tar"
+          for pkg in portico-bin portico-gui-bin; do
+            work="$RUNNER_TEMP/aur-$pkg"
+            # Cloning a package that does not exist yet gives an empty
+            # repository; the first push creates the package.
+            git clone --quiet "ssh://aur@aur.archlinux.org/$pkg.git" "$work"
+            cp "$dist/aur/$pkg/PKGBUILD" "$dist/aur/$pkg/.SRCINFO" "$work/"
+            git -C "$work" add PKGBUILD .SRCINFO
+            if git -C "$work" diff --cached --quiet; then
+              echo "AUR $pkg: already at $VERSION" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            pkgrel=$(sed -n 's/^pkgrel=//p' "$work/PKGBUILD")
+            git -C "$work" -c user.name="$GIT_NAME" -c user.email="$GIT_EMAIL" \
+              commit --quiet -m "Update to $VERSION-$pkgrel"
+            git -C "$work" push --quiet origin HEAD:master
+            echo "AUR $pkg: $VERSION-$pkgrel pushed" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Delete the SSH key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/aur-ssh"
