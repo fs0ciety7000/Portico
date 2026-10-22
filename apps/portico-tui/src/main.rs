@@ -125,6 +125,12 @@ fn parse_args(args: &[String]) -> Command {
             "--write-keybindings" => Command::Usage("--write-keybindings needs a file".into()),
             other => Command::Usage(format!("unknown option: {other}")),
         },
+        // `portico import --help` (anywhere after `import`): the usage.
+        [command, rest @ ..]
+            if command == "import" && rest.iter().any(|a| a == "-h" || a == "--help") =>
+        {
+            Command::Help
+        }
         [command, rest @ ..] if command == "import" => match import_cli::parse(rest) {
             Ok(args) => Command::Import(args),
             Err(message) => Command::Usage(message),
@@ -331,6 +337,14 @@ mod tests {
             Command::Import(import_cli::ImportArgs { apply: true, .. })
         ));
         assert!(matches!(parse_args(&args(&["import"])), Command::Usage(_)));
+        // `import --help` shows the usage (never "unknown option").
+        for help in [
+            &["import", "--help"][..],
+            &["import", "-h"],
+            &["import", "termix", "x.json", "--help"],
+        ] {
+            assert_eq!(parse_args(&args(help)), Command::Help, "{help:?}");
+        }
         assert!(matches!(
             parse_args(&args(&["import", "termius"])),
             Command::Usage(_)

@@ -46,28 +46,43 @@ fn tab_walks_every_field_and_wraps() {
         HostField::Port,
         HostField::Key,
         HostField::Jump,
+        // The password right after ProxyJump (shared with the GUI).
+        HostField::Password,
         HostField::Tags,
         HostField::Group,
         HostField::Favorite,
         HostField::Notes,
-        HostField::Password,
     ];
     for expected in order.iter().skip(1).chain(order.first()) {
         form.handle_key(k(KeyCode::Tab));
         assert_eq!(form.focus, *expected);
     }
     form.handle_key(k(KeyCode::BackTab));
-    assert_eq!(form.focus, HostField::Password);
-    // Edit has the password choice; its input only when changing.
+    assert_eq!(form.focus, HostField::Notes);
+    // Edit with a password remembered has the choice; its input only when
+    // changing, both right after ProxyJump.
     let mut edit = HostForm::create(&[]);
     edit.mode = FormMode::Edit {
         original: "web".into(),
     };
-    assert_eq!(edit.fields().last(), Some(&HostField::PasswordMode));
+    edit.password_remembered = Some(true);
+    let after_jump = |form: &HostForm| -> Vec<HostField> {
+        let fields = form.fields();
+        let at = fields.iter().position(|f| *f == HostField::Jump).unwrap();
+        fields[at + 1..].to_vec()
+    };
+    assert_eq!(after_jump(&edit).first(), Some(&HostField::PasswordMode));
     edit.focus = HostField::PasswordMode;
     edit.handle_key(k(KeyCode::Right));
     assert_eq!(edit.password_mode, PasswordMode::Change);
-    assert_eq!(edit.fields().last(), Some(&HostField::Password));
+    assert_eq!(
+        after_jump(&edit)[..3],
+        [
+            HostField::PasswordMode,
+            HostField::Password,
+            HostField::Tags
+        ]
+    );
     // Duplicate asks for the alias only.
     assert_eq!(HostForm::duplicate("Web").fields(), vec![HostField::Alias]);
 }
@@ -107,6 +122,9 @@ fn values_build_the_draft() {
     form.handle_key(k(KeyCode::Char('b')));
     assert_eq!(form.jumps.get(form.jump), Some(&Some("bastion".into())));
     form.handle_key(k(KeyCode::Tab));
+    typed(&mut form, "s3cr3t");
+    assert!(form.password_typed());
+    form.handle_key(k(KeyCode::Tab));
     typed(&mut form, "#prod, eu");
     form.handle_key(k(KeyCode::Tab));
     typed(&mut form, "EU");
@@ -117,9 +135,6 @@ fn values_build_the_draft() {
     typed(&mut form, "first");
     form.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
     typed(&mut form, "second");
-    form.handle_key(k(KeyCode::Tab));
-    typed(&mut form, "s3cr3t");
-    assert!(form.password_typed());
 
     let FormOutcome::Save(HostRequest::Create(draft)) = form.handle_key(k(KeyCode::Enter)) else {
         panic!("a create")
@@ -233,6 +248,134 @@ fn refusals_read_as_sentences_and_keep_an_alias_as_typed() {
     ));
 }
 
+/// An edit form whose `hosts.conf` values are read (`remembered`: a
+/// password is remembered for the account).
+fn edit_form(remembered: bool) -> HostForm {
+    let entry = crate::host_list::test_host("web", None);
+    let mut form = HostForm::edit(&entry, &[]);
+    form.set_managed(
+        &ManagedHostDetails {
+            host: portico_core::managed_hosts::ManagedHost {
+                alias: "web".into(),
+                hostname: "203.0.113.10".into(),
+                user: Some("deploy".into()),
+                port: Some(2222),
+                identity_file: None,
+                proxy_jump: None,
+            },
+            password_remembered: remembered,
+            imported_from: Some(ImportSource::Termix),
+        },
+        Path::new("/home/alice"),
+    );
+    form
+}
+
+#[test]
+fn nothing_remembered_offers_set_only() {
+    let mut form = edit_form(false);
+    assert_eq!(form.password_mode, PasswordMode::Change);
+    assert_eq!(form.password_mode_label(), "Set");
+    assert!(!form.fields().contains(&HostField::PasswordMode));
+    assert!(form.fields().contains(&HostField::Password));
+    assert!(!form.dirty(), "Set with an empty field is no change");
+    // Empty: nothing to remember; typed: set.
+    form.hostname.push('9');
+    assert!(matches!(form.draft().password, PasswordChange::Keep));
+    assert!(!form.forgets_on_destination_change());
+    form.focus = HostField::Password;
+    typed(&mut form, "pw");
+    assert!(form.sets_password());
+    assert!(form.password_set_or_kept());
+    assert_eq!(form.imported_from, Some(ImportSource::Termix));
+}
+
+#[test]
+fn a_new_destination_forgets_the_kept_password() {
+    let mut form = edit_form(true);
+    assert_eq!(form.password_mode, PasswordMode::Keep);
+    assert_eq!(form.password_mode_label(), "Keep");
+    assert!(form.password_set_or_kept() && !form.forgets_on_destination_change());
+    for (field, extra) in [
+        (HostField::HostName, "x"),
+        (HostField::User, "x"),
+        (HostField::Port, "1"),
+    ] {
+        let mut form = edit_form(true);
+        form.focus = field;
+        typed(&mut form, extra);
+        assert!(form.destination_changed(), "{field:?}");
+        assert!(form.forgets_on_destination_change(), "{field:?}");
+        assert!(!form.password_set_or_kept(), "{field:?}");
+        // Back as it was: kept again.
+        form.handle_key(k(KeyCode::Backspace));
+        assert!(!form.destination_changed(), "{field:?}");
+    }
+    // Change, with a new password: it goes to the new destination.
+    form.hostname.push('9');
+    form.focus = HostField::PasswordMode;
+    form.handle_key(k(KeyCode::Right));
+    assert_eq!(form.password_mode, PasswordMode::Change);
+    assert_eq!(form.password_mode_label(), "Change");
+    assert!(!form.forgets_on_destination_change());
+}
+
+#[test]
+fn a_missing_vault_waits_then_retries_or_returns_to_the_password() {
+    let home = Path::new("/home/alice");
+    for code in ["vault_missing", "vault_locked"] {
+        assert_eq!(field_of(code), Some(HostField::Password));
+    }
+    let mut form = HostForm::create(&[]);
+    typed(&mut form, "db");
+    form.focus = HostField::Password;
+    typed(&mut form, "pw");
+    assert!(form.sets_password());
+    assert!(matches!(
+        form.handle_key(k(KeyCode::Enter)),
+        FormOutcome::Save(_)
+    ));
+    form.wait_for_vault(summary("vault_missing"));
+    assert!(!form.busy && form.error.is_none());
+    // Ready: the same save again, the password still in it.
+    let Some(HostRequest::Create(draft)) = form.retry_after_vault() else {
+        panic!("a retry")
+    };
+    let PasswordChange::Set(password) = &draft.password else {
+        panic!("the password")
+    };
+    assert_eq!(password.expose_secret(), "pw");
+    assert!(form.busy);
+    assert!(form.retry_after_vault().is_none(), "only once");
+    // Declined: the refusal under the password, still typed.
+    form.wait_for_vault(summary("vault_missing"));
+    form.vault_declined(home);
+    assert!(matches!(
+        &form.error,
+        Some((Some(HostField::Password), e)) if e.code == "vault_missing"
+    ));
+    assert!(form.password_typed());
+    assert_eq!(form.focus, HostField::Password);
+}
+
+#[test]
+fn shared_labels() {
+    let form = HostForm::create(&[]);
+    assert_eq!(
+        form.keys.first().map(|k| k.label.as_str()),
+        Some("none · agent and default keys")
+    );
+    assert_eq!(
+        origin_with_source(HostOrigin::Portico, Some(ImportSource::Termius)),
+        "Portico · from Termius"
+    );
+    assert_eq!(origin_with_source(HostOrigin::Portico, None), "Portico");
+    assert_eq!(
+        read_only_hint(HostOrigin::Imported),
+        "Imported by an earlier version of Portico (imports/termius.conf), which it never edits. Duplicate it as a Portico host to change it."
+    );
+}
+
 #[test]
 fn esc_asks_before_dropping_changes_and_wipes_the_password() {
     let mut form = HostForm::create(&[]);
@@ -248,9 +391,23 @@ fn esc_asks_before_dropping_changes_and_wipes_the_password() {
         FormOutcome::None
     ));
     assert!(form.confirm_discard);
-    // Any other key goes back to the form, nothing lost.
+    // Another key leaves the question up (no "any key"), and types nothing.
+    for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Tab] {
+        assert!(matches!(form.handle_key(k(code)), FormOutcome::None));
+        assert!(form.confirm_discard, "{code:?}");
+    }
+    assert_eq!(form.alias, "web");
+    // `n` goes back to the form, nothing lost; so does `Esc`.
     assert!(matches!(
         form.handle_key(k(KeyCode::Char('n'))),
+        FormOutcome::None
+    ));
+    assert!(!form.confirm_discard);
+    assert_eq!(form.alias, "web");
+    form.handle_key(k(KeyCode::Esc));
+    assert!(form.confirm_discard);
+    assert!(matches!(
+        form.handle_key(k(KeyCode::Esc)),
         FormOutcome::None
     ));
     assert!(!form.confirm_discard);
@@ -275,6 +432,7 @@ fn edit_password_choices() {
     };
     typed(&mut form, "web");
     form.initial = form.snapshot();
+    form.password_remembered = Some(true);
     // Nothing changed: ↵ just closes.
     assert!(matches!(
         form.handle_key(k(KeyCode::Enter)),
@@ -369,13 +527,17 @@ fn a_key_kept_from_the_host_stays_listed() {
 fn managed_values_fill_the_edit_form_whatever_comes_first() {
     let home = Path::new("/home/alice");
     let entry = crate::host_list::test_host("web", None);
-    let managed = ManagedHost {
-        alias: "web".into(),
-        hostname: "203.0.113.10".into(),
-        user: Some("deploy".into()),
-        port: Some(2222),
-        identity_file: Some(PathBuf::from("/home/alice/.ssh/id_ed25519")),
-        proxy_jump: Some("Bastion".into()),
+    let managed = ManagedHostDetails {
+        password_remembered: true,
+        imported_from: None,
+        host: portico_core::managed_hosts::ManagedHost {
+            alias: "web".into(),
+            hostname: "203.0.113.10".into(),
+            user: Some("deploy".into()),
+            port: Some(2222),
+            identity_file: Some(PathBuf::from("/home/alice/.ssh/id_ed25519")),
+            proxy_jump: Some("Bastion".into()),
+        },
     };
     let aliases = vec!["bastion".to_owned(), "web".to_owned()];
     // Values first, then the keys.
@@ -398,7 +560,7 @@ fn managed_values_fill_the_edit_form_whatever_comes_first() {
     form.set_keys(&[key("id_rsa"), key("id_ed25519")], home);
     assert_eq!(
         form.keys.get(form.key).and_then(|c| c.path.clone()),
-        managed.identity_file
+        managed.host.identity_file
     );
     // Keys first, then the values.
     let mut form = HostForm::edit(&entry, &aliases);

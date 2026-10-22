@@ -9,7 +9,7 @@ use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
 use portico_core::engine::{ConnectRequest, HostInventory};
-use portico_core::events::{SessionEvent, SessionPhase, TerminalEvent};
+use portico_core::events::{PromptKind, SessionEvent, SessionPhase, TerminalEvent};
 use portico_core::ids::{SessionId, TerminalId};
 use portico_core::search::{Hit, HostSearch};
 use portico_core::vault::VaultStatus;
@@ -72,6 +72,20 @@ pub(crate) struct Toast {
     pub(crate) hint: Option<String>,
     pub(crate) kind: ToastKind,
     pub(crate) ttl: u16,
+    /// The message starts with a host alias: shown as written, never
+    /// sentence-cased.
+    pub(crate) as_written: bool,
+}
+
+impl Toast {
+    /// The message as shown: a sentence, unless it starts with an alias.
+    pub(crate) fn shown(&self) -> String {
+        if self.as_written {
+            self.message.clone()
+        } else {
+            crate::ui::fmt::sentence(&self.message)
+        }
+    }
 }
 
 /// The `?` overlay beyond `Overlay::Help`.
@@ -1091,6 +1105,7 @@ impl App {
                         .or_else(|| self.probes.get(&id).cloned())
                 });
                 let mut dialog = PromptDialog::new(prompt, alias);
+                dialog.account = self.remembered_account(&dialog);
                 if matches!(
                     self.vault,
                     Some(VaultStatus::Absent | VaultStatus::Locked | VaultStatus::Unlocked)
@@ -1276,13 +1291,50 @@ impl App {
         }
     }
 
+    /// An unknown host key that would send a remembered password: the
+    /// account it is remembered for, `user@host:port` (the session host's
+    /// user, else the local one; the prompt's address).
+    pub(crate) fn remembered_account(&self, dialog: &PromptDialog) -> Option<String> {
+        let PromptKind::UnknownHostKey {
+            host,
+            port,
+            sends_remembered_password: true,
+            ..
+        } = &dialog.kind
+        else {
+            return None;
+        };
+        let user = dialog
+            .alias
+            .as_ref()
+            .and_then(|alias| {
+                self.inventory
+                    .as_ref()?
+                    .hosts
+                    .iter()
+                    .find(|h| &h.alias == alias)
+            })
+            .and_then(|h| h.resolved.user.clone())
+            .unwrap_or_else(|| self.engine.config().local_user.clone());
+        Some(format!("{user}@{host}:{port}"))
+    }
+
     pub(crate) fn notify_error(&mut self, error: ErrorSummary) {
         self.toast = Some(Toast {
             message: error.message,
             hint: error.hint,
             kind: ToastKind::Error,
             ttl: 80,
+            as_written: false,
         });
+    }
+
+    /// An error whose message starts with a host alias (kept as written).
+    pub(crate) fn notify_error_as_written(&mut self, error: ErrorSummary) {
+        self.notify_error(error);
+        if let Some(toast) = &mut self.toast {
+            toast.as_written = true;
+        }
     }
 
     /// Something was ignored; Portico goes on (title, then the detail).
@@ -1292,7 +1344,16 @@ impl App {
             hint: detail,
             kind: ToastKind::Warning,
             ttl: 100,
+            as_written: false,
         });
+    }
+
+    /// A warning whose message starts with a host alias (kept as written).
+    pub(crate) fn notify_warning_as_written(&mut self, message: String, detail: Option<String>) {
+        self.notify_warning(message, detail);
+        if let Some(toast) = &mut self.toast {
+            toast.as_written = true;
+        }
     }
 
     pub(crate) fn notify(&mut self, message: String) {
@@ -1301,6 +1362,7 @@ impl App {
             hint: None,
             kind: ToastKind::Info,
             ttl: 40,
+            as_written: false,
         });
     }
 

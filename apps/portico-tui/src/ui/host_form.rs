@@ -12,12 +12,23 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::app::App;
 use crate::form::display_safe;
+use portico_core::hosts::HostOrigin;
+
 use crate::host_form::{
-    ADD_COMMAND, DUPLICATE_COMMAND, EDIT_COMMAND, FormMode, HostField, HostForm,
-    PASSWORD_DESTINATION_NOTE, PasswordMode, origin_label, read_only_hint,
+    DESTINATION_CHANGE_NOTE, FormMode, HostField, HostForm, NO_PASSWORD_REMEMBERED,
+    PASSWORD_DESTINATION_NOTE, PASSWORD_REMEMBERED, PROVENANCE_HELP, PasswordMode, origin_label,
+    origin_with_source, read_only_hint,
 };
 use crate::theme::Styles;
 use crate::ui::{fmt, form, spinner};
+
+/// Overlay titles (followed by the alias): no ellipsis, unlike the
+/// commands that open them.
+const ADD_TITLE: &str = "Add host";
+const EDIT_TITLE: &str = "Edit";
+const DUPLICATE_TITLE: &str = "Duplicate";
+/// Error codes whose hint only repeats the message (the port's range).
+const MESSAGE_ONLY: &[&str] = &["host_invalid_port"];
 
 /// Label column.
 const LABEL: usize = 10;
@@ -51,17 +62,29 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, band: u16) {
         .unwrap_or(u16::MAX)
         .saturating_add(3);
     let area = crate::ui::panel_rect(screen, width, height, band);
+    // Titles name the host, without the command's ellipsis.
     let (title, subject) = match &form.mode {
-        FormMode::Create => (ADD_COMMAND, String::new()),
-        FormMode::Edit { original } => (EDIT_COMMAND, original.clone()),
-        FormMode::ReadOnly { alias, .. } => (EDIT_COMMAND, alias.clone()),
-        FormMode::Duplicate { source } => (DUPLICATE_COMMAND, source.clone()),
+        FormMode::Create => (ADD_TITLE, String::new()),
+        FormMode::Edit { original } => (EDIT_TITLE, original.clone()),
+        FormMode::ReadOnly { alias, .. } => (EDIT_TITLE, alias.clone()),
+        FormMode::Duplicate { source } => (DUPLICATE_TITLE, source.clone()),
     };
     let mut title_spans = vec![Span::styled(format!(" {title} "), s.title())];
     if !subject.is_empty() {
         title_spans.push(Span::styled(
             format!("{} ", fmt::truncate(&subject, 32)),
             s.secondary(),
+        ));
+    }
+    if let FormMode::Edit { .. } = form.mode
+        && form.imported_from.is_some()
+    {
+        title_spans.push(Span::styled(
+            format!(
+                "· {} ",
+                origin_with_source(HostOrigin::Portico, form.imported_from)
+            ),
+            s.muted(),
         ));
     }
     let close = if matches!(form.mode, FormMode::ReadOnly { .. }) {
@@ -105,7 +128,11 @@ fn problem(form: &HostForm, field: Option<HostField>, s: Styles, w: usize) -> Ve
                         ])
                     })
                     .collect();
-            if let Some(hint) = &e.hint {
+            if let Some(hint) = e
+                .hint
+                .as_ref()
+                .filter(|_| !MESSAGE_ONLY.contains(&e.code.as_str()))
+            {
                 lines.extend(
                     fmt::wrap(hint, w.saturating_sub(indent).max(10))
                         .into_iter()
@@ -184,10 +211,7 @@ fn read_only_lines(
     lines.push(Line::from(""));
     lines.extend(form::hints(
         s,
-        &[
-            ("D", "duplicate as Portico host"),
-            ("t", "tags, group, notes"),
-        ],
+        &[("D", "duplicate"), ("t", "tags and notes")],
         true,
         w,
     ));
@@ -236,7 +260,7 @@ fn tail(
             Span::styled("▲ Discard your changes?  ", warning),
             Span::styled(" y ", s.key_primary()),
             Span::styled(" discard  ", s.muted()),
-            Span::styled(" any key ", s.key_hint()),
+            Span::styled(" n / Esc ", s.key_hint()),
             Span::styled(" keep editing", s.muted()),
         ]));
     } else {
@@ -268,6 +292,100 @@ fn picker(
     form::select(s, label, LABEL, choice, &note, focused)
 }
 
+/// Muted notes aligned with the inputs, wrapped.
+fn notes(text: &str, s: Styles, w: usize) -> Vec<Line<'static>> {
+    fmt::wrap(text, w.saturating_sub(LABEL + 1).max(10))
+        .into_iter()
+        .map(|l| note(&l, s))
+        .collect()
+}
+
+/// The password, right after `ProxyJump`: an optional field (add, or edit
+/// with nothing remembered: "Set"), or Keep / Change / Forget (edit, a
+/// password remembered); then where it goes, or that it is forgotten.
+fn password_lines(
+    form: &HostForm,
+    s: Styles,
+    w: usize,
+    field_w: usize,
+    remember_in: &str,
+) -> Vec<Line<'static>> {
+    let focused = |f: HostField| form.focus == f;
+    let mut lines = Vec::new();
+    let editing = matches!(form.mode, FormMode::Edit { .. });
+    // A refusal under the password (no vault…) takes the notes' place, so
+    // the form keeps fitting 80×24.
+    let refused = matches!(&form.error, Some((Some(HostField::Password), _)));
+    let remember_note = focused(HostField::Password) && !refused;
+    if editing && form.remembered() {
+        let what = match form.password_mode {
+            PasswordMode::Keep => PASSWORD_REMEMBERED,
+            PasswordMode::Change => "type the new one below",
+            PasswordMode::Forget => "removed when you save",
+        };
+        // Once the destination changed, the note below says it all.
+        let what = if form.forgets_on_destination_change() {
+            ""
+        } else {
+            what
+        };
+        lines.push(form::select(
+            s,
+            "Password",
+            LABEL,
+            form.password_mode_label(),
+            what,
+            focused(HostField::PasswordMode),
+        ));
+        if form.password_mode == PasswordMode::Change {
+            lines.push(form::secret(
+                s,
+                "",
+                LABEL,
+                form.password_typed(),
+                focused(HostField::Password),
+                field_w.min(30),
+            ));
+            if remember_note {
+                lines.push(note(&format!("remembered in {remember_in}"), s));
+            }
+        }
+    } else {
+        let mut row = form::secret(
+            s,
+            "Password",
+            LABEL,
+            form.password_typed(),
+            focused(HostField::Password),
+            field_w.min(30),
+        );
+        let aside = if editing {
+            NO_PASSWORD_REMEMBERED
+        } else {
+            "optional"
+        };
+        row.spans
+            .push(Span::styled(format!("  {aside}"), s.muted()));
+        lines.push(row);
+        if remember_note {
+            lines.push(note(&format!("remembered in {remember_in}"), s));
+        }
+    }
+    let note_text = if form.forgets_on_destination_change() {
+        Some(DESTINATION_CHANGE_NOTE)
+    } else if form.password_set_or_kept() {
+        Some(PASSWORD_DESTINATION_NOTE)
+    } else {
+        None
+    };
+    if let Some(text) = note_text.filter(|_| !refused) {
+        lines.extend(notes(text, s, w));
+    }
+    lines.extend(problem(form, Some(HostField::Password), s, w));
+    lines.extend(problem(form, Some(HostField::PasswordMode), s, w));
+    lines
+}
+
 #[allow(clippy::too_many_lines)] // one row per field, in order
 fn form_lines(
     form: &HostForm,
@@ -278,14 +396,23 @@ fn form_lines(
 ) -> Vec<Line<'static>> {
     let field_w = w.saturating_sub(LABEL).min(52);
     let focused = |f: HostField| form.focus == f;
-    let mut lines = vec![form::input(
+    let mut lines = Vec::new();
+    // A host that came from an import: what an edit does to later ones.
+    if matches!(form.mode, FormMode::Edit { .. }) && form.imported_from.is_some() {
+        lines.extend(
+            fmt::wrap(PROVENANCE_HELP, w)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, s.muted()))),
+        );
+    }
+    lines.push(form::input(
         s,
         "Alias",
         LABEL,
         &form.alias,
         focused(HostField::Alias),
         field_w,
-    )];
+    ));
     lines.extend(problem(form, Some(HostField::Alias), s, w));
     lines.push(form::input(
         s,
@@ -353,6 +480,7 @@ fn form_lines(
         focused(HostField::Jump),
     ));
     lines.extend(problem(form, Some(HostField::Jump), s, w));
+    lines.extend(password_lines(form, s, w, field_w, remember_in));
     lines.push(Line::from(""));
 
     lines.push(form::input(
@@ -406,59 +534,6 @@ fn form_lines(
         lines.push(note("Alt-↵ new line", s));
     }
     lines.extend(problem(form, Some(HostField::Notes), s, w));
-
-    if let FormMode::Edit { .. } = form.mode {
-        let what = match form.password_mode {
-            PasswordMode::Keep => "the remembered password, if any",
-            PasswordMode::Change => "type the new one below",
-            PasswordMode::Forget => "removed when you save",
-        };
-        lines.push(form::select(
-            s,
-            "Password",
-            LABEL,
-            form.password_mode.label(),
-            what,
-            focused(HostField::PasswordMode),
-        ));
-        if form.password_mode == PasswordMode::Change {
-            lines.push(form::secret(
-                s,
-                "",
-                LABEL,
-                form.password_typed(),
-                focused(HostField::Password),
-                field_w.min(30),
-            ));
-            lines.push(note(&format!("remembered in {remember_in}"), s));
-        }
-    } else {
-        let mut row = form::secret(
-            s,
-            "Password",
-            LABEL,
-            form.password_typed(),
-            focused(HostField::Password),
-            field_w.min(30),
-        );
-        row.spans.push(Span::styled("  optional", s.muted()));
-        lines.push(row);
-        if focused(HostField::Password) {
-            lines.push(note(&format!("remembered in {remember_in}"), s));
-        }
-    }
-    if form.password_set_or_kept() {
-        lines.extend(
-            fmt::wrap(
-                PASSWORD_DESTINATION_NOTE,
-                w.saturating_sub(LABEL + 1).max(10),
-            )
-            .into_iter()
-            .map(|l| note(&l, s)),
-        );
-    }
-    lines.extend(problem(form, Some(HostField::Password), s, w));
-    lines.extend(problem(form, Some(HostField::PasswordMode), s, w));
     lines.extend(problem(form, None, s, w));
     lines.push(Line::from(""));
     let mut keys = vec![("↵", "save"), ("Tab", "next field")];

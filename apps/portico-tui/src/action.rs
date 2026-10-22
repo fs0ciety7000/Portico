@@ -9,7 +9,7 @@ use portico_core::forward::ForwardSpec;
 use portico_core::hosts::HostMeta;
 use portico_core::ids::{SessionId, TerminalId, TunnelId};
 use portico_core::keys::LocalKey;
-use portico_core::managed_hosts::{HostSummary, ManagedHost};
+use portico_core::managed_hosts::{HostSummary, ManagedHostDetails};
 use portico_core::recent::RecentHost;
 use portico_core::recording::RecordingEntry;
 use portico_core::settings::Settings;
@@ -215,10 +215,10 @@ pub(crate) enum Action {
     /// Local keys for the form's key picker.
     HostFormKeys(Result<Vec<LocalKey>, ErrorSummary>),
     /// "Edit host…": the values `hosts.conf` holds for `alias`
-    /// (`Engine::managed_host`; `None`: no longer in that file).
+    /// (`Engine::managed_host_details`; `None`: no longer in that file).
     HostFormManaged {
         alias: String,
-        result: Result<Option<ManagedHost>, ErrorSummary>,
+        result: Result<Option<ManagedHostDetails>, ErrorSummary>,
     },
     /// A create, edit or duplicate came back.
     HostSaved(Result<HostSummary, ErrorSummary>),

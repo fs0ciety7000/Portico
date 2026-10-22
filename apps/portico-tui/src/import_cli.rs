@@ -19,6 +19,12 @@
 //! on stdout (no TUI), errors on stderr as `ErrorSummary` (message + hint),
 //! never a secret: the core never puts one in a plan or report.
 //!
+//! The plan lists notices in record order (`line n`, or `#n` for a JSON
+//! export) and ends with what was left out ("Not imported: …"). With
+//! `--key-passphrase`, the plan is printed before the passphrase is asked.
+//! After `--apply`, the report opens with the action to take on the export
+//! ("Delete termix.json now: it holds …"), repeated short as its last line.
+//!
 //! A re-import that would point an earlier imported alias at another
 //! server (`HostName`, `User` or `Port` changed: `PlannedHost::previous`)
 //! is shown `old → new` and **skipped** unless the alias is named with
@@ -26,14 +32,14 @@
 //! An alias that is not one of the plan's destination changes is refused
 //! before anything is written.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use portico_core::import::{
-    ImportNotice, ImportOptions, ImportPlan, ImportReport, KeyFormat, KeyId, KeySelection,
-    MAX_ALIAS_CHARS, NoticeCode, PlannedHost, PlannedKey,
+    ImportFormat, ImportNotice, ImportOptions, ImportPlan, ImportReport, KeyFormat, KeyId,
+    KeySelection, MAX_ALIAS_CHARS, NoticeCode, PlannedHost, PlannedKey,
 };
 use portico_core::{Engine, EngineConfig, ErrorSummary};
 use secrecy::SecretString;
@@ -43,6 +49,8 @@ use zeroize::Zeroizing;
 const PASSPHRASE_ATTEMPTS: usize = 3;
 /// Key fingerprints are `SHA256:` then base64 (43 characters).
 const FINGERPRINT_PREFIX: &str = "SHA256:";
+/// Marks the action to take on the export (the TUI's warning mark).
+const CAUTION: &str = "▲";
 
 /// The word after `import`, when one was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +229,9 @@ pub(crate) trait SecretPrompt: Send + 'static {
     fn read(&mut self, prompt: &str) -> io::Result<Zeroizing<String>>;
     /// Shows a short message (mismatch, empty).
     fn note(&mut self, message: &str);
+    /// Prints `text` (the plan) on stdout before the passphrase is asked,
+    /// so the user sees what it is for.
+    fn show(&mut self, text: &str);
 }
 
 /// The controlling terminal, read in raw mode (no echo).
@@ -234,6 +245,13 @@ impl SecretPrompt for TtyPrompt {
 
     fn note(&mut self, message: &str) {
         let _ = tty_write(&format!("{message}\r\n"));
+    }
+
+    fn show(&mut self, text: &str) {
+        use std::io::Write as _;
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
     }
 }
 
@@ -461,6 +479,9 @@ pub(crate) async fn run_with<P: SecretPrompt>(
         });
     }
     let key_passphrase = if args.key_passphrase && keys_to_encrypt(&plan, &selected) > 0 {
+        // The plan first: the passphrase is asked once it can be read.
+        prompt.show(&text);
+        text.clear();
         let asked = tokio::task::spawn_blocking(move || ask_passphrase(&mut prompt))
             .await
             .map_err(|_| ErrorSummary {
@@ -480,17 +501,8 @@ pub(crate) async fn run_with<P: SecretPrompt>(
     } else {
         None
     };
-    let shown = Shown {
-        skipped: plan.skipped.clone(),
-        warnings: plan.warnings.clone(),
-        encrypted: key_passphrase.is_some(),
-        redirects: plan
-            .hosts
-            .iter()
-            .filter(|h| h.previous.is_some())
-            .map(|h| (h.record, h.alias.clone()))
-            .collect(),
-    };
+    let mut shown = Shown::of_plan(&plan, home, &args);
+    shown.encrypted = key_passphrase.is_some();
     let options = ImportOptions {
         prefix: args.prefix,
         keys: selected,
@@ -504,9 +516,33 @@ pub(crate) async fn run_with<P: SecretPrompt>(
             stdout: text.clone(),
             summary: e.summary(),
         })?;
-    text.push('\n');
+    // Which hosts use each key file now (written keys, keys a redirect left).
+    if let Ok(inventory) = engine.load_hosts().await {
+        shown.key_users = key_users(&inventory);
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
     text.push_str(&report_text(&report, &shown, home));
     Ok(text)
+}
+
+/// Every identity file of a Portico host, with the aliases using it.
+fn key_users(inventory: &portico_core::engine::HostInventory) -> BTreeMap<PathBuf, Vec<String>> {
+    let mut users: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for host in inventory
+        .hosts
+        .iter()
+        .filter(|h| h.origin == portico_core::hosts::HostOrigin::Portico)
+    {
+        for path in &host.resolved.identity_files {
+            users
+                .entry(path.clone())
+                .or_default()
+                .push(host.alias.clone());
+        }
+    }
+    users
 }
 
 fn nothing_to_import() -> ErrorSummary {
@@ -548,7 +584,21 @@ fn destination(user: Option<&str>, hostname: &str, port: Option<u16>) -> String 
     format!("{user}{hostname}{port}")
 }
 
-fn host_line(host: &PlannedHost, args: &ImportArgs) -> String {
+/// Widest alias column: longer aliases push their row's address right.
+const MAX_ALIAS_COLUMN: usize = 32;
+
+/// The alias column's width: the longest alias of the plan, at most
+/// [`MAX_ALIAS_COLUMN`].
+fn alias_column(plan: &ImportPlan) -> usize {
+    plan.hosts
+        .iter()
+        .map(|h| h.alias.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_ALIAS_COLUMN)
+}
+
+fn host_line(host: &PlannedHost, args: &ImportArgs, width: usize) -> String {
     let new = destination(host.user.as_deref(), &host.hostname, host.port);
     let shown = match &host.previous {
         Some(old) => format!(
@@ -557,7 +607,7 @@ fn host_line(host: &PlannedHost, args: &ImportArgs) -> String {
         ),
         None => new,
     };
-    let mut line = format!("  {:<24} {shown}", host.alias);
+    let mut line = format!("  {:<width$} {shown}", host.alias);
     if let Some(group) = &host.group {
         let _ = write!(line, "  @{group}");
     }
@@ -615,11 +665,28 @@ fn key_lines(key: &PlannedKey, selected: &KeySelection, home: &Path) -> [String;
     [first, second]
 }
 
-/// `  line 5 · web eu 1 — message` (the GUI's separators).
-fn notice_line(notice: &ImportNotice) -> String {
+/// Where a record is: `line 5` in a CSV or ssh config export, `#5` in a
+/// JSON export (records are array entries, not lines).
+fn record_place(format: ImportFormat, record: usize) -> String {
+    match format {
+        ImportFormat::TermixJson | ImportFormat::LocalExportJson => format!("#{record}"),
+        _ => format!("line {record}"),
+    }
+}
+
+/// Notices in record order (those without a record last), as they appear
+/// in the export.
+fn by_record(notices: &[ImportNotice]) -> Vec<&ImportNotice> {
+    let mut sorted: Vec<&ImportNotice> = notices.iter().collect();
+    sorted.sort_by_key(|n| n.record.unwrap_or(usize::MAX));
+    sorted
+}
+
+/// `  line 5 · web eu 1 — message` (the GUI's separators); `#5` for JSON.
+fn notice_line(notice: &ImportNotice, format: ImportFormat) -> String {
     let place: Vec<String> = notice
         .record
-        .map(|r| format!("line {r}"))
+        .map(|r| record_place(format, r))
         .into_iter()
         .chain(notice.label.clone())
         .collect();
@@ -703,17 +770,25 @@ pub(crate) fn plan_text(
         plan.skipped.len().saturating_add(redirects_skipped)
     );
     let target = shown_path(&plan.target, home);
-    if let Some(previous) = plan.replaces {
+    // Hosts actually rewritten: in-place updates, and the destination
+    // changes accepted with --accept-redirect.
+    let updates = plan.updates(&ImportOptions {
+        prefix: args.prefix,
+        allow_redirect: args.accept_redirect.iter().cloned().collect(),
+        ..ImportOptions::default()
+    });
+    if updates > 0 {
         let _ = writeln!(
             text,
             "Updates {} from an earlier import.",
-            plural(previous, "host")
+            plural(updates, "host")
         );
     }
+    let width = alias_column(plan);
     section(
         &mut text,
         "Hosts",
-        plan.hosts.iter().map(|h| host_line(h, args)),
+        plan.hosts.iter().map(|h| host_line(h, args, width)),
     );
     if redirects_skipped > 0 {
         let _ = writeln!(
@@ -722,26 +797,15 @@ pub(crate) fn plan_text(
         );
     }
     keys_section(&mut text, plan, args, selected, home);
-    section(&mut text, "Skipped", plan.skipped.iter().map(notice_line));
-    // IdentityFile notices repeat the dedicated list below, destination
-    // changes the host lines above.
-    let listed = !plan.identity_files.is_empty();
-    section(
-        &mut text,
-        "Warnings",
-        plan.warnings
-            .iter()
-            .filter(|n| {
-                !(listed && n.code == NoticeCode::IdentityFileIgnored)
-                    && n.code != NoticeCode::DestinationChanged
-            })
-            .map(notice_line),
-    );
-    section(
-        &mut text,
-        "Secrets",
-        plan.secrets.advice().map(|a| format!("  {a}")),
-    );
+    notices_sections(&mut text, plan);
+    // After --apply, the report's delete-the-export action says it instead.
+    if !args.apply {
+        section(
+            &mut text,
+            "Secrets",
+            plan.secrets.advice().map(|a| format!("  {a}")),
+        );
+    }
     section(
         &mut text,
         "Identity files not imported",
@@ -766,6 +830,32 @@ pub(crate) fn plan_text(
         }
     }
     text
+}
+
+/// "Skipped" and "Warnings", in record order.
+fn notices_sections(text: &mut String, plan: &ImportPlan) {
+    let format = plan.format;
+    section(
+        text,
+        "Skipped",
+        by_record(&plan.skipped)
+            .into_iter()
+            .map(|n| notice_line(n, format)),
+    );
+    // IdentityFile notices repeat the dedicated list below, destination
+    // changes the host lines above.
+    let listed = !plan.identity_files.is_empty();
+    section(
+        text,
+        "Warnings",
+        by_record(&plan.warnings)
+            .into_iter()
+            .filter(|n| {
+                !(listed && n.code == NoticeCode::IdentityFileIgnored)
+                    && n.code != NoticeCode::DestinationChanged
+            })
+            .map(|n| notice_line(n, format)),
+    );
 }
 
 fn keys_section(
@@ -816,30 +906,107 @@ pub(crate) struct Shown {
     /// Destination changes of the plan: (record, alias), to name the
     /// alias of a skipped one in the report.
     pub(crate) redirects: Vec<(usize, String)>,
+    /// The export's file name (the report has no source path).
+    pub(crate) file_name: String,
+    /// The export's format (`#n` or `line n` for a record).
+    pub(crate) format: Option<ImportFormat>,
+    /// Aliases of the plan whose key is encrypted in the export.
+    pub(crate) encrypted_in_export: BTreeSet<String>,
+    /// Accepted destination changes whose host used a key Portico wrote
+    /// (`~/.ssh/portico/…`): (alias, that key).
+    pub(crate) previous_keys: Vec<(String, PathBuf)>,
+    /// After the import: each identity file of a Portico host, with the
+    /// aliases that use it.
+    pub(crate) key_users: BTreeMap<PathBuf, Vec<String>>,
 }
 
-/// "Delete the export now: it holds 2 passwords and 3 private keys."
-/// Only the non-zero counts are named.
-fn delete_advice(report: &ImportReport) -> Option<String> {
-    let secrets = report.secrets;
-    // Termix counts the keys of the export (as the plan's advice does);
-    // Termius only the key cells it ignored.
-    let keys = if secrets.keys_in_export > 0 {
-        secrets.keys_in_export
-    } else {
-        secrets.keys
-    };
-    let held: Vec<String> = [(secrets.passwords, "password"), (keys, "private key")]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, word)| plural(n, word))
-        .collect();
-    (!held.is_empty()).then(|| {
-        format!(
-            "Delete the export now: it holds {} (in clear text or encrypted). Under Linux: shred -u FILE.",
-            held.join(" and ")
-        )
-    })
+impl Shown {
+    /// What `plan` prints, as the report needs it (`args`: the accepted
+    /// destination changes).
+    pub(crate) fn of_plan(plan: &ImportPlan, home: &Path, args: &ImportArgs) -> Self {
+        let encrypted_keys: BTreeSet<&KeyId> = plan
+            .keys
+            .iter()
+            .filter(|k| k.encrypted)
+            .map(|k| &k.id)
+            .collect();
+        let portico_keys = home.join(".ssh").join("portico");
+        Self {
+            skipped: plan.skipped.clone(),
+            warnings: plan.warnings.clone(),
+            encrypted: false,
+            redirects: plan
+                .hosts
+                .iter()
+                .filter(|h| h.previous.is_some())
+                .map(|h| (h.record, h.alias.clone()))
+                .collect(),
+            file_name: plan.file_name(),
+            format: Some(plan.format),
+            encrypted_in_export: plan
+                .hosts
+                .iter()
+                .filter(|h| h.key.as_ref().is_some_and(|k| encrypted_keys.contains(k)))
+                .map(|h| h.alias.clone())
+                .collect(),
+            previous_keys: plan
+                .hosts
+                .iter()
+                .filter(|h| !redirect_skipped(h, args))
+                .filter_map(|h| {
+                    let path = h.previous.as_ref()?.identity_file.clone()?;
+                    path.starts_with(&portico_keys)
+                        .then(|| (h.alias.clone(), path))
+                })
+                .collect(),
+            key_users: BTreeMap::new(),
+        }
+    }
+
+    fn format(&self) -> ImportFormat {
+        self.format.unwrap_or(ImportFormat::TemplateCsv)
+    }
+}
+
+/// `  ~/.ssh/portico/web  written · 0600 · encrypted · used by web, db`.
+fn written_key_line(path: &Path, shown: &Shown, home: &Path) -> String {
+    let users = shown
+        .key_users
+        .get(path)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let encrypted = shown.encrypted
+        || users
+            .iter()
+            .any(|alias| shown.encrypted_in_export.contains(alias));
+    let mut line = format!(
+        "  {}  written · 0600 · {}",
+        shown_path(path, home),
+        if encrypted {
+            "encrypted"
+        } else {
+            "no passphrase"
+        }
+    );
+    if !users.is_empty() {
+        let _ = write!(line, " · used by {}", users.join(", "));
+    }
+    line
+}
+
+/// `  hbd — key ~/.ssh/portico/hbd no longer used` for an updated host
+/// whose earlier key (written by an import) no host uses any more.
+fn updated_line(alias: &str, shown: &Shown, home: &Path) -> String {
+    let orphan = shown
+        .previous_keys
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(alias))
+        .map(|(_, path)| path)
+        .filter(|path| !shown.key_users.contains_key(*path));
+    match orphan {
+        Some(path) => format!("  {alias} — key {} no longer used", shown_path(path, home)),
+        None => format!("  {alias}"),
+    }
 }
 
 /// `  web-prod — message` for a skipped destination change (the alias
@@ -854,7 +1021,7 @@ fn redirect_line(notice: &ImportNotice, shown: &Shown) -> String {
     });
     match alias {
         Some(alias) => format!("  {alias} — {}", notice.message),
-        None => notice_line(notice),
+        None => notice_line(notice, shown.format()),
     }
 }
 
@@ -903,28 +1070,33 @@ pub(crate) fn report_text(report: &ImportReport, shown: &Shown, home: &Path) -> 
             plural(report.imported.len(), "host"),
         );
     }
-    let _ = writeln!(
-        text,
-        "Metadata (group, tags, notes) updated for {} in hosts.toml.",
-        plural(report.meta_updated, "host")
-    );
+    // The action first: the export holds secrets Portico did not import.
+    let delete = report.secrets.delete_export_advice(&shown.file_name);
+    if let Some(advice) = &delete {
+        let _ = writeln!(text, "{CAUTION} {advice}");
+    }
+    if report.meta_updated > 0 {
+        let _ = writeln!(
+            text,
+            "Metadata (group, tags, notes) updated for {} in hosts.toml.",
+            plural(report.meta_updated, "host")
+        );
+    }
     section(
         &mut text,
         "Updated hosts",
-        report.updated.iter().map(|alias| format!("  {alias}")),
+        report
+            .updated
+            .iter()
+            .map(|alias| updated_line(alias, shown, home)),
     );
     let keys = &report.keys;
-    let imported_title = if shown.encrypted {
-        "Keys imported (0600; those not encrypted in the export now use your passphrase)"
-    } else {
-        "Keys imported (0600)"
-    };
     section(
         &mut text,
-        imported_title,
+        "Keys imported",
         keys.imported
             .iter()
-            .map(|p| format!("  {}", shown_path(p, home))),
+            .map(|p| written_key_line(p, shown, home)),
     );
     section(
         &mut text,
@@ -941,27 +1113,30 @@ pub(crate) fn report_text(report: &ImportReport, shown: &Shown, home: &Path) -> 
         );
     }
     redirects_section(&mut text, report, shown);
+    let format = shown.format();
     section(
         &mut text,
         "Skipped while writing (changed since the plan)",
-        report
-            .skipped
-            .iter()
+        by_record(&report.skipped)
+            .into_iter()
             .filter(|n| n.code != NoticeCode::DestinationChanged && !shown.skipped.contains(n))
-            .map(notice_line),
+            .map(|n| notice_line(n, format)),
     );
     section(
         &mut text,
         "Warnings while writing",
-        report
-            .warnings
-            .iter()
+        by_record(&report.warnings)
+            .into_iter()
             .filter(|n| !shown.warnings.contains(n))
-            .map(notice_line),
+            .map(|n| notice_line(n, format)),
     );
-    if let Some(advice) = delete_advice(report) {
-        let _ = writeln!(text, "\n{advice}");
-    }
+    report_end(&mut text, report, shown, delete.is_some());
+    text
+}
+
+/// The `Include` line (or that it is in place), then the short version of
+/// the action on the export, last, where the eye ends.
+fn report_end(text: &mut String, report: &ImportReport, shown: &Shown, delete: bool) {
     if report.include_active {
         let _ = writeln!(
             text,
@@ -970,11 +1145,19 @@ pub(crate) fn report_text(report: &ImportReport, shown: &Shown, home: &Path) -> 
     } else {
         let _ = writeln!(
             text,
-            "\nOne step left: add this line at the top of ~/.ssh/config (Portico never edits that file):\n\n    {}",
+            "\n{}\n\n    {}",
+            crate::app_hosts::INCLUDE_BANNER,
             report.include_line
         );
     }
-    text
+    if delete {
+        let name: String = shown
+            .file_name
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        let _ = writeln!(text, "\n{CAUTION} Delete {name} now.");
+    }
 }
 
 fn plural(n: usize, word: &str) -> String {

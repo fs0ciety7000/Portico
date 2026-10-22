@@ -335,6 +335,11 @@ pub(crate) fn passphrase_rule(s: Styles, typed: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Why the vault is asked for after a host save (`SecretDialog::host_save`).
+const HOST_SAVE_CREATE: &str = "This host's password is remembered in the Portico vault, encrypted under a master passphrase. Create it to save the host.";
+const HOST_SAVE_UNLOCK: &str =
+    "This host's password is remembered in the Portico vault. Unlock it to save the host.";
+
 /// Vault unlock / create / change, and a key passphrase for the agent.
 /// Explanation lines, then (title, primary action, cancel action).
 fn secret_intro(
@@ -346,6 +351,21 @@ fn secret_intro(
         lines.push(Line::from(Span::styled(t.to_owned(), style)));
     };
     match &d.purpose {
+        // A host's password waits for the vault: "not now" goes back to
+        // the form, the password still typed.
+        SecretPurpose::VaultUnlock { .. } if d.host_save => {
+            text(lines, HOST_SAVE_UNLOCK, s.secondary());
+            (" Unlock the vault ", "unlock & save", "not now")
+        }
+        SecretPurpose::VaultCreate { .. } if d.host_save => {
+            text(lines, HOST_SAVE_CREATE, s.secondary());
+            text(
+                lines,
+                "It cannot be recovered if forgotten.",
+                s.status(s.theme.status.warning),
+            );
+            (" Create the vault ", "create & save", "not now")
+        }
         SecretPurpose::VaultUnlock { startup } => {
             text(
                 lines,
@@ -521,9 +541,19 @@ struct HostKeyShown<'a> {
     sends_remembered_password: bool,
 }
 
-/// Same wording as the GUI's host-key dialog.
-const SENDS_REMEMBERED_PASSWORD: &str =
-    "A remembered password will be sent to this server once you accept its key.";
+/// Same wording as the GUI's host-key dialog: the account the password is
+/// remembered for, `user@host:port`.
+pub(crate) fn remembered_password_warning(account: &str) -> String {
+    format!(
+        "The password remembered for {account} will be sent to this server once you accept its key."
+    )
+}
+
+/// A server in prose: `host:port`, always (the `[host]:port` form is only
+/// for `known_hosts` lines).
+pub(crate) fn prose_target(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
 
 fn host_key_lines(
     p: &PromptDialog,
@@ -539,11 +569,7 @@ fn host_key_lines(
         other_algorithms,
         sends_remembered_password,
     } = *shown;
-    let target = if port == 22 {
-        host.to_owned()
-    } else {
-        format!("{host}:{port}")
-    };
+    let target = prose_target(host, port);
     lines.push(Line::from(Span::styled(
         format!("First connection to {target}."),
         s.title(),
@@ -557,8 +583,12 @@ fn host_key_lines(
     lines.push(kv(s, 13, "Fingerprint", fingerprint.to_owned()));
     if sends_remembered_password {
         lines.push(Line::from(""));
+        let account = p
+            .account
+            .clone()
+            .unwrap_or_else(|| prose_target(host, port));
         lines.push(Line::from(Span::styled(
-            format!("▲ {SENDS_REMEMBERED_PASSWORD}"),
+            format!("▲ {}", remembered_password_warning(&account)),
             s.status(s.theme.status.warning),
         )));
     }
@@ -582,11 +612,7 @@ fn host_key_lines(
 
 fn render_changed(a: &ChangedKeyAlert, s: Styles, frame: &mut Frame<'_>) {
     let error = s.theme.status.error;
-    let target = if a.port == 22 {
-        a.host.clone()
-    } else {
-        format!("[{}]:{}", a.host, a.port)
-    };
+    let target = prose_target(&a.host, a.port);
     let lines = vec![
         Line::from(Span::styled(
             format!("The key presented by {target} does not match known_hosts."),
@@ -677,7 +703,7 @@ mod tests {
     }
 
     fn host_key(sends_remembered_password: bool) -> Dialog {
-        Dialog::Prompt(PromptDialog::new(
+        let mut dialog = PromptDialog::new(
             Prompt {
                 id: PromptId::next(),
                 session: None,
@@ -691,14 +717,24 @@ mod tests {
                 },
             },
             Some("db".into()),
-        ))
+        );
+        if sends_remembered_password {
+            dialog.account = Some("deploy@db.example.test:22".into());
+        }
+        Dialog::Prompt(dialog)
     }
 
     #[test]
     fn host_key_prompt_says_a_remembered_password_will_be_sent() {
-        let (screen, colour) = draw(&host_key(true), "▲ A remembered password will be sent");
+        let (screen, colour) = draw(&host_key(true), "▲ The password remembered for");
+        // The target as `host:port` in prose, port 22 included.
         assert!(
-            screen.contains("First connection to db.example.test."),
+            screen.contains("First connection to db.example.test:22."),
+            "{screen}"
+        );
+        // The warning names the account.
+        assert!(
+            screen.contains("▲ The password remembered for deploy@db.example.test:22"),
             "{screen}"
         );
         // Wrapped in the modal: the end of the sentence on the next row.

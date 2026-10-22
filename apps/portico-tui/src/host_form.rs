@@ -20,24 +20,37 @@ use portico_core::ErrorSummary;
 use portico_core::hosts::{
     HostEntry, HostOrigin, MAX_GROUP_CHARS, MAX_NOTES_CHARS, MAX_TAG_CHARS, MAX_TAGS,
 };
+use portico_core::import::ImportSource;
 use portico_core::keys::LocalKey;
-use portico_core::managed_hosts::{HostDraft, ManagedHost, PasswordChange};
+use portico_core::managed_hosts::{HostDraft, ManagedHostDetails, PasswordChange};
 use secrecy::SecretString;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::edit_host::split_tags;
 use crate::form::{MAX_LINE, paste_line, push_char, secret_buffer};
 
-/// Command names shared with the GUI.
-pub(crate) const ADD_COMMAND: &str = "Add host…";
-pub(crate) const EDIT_COMMAND: &str = "Edit host…";
-pub(crate) const DUPLICATE_COMMAND: &str = "Duplicate as Portico host…";
+/// Command name shared with the GUI (the delete confirmation's title).
 pub(crate) const DELETE_COMMAND: &str = "Delete host";
 /// Read-only hint of a host of `~/.ssh/config` (shared with the GUI).
 pub(crate) const READ_ONLY_HINT: &str = "Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it.";
-/// Read-only hint of an imported host (the import file is replaced by the
-/// next import).
-pub(crate) const IMPORTED_HINT: &str = "Imported from Termius into a file each import replaces. Duplicate it as a Portico host to change it.";
+/// Read-only hint of a host of the old import file (`imports/termius.conf`,
+/// written by Portico before imports became Portico hosts; shared with the
+/// GUI).
+pub(crate) const IMPORTED_HINT: &str = "Imported by an earlier version of Portico (imports/termius.conf), which it never edits. Duplicate it as a Portico host to change it.";
+/// Help of the form of a Portico host that came from an import (shared
+/// with the GUI): an edit marks it, and later imports leave it alone.
+pub(crate) const PROVENANCE_HELP: &str = "Editing it keeps later imports from updating it.";
+/// Replaces the remembered-password lines once `HostName`, `User` or
+/// `Port` changed (shared with the GUI): the core forgets a password whose
+/// account changes.
+pub(crate) const DESTINATION_CHANGE_NOTE: &str = "Changing the server or user forgets the remembered password. Choose Change to set one for the new destination.";
+/// Edit: a password is remembered for the host's account, or not (shared
+/// with the GUI).
+pub(crate) const PASSWORD_REMEMBERED: &str = "A password is remembered";
+pub(crate) const NO_PASSWORD_REMEMBERED: &str = "No password remembered";
+/// The key picker's first choice (shared with the GUI): no `IdentityFile`,
+/// so ssh-agent and the default keys are tried.
+pub(crate) const KEY_NONE_LABEL: &str = "none · agent and default keys";
 
 /// Under the password once one is set or kept (shared with the GUI): it
 /// is not tied to a host key until the first connection (`SECURITY.md`,
@@ -61,6 +74,17 @@ pub(crate) fn origin_label(origin: HostOrigin) -> &'static str {
         HostOrigin::Portico => "Portico",
         HostOrigin::SshConfig => "~/.ssh/config",
         HostOrigin::Imported => "Imported",
+    }
+}
+
+/// `Portico · from Termix` for a Portico host that came from an import,
+/// else the plain origin label (shared with the GUI).
+pub(crate) fn origin_with_source(origin: HostOrigin, source: Option<ImportSource>) -> String {
+    match (origin, source) {
+        (HostOrigin::Portico, Some(source)) => {
+            format!("{} · from {}", origin_label(origin), source.label())
+        }
+        _ => origin_label(origin).to_owned(),
     }
 }
 
@@ -101,6 +125,8 @@ pub(crate) fn field_of(code: &str) -> Option<HostField> {
         "host_tag" | "host_tags" => HostField::Tags,
         "host_group" => HostField::Group,
         "host_notes" => HostField::Notes,
+        // A password to remember, and no vault to hold it.
+        "vault_missing" | "vault_locked" => HostField::Password,
         _ => return None,
     })
 }
@@ -145,7 +171,7 @@ impl KeyChoice {
     fn none() -> Self {
         Self {
             path: None,
-            label: "none".into(),
+            label: KEY_NONE_LABEL.into(),
             note: String::new(),
         }
     }
@@ -232,13 +258,24 @@ pub(crate) struct HostForm {
     pub(crate) favorite: bool,
     pub(crate) notes: String,
     pub(crate) password_mode: PasswordMode,
+    /// The mode the form opened with (`Change` when nothing is remembered).
+    initial_password_mode: PasswordMode,
+    /// Edit: a password is remembered for the host's account (`None` until
+    /// `hosts.conf` is read). Without one, only "Set" is offered.
+    pub(crate) password_remembered: Option<bool>,
+    /// Edit: the import the host came from (`Portico · from Termix`).
+    pub(crate) imported_from: Option<ImportSource>,
+    /// The save was refused for want of a vault (`vault_missing` /
+    /// `vault_locked`): the create / unlock dialog is open, and this
+    /// refusal is shown under the password if the user says "not now".
+    pub(crate) vault_wait: Option<ErrorSummary>,
     /// Never shown, never logged (redacted `Debug`).
     password: PasswordInput,
     pub(crate) focus: HostField,
     /// Refusal from the engine: its field (`None`: the whole form).
     pub(crate) error: Option<(Option<HostField>, ErrorSummary)>,
     pub(crate) busy: bool,
-    /// `Esc` with unsaved changes: `y` discards, any other key goes back.
+    /// `Esc` with unsaved changes: `y` discards, `n` / `Esc` go back.
     pub(crate) confirm_discard: bool,
     initial: Snapshot,
 }
@@ -306,6 +343,10 @@ impl HostForm {
             favorite: false,
             notes: String::new(),
             password_mode: PasswordMode::Keep,
+            initial_password_mode: PasswordMode::Keep,
+            password_remembered: None,
+            imported_from: None,
+            vault_wait: None,
             password: PasswordInput(secret_buffer()),
             focus: HostField::Alias,
             error: None,
@@ -362,15 +403,29 @@ impl HostForm {
         form.group = host.meta.group.clone().unwrap_or_default();
         form.favorite = host.meta.favorite;
         form.notes = host.meta.notes.clone().unwrap_or_default();
+        form.imported_from = host.imported_from;
         form.loading = true;
         form.initial = form.snapshot();
         form
     }
 
     /// The values `hosts.conf` holds for the edited host
-    /// (`Engine::managed_host`): host name, user, port, key, jump host.
+    /// (`Engine::managed_host_details`): host name, user, port, key, jump
+    /// host, whether a password is remembered and the import it came from.
     /// The form becomes editable; what it holds now is "unchanged".
-    pub(crate) fn set_managed(&mut self, host: &ManagedHost, home: &Path) {
+    pub(crate) fn set_managed(&mut self, details: &ManagedHostDetails, home: &Path) {
+        let host = &details.host;
+        self.password_remembered = Some(details.password_remembered);
+        // Nothing to keep or forget: "Set", with an empty field.
+        self.password_mode = if details.password_remembered {
+            PasswordMode::Keep
+        } else {
+            PasswordMode::Change
+        };
+        self.initial_password_mode = self.password_mode;
+        if details.imported_from.is_some() {
+            self.imported_from = details.imported_from;
+        }
         self.hostname.clone_from(&host.hostname);
         self.user = host.user.clone().unwrap_or_default();
         self.port = host.port.map(|p| p.to_string()).unwrap_or_default();
@@ -476,7 +531,29 @@ impl HostForm {
     pub(crate) fn dirty(&self) -> bool {
         self.snapshot() != self.initial
             || !self.password.0.is_empty()
-            || self.password_mode != PasswordMode::Keep
+            || self.password_mode != self.initial_password_mode
+    }
+
+    /// Edit: `HostName`, `User` or `Port` differ from the values read, so
+    /// the remembered password (tied to the old account) is forgotten.
+    pub(crate) fn destination_changed(&self) -> bool {
+        matches!(self.mode, FormMode::Edit { .. })
+            && (self.hostname.trim() != self.initial.hostname.trim()
+                || self.user.trim() != self.initial.user.trim()
+                || self.port.trim() != self.initial.port.trim())
+    }
+
+    /// Edit: a password is remembered (Keep and Forget make sense).
+    pub(crate) fn remembered(&self) -> bool {
+        self.password_remembered == Some(true)
+    }
+
+    /// The label of the password choice: "Set" when nothing is remembered.
+    pub(crate) fn password_mode_label(&self) -> &'static str {
+        match self.password_mode {
+            PasswordMode::Change if !self.remembered() => "Set",
+            mode => mode.label(),
+        }
     }
 
     /// The focus is on a picker or toggle (`←` / `→` choose).
@@ -493,13 +570,24 @@ impl HostForm {
     }
 
     /// Saving sets a password (typed) or keeps the remembered one (edit,
-    /// "Keep"): the form then says where it will be sent.
+    /// "Keep", same destination): the form then says where it will be sent.
     pub(crate) fn password_set_or_kept(&self) -> bool {
         match (&self.mode, self.password_mode) {
             (FormMode::ReadOnly { .. }, _) | (FormMode::Edit { .. }, PasswordMode::Forget) => false,
-            (FormMode::Edit { .. }, PasswordMode::Keep) => true,
+            (FormMode::Edit { .. }, PasswordMode::Keep) => {
+                self.remembered() && !self.destination_changed()
+            }
             _ => self.password_typed(),
         }
+    }
+
+    /// Edit, "Keep", a password remembered, and the destination changed:
+    /// the form says it will be forgotten instead of where it goes.
+    pub(crate) fn forgets_on_destination_change(&self) -> bool {
+        matches!(self.mode, FormMode::Edit { .. })
+            && self.password_mode == PasswordMode::Keep
+            && self.remembered()
+            && self.destination_changed()
     }
 
     /// The fields, in `Tab` order.
@@ -512,15 +600,19 @@ impl HostForm {
             FormMode::ReadOnly { .. } => Vec::new(),
             FormMode::Duplicate { .. } => vec![Alias],
             FormMode::Create => vec![
-                Alias, HostName, User, Port, Key, Jump, Tags, Group, Favorite, Notes, Password,
+                Alias, HostName, User, Port, Key, Jump, Password, Tags, Group, Favorite, Notes,
             ],
             FormMode::Edit { .. } => {
-                let mut fields = vec![
-                    Alias, HostName, User, Port, Key, Jump, Tags, Group, Favorite, Notes, Mode,
-                ];
+                let mut fields = vec![Alias, HostName, User, Port, Key, Jump];
+                // Without a remembered password, "Set" is the only choice:
+                // the field itself, as when adding.
+                if self.remembered() {
+                    fields.push(Mode);
+                }
                 if self.password_mode == PasswordMode::Change {
                     fields.push(Password);
                 }
+                fields.extend([Tags, Group, Favorite, Notes]);
                 fields
             }
         }
@@ -572,7 +664,8 @@ impl HostForm {
             HostField::Key => self.key = step(self.key, self.keys.len()),
             HostField::Jump => self.jump = step(self.jump, self.jumps.len()),
             HostField::Favorite => self.favorite = !self.favorite,
-            HostField::PasswordMode => {
+            // Keep and Forget only when a password is remembered.
+            HostField::PasswordMode if self.remembered() => {
                 self.password_mode = self.password_mode.cycle(forward);
                 if self.password_mode != PasswordMode::Change {
                     self.password.0.zeroize();
@@ -703,9 +796,18 @@ impl HostForm {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if self.confirm_discard {
-            self.confirm_discard = false;
+            // `y` discards, `n` / `Esc` go back to the form; any other key
+            // leaves the question up.
             return match key.code {
                 KeyCode::Char('y') if !ctrl && !alt => self.close(),
+                KeyCode::Char('n') if !ctrl && !alt => {
+                    self.confirm_discard = false;
+                    FormOutcome::None
+                }
+                KeyCode::Esc => {
+                    self.confirm_discard = false;
+                    FormOutcome::None
+                }
                 _ => FormOutcome::None,
             };
         }
@@ -799,6 +901,36 @@ impl HostForm {
             } else {
                 paste_line(value, text, max);
             }
+        }
+    }
+
+    /// The save sets a password: a `vault_missing` / `vault_locked`
+    /// refusal then asks for the vault and retries.
+    pub(crate) fn sets_password(&self) -> bool {
+        matches!(self.draft().password, PasswordChange::Set(_))
+    }
+
+    /// The save was refused for want of a vault: waits for the create /
+    /// unlock dialog (`error` is shown under the password if it is declined).
+    pub(crate) fn wait_for_vault(&mut self, error: ErrorSummary) {
+        self.busy = false;
+        self.vault_wait = Some(error);
+    }
+
+    /// The vault is ready: the same save again (`None` if nothing waited).
+    pub(crate) fn retry_after_vault(&mut self) -> Option<HostRequest> {
+        self.vault_wait.take()?;
+        match self.submit() {
+            FormOutcome::Save(request) => Some(request),
+            _ => None,
+        }
+    }
+
+    /// "Not now": back to the form, the password still typed and the
+    /// refusal under it.
+    pub(crate) fn vault_declined(&mut self, home: &Path) {
+        if let Some(error) = self.vault_wait.take() {
+            self.refused(error, home);
         }
     }
 

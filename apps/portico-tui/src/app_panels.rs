@@ -633,7 +633,12 @@ impl App {
             SecretOutcome::Pending => {}
             SecretOutcome::Cancel => {
                 let purpose = dialog.purpose.clone();
+                let host_save = dialog.host_save;
                 self.dialogs.pop_front();
+                if host_save {
+                    self.host_save_vault_done(false);
+                    return;
+                }
                 if let SecretPurpose::VaultUnlock { startup: true } = purpose {
                     self.notify_error(ErrorSummary {
                         code: "vault_locked".into(),
@@ -686,7 +691,14 @@ impl App {
             return;
         }
         let purpose = dialog.purpose.clone();
+        let host_save = dialog.host_save;
         self.dialogs.pop_front();
+        if host_save {
+            // The vault is ready: the host is saved again (its own toast).
+            self.refresh_vault(false);
+            self.host_save_vault_done(true);
+            return;
+        }
         match purpose {
             SecretPurpose::VaultUnlock { .. } => {
                 self.notify("Vault unlocked".into());

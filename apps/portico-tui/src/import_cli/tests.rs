@@ -93,6 +93,10 @@ impl SecretPrompt for Scripted {
     fn note(&mut self, message: &str) {
         self.asked.lock().unwrap().push(format!("note: {message}"));
     }
+
+    fn show(&mut self, text: &str) {
+        self.asked.lock().unwrap().push(format!("show: {text}"));
+    }
 }
 
 #[test]
@@ -262,9 +266,7 @@ async fn termius_plan_and_report_texts() {
     assert!(!text.contains("Updates"), "{text}");
     assert!(!text.contains("Private keys"), "{text}");
     assert!(
-        text.contains(
-            "  web-eu-1                 deploy@203.0.113.10:2222  @Prod/EU #web #web-serveur\n"
-        ),
+        text.contains("  web-eu-1 deploy@203.0.113.10:2222  @Prod/EU #web #web-serveur\n"),
         "{text}"
     );
     assert!(
@@ -284,29 +286,25 @@ async fn termius_plan_and_report_texts() {
     );
     assert_no_secret(&text);
 
-    let shown = Shown {
-        skipped: plan.skipped.clone(),
-        warnings: plan.warnings.clone(),
-        encrypted: false,
-        redirects: Vec::new(),
-    };
+    let shown = Shown::of_plan(&plan, dir.path(), &args);
     let report = engine
         .apply_import(plan, ImportOptions::default())
         .await
         .unwrap();
     let text = report_text(&report, &shown, dir.path());
+    // The action on the export first, right after the summary, naming it.
     assert!(
-        text.starts_with("Wrote 1 host to ~/config/hosts.conf.\n"),
+        text.starts_with(
+            "Wrote 1 host to ~/config/hosts.conf.\n▲ Delete export.csv now: it holds 1 password (in clear text or encrypted).\nMetadata (group, tags, notes) updated for 1 host in hosts.toml.\n"
+        ),
         "{text}"
     );
-    assert!(
-        text.contains("\nDelete the export now: it holds 1 password (in clear text or encrypted)"),
-        "{text}"
-    );
+    assert!(!text.contains("Under Linux"), "{text}");
     assert!(!text.contains("Skipped while writing"), "{text}");
     assert!(!text.contains("Keys"), "{text}");
+    // The Include line, then the short version of the action, last.
     assert!(
-        text.ends_with("\n    Include ~/config/hosts.conf\n"),
+        text.ends_with("\n    Include ~/config/hosts.conf\n\n▲ Delete export.csv now.\n"),
         "{text}"
     );
     assert_no_secret(&text);
@@ -333,6 +331,9 @@ async fn termius_plan_and_report_texts() {
         "{text}"
     );
     assert!(text.contains("\nUpdated hosts\n  web-eu-1\n"), "{text}");
+    // No metadata changed: no line saying "0 hosts".
+    assert_eq!(report.meta_updated, 0);
+    assert!(!text.contains("Metadata"), "{text}");
 }
 
 #[tokio::test]
@@ -425,13 +426,53 @@ async fn termix_plan_lists_keys_and_how_to_select_them() {
     );
     assert_no_secret(&text);
     assert!(!dir.path().join("config/hosts.conf").exists());
+    termix_keys_selected(&engine, dir.path(), &args).await;
+}
 
+#[tokio::test]
+async fn termix_plan_numbers_records_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let text = run_with(&engine, dir.path(), cli(fixture()), Scripted::default())
+        .await
+        .unwrap();
+    // JSON records are numbered `#n` (not lines), in record order.
+    assert!(
+        text.contains("\nSkipped\n  #9 · inject ip — ")
+            && text.contains("\n  #10 · inject user — "),
+        "{text}"
+    );
+    assert!(!text.contains("  line "), "{text}");
+    let warnings: Vec<usize> = text
+        .split("\nWarnings\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .take_while(|l| l.starts_with("  #"))
+        .map(|l| l[3..].split(' ').next().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(warnings, [5, 6, 6, 6, 7], "{text}");
+    // The alias column fits the longest alias (32 at most).
+    assert!(
+        text.contains("\n  hbd                              root@203.0.113.20:2222\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  evilproxycommand-touch-tmp-pwned root@192.0.2.66\n"),
+        "{text}"
+    );
+}
+
+/// The Termix plan with keys selected (one, all, an unknown one).
+async fn termix_keys_selected(engine: &Engine, home: &Path, args: &ImportArgs) {
+    let dir = home;
+    let args = args.clone();
     // Selected keys are marked, and the suggested command keeps them.
     let selected = ImportArgs {
         keys: vec![RSA.to_owned()],
         ..args.clone()
     };
-    let text = run_with(&engine, dir.path(), selected, Scripted::default())
+    let text = run_with(engine, dir, selected, Scripted::default())
         .await
         .unwrap();
     assert!(text.contains("3 found, 1 selected"), "{text}");
@@ -448,7 +489,7 @@ async fn termix_plan_lists_keys_and_how_to_select_them() {
         key_passphrase: true,
         ..args.clone()
     };
-    let text = run_with(&engine, dir.path(), all, Scripted::default())
+    let text = run_with(engine, dir, all, Scripted::default())
         .await
         .unwrap();
     assert!(text.contains("3 found, 3 selected"), "{text}");
@@ -464,13 +505,13 @@ async fn termix_plan_lists_keys_and_how_to_select_them() {
         apply: true,
         ..args
     };
-    let failure = run_with(&engine, dir.path(), unknown, Scripted::default())
+    let failure = run_with(engine, dir, unknown, Scripted::default())
         .await
         .unwrap_err();
     assert_eq!(failure.summary.code, "import_unknown_key");
     assert_eq!(failure.summary.message, "no key SHA256:AAAA in this export");
     assert!(failure.stdout.contains("Private keys: 3 found"));
-    assert!(!dir.path().join("config/hosts.conf").exists());
+    assert!(!dir.join("config/hosts.conf").exists());
 }
 
 #[cfg(unix)]
@@ -496,8 +537,17 @@ async fn termix_apply_with_one_key_end_to_end() {
     let text = run_with(&engine, dir.path(), args, prompt.clone())
         .await
         .unwrap();
+    // The plan is printed first, then the passphrase is asked.
+    let asked = prompt.asked();
+    let (plan, prompts) = asked.split_first().unwrap();
+    assert!(
+        plan.starts_with("show: Termix import: termix_export.json (Termix JSON)\n"),
+        "{plan}"
+    );
+    assert!(plan.contains("Private keys: 3 found, 1 selected"), "{plan}");
+    assert!(!plan.contains("Wrote"), "{plan}");
     assert_eq!(
-        prompt.asked(),
+        prompts,
         [
             "Passphrase for the imported keys: ",
             "Same passphrase again: ",
@@ -506,14 +556,20 @@ async fn termix_apply_with_one_key_end_to_end() {
             "Same passphrase again: ",
         ]
     );
+    // What is left to print: the report alone, the action on the export
+    // right after its summary, and again (short) on the last line.
     let key = dir.path().join(".ssh/portico/hbd");
     assert!(
-        text.contains("Wrote 8 hosts to ~/config/hosts.conf.\n"),
+        text.starts_with(
+            "Wrote 8 hosts to ~/config/hosts.conf.\n▲ Delete termix_export.json now: it holds 3 passwords and 5 private keys (in clear text or encrypted).\n"
+        ),
         "{text}"
     );
+    assert!(!text.contains("Termix import:"), "{text}");
+    assert!(!text.contains("\nSecrets\n"), "{text}");
     assert!(
         text.contains(
-            "\nKeys imported (0600; those not encrypted in the export now use your passphrase)\n  ~/.ssh/portico/hbd\n"
+            "\nKeys imported\n  ~/.ssh/portico/hbd  written · 0600 · encrypted · used by hbd, hbd-backup\n"
         ),
         "{text}"
     );
@@ -523,11 +579,14 @@ async fn termix_apply_with_one_key_end_to_end() {
     );
     assert!(!text.contains("Keys reused"), "{text}");
     assert!(
-        text.contains("\nDelete the export now: it holds 3 passwords and 5 private keys"),
+        text.contains(
+            "\nOptional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config:\n\n    Include ~/config/hosts.conf\n"
+        ),
         "{text}"
     );
+    assert!(!text.contains("One step left"), "{text}");
     assert!(
-        text.contains("\n    Include ~/config/hosts.conf\n"),
+        text.ends_with("\n\n▲ Delete termix_export.json now.\n"),
         "{text}"
     );
     assert_no_secret(&text);
@@ -582,8 +641,11 @@ async fn passphrase_prompt_only_when_needed_and_never_half_written() {
         .await
         .unwrap();
     assert!(prompt.asked().is_empty(), "{:?}", prompt.asked());
+    // Encrypted in the export: written as it is, still encrypted.
     assert!(
-        text.contains("\nKeys imported (0600)\n  ~/.ssh/portico/locked-box\n"),
+        text.contains(
+            "\nKeys imported\n  ~/.ssh/portico/locked-box  written · 0600 · encrypted · used by locked-box\n"
+        ),
         "{text}"
     );
 
@@ -597,14 +659,21 @@ async fn passphrase_prompt_only_when_needed_and_never_half_written() {
         ..cli(fixture())
     };
     let interrupted = Scripted::new([Err(io::ErrorKind::Interrupted.into())]);
-    let failure = run_with(&engine, other.path(), args.clone(), interrupted)
+    let failure = run_with(&engine, other.path(), args.clone(), interrupted.clone())
         .await
         .unwrap_err();
     assert_eq!(
         failure.summary.message,
         "passphrase not given: nothing was written"
     );
-    assert!(failure.stdout.contains("Private keys: 3 found, 1 selected"));
+    // The plan was already printed, before the question: not twice.
+    assert!(
+        interrupted
+            .asked()
+            .first()
+            .is_some_and(|p| p.contains("Private keys: 3 found, 1 selected"))
+    );
+    assert!(failure.stdout.is_empty(), "{}", failure.stdout);
     let never = Scripted::new([Ok(""), Ok("a"), Ok("b"), Ok("a"), Ok("c")]);
     let failure = run_with(&engine, other.path(), args, never.clone())
         .await
@@ -701,12 +770,14 @@ fn report_lists_reused_keys_and_new_warnings_only() {
     };
     let shown = Shown {
         warnings: vec![shown_warning],
+        file_name: "termix.json".into(),
+        format: Some(portico_core::import::ImportFormat::TermixJson),
         ..Shown::default()
     };
     let text = report_text(&report, &shown, Path::new("/home/ana"));
     assert!(
         text.starts_with(
-            "Wrote 2 hosts to ~/.config/portico/hosts.conf, 1 updated from an earlier import.\n"
+            "Wrote 2 hosts to ~/.config/portico/hosts.conf, 1 updated from an earlier import.\n▲ Delete termix.json now: it holds 1 private key (in clear text or encrypted).\nMetadata (group, tags, notes) updated for 2 hosts in hosts.toml.\n"
         ),
         "{text}"
     );
@@ -725,10 +796,106 @@ fn report_lists_reused_keys_and_new_warnings_only() {
     );
     assert!(!text.contains("already shown"), "{text}");
     assert!(
-        text.contains("Delete the export now: it holds 1 private key (in clear text or encrypted)"),
+        text.ends_with(
+            "already includes this file: the hosts are in your list.\n\n▲ Delete termix.json now.\n"
+        ),
         "{text}"
     );
-    assert!(text.ends_with("already includes this file: the hosts are in your list.\n"));
+}
+
+#[test]
+fn alias_column_is_capped_and_notices_are_plain() {
+    let mut plan = redirected_plan();
+    if let Some(host) = plan.hosts.first_mut() {
+        host.alias = "a".repeat(40);
+    }
+    let text = plan_text(
+        &plan,
+        Path::new("/home/ana"),
+        &cli("x.json"),
+        &KeySelection::None,
+    );
+    // Longer than 32: one space, the other rows padded to 32.
+    assert!(
+        text.contains(&format!("\n  {} deploy@203.0.113.20:2200", "a".repeat(40))),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "\n  web-prod{} deploy@198.51.100.10",
+            " ".repeat(24)
+        )),
+        "{text}"
+    );
+    // `edited_since_import`: the core's message, nothing added.
+    let notice = ImportNotice {
+        code: NoticeCode::EditedSinceImport,
+        record: Some(4),
+        label: Some("Web".into()),
+        message: "`web` was imported earlier, then edited: left as it is".into(),
+    };
+    assert_eq!(
+        notice_line(&notice, portico_core::import::ImportFormat::TermixJson),
+        "  #4 · Web — `web` was imported earlier, then edited: left as it is"
+    );
+    assert_eq!(
+        notice_line(&notice, portico_core::import::ImportFormat::TemplateCsv),
+        "  line 4 · Web — `web` was imported earlier, then edited: left as it is"
+    );
+}
+
+/// An accepted destination change whose earlier key (written by an
+/// import) no host uses any more says so; a key still used does not.
+#[test]
+fn report_says_when_a_redirect_leaves_a_key_unused() {
+    let home = Path::new("/home/ana");
+    let mut plan = redirected_plan();
+    let old_key = PathBuf::from("/home/ana/.ssh/portico/web-prod");
+    if let Some(host) = plan.hosts.get_mut(1)
+        && let Some(previous) = &mut host.previous
+    {
+        previous.identity_file = Some(old_key.clone());
+    }
+    let accepted = ImportArgs {
+        accept_redirect: vec!["web-prod".into()],
+        ..cli("export.json")
+    };
+    let mut shown = Shown::of_plan(&plan, home, &accepted);
+    assert_eq!(
+        shown.previous_keys,
+        [("web-prod".to_owned(), old_key.clone())]
+    );
+    let report = ImportReport {
+        format: portico_core::import::ImportFormat::TermixJson,
+        target: "/home/ana/.config/portico/hosts.conf".into(),
+        unchanged: false,
+        imported: vec!["hbd".into(), "web-prod".into()],
+        updated: vec!["hbd".into(), "web-prod".into()],
+        skipped: Vec::new(),
+        warnings: Vec::new(),
+        secrets: portico_core::import::IgnoredSecrets::default(),
+        identity_files: Vec::new(),
+        meta_updated: 0,
+        include_line: "Include ~/.config/portico/hosts.conf".into(),
+        include_active: true,
+        keys: portico_core::import::KeyOutcome::default(),
+    };
+    let text = report_text(&report, &shown, home);
+    assert!(
+        text.contains(
+            "\nUpdated hosts\n  hbd\n  web-prod — key ~/.ssh/portico/web-prod no longer used\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Metadata"), "{text}");
+    assert!(!text.contains("Delete"), "nothing to delete: {text}");
+    // Another host still uses it: nothing to say.
+    shown.key_users.insert(old_key, vec!["web-staging".into()]);
+    let text = report_text(&report, &shown, home);
+    assert!(text.contains("\n  web-prod\n"), "{text}");
+    // Skipped (not accepted): never said.
+    let skipped = Shown::of_plan(&plan, home, &cli("export.json"));
+    assert!(skipped.previous_keys.is_empty());
 }
 
 /// A host of `plan` as a destination change of `web-prod`.
@@ -798,14 +965,19 @@ fn plan_shows_destination_changes() {
         text.contains("\n2 records: 1 host to import, 1 skipped.\n"),
         "{text}"
     );
+    // Only the hosts actually rewritten count: not the skipped change.
+    assert!(
+        text.contains("\nUpdates 1 host from an earlier import.\n"),
+        "{text}"
+    );
     assert!(
         text.contains(
-            "\n  web-prod                 deploy@198.51.100.10 → deploy@198.51.100.99:2200 #web  (destination changed, skipped)\n"
+            "\n  web-prod deploy@198.51.100.10 → deploy@198.51.100.99:2200 #web  (destination changed, skipped)\n"
         ),
         "{text}"
     );
     assert!(
-        text.contains("\n  hbd                      deploy@203.0.113.20:2200  (update)\n"),
+        text.contains("\n  hbd      deploy@203.0.113.20:2200  (update)\n"),
         "{text}"
     );
     assert!(
@@ -826,6 +998,10 @@ fn plan_shows_destination_changes() {
     };
     let text = plan_text(&plan, home, &accepted, &KeySelection::None);
     assert!(text.contains("2 hosts to import, 0 skipped"), "{text}");
+    assert!(
+        text.contains("\nUpdates 2 hosts from an earlier import.\n"),
+        "{text}"
+    );
     assert!(
         text.contains(":2200 #web  (destination changed, accepted)\n"),
         "{text}"
