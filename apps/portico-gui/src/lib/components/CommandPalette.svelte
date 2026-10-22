@@ -12,7 +12,21 @@
   import { fade, scale } from "svelte/transition";
   import { dur } from "../motion";
 
-  let { open = $bindable(false), commands }: { open?: boolean; commands: Command[] } = $props();
+  let {
+    open = $bindable(false),
+    commands,
+    label = "Command palette",
+    placeholder = "Type a command…",
+    empty = "No command found",
+  }: {
+    open?: boolean;
+    commands: Command[];
+    /** Accessible name (the palette, or a picker built on it). */
+    label?: string;
+    placeholder?: string;
+    /** Shown when nothing matches. */
+    empty?: string;
+  } = $props();
 
   let query = $state("");
   let active = $state(0);
@@ -48,8 +62,8 @@
 
 {#if open}
   <div class="scrim" transition:fade={{ duration: dur("fast") }} onclick={() => (open = false)} role="presentation"></div>
-  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" transition:scale={{ start: 0.97, duration: dur("base") }}>
-    <input bind:this={input} bind:value={query} {onkeydown} placeholder="Type a command…" spellcheck="false" oninput={() => (active = 0)} />
+  <div class="palette" role="dialog" aria-modal="true" aria-label={label} transition:scale={{ start: 0.97, duration: dur("base") }}>
+    <input bind:this={input} bind:value={query} {onkeydown} {placeholder} spellcheck="false" oninput={() => (active = 0)} />
     <ul>
       {#each filtered as cmd, i (cmd.id)}
         <li class:active={i === active} onmouseenter={() => (active = i)} onclick={() => run(cmd)} onkeydown={() => {}} role="option" aria-selected={i === active}>
@@ -58,7 +72,7 @@
           {#if cmd.shortcut}<kbd>{cmd.shortcut}</kbd>{/if}
         </li>
       {:else}
-        <li class="empty">No command found</li>
+        <li class="empty">{empty}</li>
       {/each}
     </ul>
   </div>

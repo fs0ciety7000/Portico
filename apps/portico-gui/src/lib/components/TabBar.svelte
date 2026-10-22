@@ -1,7 +1,8 @@
 <script lang="ts">
   // Tabs in the title bar: Hosts (pinned), then one tab per terminal with its
-  // live status dot. The alias always comes first; the remote title follows
-  // on the active tab only.
+  // live status dot. A tab speaks for its focused pane: its alias first, its
+  // remote title on the active tab only, and the number of panes when the
+  // tab is split.
   //
   // Dot grammar (shared with the status bar and the ended bar): the colour is
   // the session's status, the fill says whether a shell is attached.
@@ -13,7 +14,8 @@
   import { describe } from "../api";
   import { keymap } from "../state/keymap.svelte";
   import { dur } from "../motion";
-  import { isLive, workspace, type Tab } from "../state/workspace.svelte";
+  import { panesOf } from "../panes";
+  import { isLive, workspace, type Pane } from "../state/workspace.svelte";
 
   let { hostCount }: { hostCount: number } = $props();
 
@@ -31,7 +33,7 @@
   // remote title appears on activation).
   $effect(() => {
     const key = workspace.active;
-    void workspace.activeTab?.title;
+    void workspace.activePane?.title;
     void workspace.tabs.length;
     requestAnimationFrame(() => {
       strip
@@ -41,10 +43,10 @@
     });
   });
 
-  function dotOf(tab: Tab) {
-    const session = workspace.sessions[tab.session];
+  function dotOf(pane: Pane | undefined) {
+    const session = pane ? workspace.sessions[pane.session] : undefined;
     const d = describe(session);
-    return { status: d.status, busy: d.busy, hollow: !!tab.end || (!isLive(session) && tab.terminal === null) };
+    return { status: d.status, busy: d.busy, hollow: !pane || !!pane.end || (!isLive(session) && pane.terminal === null) };
   }
 
   function focusTab(index: number) {
@@ -97,7 +99,11 @@
     data-tauri-drag-region
   >
     {#each workspace.tabs as tab, i (tab.key)}
-      {@const dot = dotOf(tab)}
+      {@const focus = workspace.focusOf(tab)}
+      {@const alias = focus?.alias ?? ""}
+      {@const title = focus?.title ?? ""}
+      {@const count = panesOf(tab.root).length}
+      {@const dot = dotOf(focus)}
       {@const selected = workspace.active === tab.key}
       <div
         class="tab"
@@ -105,7 +111,7 @@
         tabindex={selected ? 0 : -1}
         data-key={tab.key}
         aria-selected={selected}
-        title={tab.title ? `${tab.alias} — ${tab.title}` : tab.alias}
+        title={`${title ? `${alias} — ${title}` : alias}${count > 1 ? ` · ${count} panes` : ""}`}
         animate:flip={{ duration: dur("base") }}
         in:fly={{ y: -4, duration: dur("base") }}
         onclick={() => (workspace.active = tab.key)}
@@ -113,13 +119,19 @@
         onauxclick={(e) => e.button === 1 && workspace.close(tab.key)}
       >
         <span class="dot" data-status={dot.status} class:busy={dot.busy} class:hollow={dot.hollow}></span>
-        <span class="alias">{tab.alias}</span>
-        {#if tab.title && selected}<span class="remote">{tab.title}</span>{/if}
+        <span class="alias">{alias}</span>
+        {#if title && selected}<span class="remote">{title}</span>{/if}
+        {#if count > 1}
+          <span class="panes" aria-label={`${count} panes`}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><path d="M8 3v10" /></svg>
+            {count}
+          </span>
+        {/if}
         <span class="slot">
           {#if i < 9}<span class="index">{i + 1}</span>{/if}
           <button
             class="close"
-            aria-label={`Close ${tab.alias}`}
+            aria-label={`Close ${alias}`}
             tabindex="-1"
             onclick={(e) => {
               e.stopPropagation();
@@ -203,6 +215,17 @@
     stroke-width: 1.5;
     stroke-linejoin: round;
   }
+  .panes {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+  }
+  .panes svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; }
   .count, .index {
     font-family: var(--font-mono);
     font-size: var(--text-xs);

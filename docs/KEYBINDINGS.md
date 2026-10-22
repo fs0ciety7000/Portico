@@ -15,9 +15,10 @@
 
 Une seule grammaire dans les deux interfaces : `↵` se connecte, `/` cherche (`#tag`, `@groupe`, `*` favoris),
 `f` fichiers, `p` tunnels, `i` clés, `s` snippets, `e` édition des métadonnées d'un hôte, `*` (TUI) ou `⌘D`
-(GUI) favori, `l` (TUI) ou `⌘⇧L` (GUI) logs de session, `t` thème. La TUI passe par le préfixe `Ctrl-Space`
-dans un terminal ; la GUI par `⌘` (Linux : `Ctrl`, `Ctrl-Shift` quand un terminal a le focus) et la palette
-`⌘K`. Les tables complètes et à jour sont les blocs générés ci-dessous.
+(GUI, liste des hôtes) favori, `l` (TUI) ou `⌘⇧L` (GUI) logs de session, `t` thème. La TUI passe par le préfixe
+`Ctrl-Space` dans un terminal ; la GUI par `⌘` (Linux : `Ctrl`, `Ctrl-Shift` quand un terminal a le focus) et la
+palette `⌘K`. Dans un terminal GUI, `⌘D` divise le panneau (voir « Panneaux (GUI) : principe »). Les tables
+complètes et à jour sont les blocs générés ci-dessous.
 
 ## Configurer les raccourcis et le thème (`settings.toml`)
 
@@ -277,7 +278,7 @@ theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé qua
   `Ctrl-Shift` dès qu'un terminal a le focus), `Ctrl`, `Alt` (`Option`), `Shift`, `Cmd` (`Meta`, `Super`).
   Touches : `a`–`z`, `0`–`9`, `F1`–`F12`, `Enter`, `Esc`, `Tab`, `Space`, `Backspace`, `Delete`, `Insert`,
   `Up` `Down` `Left` `Right`, `Home`, `End`, `PageUp`, `PageDown`, et les signes `/` `[` `]` `.` `,` `;` `'` `-` `=` `?` `*` `\` et `` ` ``. `none` retire.
-- Une entrée remplace toutes les combinaisons par défaut de l'action. Les actions globales exigent `Mod`,
+- Une entrée remplace toutes les combinaisons par défaut de l'action. Les actions globales et de panneau exigent `Mod`,
   `Ctrl`, `Alt` ou une touche `F` ; les actions de la liste des hôtes acceptent une touche seule.
 - Entrées ignorées (le défaut reste) et listées dans une notification au démarrage : action inconnue,
   combinaison illisible, conflit avec une autre action, combinaison réservée (copier/coller du terminal
@@ -287,6 +288,21 @@ theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé qua
   pas. La palette, les infobulles et la barre de statut affichent les combinaisons effectives.
 - Le thème est appliqué avant le premier rendu (dernier thème mémorisé localement, confirmé par
   `settings.toml`) ; un nom inconnu donne le thème par défaut et une notification.
+- Les actions de panneau (`pane.*`) n'écoutent que dans un onglet terminal : elles peuvent reprendre une
+  combinaison de la liste des hôtes (`Mod+D` divise dans un terminal et bascule le favori dans la liste).
+
+## Panneaux (GUI) : principe
+
+Un onglet se divise en panneaux (8 au plus), chacun un terminal indépendant : « Split right » / « Split down »
+ouvrent un canal PTY de plus sur la **même session** (aucune nouvelle connexion), « Split with another host… »
+ouvre le sélecteur d'hôtes et place un terminal d'un **autre hôte** à côté. Un seul panneau a le focus (liseré
+d'accent, en-tête lumineux) et lui seul reçoit les frappes ; les autres sont atténués. Chaque panneau affiche son
+statut (phase, latence, titre distant) dans son en-tête, et la barre d'état parle du panneau actif (« pane 2/4 »).
+Une division qui laisserait un panneau sous 20 colonnes × 5 lignes, ou un neuvième panneau, est refusée par une
+notification. Les séparations se déplacent au clavier (`pane.resize-*`, ou flèches sur une séparation qui a le
+focus) ou à la souris ; chaque terminal suit sa taille (resize PTY après un court délai). Le zoom donne tout
+l'onglet au panneau actif sans fermer les autres. Fermer un panneau ferme son canal PTY ; le dernier panneau
+d'un onglet ferme l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier onglet.
 
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
@@ -305,7 +321,6 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Clés (locales, agent, vault) | `app.keys` | `⌘⇧I` | `Ctrl-Shift-I` |
 | Snippets de l'hôte (la palette liste aussi « Run: <nom> ») | `app.snippets` | `⌘⇧S` | `Ctrl-Shift-S` |
 | Journaux de session et config effective (panneau debug) | `app.logs` | `⌘⇧L` | `Ctrl-Shift-L` |
-| Favori on/off (hôte sélectionné, ou celui de l'onglet) | `app.favorite` | `⌘D` | `Ctrl-Shift-D` |
 | Nouvel onglet sur le même hôte (depuis la liste : se connecter) | `tab.new` | `⌘T` | `Ctrl-Shift-T` |
 | Fermer l'onglet (le dernier onglet d'un hôte le déconnecte ; pendant la connexion : annuler) | `tab.close` | `⌘W` | `Ctrl-Shift-W` |
 | Onglet suivant | `tab.next` | `Ctrl-Tab`, `⌘]` | `Ctrl-Tab` |
@@ -321,12 +336,35 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
 | Importer depuis Termius (aperçu, puis fichier à inclure dans `~/.ssh/config`, voir `docs/IMPORT.md`) | `app.import-termius` | — | — |
 
+## Panneaux (GUI)
+
+Actives dans un onglet terminal (division, focus, taille, zoom, fermeture ; voir « Panneaux (GUI) : principe » plus haut). Sur Linux,
+`Ctrl-Shift-…` comme pour les actions globales ; les flèches passent par `Ctrl-Alt` (`⌘⌥` sur macOS).
+
+| Action | Identifiant | macOS | Linux |
+|---|---|---|---|
+| Diviser à droite (même session : un canal PTY de plus) | `pane.split-right` | `⌘D` | `Ctrl-Shift-D` |
+| Diviser en bas (même session) | `pane.split-down` | `⌘⇧D` | `Ctrl-Shift-E` |
+| Diviser avec un autre hôte (sélecteur d'hôtes ; à droite si le panneau est plus large que haut, sinon en bas) | `pane.split-host` | — | — |
+| Focus au panneau voisin à gauche | `pane.focus-left` | `⌥⌘←` | `Ctrl-Alt-←` |
+| Focus au panneau voisin à droite | `pane.focus-right` | `⌥⌘→` | `Ctrl-Alt-→` |
+| Focus au panneau voisin vers le haut | `pane.focus-up` | `⌥⌘↑` | `Ctrl-Alt-↑` |
+| Focus au panneau voisin vers le bas | `pane.focus-down` | `⌥⌘↓` | `Ctrl-Alt-↓` |
+| Déplacer la séparation la plus proche à gauche (dans la taille minimale des panneaux) | `pane.resize-left` | `⌥⌘⇧←` | `Ctrl-Alt-Shift-←` |
+| Déplacer la séparation la plus proche à droite (dans la taille minimale des panneaux) | `pane.resize-right` | `⌥⌘⇧→` | `Ctrl-Alt-Shift-→` |
+| Déplacer la séparation la plus proche vers le haut (dans la taille minimale des panneaux) | `pane.resize-up` | `⌥⌘⇧↑` | `Ctrl-Alt-Shift-↑` |
+| Déplacer la séparation la plus proche vers le bas (dans la taille minimale des panneaux) | `pane.resize-down` | `⌥⌘⇧↓` | `Ctrl-Alt-Shift-↓` |
+| Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
+| Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
+| Fermer le panneau (son canal PTY ; le dernier panneau d'une session la déconnecte) | `pane.close` | `⌘⇧W` | `Ctrl-Shift-Q` |
+
 ## Liste des hôtes (GUI)
 
 Actives quand la liste des hôtes est affichée et que le focus n'est pas dans un champ (la recherche garde ses touches).
 
 | Action | Identifiant | macOS | Linux |
 |---|---|---|---|
+| Favori on/off de l'hôte sélectionné (depuis un onglet : palette, « Add <alias> to favorites » ; dans un terminal, `Mod+D` divise le panneau) | `app.favorite` | `⌘D` | `Ctrl-D` |
 | Recharger `~/.ssh/config` et `hosts.toml` | `app.reload` | `⌘R` | `Ctrl-R` |
 | Rechercher (flou, `#tag`, `*` favoris, `@groupe`) | `hosts.search` | `/` | `/` |
 | Hôte suivant | `hosts.down` | `j`, `↓` | `j`, `↓` |
@@ -356,6 +394,9 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (t
 | Barre d'onglets (focus clavier) : onglet voisin, premier / dernier, fermer | `←` `→`, `Home` / `End`, `Suppr` |
 | Fermer un onglet (souris) | clic milieu sur l'onglet |
 | Coller (Linux) | `Ctrl-Shift-V`, `Shift-Insert`, clic milieu |
+| Panneaux : donner le focus à un panneau (souris) | clic dans le panneau |
+| Séparation entre panneaux (souris) | glisser |
+| Séparation entre panneaux (focus clavier) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
 

@@ -4,7 +4,7 @@
 |---|---|---|---|
 | Unitaires Rust (core, thème, TUI, commandes GUI) | `#[cfg(test)]` à côté du code | `cargo test` | oui |
 | Interopérabilité OpenSSH (`sshd`, `ssh-agent`, `ssh-keygen`) | `crates/portico-core/tests/openssh_interop.rs` | `cargo test -p portico-core --test openssh_interop -- --ignored` | oui |
-| Logique TypeScript de la GUI (raccourcis, liste d'hôtes) | `apps/portico-gui/scripts/test-*.ts` | `pnpm check` | oui |
+| Logique TypeScript de la GUI (raccourcis, liste d'hôtes, arbre de panneaux) | `apps/portico-gui/scripts/test-*.ts` | `pnpm check` | oui |
 | **E2E de l'app de bureau** (Tauri sous WebKitGTK, vrai `sshd`) | `apps/portico-gui/e2e/` | `pnpm e2e` | non (voir plus bas) |
 
 Le mode démo (`pnpm dev`, Playwright) sert au design ; il ne remplace pas l'E2E : seul ce dernier passe par
