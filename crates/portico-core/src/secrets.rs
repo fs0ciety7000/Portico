@@ -37,6 +37,18 @@ pub enum SecretKey {
     },
     /// Passphrase of a private key file.
     KeyPassphrase { fingerprint: String },
+    /// Password typed when a host was created in Portico (phase 6b),
+    /// before any connection: the server's key is not known yet, so it
+    /// cannot be bound to it. `host` and `port` are the `known_hosts` name
+    /// and port, as for [`Self::HostPassword`]. It is only offered once the
+    /// host key passed the usual verification (a changed key is still a
+    /// blocking refusal), and the first login it opens moves it to
+    /// [`Self::HostPassword`], bound to that key.
+    UnboundHostPassword {
+        user: String,
+        host: String,
+        port: u16,
+    },
 }
 
 impl SecretKey {
@@ -49,6 +61,9 @@ impl SecretKey {
                 host_key,
             } => format!("password:{user}@{host}:{port}#{host_key}"),
             Self::KeyPassphrase { fingerprint } => format!("passphrase:{fingerprint}"),
+            Self::UnboundHostPassword { user, host, port } => {
+                format!("unbound-password:{user}@{host}:{port}")
+            }
         }
     }
 }
@@ -169,6 +184,12 @@ mod tests {
             host_key: "SHA256:abc".into(),
         };
         assert_eq!(k.account(), "password:root@db:22#SHA256:abc");
+        let k = SecretKey::UnboundHostPassword {
+            user: "root".into(),
+            host: "db".into(),
+            port: 2222,
+        };
+        assert_eq!(k.account(), "unbound-password:root@db:2222");
     }
 
     #[test]

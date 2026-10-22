@@ -94,11 +94,27 @@ pub struct HostMetaFile {
     pub hosts: BTreeMap<String, HostMeta>,
 }
 
+/// Which file declares a host, so the UIs know what they may edit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostOrigin {
+    /// The user's own `~/.ssh/config` (or a file it includes): read-only
+    /// in Portico, which can duplicate it as a Portico host.
+    #[default]
+    SshConfig,
+    /// Portico's `hosts.conf` ([`crate::managed_hosts`]): editable.
+    Portico,
+    /// The Termius import file ([`crate::import`]): replaced by each import.
+    Imported,
+}
+
 /// A host as displayed by the UIs.
 #[derive(Debug, Clone)]
 pub struct HostEntry {
     pub alias: String,
     pub source: Source,
+    /// The file `source` belongs to, classified (phase 6b).
+    pub origin: HostOrigin,
     pub resolved: ResolvedHost,
     pub meta: HostMeta,
 }
@@ -124,6 +140,8 @@ impl HostEntry {
 }
 
 /// Builds the host list: config aliases (declaration order) + metadata.
+/// Every host is marked [`HostOrigin::SshConfig`]; the engine classifies
+/// them afterwards (see `crate::managed_hosts::mark_origins`).
 pub fn inventory(config: &SshConfig, meta: &HostMetaFile, ctx: &ResolveContext) -> Vec<HostEntry> {
     config
         .host_aliases()
@@ -133,6 +151,7 @@ pub fn inventory(config: &SshConfig, meta: &HostMetaFile, ctx: &ResolveContext) 
             meta: meta.hosts.get(&name).cloned().unwrap_or_default(),
             alias: name,
             source,
+            origin: HostOrigin::SshConfig,
         })
         .collect()
 }
@@ -386,8 +405,28 @@ pub(crate) fn check_alias(alias: &str) -> std::result::Result<(), HostMetaError>
 /// Applies `change` to `alias` in `hosts.toml` (see the module doc) and
 /// returns the alias' metadata as the next load will read it. Blocking.
 pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Result<HostMeta> {
+    replace_meta(path, alias, None, vec![change])
+}
+
+/// Applies every change of `changes` to `alias` in one read-modify-write
+/// cycle (same lock, document editing and atomic write as
+/// [`update_meta`]). With `rename_from`, the entry of that alias (unknown
+/// keys and comments included) is first moved to `alias`, replacing any
+/// stale entry there. Returns what the next load reads. Blocking.
+pub(crate) fn replace_meta(
+    path: &Path,
+    alias: &str,
+    rename_from: Option<&str>,
+    changes: Vec<MetaChange>,
+) -> Result<HostMeta> {
     check_alias(alias)?;
-    let change = change.normalized()?;
+    if let Some(from) = rename_from {
+        check_alias(from)?;
+    }
+    let changes = changes
+        .into_iter()
+        .map(MetaChange::normalized)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let _lock = store::lock_exclusive(&store::lock_path(path))?;
     let text = store::read_capped(path, MAX_HOSTS_FILE_BYTES)?.unwrap_or_default();
     // The typed view must parse too: never write a file `load_hosts` rejects.
@@ -397,9 +436,33 @@ pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Resul
     let mut doc = store::parse_document(path, &text)?;
 
     let hosts = store::child_table(doc.as_table_mut(), "hosts", path)?;
+    let mut meta = current.hosts.get(alias).cloned().unwrap_or_default();
+    if let Some(from) = rename_from.filter(|from| *from != alias) {
+        hosts.remove(alias);
+        if let Some(moved) = hosts.remove(from) {
+            hosts.insert(alias, moved);
+        }
+        meta = current.hosts.get(from).cloned().unwrap_or_default();
+    }
     let entry = store::child_table(hosts, alias, path)?;
     entry.set_implicit(false);
-    match &change {
+    for change in &changes {
+        apply_to_table(entry, change);
+        change.apply(&mut meta);
+    }
+    if entry.is_empty() {
+        hosts.remove(alias);
+    }
+    if hosts.is_empty() {
+        doc.as_table_mut().remove("hosts");
+    }
+    store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)?;
+    Ok(meta)
+}
+
+/// Writes one (normalized) change into the alias' table.
+fn apply_to_table(entry: &mut toml_edit::Table, change: &MetaChange) {
+    match change {
         MetaChange::Favorite(true) => {
             entry.insert("favorite", toml_edit::value(true));
         }
@@ -429,17 +492,34 @@ pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Resul
             }
         }
     }
-    if entry.is_empty() {
-        hosts.remove(alias);
+}
+
+/// Removes the whole entry of `alias` (unknown keys included) from
+/// `hosts.toml`; `false` when there was none (nothing is written).
+/// Blocking.
+pub(crate) fn remove_meta(path: &Path, alias: &str) -> Result<bool> {
+    check_alias(alias)?;
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let Some(text) = store::read_capped(path, MAX_HOSTS_FILE_BYTES)? else {
+        return Ok(false);
+    };
+    let _: HostMetaFile = store::parse_toml(path, &text)?;
+    let mut doc = store::parse_document(path, &text)?;
+    let Some(hosts) = doc
+        .as_table_mut()
+        .get_mut("hosts")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(false);
+    };
+    if hosts.remove(alias).is_none() {
+        return Ok(false);
     }
     if hosts.is_empty() {
         doc.as_table_mut().remove("hosts");
     }
-
-    let mut meta = current.hosts.get(alias).cloned().unwrap_or_default();
-    change.apply(&mut meta);
     store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)?;
-    Ok(meta)
+    Ok(true)
 }
 
 /// Metadata brought by an import (see [`crate::import`]), merged into

@@ -52,6 +52,11 @@ pub enum EngineEvent {
         alias: String,
         meta: crate::hosts::HostMeta,
     },
+    /// Hosts were created, edited, renamed, duplicated or deleted in
+    /// Portico's `hosts.conf` (phase 6b): UIs reload the inventory
+    /// ([`crate::Engine::load_hosts`]). Followed by [`Self::HostMeta`] for
+    /// a host that was created or edited.
+    HostsChanged,
     /// The recent-sessions list changed (recorded, forgotten, cleared): UIs
     /// that show it call [`crate::Engine::recent`] again.
     RecentChanged,
