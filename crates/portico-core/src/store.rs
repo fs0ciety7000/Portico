@@ -9,6 +9,7 @@
 //! | `settings.toml`   | theme, keymap overrides, preferences      |
 //! | `state/recent.toml` | recent sessions (data dir)              |
 //! | `vault.toml`      | encrypted secrets fallback (data dir)     |
+//! | `recordings/*.cast` | opt-in terminal recordings (data dir)   |
 //!
 //! Secrets are **never** written here in clear text (see [`crate::secrets`]
 //! and [`crate::vault`]).
@@ -95,6 +96,11 @@ impl Paths {
     /// `state/recent.toml` (data dir), see [`crate::recent`].
     pub fn recent(&self) -> PathBuf {
         self.data_dir.join("state").join("recent.toml")
+    }
+
+    /// `recordings/` (data dir): asciicast files, see [`crate::recording`].
+    pub fn recordings(&self) -> PathBuf {
+        self.data_dir.join("recordings")
     }
 
     /// OpenSSH default identities, in OpenSSH's order.

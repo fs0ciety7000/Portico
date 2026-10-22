@@ -55,6 +55,37 @@ pub enum EngineEvent {
     /// The recent-sessions list changed (recorded, forgotten, cleared): UIs
     /// that show it call [`crate::Engine::recent`] again.
     RecentChanged,
+    /// A terminal recording started or stopped (phase 6). UIs show `REC`
+    /// on the terminal between `Started` and `Stopped`.
+    Recording {
+        terminal: TerminalId,
+        session: SessionId,
+        state: RecordingState,
+    },
+}
+
+/// Lifecycle of a terminal recording ([`crate::recording`]). Every
+/// `Started` is followed by exactly one `Stopped`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecordingState {
+    Started {
+        /// File name (the id for open / delete).
+        name: String,
+        path: String,
+    },
+    Stopped {
+        /// Stable code: `requested`, `terminal_closed`, `queue_full`,
+        /// `write_failed`, `size_limit`.
+        reason: crate::recording::RecordingStopReason,
+        name: String,
+        path: String,
+        /// File size, header included.
+        bytes: u64,
+        /// Time of the last event written.
+        duration: Duration,
+    },
 }
 
 /// Lifecycle of an SSH connection. UIs render this as the status badge.
