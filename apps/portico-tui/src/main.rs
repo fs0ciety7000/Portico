@@ -8,7 +8,8 @@
 //! Command line: `--help`, `--version`, `--print-keybindings` (the TUI
 //! tables of `docs/KEYBINDINGS.md`) and `--write-keybindings <file>`
 //! (regenerates that block in place), and `import [termius|termix] FILE
-//! [--prefix] [--key SHA256:…] [--all-keys] [--key-passphrase] [--apply]`
+//! [--prefix] [--key SHA256:…] [--all-keys] [--key-passphrase]
+//! [--accept-redirect ALIAS] [--apply]`
 //! (see [`import_cli`]). Without a terminal on stdin and
 //! stdout, Portico says so and exits with status 1.
 
@@ -57,7 +58,8 @@ Portico: SSH sessions, keyboard-first.
 
 Usage: portico [OPTION]
        portico import [termius|termix] FILE [--prefix] [--key SHA256:...]...
-                      [--all-keys] [--key-passphrase] [--apply]
+                      [--all-keys] [--key-passphrase]
+                      [--accept-redirect ALIAS]... [--apply]
 
 Options:
   -h, --help                   Show this help
@@ -85,6 +87,10 @@ Import from Termius or Termix (see docs/IMPORT.md):
       --key-passphrase         Ask on the terminal (twice, not echoed) for a
                                passphrase that encrypts the imported keys.
                                Never given on the command line.
+      --accept-redirect ALIAS  Apply this destination change: a re-import
+                               that points ALIAS (imported earlier) at
+                               another HostName, User or Port. Skipped
+                               otherwise (repeatable)
       --apply                  Write the hosts to Portico's hosts.conf and
                                print the Include line to add to
                                ~/.ssh/config yourself (never edited by
@@ -103,7 +109,7 @@ enum Command {
     PrintKeybindings,
     WriteKeybindings(std::path::PathBuf),
     /// `import [termius|termix] FILE [--prefix] [--key ID]… [--all-keys]
-    /// [--key-passphrase] [--apply]`.
+    /// [--key-passphrase] [--accept-redirect ALIAS]… [--apply]`.
     Import(import_cli::ImportArgs),
     /// Unknown option or missing value: message for stderr.
     Usage(String),
@@ -337,6 +343,12 @@ mod tests {
             USAGE.contains("portico import [termius|termix] FILE [--prefix] [--key SHA256:...]...")
         );
         assert!(USAGE.contains("--key-passphrase"));
+        assert!(USAGE.contains("--accept-redirect ALIAS"));
+        assert!(matches!(
+            parse_args(&args(&["import", "x.json", "--accept-redirect", "Web-Prod"])),
+            Command::Import(import_cli::ImportArgs { accept_redirect, .. })
+                if accept_redirect == ["web-prod"]
+        ));
         assert!(matches!(
             parse_args(&args(&["--write-keybindings"])),
             Command::Usage(_)
