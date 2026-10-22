@@ -54,7 +54,7 @@ pub fn run() {
     hardening.log();
     #[cfg(target_os = "linux")]
     if let Some(err) = restart {
-        tracing::warn!("could not restart with {}=1: {err}", webkit_env::DMABUF);
+        tracing::warn!("could not restart with the WebKitGTK workarounds: {err}");
     }
     run_app();
 }
@@ -62,21 +62,43 @@ pub fn run() {
 /// `WebKitGTK` workarounds that must be in the environment before it
 /// starts. `std::env::set_var` is unsafe in a threaded process (and unsafe
 /// code is forbidden here), so the process re-executes itself once with the
-/// variable set.
+/// variables set.
 #[cfg(target_os = "linux")]
 mod webkit_env {
-    use std::ffi::OsStr;
+    use std::ffi::OsString;
     use std::os::unix::process::CommandExt;
+    use std::path::Path;
 
-    /// The DMA-BUF renderer crashes on some Wayland compositors and drivers
-    /// (`Error 71 (Protocol error) dispatching to Wayland display`) and
-    /// makes input lag on others. Any value the user set, `0` included, wins.
-    pub(crate) const DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    /// NVIDIA's proprietary driver and `WebKitGTK` disagree on Wayland explicit
+    /// sync: the window closes at once (`Error 71 (Protocol error)
+    /// dispatching to Wayland display`). Turning explicit sync off keeps the
+    /// GPU path; turning `WebKit`'s DMA-BUF renderer off instead also avoids
+    /// the crash but renders slowly enough to make typing lag.
+    pub(crate) const NV_EXPLICIT_SYNC: &str = "__NV_DISABLE_EXPLICIT_SYNC";
+
+    /// Present when the NVIDIA proprietary kernel driver is loaded.
+    const NVIDIA_DRIVER: &str = "/proc/driver/nvidia/version";
+
+    /// The variables to add: none that the user already set (any value
+    /// wins, `0` included), and only for the driver that needs them.
+    pub(crate) fn missing(
+        nvidia: bool,
+        is_set: impl Fn(&str) -> bool,
+    ) -> Vec<(&'static str, &'static str)> {
+        let mut vars = Vec::new();
+        if nvidia && !is_set(NV_EXPLICIT_SYNC) {
+            vars.push((NV_EXPLICIT_SYNC, "1"));
+        }
+        vars
+    }
 
     /// Returns only when nothing had to change, or when the restart failed
     /// (then the app starts as is and the error is logged).
     pub(crate) fn apply() -> Option<std::io::Error> {
-        if std::env::var_os(DMABUF).is_some() {
+        let vars = missing(Path::new(NVIDIA_DRIVER).exists(), |name| {
+            std::env::var_os(name).is_some()
+        });
+        if vars.is_empty() {
             return None;
         }
         let exe = match std::env::current_exe() {
@@ -86,9 +108,25 @@ mod webkit_env {
         Some(
             std::process::Command::new(exe)
                 .args(std::env::args_os().skip(1))
-                .env(DMABUF, OsStr::new("1"))
+                .envs(vars.into_iter().map(|(k, v)| (k, OsString::from(v))))
                 .exec(),
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn nvidia_gets_explicit_sync_off_unless_the_user_chose() {
+            assert_eq!(missing(true, |_| false), vec![(NV_EXPLICIT_SYNC, "1")]);
+            assert!(missing(true, |name| name == NV_EXPLICIT_SYNC).is_empty());
+        }
+
+        #[test]
+        fn other_drivers_keep_webkit_defaults() {
+            assert!(missing(false, |_| false).is_empty());
+        }
     }
 }
 
