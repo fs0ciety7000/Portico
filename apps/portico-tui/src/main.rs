@@ -7,8 +7,9 @@
 //!
 //! Command line: `--help`, `--version`, `--print-keybindings` (the TUI
 //! tables of `docs/KEYBINDINGS.md`) and `--write-keybindings <file>`
-//! (regenerates that block in place), and `import termius FILE [--prefix]
-//! [--apply]` (see [`import_cli`]). Without a terminal on stdin and
+//! (regenerates that block in place), and `import [termius|termix] FILE
+//! [--prefix] [--key SHA256:…] [--all-keys] [--key-passphrase] [--apply]`
+//! (see [`import_cli`]). Without a terminal on stdin and
 //! stdout, Portico says so and exits with status 1.
 
 mod action;
@@ -55,7 +56,8 @@ const USAGE: &str = "\
 Portico: SSH sessions, keyboard-first.
 
 Usage: portico [OPTION]
-       portico import termius FILE [--prefix] [--apply]
+       portico import [termius|termix] FILE [--prefix] [--key SHA256:...]...
+                      [--all-keys] [--key-passphrase] [--apply]
 
 Options:
   -h, --help                   Show this help
@@ -64,15 +66,29 @@ Options:
       --write-keybindings FILE Regenerate the TUI block of FILE
                                (docs/KEYBINDINGS.md)
 
-Import from Termius (see docs/IMPORT.md):
-  import termius FILE          Show what importing FILE would do (a Termius
-                               CSV, termius-local-export hosts.json or
-                               credentials.csv, or `termius export-ssh-config`
-                               output). Nothing is written.
-      --prefix                 Prefix every alias with `termius-`
-      --apply                  Write the hosts to Portico's imports/termius.conf
-                               and print the Include line to add to
-                               ~/.ssh/config yourself (never edited by Portico)
+Import from Termius or Termix (see docs/IMPORT.md):
+  import FILE                  Show what importing FILE would do. The format
+                               is read from the content: a Termius CSV,
+                               termius-local-export hosts.json or
+                               credentials.csv, `termius export-ssh-config`
+                               output, or a Termix JSON export. Lists the
+                               hosts and the private keys found. Nothing is
+                               written. `import termius FILE` and
+                               `import termix FILE` (Termix only) also work.
+      --prefix                 Prefix every alias with `termius-` / `termix-`
+      --key SHA256:...         Import this private key (fingerprint from the
+                               plan; repeatable). No key is imported unless
+                               selected: it goes to ~/.ssh/portico (0600),
+                               or a local copy with the same fingerprint is
+                               reused.
+      --all-keys               Import every private key of the export
+      --key-passphrase         Ask on the terminal (twice, not echoed) for a
+                               passphrase that encrypts the imported keys.
+                               Never given on the command line.
+      --apply                  Write the hosts to Portico's hosts.conf and
+                               print the Include line to add to
+                               ~/.ssh/config yourself (never edited by
+                               Portico)
 
 Without an option, Portico opens in the current terminal. Settings live in
 settings.toml (theme, [keymap.tui]); see docs/KEYBINDINGS.md.
@@ -86,7 +102,8 @@ enum Command {
     Version,
     PrintKeybindings,
     WriteKeybindings(std::path::PathBuf),
-    /// `import termius FILE [--prefix] [--apply]`.
+    /// `import [termius|termix] FILE [--prefix] [--key ID]… [--all-keys]
+    /// [--key-passphrase] [--apply]`.
     Import(import_cli::ImportArgs),
     /// Unknown option or missing value: message for stderr.
     Usage(String),
@@ -312,7 +329,14 @@ mod tests {
             parse_args(&args(&["import", "termius"])),
             Command::Usage(_)
         ));
-        assert!(USAGE.contains("portico import termius FILE [--prefix] [--apply]"));
+        assert!(matches!(
+            parse_args(&args(&["import", "export.json", "--key-passphrase=x"])),
+            Command::Usage(m) if !m.contains("=x")
+        ));
+        assert!(
+            USAGE.contains("portico import [termius|termix] FILE [--prefix] [--key SHA256:...]...")
+        );
+        assert!(USAGE.contains("--key-passphrase"));
         assert!(matches!(
             parse_args(&args(&["--write-keybindings"])),
             Command::Usage(_)

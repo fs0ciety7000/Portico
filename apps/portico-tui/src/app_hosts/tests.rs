@@ -224,6 +224,13 @@ async fn edit_and_rename_keep_the_selection_on_the_host() {
     lab.app.update(Action::EditHost);
     let form = lab.app.host_form.as_ref().unwrap();
     assert!(matches!(&form.mode, FormMode::Edit { original } if original == "db"));
+    // Read from hosts.conf off the UI thread: nothing typed meanwhile.
+    assert!(form.loading);
+    lab.form_key(KeyCode::Char('x'));
+    assert_eq!(lab.app.host_form.as_ref().unwrap().alias, "db");
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
+        .await;
+    let form = lab.app.host_form.as_ref().unwrap();
     // Its own values, never inherited ones.
     assert_eq!(form.hostname, "10.0.0.5");
     assert_eq!(form.user, "");
@@ -248,6 +255,87 @@ async fn edit_and_rename_keep_the_selection_on_the_host() {
             .toast
             .as_ref()
             .is_some_and(|t| t.message.contains("Saved db-main"))
+    );
+}
+
+/// `Include` at the bottom of `~/.ssh/config`, under a `Host web*` block
+/// that sets `User` first: OpenSSH resolves `early`, but the form shows
+/// (and saving keeps) what hosts.conf holds. (A literal `Host web` block
+/// would declare the alias in `~/.ssh/config` first: a read-only host.)
+#[tokio::test]
+async fn edit_prefills_from_hosts_conf_not_from_resolved_options() {
+    let mut lab = Lab::new("").await;
+    lab.add("web", "203.0.113.10").await;
+    lab.app.update(Action::EditHost);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
+        .await;
+    lab.focus(HostField::User);
+    lab.type_text("deploy");
+    lab.focus(HostField::Port);
+    lab.type_text("2222");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| app.host_form.is_none() && app.pending_select.is_none())
+        .await;
+    let include = lab.env.engine.managed_include_line();
+    std::fs::write(
+        lab.env.dir.path().join(".ssh/config"),
+        format!("Host web*\n    User early\n\n{include}\n"),
+    )
+    .unwrap();
+    lab.app.on_hosts_changed();
+    lab.until(|app| {
+        app.inventory.as_ref().is_some_and(|i| {
+            i.hosts
+                .iter()
+                .any(|h| h.alias == "web" && h.resolved.user.as_deref() == Some("early"))
+        })
+    })
+    .await;
+    lab.select("web");
+
+    lab.app.update(Action::EditHost);
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert!(matches!(&form.mode, FormMode::Edit { original } if original == "web"));
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.loading))
+        .await;
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert_eq!(form.user, "deploy", "the hosts.conf value, not `early`");
+    assert_eq!(form.port, "2222");
+    assert_eq!(form.hostname, "203.0.113.10");
+    assert!(!form.dirty());
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains("deploy"), "{shown}");
+    assert!(!shown.contains("early"), "{shown}");
+
+    // Saving another change keeps the user.
+    lab.focus(HostField::HostName);
+    lab.clear_field();
+    lab.type_text("203.0.113.11");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| app.host_form.is_none() && app.pending_select.is_none())
+        .await;
+    let conf = lab.hosts_conf();
+    assert!(conf.contains("HostName 203.0.113.11"), "{conf}");
+    assert!(conf.contains("User deploy"), "{conf}");
+    assert!(conf.contains("Port 2222"), "{conf}");
+    assert!(!conf.contains("early"), "{conf}");
+}
+
+#[tokio::test]
+async fn edit_of_a_host_gone_from_hosts_conf_closes_with_a_toast() {
+    let mut lab = Lab::new("").await;
+    lab.add("db", "10.0.0.5").await;
+    lab.app.update(Action::EditHost);
+    lab.app.update(Action::HostFormManaged {
+        alias: "db".into(),
+        result: Ok(None),
+    });
+    assert!(lab.app.host_form.is_none());
+    assert!(
+        lab.app
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.message == "db is no longer in hosts.conf")
     );
 }
 

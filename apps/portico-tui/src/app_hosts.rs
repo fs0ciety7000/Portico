@@ -74,6 +74,7 @@ impl App {
                     (_, None) => {}
                 }
             }
+            Action::HostFormManaged { alias, result } => self.host_form_managed(&alias, result),
             Action::HostSaved(result) => self.host_saved(result),
             Action::HostDeleted { alias, result } => match result {
                 Ok(()) => self.notify(format!("Deleted {}", fmt::truncate(&alias, 48))),
@@ -195,25 +196,71 @@ impl App {
     /// "Add host…" (`None`) or "Edit host…" on `alias`.
     fn open_host_form(&mut self, alias: Option<String>) {
         let aliases = self.aliases();
-        let home = self.engine.config().paths.home.clone();
         let form = match alias.and_then(|a| {
             self.inventory
                 .as_ref()
                 .and_then(|i| i.hosts.iter().find(|h| h.alias == a))
         }) {
             None => HostForm::create(&aliases),
-            Some(host) if host.origin == HostOrigin::Portico => {
-                HostForm::edit(host, &aliases, &home)
-            }
+            Some(host) if host.origin == HostOrigin::Portico => HostForm::edit(host, &aliases),
             Some(host) => HostForm::read_only(&host.alias, host.origin),
         };
         let wants_keys = matches!(form.mode, FormMode::Create | FormMode::Edit { .. });
+        let edited = match &form.mode {
+            FormMode::Edit { original } => Some(original.clone()),
+            _ => None,
+        };
         self.show_form(form);
+        if let Some(alias) = edited {
+            // The values hosts.conf holds, read off the UI thread.
+            let engine = self.engine.clone();
+            spawn(self, async move {
+                let result = engine.managed_host(&alias).await.map_err(|e| e.summary());
+                Action::HostFormManaged { alias, result }
+            });
+        }
         if wants_keys {
             let engine = self.engine.clone();
             spawn(self, async move {
                 Action::HostFormKeys(engine.local_keys().await.map_err(|e| e.summary()))
             });
+        }
+    }
+
+    /// The edited host's own values came back: fill the form, or close it
+    /// when the host is gone from `hosts.conf` (or the file is unreadable).
+    fn host_form_managed(
+        &mut self,
+        alias: &str,
+        result: Result<Option<portico_core::managed_hosts::ManagedHost>, ErrorSummary>,
+    ) {
+        let waiting = self.host_form.as_ref().is_some_and(|form| {
+            form.loading && matches!(&form.mode, FormMode::Edit { original } if original == alias)
+        });
+        if !waiting {
+            return;
+        }
+        let home = self.engine.config().paths.home.clone();
+        match result {
+            Ok(Some(host)) => {
+                if let Some(form) = &mut self.host_form {
+                    form.set_managed(&host, &home);
+                }
+            }
+            Ok(None) => {
+                self.close_form();
+                self.notify_error(ErrorSummary {
+                    code: "host_not_managed".into(),
+                    message: format!("{} is no longer in hosts.conf", fmt::truncate(alias, 48)),
+                    hint: Some(
+                        "It was deleted or renamed meanwhile: pick it again in the list.".into(),
+                    ),
+                });
+            }
+            Err(error) => {
+                self.close_form();
+                self.notify_error(error);
+            }
         }
     }
 

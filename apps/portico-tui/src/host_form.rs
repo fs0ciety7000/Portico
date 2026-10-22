@@ -21,7 +21,7 @@ use portico_core::hosts::{
     HostEntry, HostOrigin, MAX_GROUP_CHARS, MAX_NOTES_CHARS, MAX_TAG_CHARS, MAX_TAGS,
 };
 use portico_core::keys::LocalKey;
-use portico_core::managed_hosts::{HostDraft, PasswordChange};
+use portico_core::managed_hosts::{HostDraft, ManagedHost, PasswordChange};
 use secrecy::SecretString;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -216,6 +216,9 @@ pub(crate) struct HostForm {
     pub(crate) key: usize,
     /// `false` until the local keys are listed.
     pub(crate) keys_loaded: bool,
+    /// Edit: `true` until the host's own values are read from `hosts.conf`
+    /// ([`Self::set_managed`]); nothing can be typed or saved meanwhile.
+    pub(crate) loading: bool,
     /// Every other host alias (`ProxyJump` choices), `none` first.
     pub(crate) jumps: Vec<Option<String>>,
     pub(crate) jump: usize,
@@ -242,14 +245,6 @@ pub(crate) struct PasswordInput(Zeroizing<String>);
 impl std::fmt::Debug for PasswordInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PasswordInput([redacted])")
-    }
-}
-
-/// The path of `raw` (`~/…` or absolute) under `home`.
-fn expand(home: &Path, raw: &str) -> PathBuf {
-    match raw.strip_prefix("~/") {
-        Some(rest) => home.join(rest),
-        None => PathBuf::from(raw),
     }
 }
 
@@ -287,17 +282,6 @@ pub(crate) fn copy_alias(alias: &str) -> String {
     }
 }
 
-/// The value `keyword` takes from the host's own file (`hosts.conf`): only
-/// what Portico wrote, never what `Host *` of `~/.ssh/config` adds.
-fn own_value(host: &HostEntry, keyword: &str) -> Option<String> {
-    host.resolved
-        .options
-        .get(keyword)?
-        .iter()
-        .find(|(_, source)| source.file == host.source.file)
-        .and_then(|(args, _)| args.first().cloned())
-}
-
 impl HostForm {
     fn blank(mode: FormMode, jumps: Vec<Option<String>>) -> Self {
         let mut form = Self {
@@ -309,6 +293,7 @@ impl HostForm {
             keys: vec![KeyChoice::none()],
             key: 0,
             keys_loaded: false,
+            loading: false,
             jumps,
             jump: 0,
             tags: String::new(),
@@ -356,9 +341,11 @@ impl HostForm {
         Self::blank(FormMode::Create, Self::jump_choices(aliases, None))
     }
 
-    /// "Edit host…" on a Portico host: its own values (never inherited
-    /// ones), its metadata, the password kept.
-    pub(crate) fn edit(host: &HostEntry, aliases: &[String], home: &Path) -> Self {
+    /// "Edit host…" on a Portico host: its metadata and the password kept;
+    /// its own values come next from `hosts.conf` ([`Self::set_managed`]),
+    /// never from the resolved options (an earlier block of
+    /// `~/.ssh/config` can hide them, and saving would erase them).
+    pub(crate) fn edit(host: &HostEntry, aliases: &[String]) -> Self {
         let mut form = Self::blank(
             FormMode::Edit {
                 original: host.alias.clone(),
@@ -366,37 +353,53 @@ impl HostForm {
             Self::jump_choices(aliases, Some(&host.alias)),
         );
         form.alias.clone_from(&host.alias);
-        form.hostname = own_value(host, "hostname").unwrap_or_default();
-        form.user = own_value(host, "user").unwrap_or_default();
-        form.port = own_value(host, "port").unwrap_or_default();
-        if let Some(raw) = own_value(host, "identityfile") {
-            let path = expand(home, &raw);
-            form.keys.push(KeyChoice {
-                label: tilde(home, &path),
-                note: String::new(),
-                path: Some(path),
-            });
-            form.key = 1;
-        }
-        if let Some(jump) = own_value(host, "proxyjump") {
-            let known = form
-                .jumps
-                .iter()
-                .position(|j| j.as_deref().is_some_and(|j| j.eq_ignore_ascii_case(&jump)));
-            if let Some(i) = known {
-                form.jump = i;
-            } else {
-                // Kept as written, even if that host is gone.
-                form.jumps.push(Some(jump));
-                form.jump = form.jumps.len().saturating_sub(1);
-            }
-        }
         form.tags = host.meta.tags.join(" ");
         form.group = host.meta.group.clone().unwrap_or_default();
         form.favorite = host.meta.favorite;
         form.notes = host.meta.notes.clone().unwrap_or_default();
+        form.loading = true;
         form.initial = form.snapshot();
         form
+    }
+
+    /// The values `hosts.conf` holds for the edited host
+    /// (`Engine::managed_host`): host name, user, port, key, jump host.
+    /// The form becomes editable; what it holds now is "unchanged".
+    pub(crate) fn set_managed(&mut self, host: &ManagedHost, home: &Path) {
+        self.hostname.clone_from(&host.hostname);
+        self.user = host.user.clone().unwrap_or_default();
+        self.port = host.port.map(|p| p.to_string()).unwrap_or_default();
+        if let Some(path) = &host.identity_file {
+            let known = self.keys.iter().position(|k| k.path.as_ref() == Some(path));
+            self.key = known.unwrap_or_else(|| {
+                self.keys.push(KeyChoice {
+                    path: Some(path.clone()),
+                    label: tilde(home, path),
+                    // Listed already: this key was not among them.
+                    note: if self.keys_loaded {
+                        "not discovered".into()
+                    } else {
+                        String::new()
+                    },
+                });
+                self.keys.len().saturating_sub(1)
+            });
+        }
+        if let Some(jump) = &host.proxy_jump {
+            let known = self
+                .jumps
+                .iter()
+                .position(|j| j.as_deref().is_some_and(|j| j.eq_ignore_ascii_case(jump)));
+            if let Some(i) = known {
+                self.jump = i;
+            } else {
+                // Kept as written, even if that host is gone.
+                self.jumps.push(Some(jump.clone()));
+                self.jump = self.jumps.len().saturating_sub(1);
+            }
+        }
+        self.loading = false;
+        self.initial = self.snapshot();
     }
 
     /// "Duplicate as Portico host…": only the new alias is asked.
@@ -672,6 +675,13 @@ impl HostForm {
         if self.busy || key.kind == KeyEventKind::Release {
             return FormOutcome::None;
         }
+        if self.loading {
+            // Nothing typed yet, nothing to lose: only `Esc` does something.
+            return match key.code {
+                KeyCode::Esc => self.close(),
+                _ => FormOutcome::None,
+            };
+        }
         if matches!(self.mode, FormMode::ReadOnly { .. }) {
             return self.read_only_key(key);
         }
@@ -753,7 +763,11 @@ impl HostForm {
     /// A paste goes to the focused text input (first line; digits only
     /// for the port), never to a picker.
     pub(crate) fn paste(&mut self, text: &str) {
-        if self.busy || self.confirm_discard || matches!(self.mode, FormMode::ReadOnly { .. }) {
+        if self.busy
+            || self.loading
+            || self.confirm_discard
+            || matches!(self.mode, FormMode::ReadOnly { .. })
+        {
             return;
         }
         let port = self.focus == HostField::Port;

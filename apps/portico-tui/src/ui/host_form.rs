@@ -222,6 +222,14 @@ fn tail(
             ),
             Span::styled("Saving…", s.secondary()),
         ]));
+    } else if form.loading {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", spinner(tick)),
+                s.status(s.theme.status.connecting),
+            ),
+            Span::styled("Reading hosts.conf…", s.secondary()),
+        ]));
     } else if form.confirm_discard {
         let warning = s.status(s.theme.status.warning);
         lines.push(Line::from(vec![

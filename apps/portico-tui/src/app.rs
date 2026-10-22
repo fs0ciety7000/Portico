@@ -434,7 +434,7 @@ impl App {
                 .recordings_panel
                 .as_ref()
                 .is_some_and(crate::recordings::RecordingsPanel::busy)
-            || self.host_form.as_ref().is_some_and(|f| f.busy)
+            || self.host_form.as_ref().is_some_and(|f| f.busy || f.loading)
     }
 
     fn spawn_load_hosts(&self) {

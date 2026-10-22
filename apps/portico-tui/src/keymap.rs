@@ -1121,11 +1121,11 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         ],
     ),
     (
-        "Import from Termius (shell)",
+        "Import Termius / Termix (shell)",
         1,
         &[
-            (&[Fixed("portico")], "import termius FILE"),
-            (&[Fixed("--prefix")], "termius- aliases"),
+            (&[Fixed("portico")], "import FILE"),
+            (&[Fixed("--key SHA256")], "Import key (opt-in)"),
             (&[Fixed("--apply")], "Write (preview 1st)"),
             (&[Fixed("docs")], "IMPORT.md"),
         ],
