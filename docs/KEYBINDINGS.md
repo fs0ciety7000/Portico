@@ -447,20 +447,31 @@ l'onglet, et le dernier panneau d'une session la déconnecte, comme le dernier o
 ## Enregistrement de sessions (GUI) : principe
 
 Enregistrer est un choix explicite, **par panneau** : « Record session » (`session.record`, `⌘⇧R` / `Ctrl-Shift-R`
-dans un terminal, ou la palette) ouvre la confirmation « Record this terminal? », qui rappelle que tout ce qui
-s'affiche est enregistré (y compris un secret affiché par une commande ou ce que le distant fait écho) mais jamais
-ce qui est tapé, et indique le dossier (`~/…/portico/recordings/`, lisible par vous seul) ; « Record » ne s'active
-qu'après 400 ms sans frappe. Un badge `REC` (couleur d'erreur) apparaît sur l'en-tête du panneau, sur l'onglet et
+dans un terminal, ou la palette) ouvre la confirmation « Record this terminal? » (« Record this pane? » dans un
+onglet divisé, avec l'alias et « pane n/N »). Son texte, identique dans la TUI : « Everything the terminal shows is
+recorded, including the commands you type (the shell echoes them) and any secret a command prints. Keystrokes
+themselves are not stored, so a password typed at a prompt that does not echo stays out. Saved to <dossier>, readable
+only by you. » Seul `y` démarre, et seulement après 400 ms sans frappe (bouton « Record y ») ; `Esc` et `n`
+annulent, `↵` ne fait rien. Un badge `REC` (couleur d'erreur) apparaît sur l'en-tête du panneau, sur l'onglet et
 dans la barre d'état **à l'événement `started` du moteur** et disparaît à `stopped`, jamais sur la seule réponse de
-la commande ; après une perte d'événements, l'état est relu auprès du moteur. Arrêter (`session.record` à nouveau,
-« Stop recording ») se fait sans confirmation. Un arrêt involontaire est signalé : « Recording stopped: the disk
-could not keep up », « … the file could not be written », « … size limit reached (512 MiB) ». « Recordings… » liste
-les fichiers (titre de l'en-tête **et** nom de fichier, toujours affiché car un fichier tiers peut porter n'importe
-quel titre ; date, durée, taille, marque « invalid ») ; la suppression est confirmée et refusée tant que le fichier
-s'écrit. La lecture se fait dans une instance xterm.js dédiée, en lecture seule : la sortie est assainie côté Rust
-(OSC hors couleurs, DCS/APC, C1 retirés), le terminal n'a ni entrée, ni liens, ni presse-papiers, ni réponse aux
-requêtes (`ESC[6n`, `ESC[c`), et les modes que joue l'enregistrement (souris, bracketed paste, focus) restent dans
-le lecteur. « Show in folder » n'existe pas : il faudrait un plugin d'ouverture et une capability de plus.
+la commande ; après une perte d'événements, l'état est relu auprès du moteur (et un arrêt que le moteur dit déjà
+fait éteint `REC`). Tant que le panneau actif est enregistré, la barre d'état rappelle « `⌘⇧R` / `Ctrl-Shift-R`
+stop ». Arrêter (`session.record` à nouveau, « Stop recording ») se fait sans confirmation et affiche 4 s une notice
+neutre « Recording saved · <fichier> » (« v from the host list opens Recordings »). Un arrêt involontaire est
+signalé : « Recording stopped: the disk could not keep up », « … the file could not be written », « … size limit
+reached (512 MiB) ». « Recordings… » (`v` depuis la liste des hôtes, ou la palette) liste les fichiers (titre de
+l'en-tête **et** nom de fichier, toujours affiché car un fichier tiers peut porter n'importe quel titre ; date
+locale sur 24 h, `22 Oct 13:34`, l'année seulement si elle diffère ; durée en horloge `m:ss` / `h:mm:ss` ; taille).
+Un fichier invalide porte « invalid » en couleur d'avertissement et, sélectionné : « Not a valid asciicast v2
+recording: it cannot be played, it can be deleted. » La suppression est confirmée (« The file is removed from the
+recordings folder. This cannot be undone. ») et refusée d'emblée tant que le fichier s'écrit (« This recording is
+still being written » · « Stop the recording first » ; le bouton Delete est désactivé). La lecture se fait dans une
+instance xterm.js dédiée, en lecture seule : la sortie est assainie côté Rust (OSC hors couleurs, DCS/APC, C1
+retirés), le terminal n'a ni entrée, ni liens, ni presse-papiers, ni réponse aux requêtes (`ESC[6n`, `ESC[c`), et
+les modes que joue l'enregistrement (souris, bracketed paste, focus) restent dans le lecteur. Touches du lecteur,
+identiques dans la TUI : `Espace` lecture / pause (à la fin : rejouer), `+` / `-` vitesse, `→` sauter le silence,
+`←` reculer de 5 s, `Home` revenir au début, `q` et `Esc` fermer ; à la fin : « Space replay · q back to list ».
+« Show in folder » n'existe pas : il faudrait un plugin d'ouverture et une capability de plus.
 
 ## Hôtes créés dans Portico (GUI) : principe
 
@@ -508,7 +519,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Reconnecter l'hôte de l'onglet | `tab.reconnect` | — | — |
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
 | Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
-| Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut : palette | `recordings.open` | — | — |
+| Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette | `recordings.open` | — | — |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
@@ -562,6 +573,7 @@ Actives quand la liste des hôtes est affichée et que le focus n'est pas dans u
 | Déplier le groupe | `hosts.expand` | `→` | `→` |
 | Vider « Recent » (confirmation) | `hosts.clear-recent` | `⇧X` | `Shift-X` |
 | Thème suivant (mémorisé dans `settings.toml`) | `app.theme` | `t` | `t` |
+| Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes) | `hosts.recordings` | `v` | `v` |
 
 ## Terminal (GUI) : touches fixes
 
@@ -706,18 +718,18 @@ Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée 
 
 ## Enregistrements (GUI)
 
-« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » ; « Recordings… » (`recordings.open`, palette) ouvre la liste.
+« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » (« Record this pane? » dans un onglet divisé) ; « Recordings… » (`v` depuis la liste des hôtes, `hosts.recordings`, ou la palette, `recordings.open`) ouvre la liste.
 
 | Action | Touches |
 |---|---|
-| Confirmer l'enregistrement (actif après 400 ms sans frappe) / annuler | `↵` ou `y` / `Esc` ou `n` |
-| Arrêter l'enregistrement du panneau actif (sans confirmation) | `session.record` à nouveau, ou « Stop recording » dans la palette |
+| Confirmer l'enregistrement (seul `y`, actif après 400 ms sans frappe ; `↵` ne fait rien) / annuler | `y` / `Esc` ou `n` |
+| Arrêter l'enregistrement du panneau actif (sans confirmation ; « Recording saved · <fichier> ») | `session.record` à nouveau, ou « Stop recording » dans la palette |
 | Liste : se déplacer | `j` / `k`, `↓` / `↑`, `Home` / `End` |
-| Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde) | `↵` ou double-clic / `Suppr` ou `x` |
+| Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde ; refusé d'emblée pendant l'écriture) | `↵` ou double-clic / `Suppr` ou `x` |
 | Liste : rafraîchir | `Ctrl-R` |
 | Lecture : pause / reprise (à la fin : rejouer depuis le début) | `Espace` |
 | Lecture : vitesse ×0,5 · ×1 · ×2 · ×4 · ×8 | `+` / `-` |
-| Lecture : sauter le silence en cours / reculer de 5 s / revenir au début | `→` / `←` / `Home` |
+| Lecture : sauter le silence en cours / reculer de 5 s / revenir au début (aussi les boutons « ↺ 5 s » et « Restart ») | `→` / `←` / `Home` |
 | Lecture : aller à un instant | clic sur la barre de progression |
-| Fermer la lecture (retour à la liste) / fermer la liste | `Esc` |
+| Fermer la lecture (retour à la liste) / fermer la liste | `q` ou `Esc` / `Esc` |
 <!-- END GENERATED: gui -->

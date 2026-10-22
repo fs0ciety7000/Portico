@@ -5,10 +5,16 @@
   import { fade } from "svelte/transition";
   import { dur } from "../motion";
 
-  let { compact = false, title = "Recording this terminal's output" }: { compact?: boolean; title?: string } = $props();
+  // `status` (a live region) only in the status bar, where REC comes and
+  // goes; a picture with a label everywhere else (tabs, panes, lists).
+  let {
+    compact = false,
+    title = "Recording this terminal's output",
+    role = "img",
+  }: { compact?: boolean; title?: string; role?: "status" | "img" } = $props();
 </script>
 
-<span class="rec" class:compact {title} role="status" aria-label="Recording" transition:fade={{ duration: dur("fast") }}>
+<span class="rec" class:compact {title} {role} aria-label={role === "img" ? title : "Recording"} transition:fade={{ duration: dur("fast") }}>
   <span class="dot" aria-hidden="true"></span>REC
 </span>
 

@@ -466,7 +466,7 @@
   .crumbs {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding: 0 var(--space-3) var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
     font-size: var(--text-sm);
@@ -529,7 +529,7 @@
     left: 0;
     top: 8px;
     bottom: 8px;
-    width: 2px;
+    width: var(--size-bar);
     border-radius: 2px;
     background: var(--accent);
   }
@@ -551,7 +551,7 @@
     position: absolute;
     right: var(--space-2);
     display: flex;
-    gap: 2px;
+    gap: var(--size-line-gap);
     padding-left: var(--space-3);
 
     opacity: 0;
@@ -606,12 +606,6 @@
     transition: background var(--motion-fast) var(--ease-standard);
   }
   button.secondary:hover { background: var(--bg-elevated); }
-  :global(.modal button.danger) {
-    border: 0;
-    background: var(--status-error);
-    color: var(--text-on-accent);
-    font-weight: 600;
-  }
   .skeleton { display: grid; gap: var(--space-3); padding: var(--space-3); }
   .bar {
     width: var(--w);

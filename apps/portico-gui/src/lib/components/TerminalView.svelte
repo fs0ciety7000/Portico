@@ -92,7 +92,7 @@
       foreground: v("--text-primary"),
       cursor: hideCursor ? `${v("--bg-base")}00` : v("--accent"),
       cursorAccent: v("--bg-base"),
-      selectionBackground: `${v("--accent")}55`,
+      selectionBackground: v("--accent-selection"),
       selectionInactiveBackground: `${v("--text-muted")}44`,
       scrollbarSliderBackground: `${v("--text-muted")}33`,
       scrollbarSliderHoverBackground: `${v("--text-muted")}66`,
@@ -276,7 +276,7 @@
   onMount(() => {
     const css = getComputedStyle(document.documentElement);
     const fontFamily = css.getPropertyValue("--font-mono").trim();
-    const fontSize = Number.parseFloat(css.getPropertyValue("--text-base")) || 13;
+    const fontSize = Number.parseFloat(css.getPropertyValue("--text-base"));
     void fontsReady(fontFamily, fontSize).then(() => {
       if (!destroyed) create(fontFamily, fontSize);
     });
@@ -350,10 +350,13 @@
     term.onBinary((d) => send(d, true));
     term.onTitleChange((t) => (pane.title = sanitizeTitle(t)));
 
-    // Every paste (menu, Shift-Insert, middle click) is sanitized first.
+    // Every paste (menu, Shift-Insert, middle click) is sanitized first,
+    // and only reaches the active pane (like keys): a hidden or unfocused
+    // pane never takes a paste.
     const onPaste = (e: ClipboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      if (!active) return;
       const text = e.clipboardData?.getData("text/plain");
       if (text) paste(text);
     };
@@ -516,14 +519,17 @@
         </div>
       </div>
       {#if split}
-        <!-- A short pane: one line, the hint in its tooltip. -->
+        <!-- A short pane: the message on two lines at most, then the
+             actions; the hint in its tooltip and, when focused, in the
+             status bar. -->
         {@const text = keyChanged ? "Host key changed: possible man-in-the-middle." : sentence(error.message)}
         {@const tip = keyChanged ? "Fix known_hosts only once the administrator confirms the new key." : error.hint}
         <div class="compact failure" data-status={status.status} title={tip ? `${text}\n${tip}` : text}>
-          <span class="dot"></span>
-          <span class="message">{text}</span>
-          <button class="link" onclick={() => workspace.reconnect(pane.key)}>Retry{#if !keyChanged} <kbd>↵</kbd>{/if}</button>
-          <button class="link" onclick={() => workspace.closePane(pane.key)}>{closeLabel}</button>
+          <p class="message"><span class="dot"></span>{text}</p>
+          <div class="compact-actions">
+            <button class="link" onclick={() => workspace.reconnect(pane.key)}>{#if !keyChanged}<kbd>↵</kbd> {/if}Retry</button>
+            <button class="link" onclick={() => workspace.closePane(pane.key)}>Close</button>
+          </div>
         </div>
       {/if}
     </div>
@@ -688,6 +694,25 @@
   /* The message takes what the actions leave, cut with an ellipsis (the hint is in the tooltip). */
   .compact .message { flex: 1 1 auto; min-width: 3ch; margin: 0; overflow: hidden; color: var(--text-primary); text-overflow: ellipsis; }
   .compact.failure .message { color: var(--status-error); }
+  /* Failure: two lines of message at most, then the actions. */
+  .compact.failure {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+    height: auto;
+    padding: var(--space-2) var(--space-3);
+    white-space: normal;
+  }
+  .compact.failure .message {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  .compact.failure .message .dot { display: inline-block; margin-right: var(--space-2); vertical-align: middle; }
+  .compact-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   .compact .link { height: var(--space-5); padding: 0 var(--space-1); gap: var(--space-1); }
   .xterm-host :global(.xterm) { height: 100%; }
   .xterm-host :global(.xterm-viewport) { background: transparent !important; }

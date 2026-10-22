@@ -200,7 +200,7 @@
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 2px;
+    gap: var(--size-line-gap);
     height: 24px;
     padding: 0 2px 0 var(--space-2);
     border: 1px solid var(--border-strong);

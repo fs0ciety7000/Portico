@@ -49,6 +49,16 @@ kbd {
   font-family: var(--font-mono);
 }
 
+/* The destructive action of a dialog (delete a snippet, a file, a
+   recording). `:not(.secondary)`: an outlined danger button keeps its own
+   look (HostActionDialog); the extra class also outranks Modal's `font`. */
+.modal button.danger:not(.secondary) {
+  border: 0;
+  background: var(--status-error);
+  color: var(--text-on-accent);
+  font-weight: 600;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

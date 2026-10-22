@@ -98,6 +98,14 @@
   /** Terminals being recorded (any tab): REC in the status bar. */
   const recCount = $derived(Object.keys(recordings.active).length);
   const recHere = $derived(recordings.isRecording(pane?.terminal ?? null));
+  /** Hint of the focused pane's failure: a short split pane shows only the
+   * message (TerminalView's compact card), the status bar the hint. */
+  const paneHint = $derived.by(() => {
+    if (!pane) return undefined;
+    const error = tabSession?.phase.phase === "failed" ? tabSession.phase.error : pane.error;
+    if (!error) return undefined;
+    return error.code === "host_key_changed" ? "Fix known_hosts only once the administrator confirms the new key." : (error.hint ?? undefined);
+  });
 
   /** Favorite, edit: the active pane's host, else the selected one. */
   const targetAlias = $derived(pane ? pane.alias : selectedHost?.alias);
@@ -366,7 +374,7 @@
     const px = (name: string) => Number.parseFloat(css.getPropertyValue(name)) || 0;
     paneGap = px("--space-2");
     panePad = px("--space-1");
-    const fontSize = px("--text-base") || 13;
+    const fontSize = px("--text-base");
     const ctx = document.createElement("canvas").getContext("2d");
     if (ctx) ctx.font = `${fontSize}px ${css.getPropertyValue("--font-mono").trim()}`;
     const cell = { w: ctx?.measureText("W").width || fontSize * 0.6, h: Math.ceil(fontSize * 1.2) };
@@ -442,6 +450,7 @@
       return {
         id: `split-host-${h.alias}`,
         title: h.alias,
+        favorite: h.favorite,
         status: { status: d.status, busy: d.busy },
         // The split reuses the host's live session: no new connection, no prompt.
         note: isLive(session) ? "reuses connection" : undefined,
@@ -579,7 +588,8 @@
       id: "recordings.open",
       title: "Recordings…",
       hint: recCount ? `${recCount} recording now` : "play or delete recorded sessions",
-      shortcut: k("recordings.open"),
+      // `v` only listens in the host list.
+      shortcut: k("recordings.open") ?? (pane ? undefined : k("hosts.recordings")),
       run: () => recordings.show(),
     },
     {
@@ -719,6 +729,7 @@
       case "session.record":
         return void recordings.toggle(pane);
       case "recordings.open":
+      case "hosts.recordings":
         return recordings.show();
       default:
         // Palette-only actions bound in settings.toml run their command.
@@ -858,6 +869,7 @@
     ["hosts.files", "files"],
     ["app.logs", "logs"],
     ["hosts.snippets", "snippets"],
+    ["hosts.recordings", "recordings"],
     ["app.theme", "theme"],
   ] as const;
 </script>
@@ -961,12 +973,15 @@
           <span class="rtt mono" class:slow={tabStatus.status === "warning"}>{formatRtt(tabSession.latencyMs)}</span>
         {/if}
         <!-- Split: each pane header shows its own title already. -->
-        {#if pane.title && paneCount < 2}<span class="title" title={pane.title}>{pane.title}</span>{/if}
+        {#if pane.title && paneCount < 2}<span class="title" title={pane.title}>{pane.title}</span>
+        {:else if paneHint && paneCount > 1}<span class="title" title={paneHint}>{paneHint}</span>{/if}
       </span>
       {#if recCount}
-        <RecBadge title={recHere ? "This pane's output is being recorded" : `${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
+        <RecBadge role="status" title={recHere ? "This pane's output is being recorded" : `${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
       {/if}
       <span class="hints">
+        <!-- First: the hints give way from the end. -->
+        {#if recHere && k("session.record")}<span><kbd>{k("session.record")}</kbd> stop</span>{/if}
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
         {#each tabHints as [key, label] (label)}
           {#if key}<span><kbd>{key}</kbd> {label}</span>{/if}
@@ -975,7 +990,7 @@
     {:else}
       <span class="counts">{hosts.all.length} hosts · {workspace.tabs.length} open</span>
       {#if recCount}
-        <RecBadge title={`${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
+        <RecBadge role="status" title={`${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
       {/if}
       <span class="hints">
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
@@ -1106,7 +1121,7 @@
   <ImportDialog />
 {:else if recordings.confirm}
   {#key recordings.confirm}
-    <RecordConfirm alias={recordings.confirm.alias} folder={recordings.confirm.folder} />
+    <RecordConfirm alias={recordings.confirm.alias} folder={recordings.confirm.folder} pane={recordings.confirm.pane} />
   {/key}
 {:else if recordings.open}
   <RecordingsDialog themeId={settings.themeId} />

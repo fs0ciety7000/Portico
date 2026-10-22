@@ -139,13 +139,21 @@ pub const TYPE_SCALE: [(&str, u16); 8] = [
 /// - `dot`: the status dot, everywhere (tabs, pane headers, lists, status bar);
 /// - `dot-ring`: the ring of a hollow dot ("no shell attached");
 /// - `icon-sm`: small inline icons (pane count, close crosses);
-/// - `card`: the widest connection or failure card over a terminal.
-pub const SIZES: [(&str, &str); 4] = [
+/// - `card`: the widest connection or failure card over a terminal;
+/// - `bar`: the accent bar of a selected row (and the focus ring width);
+/// - `line-gap`: between the two lines of a list row (title, then details).
+pub const SIZES: [(&str, &str); 6] = [
     ("dot", "6px"),
     ("dot-ring", "1.5px"),
     ("icon-sm", "12px"),
     ("card", "540px"),
+    ("bar", "2px"),
+    ("line-gap", "2px"),
 ];
+
+/// Alpha of the terminal selection (`--accent-selection`): the theme's
+/// accent at about one third, so selected text stays readable.
+pub const ACCENT_SELECTION_ALPHA: u8 = 0x55;
 
 /// Letter spacing of small capitals (badges such as ZOOM and DEMO, section labels).
 pub const TRACKING_CAPS: &str = "0.08em";
@@ -369,6 +377,11 @@ pub fn export_css() -> String {
         ] {
             let _ = writeln!(css, "  --{name}: {};", c.to_hex());
         }
+        let _ = writeln!(
+            css,
+            "  --accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
+            p.accent.to_hex()
+        );
         let s = &theme.status;
         for (name, c) in [
             ("idle", s.idle),
@@ -517,6 +530,24 @@ mod tests {
         for (i, a) in THEMES.iter().enumerate() {
             assert!(THEMES.iter().skip(i + 1).all(|b| b.id != a.id));
         }
+    }
+
+    #[test]
+    fn every_theme_exports_its_selection_from_its_accent() {
+        let css = export_css();
+        for theme in THEMES {
+            let block = css
+                .split(&format!("[data-theme=\"{}\"]", theme.id))
+                .nth(1)
+                .unwrap_or_default();
+            let line = format!(
+                "--accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
+                theme.palette.accent.to_hex()
+            );
+            assert!(block.contains(&line), "{}: missing `{line}`", theme.id);
+        }
+        assert!(css.contains("--size-bar: 2px;"));
+        assert!(css.contains("--size-line-gap: 2px;"));
     }
 
     #[test]

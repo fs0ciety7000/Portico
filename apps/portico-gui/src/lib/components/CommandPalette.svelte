@@ -11,6 +11,8 @@
     status?: { status: Status; busy: boolean };
     /** A short note after the title ("reuses connection"). */
     note?: string;
+    /** A favourite host (host picker): `★` after the title. */
+    favorite?: boolean;
     shortcut?: string;
     run: () => void;
   }
@@ -76,7 +78,7 @@
       {#each filtered as cmd, i (cmd.id)}
         <li class:active={i === active} onmouseenter={() => (active = i)} onclick={() => run(cmd)} onkeydown={() => {}} role="option" aria-selected={i === active}>
           {#if cmd.status}<span class="dot" data-status={cmd.status.status} class:busy={cmd.status.busy}></span>{/if}
-          <span class="title">{cmd.title}{#if cmd.note}<span class="note">{cmd.note}</span>{/if}</span>
+          <span class="title">{cmd.title}{#if cmd.favorite}<span class="star" title="Favorite" aria-label="favorite">★</span>{/if}{#if cmd.note}<span class="note">{cmd.note}</span>{/if}</span>
           {#if cmd.hint}<span class="hint" class:mono={cmd.mono}>{cmd.hint}</span>{/if}
           {#if cmd.shortcut}<kbd>{cmd.shortcut}</kbd>{/if}
         </li>
@@ -129,7 +131,20 @@
     padding: 0 var(--space-3);
     border-radius: var(--radius-md);
   }
+  li { position: relative; }
   li.active { background: var(--bg-selected); }
+  /* The selection grammar of every list: background and accent bar. */
+  li.active:not(.empty)::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: var(--space-2);
+    bottom: var(--space-2);
+    width: var(--size-bar);
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+  }
+  .star { margin-left: var(--space-1); color: var(--accent); }
   .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .note { margin-left: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
   .hint { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }

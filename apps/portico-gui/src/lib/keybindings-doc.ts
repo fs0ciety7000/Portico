@@ -187,19 +187,19 @@ export const GUI_FIXED: DocTable[] = [
   {
     title: "Enregistrements (GUI)",
     intro:
-      "« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » ; « Recordings… » " +
-      "(`recordings.open`, palette) ouvre la liste.",
+      "« Record session » (`session.record`) sur le panneau actif ouvre la confirmation « Record this terminal? » (« Record this pane? » " +
+      "dans un onglet divisé) ; « Recordings… » (`v` depuis la liste des hôtes, `hosts.recordings`, ou la palette, `recordings.open`) ouvre la liste.",
     rows: [
-      ["Confirmer l'enregistrement (actif après 400 ms sans frappe) / annuler", "`↵` ou `y` / `Esc` ou `n`"],
-      ["Arrêter l'enregistrement du panneau actif (sans confirmation)", "`session.record` à nouveau, ou « Stop recording » dans la palette"],
+      ["Confirmer l'enregistrement (seul `y`, actif après 400 ms sans frappe ; `↵` ne fait rien) / annuler", "`y` / `Esc` ou `n`"],
+      ["Arrêter l'enregistrement du panneau actif (sans confirmation ; « Recording saved · <fichier> »)", "`session.record` à nouveau, ou « Stop recording » dans la palette"],
       ["Liste : se déplacer", "`j` / `k`, `↓` / `↑`, `Home` / `End`"],
-      ["Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde)", "`↵` ou double-clic / `Suppr` ou `x`"],
+      ["Liste : lire (fichier valide) / supprimer (confirmation, focus sur `Keep` : `y` supprime, `n` / `Esc` garde ; refusé d'emblée pendant l'écriture)", "`↵` ou double-clic / `Suppr` ou `x`"],
       ["Liste : rafraîchir", "`Ctrl-R`"],
       ["Lecture : pause / reprise (à la fin : rejouer depuis le début)", "`Espace`"],
       ["Lecture : vitesse ×0,5 · ×1 · ×2 · ×4 · ×8", "`+` / `-`"],
-      ["Lecture : sauter le silence en cours / reculer de 5 s / revenir au début", "`→` / `←` / `Home`"],
+      ["Lecture : sauter le silence en cours / reculer de 5 s / revenir au début (aussi les boutons « ↺ 5 s » et « Restart »)", "`→` / `←` / `Home`"],
       ["Lecture : aller à un instant", "clic sur la barre de progression"],
-      ["Fermer la lecture (retour à la liste) / fermer la liste", "`Esc`"],
+      ["Fermer la lecture (retour à la liste) / fermer la liste", "`q` ou `Esc` / `Esc`"],
     ],
   },
 ];

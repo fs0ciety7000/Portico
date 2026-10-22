@@ -162,12 +162,19 @@ test("recording: confirm, REC from the engine event, stop, list, play", async ()
   // Ctrl-Shift-R in the terminal: the armed confirmation, with the folder.
   await press(Key.Control, Key.Shift, "R");
   await dialog("Record this terminal?");
-  assert.match(await modal(), /What you type is never recorded/);
+  assert.match(await modal(), /including the commands you type \(the shell echoes them\)/);
+  assert.match(await modal(), /Keystrokes themselves are not stored/);
   assert.match(await modal(), /recordings\/, readable only by you/);
   await capture("record-confirm");
+  // Only `y` records: Enter does nothing.
+  await sleep(600);
   await press(Key.Enter);
+  await sleep(300);
+  await dialog("Record this terminal?");
+  await type("y");
   await noDialog();
   await waitFor("REC in the status bar", async () => (await text(".statusbar")).includes("REC"));
+  assert.match(await text(".statusbar"), /Ctrl-Shift-R\s+stop/);
   await shellReady();
   await type("echo rec-e2e-$((6*7))");
   await press(Key.Enter);
@@ -177,6 +184,8 @@ test("recording: confirm, REC from the engine event, stop, list, play", async ()
   await press(Key.Control, Key.Shift, "R");
   await waitFor("REC gone", async () => !(await text(".statusbar")).includes("REC"));
   assert.equal(await s.find(".modal"), null, "no confirmation to stop");
+  await waitFor("saved notice", async () => (await text(".toast")).includes("Recording saved · alpha"));
+  assert.match(await text(".toast"), /v from the host list opens Recordings/);
   const files = readdirSync(recDir).filter((f) => f.endsWith(".cast"));
   assert.equal(files.length, 1, `one recording in ${recDir}`);
   const file = join(recDir, files[0] ?? "");
@@ -198,7 +207,8 @@ test("recording: confirm, REC from the engine event, stop, list, play", async ()
   await waitFor("recorded output in the player", async () => (await text(".player .xterm-rows")).includes("rec-e2e-42"));
   await sleep(300);
   await capture("player");
-  await press(Key.Escape);
+  // `q` goes back to the list, like Esc.
+  await type("q");
   await dialog("Recordings");
   await press(Key.Escape);
   await noDialog();
