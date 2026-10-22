@@ -5,8 +5,20 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Padding, Paragraph};
 
+use portico_core::hosts::HostOrigin;
+
 use crate::app::{App, Focus};
 use crate::host_list::{Entry, section_title};
+
+/// The list's origin mark: `◆` a Portico host (editable), `◇` an imported
+/// one; none for `~/.ssh/config` (read-only, the usual case).
+pub(crate) fn origin_mark(origin: HostOrigin) -> Option<&'static str> {
+    match origin {
+        HostOrigin::Portico => Some("◆"),
+        HostOrigin::Imported => Some("◇"),
+        HostOrigin::SshConfig => None,
+    }
+}
 
 /// Hosts listed under the section header at `header`.
 fn section_size(entries: &[Entry], header: usize) -> usize {
@@ -97,11 +109,15 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     if app.entries.is_empty() {
         let lines = if app.query.is_empty() {
             vec![
+                Line::from(Span::styled("No hosts yet.", s.secondary())),
                 Line::from(Span::styled(
-                    "No hosts in ~/.ssh/config yet.",
-                    s.secondary(),
+                    format!(
+                        "{} adds one here, or add a Host block to ~/.ssh/config, then {} reloads.",
+                        app.keymap.shown("hosts.add", 1),
+                        app.keymap.shown("hosts.reload", 1)
+                    ),
+                    s.muted(),
                 )),
-                Line::from(Span::styled("Add a Host block, then r reloads.", s.muted())),
             ]
         } else {
             vec![
@@ -160,6 +176,11 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
                 Span::styled(format!("{dot} "), s.status(st.color)),
                 Span::styled(super::fmt::truncate(&h.alias, alias_max), s.title()),
             ];
+            // Origin, discreetly: Portico's own hosts (editable) and
+            // imported ones; `~/.ssh/config` hosts carry no mark.
+            if let Some(mark) = origin_mark(h.origin) {
+                spans.push(Span::styled(format!(" {mark}"), s.muted()));
+            }
             if h.meta.favorite {
                 spans.push(Span::styled(" ★", s.accent()));
             }

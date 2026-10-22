@@ -9,6 +9,7 @@ use portico_core::forward::ForwardSpec;
 use portico_core::hosts::HostMeta;
 use portico_core::ids::{SessionId, TerminalId, TunnelId};
 use portico_core::keys::LocalKey;
+use portico_core::managed_hosts::HostSummary;
 use portico_core::recent::RecentHost;
 use portico_core::recording::RecordingEntry;
 use portico_core::settings::Settings;
@@ -196,4 +197,26 @@ pub(crate) enum Action {
     PlayerKey(KeyEvent),
     /// Next message of the playback reader (`None`: the reader is gone).
     PlayerFeed(Option<ReaderMsg>),
+    // Hosts created in Portico (phase 6b)
+    /// "Add host…".
+    AddHost,
+    /// "Duplicate as Portico host…" on the selected host.
+    DuplicateHost,
+    /// "Delete host" on the selected host (asks first).
+    DeleteHost,
+    HostFormKey(KeyEvent),
+    /// Local keys for the form's key picker.
+    HostFormKeys(Result<Vec<LocalKey>, ErrorSummary>),
+    /// A create, edit or duplicate came back.
+    HostSaved(Result<HostSummary, ErrorSummary>),
+    HostDeleted {
+        alias: String,
+        result: Result<(), ErrorSummary>,
+    },
+    /// Whether `~/.ssh/config` already includes `hosts.conf`.
+    IncludeChecked(Result<bool, ErrorSummary>),
+    /// Copies the proposed `Include` line (OSC 52).
+    CopyInclude,
+    /// Hides the `Include` banner until Portico restarts.
+    HideInclude,
 }

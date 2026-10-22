@@ -13,6 +13,7 @@
 
 mod action;
 mod app;
+mod app_hosts;
 mod app_meta;
 mod app_panels;
 mod app_panes;
@@ -23,6 +24,7 @@ mod dialog;
 mod edit_host;
 mod files;
 mod form;
+mod host_form;
 mod host_list;
 mod import_cli;
 mod keydoc;

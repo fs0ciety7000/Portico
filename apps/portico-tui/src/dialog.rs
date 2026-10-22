@@ -236,11 +236,13 @@ pub(crate) struct ChangedKeyAlert {
 }
 
 /// What a confirmation dialog confirms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConfirmAction {
     ClearRecent,
     /// "Record session": start recording this terminal.
     StartRecording(portico_core::ids::TerminalId),
+    /// "Delete host": remove this Portico host from `hosts.conf`.
+    DeleteHost(String),
 }
 
 /// A yes / no question: `y` confirms, `n` or `Esc` keeps things as they are.

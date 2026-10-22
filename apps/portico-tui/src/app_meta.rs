@@ -52,7 +52,7 @@ impl App {
     pub(crate) fn update_meta(&mut self, action: Action) {
         match action {
             Action::ToggleFavorite => self.toggle_favorite(),
-            Action::EditHost => self.open_edit(),
+            Action::EditHost => self.edit_host(),
             Action::EditKey(key) => self.edit_key(key),
             // Only the favorite toggle saves this way: a short confirmation.
             Action::MetaSaved { alias, result } => match result {
@@ -132,6 +132,7 @@ impl App {
         match event {
             EngineEvent::HostMeta { alias, meta } => self.set_meta(&alias, &meta),
             EngineEvent::RecentChanged => self.spawn_load_recent(),
+            EngineEvent::HostsChanged => self.on_hosts_changed(),
             EngineEvent::Recording {
                 terminal, state, ..
             } => self.on_recording_event(terminal, state),
@@ -178,8 +179,14 @@ impl App {
         });
     }
 
-    fn open_edit(&mut self) {
-        let Some(host) = self.selected_host() else {
+    /// Tags, group and notes of `alias` (any origin: they live in
+    /// `hosts.toml`).
+    pub(crate) fn open_edit_meta(&mut self, alias: &str) {
+        let Some(host) = self
+            .inventory
+            .as_ref()
+            .and_then(|i| i.hosts.iter().find(|h| h.alias == alias))
+        else {
             self.notify("Select a host to edit".into());
             return;
         };
@@ -285,7 +292,7 @@ impl App {
         let Some(Dialog::Confirm(dialog)) = self.dialogs.front() else {
             return;
         };
-        let action = dialog.action;
+        let action = dialog.action.clone();
         match dialog.handle_key(key) {
             ConfirmOutcome::Confirm => {
                 self.dialogs.pop_front();
@@ -300,6 +307,7 @@ impl App {
                         });
                     }
                     ConfirmAction::StartRecording(terminal) => self.start_recording(terminal),
+                    ConfirmAction::DeleteHost(alias) => self.delete_host(alias),
                 }
             }
             ConfirmOutcome::Cancel => {
@@ -645,6 +653,8 @@ mod render_tests {
     fn edit_form_fits_80x24_with_chips_and_inline_errors() {
         let mut app = hosts_app();
         app.update(Action::EditHost);
+        // A ~/.ssh/config host: the read-only view, `t` its tags and notes.
+        app.update(Action::HostFormKey(key(KeyCode::Char('t'))));
         assert_eq!(app.overlay, Some(Overlay::Edit));
         for c in "#prod, eu".chars() {
             app.update(Action::EditKey(key(KeyCode::Char(c))));
@@ -1085,6 +1095,7 @@ mod render_tests {
     fn edit_form_says_esc_once_clears_its_edges_and_marks_the_bad_tag() {
         let mut app = hosts_app();
         app.update(Action::EditHost);
+        app.update(Action::HostFormKey(key(KeyCode::Char('t'))));
         for c in "web ok bad! db".chars() {
             app.update(Action::EditKey(key(KeyCode::Char(c))));
         }
@@ -1172,7 +1183,7 @@ mod render_tests {
         app.update(Action::DebugKey(key(KeyCode::Char('?'))));
         assert!(app.help.over_panel);
         let lines = screen(&mut app, 80, 24);
-        check(&lines, &["Keyboard shortcuts", "Session logs", "Edit host"]);
+        check(&lines, &["Keyboard shortcuts", "Session logs", "Host form"]);
         check(&lines, &["Switch tab · reveal", "Scroll · G follows"]);
         check(&lines, &["Next · prev field", "New line in notes"]);
         let lines = screen(&mut app, 110, 28);

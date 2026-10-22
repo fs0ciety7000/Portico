@@ -75,7 +75,12 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Tunnels | `p` | `hosts.tunnels` |
 | Clés (locales, agent, vault) | `i` | `hosts.keys` |
 | Snippets de l'hôte | `s` | `hosts.snippets` |
-| Éditer tags, groupe et notes de l'hôte (`hosts.toml`) | `e` | `hosts.edit` |
+| « Add host… » : créer un hôte Portico (dans `hosts.conf`, jamais dans `~/.ssh/config`) | `a`, `n` | `hosts.add` |
+| « Edit host… » : modifier un hôte Portico ; un hôte de `~/.ssh/config` (ou importé) reste en lecture seule : la vue propose de le dupliquer (`D`) ou d'éditer ses tags, groupe et notes (`t`, `hosts.toml`) | `e` | `hosts.edit` |
+| « Duplicate as Portico host… » : copie modifiable de l'hôte sélectionné, sous un nouvel alias | `D` | `hosts.duplicate` |
+| « Delete host » : supprimer un hôte Portico, ses métadonnées et son mot de passe mémorisé (confirmation armée : seul `y` supprime) | `Del` | `hosts.delete` |
+| Copier (OSC 52) la ligne `Include` à ajouter en tête de `~/.ssh/config`, quand le bandeau est affiché | `y` | `hosts.copy_include` |
+| Masquer le bandeau `Include` jusqu'au prochain lancement | `z` | `hosts.hide_include` |
 | Favori on/off | `*` | `hosts.favorite` |
 | Journaux de session (panneau debug) et config effective | `l` | `hosts.debug` |
 | « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `hosts.recordings` |
@@ -166,9 +171,25 @@ Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 ce
 
 Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Un panneau en échec a un point plein et sa phase en couleur d'erreur, dans son titre comme dans l'onglet ; le point creux est réservé à un panneau sans shell (sorti, fermé). Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin, et diviser un panneau zoomé dézoome puis divise. Une division impossible est refusée sur une ligne de la barre de statut, pendant 4 s, sans couvrir aucun panneau (« This tab already has 8 panes · Close a pane first. », « Each pane needs at least 20 columns × 5 rows · Enlarge the window, or close a pane. »). Depuis un onglet divisé, `?` ouvre l'aide sur la page « Panes ».
 
-### TUI : édition d'un hôte
+### TUI : hôtes créés dans Portico
 
-« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.
+« Add host… » (`a` ou `n`), « Edit host… » (`e`, hôte Portico), « Duplicate as Portico host… » (`D`) et « Delete host » (`Del`) depuis la liste. Ces hôtes vivent dans le fragment `hosts.conf` de Portico ; Portico n'écrit jamais `~/.ssh/config`. Champs : alias, `HostName`, `User`, `Port`, clé (choisie parmi les clés locales découvertes, ou « none »), `ProxyJump` (un hôte existant, ou « none »), tags, groupe, favori, notes, et mot de passe facultatif, masqué, mémorisé dans le trousseau (ou le vault) ; à l'édition : `Keep`, `Change` ou `Forget`. Chaque valeur est vérifiée par le moteur : un refus s'affiche sous le champ concerné (choisi par son code d'erreur), avec son hint. Un hôte de `~/.ssh/config` (ou importé) s'ouvre en lecture seule : « Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it. » (`D` duplique, `t` édite ses tags, groupe et notes).
+
+| Action | Touches |
+|---|---|
+| Champ suivant / précédent | `Tab` / `Shift-Tab`, `↓` / `↑` |
+| Choisir (clé, `ProxyJump`, favori, mot de passe) | `←` / `→`, `Space` ; une lettre saute au choix suivant qui commence par elle |
+| Nouvelle ligne dans les notes | `Alt-↵` |
+| Enregistrer | `↵` (ou `Ctrl-S`) |
+| Vider le champ | `Ctrl-U` |
+| Annuler (avec des changements : `y` les abandonne, toute autre touche revient au formulaire) | `Esc`, `Ctrl-C` |
+| Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime) | `Del` depuis la liste |
+
+Après un enregistrement, la liste se recharge (`HostsChanged`) et sélectionne l'hôte. Les hôtes Portico portent `◆` dans la liste, les hôtes importés `◇` ; les détails indiquent l'origine. Tant que `~/.ssh/config` n'inclut pas `hosts.conf`, un bandeau sous les détails donne la ligne `Include` à ajouter en tête du fichier (`y` la copie, `z` masque le bandeau jusqu'au prochain lancement).
+
+### TUI : tags, groupe et notes d'un hôte en lecture seule
+
+« Edit <alias> » (`e` puis `t` sur un hôte de `~/.ssh/config` ou importé). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.
 
 | Action | Touches |
 |---|---|
@@ -317,6 +338,24 @@ déconnecte, comme fermer le dernier onglet. Un panneau dont la connexion échou
 panneau actif. Une division refusée s'affiche sur une ligne de la barre de statut (4 s), jamais par-dessus un
 panneau ; diviser un panneau zoomé dézoome puis divise. Depuis un onglet divisé, `Ctrl-Space ?` ouvre l'aide sur
 la page « Panes ».
+
+### Ajouter un hôte dans la TUI
+
+Depuis la liste, `a` (ou `n`, « Add host… ») ouvre le formulaire : alias, `HostName`, `User` et `Port` se
+tapent, la clé se choisit parmi les clés privées découvertes dans `~/.ssh` (ou « none ») et le `ProxyJump` parmi
+les hôtes existants (ou « none ») avec `←` / `→` ; une lettre saute au choix suivant qui commence par elle.
+Viennent ensuite tags, groupe, favori, notes (`Alt-↵` pour une nouvelle ligne) et un mot de passe facultatif,
+jamais affiché (masque fixe) et mémorisé dans le trousseau du système, ou dans le vault de Portico ; Portico le
+propose à la première connexion seulement après avoir vérifié la clé du serveur. `↵` enregistre ; un refus du
+moteur s'affiche sous le champ qu'il concerne, avec quoi faire. `Esc` annule, et demande confirmation (`y`) si
+quelque chose a été saisi ; le mot de passe tapé est alors effacé. L'hôte rejoint la liste aussitôt, sélectionné,
+marqué `◆` : il vit dans le fichier `hosts.conf` de Portico, jamais dans `~/.ssh/config`. Pour que `ssh`, `scp`
+et `git` le voient aussi, un bandeau sous les détails donne la ligne `Include` à ajouter soi-même en tête de
+`~/.ssh/config` (`y` la copie, `z` masque le bandeau jusqu'au prochain lancement). `e` modifie un hôte Portico
+(renommer compris ; le mot de passe : `Keep`, `Change` ou `Forget`), `D` duplique n'importe quel hôte en hôte
+Portico sous un nouvel alias, `Del` en supprime un après une confirmation armée (seul `y` supprime). Sur un hôte
+de `~/.ssh/config`, `e` explique qu'il est en lecture seule et propose `D` pour le dupliquer, ou `t` pour éditer
+ses tags, son groupe et ses notes.
 
 ### Enregistrer une session dans la TUI
 

@@ -7,6 +7,7 @@ mod edit_host;
 mod files;
 pub(crate) mod fmt;
 mod form;
+mod host_form;
 mod hosts;
 mod keys;
 mod overlays;
@@ -118,8 +119,9 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
                 .spacing(1)
                 .areas(body.inner(ratatui::layout::Margin::new(1, 0)));
         hosts::render(app, frame, sidebar);
-        details::render(app, frame, main);
-        toast_zone = main.inner(ratatui::layout::Margin::new(1, 1));
+        // Toasts stay over the details, never over the `Include` banner.
+        let details = details::render(app, frame, main);
+        toast_zone = details.inner(ratatui::layout::Margin::new(1, 1));
     }
     // Over a panel, the toast sits between the panel and the status bar,
     // never on the panel's frame or hints: the panel gives way if needed.
@@ -130,6 +132,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
                 | Overlay::Snippets
                 | Overlay::Tunnels
                 | Overlay::Edit
+                | Overlay::HostForm
                 | Overlay::Debug
                 | Overlay::Recordings
         )
@@ -158,6 +161,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         Some(Overlay::Keys) => keys::render(app, frame, band),
         Some(Overlay::Snippets) => snippets::render(app, frame, band),
         Some(Overlay::Edit) => edit_host::render(app, frame, band),
+        Some(Overlay::HostForm) => host_form::render(app, frame, band),
         Some(Overlay::Debug) => debug::render(app, frame, band),
         Some(Overlay::Recordings) => recordings::render(app, frame, band),
         _ => {}

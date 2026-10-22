@@ -319,6 +319,26 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             hints.push(("q", "back to list"));
             return (" PLAYBACK ", owned(hints));
         }
+        _ if app.overlay == Some(crate::app::Overlay::HostForm) => {
+            let hints: &[(&'static str, &'static str)] = match &app.host_form {
+                Some(f) if matches!(f.mode, crate::host_form::FormMode::ReadOnly { .. }) => {
+                    &[("D", "duplicate"), ("t", "tags & notes"), ("Esc", "close")]
+                }
+                Some(f) if f.confirm_discard => &[("y", "discard"), ("any key", "keep editing")],
+                Some(f) if f.busy => &[],
+                Some(f) if matches!(f.mode, crate::host_form::FormMode::Duplicate { .. }) => {
+                    &[("↵", "duplicate"), ("Esc", "cancel")]
+                }
+                Some(f) if f.on_picker() => &[
+                    ("↵", "save"),
+                    ("Tab", "next field"),
+                    ("← →", "choose"),
+                    ("Esc", "cancel"),
+                ],
+                _ => &[("↵", "save"), ("Tab", "next field"), ("Esc", "cancel")],
+            };
+            return (" HOST ", owned(hints.to_vec()));
+        }
         _ if app.overlay == Some(crate::app::Overlay::Edit) => (
             " EDIT ",
             &[
@@ -420,6 +440,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             }
             ids.extend([
                 "hosts.search",
+                "hosts.add",
                 "hosts.edit",
                 "hosts.favorite",
                 "hosts.debug",
