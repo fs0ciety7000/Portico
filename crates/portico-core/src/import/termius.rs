@@ -177,10 +177,12 @@ fn decode(bytes: &[u8]) -> Option<Zeroizing<String>> {
         if !rest.len().is_multiple_of(2) {
             return None;
         }
-        let units = rest.chunks_exact(2).map(|pair| match pair {
-            [a, b] if little => u16::from_le_bytes([*a, *b]),
-            [a, b] => u16::from_be_bytes([*a, *b]),
-            _ => 0,
+        let units = rest.as_chunks::<2>().0.iter().map(|&pair| {
+            if little {
+                u16::from_le_bytes(pair)
+            } else {
+                u16::from_be_bytes(pair)
+            }
         });
         // One UTF-16 unit is at most 3 UTF-8 bytes (a surrogate pair, two
         // units, is 4): the string never reallocates, so no copy of the
