@@ -124,7 +124,7 @@ Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié
 | 4 | SFTP : explorateur, upload, download | ✅ | ✅ | 1 Gio dans chaque sens contre OpenSSH, annulation sans résidu |
 | 5 | Clés locales, ssh-agent, certificats | ✅ | ✅ | Interop scénario 12 (agent réel), badges de validité |
 | 6 | Génération de clés (ed25519 / rsa ≥ 3072 / ecdsa) avec passphrase | ✅ | ✅ | Tests par algorithme, relecture par `ssh-keygen` |
-| 7 | Copie de clé publique (`ssh-copy-id`) | ✅ | ✅ (démo) | Réel en TUI et en interop ; GUI en mode démo |
+| 7 | Copie de clé publique (`ssh-copy-id`) | ✅ | ✅ | Réel en TUI, en interop et dans l'E2E de l'app de bureau |
 | 8 | Port forwarding local et distant | ✅ | ✅ | Interop scénarios 10 et 11, `nc` sur un tunnel exposé |
 | 9 | Sessions récentes et favorites, onglets multi-sessions | ✅ | ✅ | Tests d'intégration (récents), rendu 80×24, captures |
 | 10 | Snippets (CRUD, portée, placeholders, exécution) | ✅ | ✅ | Tests de rendu sûr, exécution réelle sous `sh` en TUI |
@@ -133,10 +133,11 @@ Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié
 | 13 | Secrets dans le keyring (vault chiffré en repli) | ✅ | ✅ | Vault v2 testé (verrou, anti-retour), déverrouillage au démarrage |
 | 14 | Mode debug : logs de connexion par session | ✅ | ✅ | Panneau de logs, sessions terminées conservées |
 
-**Non vérifié dans l'app de bureau réelle** : les parcours des phases 3 et 4 de la GUI (clés, copy-id, vault, snippets, logs, édition)
-ont été vérifiés en mode démo (Playwright) et par les tests Rust des commandes, pas dans l'app Tauri sous WebKitGTK avec un vrai
-serveur ; l'app réelle a été vérifiée jusqu'à la phase 1c (et la phase 2 pour le panneau de fichiers). À faire avant la première
-release publique, avec la re-mesure du CPU au repos de la GUI (`bench/run-all.sh`).
+**Vérifié dans l'app de bureau réelle** (2026-10-22) : les parcours des phases 3 et 4 de la GUI (vault, clés, agent, copy-id
+et sa vérification, connexion par la seule clé, snippets et refus du collage sous `sh`, favoris et édition, récents, logs et
+configuration effective, thème, SFTP, tunnel `-L`, redémarrage avec déverrouillage) ont été parcourus dans l'app Tauri sous
+WebKitGTK contre un `sshd` OpenSSH, et un E2E rejouable les couvre (`pnpm e2e`, voir [TESTING.md](TESTING.md)). Reste à faire
+avant la première release publique : la re-mesure du CPU au repos de la GUI (`bench/run-all.sh`).
 
 ---
 
