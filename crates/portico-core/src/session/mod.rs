@@ -100,6 +100,12 @@ pub(crate) struct SessionCtx {
     /// How long a tunnel peer may stall before it is cut, in milliseconds
     /// (kept below the keepalive budget once the connection is up).
     stall_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Time allowed to open one tunnel channel, in milliseconds (the target's
+    /// `ConnectTimeout`, set once the connection is up).
+    open_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Bytes buffered towards local tunnel peers, shared by every tunnel of
+    /// the session.
+    pub(crate) forward_budget: crate::forward::ForwardBudget,
 }
 
 impl SessionCtx {
@@ -121,7 +127,17 @@ impl SessionCtx {
             stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(duration_ms(
                 crate::forward::STALL_TIMEOUT,
             ))),
+            open_ms: Arc::new(std::sync::atomic::AtomicU64::new(duration_ms(
+                crate::engine::DEFAULT_CONNECT_TIMEOUT,
+            ))),
+            forward_budget: crate::forward::ForwardBudget::default(),
         }
+    }
+
+    /// Time allowed to open one tunnel channel: the target's
+    /// `ConnectTimeout` (engine default otherwise).
+    pub(crate) fn channel_open_timeout(&self) -> Duration {
+        Duration::from_millis(self.open_ms.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// See [`crate::forward::stall_limit`].
@@ -266,6 +282,8 @@ struct Connection {
     keepalive_max: u32,
     /// `ServerAliveInterval 0`: probe for latency, never disconnect.
     disconnect_on_silence: bool,
+    /// The target's `ConnectTimeout`, also used to open tunnel channels.
+    connect_timeout: Duration,
 }
 
 async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connection> {
@@ -336,8 +354,10 @@ async fn establish(ctx: &SessionCtx, request: &ConnectRequest) -> Result<Connect
 
     let target = hops.last();
     let interval = target.and_then(|h| h.option_u32("serveraliveinterval"));
+    let default_timeout = ctx.engine.config().connect_timeout;
     Ok(Connection {
         links,
+        connect_timeout: target.map_or(default_timeout, |h| h.connect_timeout(default_timeout)),
         keepalive: interval
             .filter(|s| *s > 0)
             .map_or(ctx.engine.config().keepalive, |s| {
@@ -516,6 +536,10 @@ impl Connection {
         );
         ctx.stall_ms
             .store(duration_ms(stall), std::sync::atomic::Ordering::Relaxed);
+        ctx.open_ms.store(
+            duration_ms(self.connect_timeout),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // First probe slightly after login: right after authentication the
         // peer may delay its ACKs, which would inflate the first RTT sample.
         let mut ticker = tokio::time::interval_at(

@@ -13,10 +13,21 @@
 //!   each client; the destination it asks for (a domain is resolved by the
 //!   server, never here) becomes the `direct-tcpip` target.
 //! - Binding defaults to `localhost`; any other address must be explicit.
+//!
+//! Invariants:
+//! - a `direct-tcpip` open is never dropped mid-flight: when Portico stops
+//!   waiting (timeout, stop), a confirmation that still comes is closed
+//!   ([`open_direct_tcpip`]), so no channel stays open on the server;
+//! - data from the server waiting for slow local peers is bounded per session
+//!   ([`ForwardBudget`]); a peer is cut only when that budget is exhausted and
+//!   it accepted nothing for the session's [`stall_limit`];
+//! - per-connection refusals and failures are logged at a bounded rate, and
+//!   SOCKS destinations are logged only when they fail.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -24,7 +35,7 @@ use russh::client::Msg;
 use russh::{Channel, ChannelOpenFailure};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{EngineEvent, TunnelEvent};
@@ -34,14 +45,28 @@ use crate::session::{Attached, SessionCtx};
 
 /// Simultaneous connections per tunnel (more are refused).
 const MAX_CONNECTIONS: usize = 256;
-/// Time allowed to open a channel or a local connection for one client.
+/// Time allowed to open a local connection for one client (`-R`), or to
+/// ask the server to listen. Channel opens use the session's
+/// `ConnectTimeout` ([`SessionCtx::channel_open_timeout`]).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Data buffered from the SSH side towards a local peer (chunks).
-const PIPE_QUEUE: usize = 128;
+/// How long an abandoned `direct-tcpip` open is still awaited, so that a
+/// late confirmation can be closed instead of leaking a server channel.
+const REAP_WINDOW: Duration = Duration::from_secs(120);
+/// Largest read from the SSH side.
 const PIPE_CHUNK: usize = 32 * 1024;
-/// A local peer that accepts nothing for this long is disconnected: russh
-/// has one session loop for every channel, so a stalled reader would
-/// otherwise freeze the whole connection (see docs/STACK.md).
+/// Bytes from the server buffered towards local peers, per session (every
+/// tunnel together): a paused reader (video, slow consumer) keeps its
+/// connection while the session as a whole stays under this.
+const SESSION_BUFFER_BUDGET: usize = 64 * 1024 * 1024;
+/// Each buffered chunk costs at least this much budget, which also bounds
+/// the number of chunks.
+const MIN_CHUNK_CHARGE: usize = 1024;
+/// Chunks one connection may queue: never reached before the byte budget.
+const MAX_QUEUED_CHUNKS: usize = SESSION_BUFFER_BUDGET / MIN_CHUNK_CHARGE;
+/// A local peer that accepts nothing for this long while the session's
+/// buffer budget is exhausted is disconnected: russh has one session loop
+/// for every channel, so it would otherwise freeze the whole connection
+/// (see docs/STACK.md).
 pub(crate) const STALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Shortest stall allowed, even with a very tight keepalive.
 const MIN_STALL: Duration = Duration::from_millis(100);
@@ -62,6 +87,18 @@ const SOCKS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKS_LINGER: Duration = Duration::from_millis(500);
 /// Pause after a failed `accept` (e.g. too many open files).
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(200);
+/// SOCKS clients answered "general failure" at once when a `-D` tunnel is
+/// full (more are closed bare), and the time each one gets.
+const BUSY_REPLY_SLOTS: usize = 16;
+const BUSY_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+/// Rate limit of per-connection logs, per tunnel: within one window, the
+/// first refusal ("too many connections") and the first few failures
+/// (handshake, channel open) are logged; the rest are counted and reported
+/// in one line (a flood would otherwise evict useful logs and make the UIs
+/// lag behind the event bus).
+const LOG_WINDOW: Duration = Duration::from_secs(1);
+const REFUSALS_LOGGED_PER_WINDOW: u32 = 1;
+const FAILURES_LOGGED_PER_WINDOW: u32 = 5;
 
 /// `[bind_address:]port`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,15 +152,25 @@ impl ForwardSpec {
     }
 
     /// Parses OpenSSH `DynamicForward` / `-D` syntax: `[bind_address:]port`
-    /// (IPv6 bind addresses in brackets). Like `-L`, the bind address
-    /// defaults to `localhost`; empty or `*` means every IPv4 interface.
+    /// (IPv6 bind addresses in brackets), or OpenSSH's alternative
+    /// `bind_address/port` (which needs no brackets: `::1/1080`). Like `-L`,
+    /// the bind address defaults to `localhost`; empty or `*` means every
+    /// IPv4 interface.
     pub fn parse_dynamic(input: &str) -> Result<Self, ForwardParseError> {
         let text = input.trim();
         let err = |reason| ForwardParseError {
             input: text.to_owned(),
             reason,
         };
-        let parts = split_colons(text);
+        let parts = match text.split_once('/') {
+            Some((host, port)) => {
+                if port.contains('/') || host.contains(['[', ']']) {
+                    return Err(err("expected [bind:]port, e.g. 1080"));
+                }
+                vec![host.to_owned(), port.to_owned()]
+            }
+            None => split_colons(text),
+        };
         let (host, port) = match parts.as_slice() {
             [port] => ("localhost", port),
             [host, port] => (host.as_str(), port),
@@ -405,6 +452,114 @@ async fn bind_all(
     Ok(listeners)
 }
 
+/// Per-connection log lines of one tunnel, rate-limited ([`LOG_WINDOW`]).
+#[derive(Debug)]
+struct Throttle {
+    /// Lines logged per window; the rest are counted.
+    per_window: u32,
+    /// How the counted lines are reported, e.g. "connections refused: too
+    /// many connections" (prefixed with their number).
+    summary: &'static str,
+    state: Mutex<ThrottleState>,
+}
+
+#[derive(Debug, Default)]
+struct ThrottleState {
+    window_start: Option<tokio::time::Instant>,
+    logged: u32,
+    suppressed: u64,
+}
+
+impl Throttle {
+    fn new(per_window: u32, summary: &'static str) -> Self {
+        Self {
+            per_window,
+            summary,
+            state: Mutex::new(ThrottleState::default()),
+        }
+    }
+
+    /// Logs `message` (built only when it is logged) as a warning, or counts
+    /// it once this window's quota is used.
+    fn warn(&self, ctx: &SessionCtx, message: impl FnOnce() -> String) {
+        let now = tokio::time::Instant::now();
+        let (log_it, report) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut report = 0;
+            if state
+                .window_start
+                .is_none_or(|start| now.duration_since(start) >= LOG_WINDOW)
+            {
+                report = std::mem::take(&mut state.suppressed);
+                state.window_start = Some(now);
+                state.logged = 0;
+            }
+            if state.logged < self.per_window {
+                state.logged = state.logged.saturating_add(1);
+                (true, report)
+            } else {
+                state.suppressed = state.suppressed.saturating_add(1);
+                (false, report)
+            }
+        };
+        self.report(ctx, report);
+        if log_it {
+            ctx.log(LogLevel::Warn, "tunnel", message());
+        }
+    }
+
+    /// Reports what is still counted (when the tunnel ends).
+    fn flush(&self, ctx: &SessionCtx) {
+        let report = std::mem::take(
+            &mut self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .suppressed,
+        );
+        self.report(ctx, report);
+    }
+
+    fn report(&self, ctx: &SessionCtx, count: u64) {
+        if count > 0 {
+            ctx.log(
+                LogLevel::Warn,
+                "tunnel",
+                format!("{count} {}", self.summary),
+            );
+        }
+    }
+}
+
+/// Rate-limited logs shared by a listening tunnel and its connections.
+#[derive(Debug)]
+struct ListenerLogs {
+    /// "too many connections"
+    refusals: Throttle,
+    /// SOCKS handshakes and channel opens that failed.
+    failures: Throttle,
+}
+
+impl ListenerLogs {
+    fn new(flag: &str) -> Self {
+        let (refused, failed) = if flag == "-D" {
+            (
+                "connections refused (-D): too many connections",
+                "more -D connection failures (not logged one by one)",
+            )
+        } else {
+            (
+                "connections refused (-L): too many connections",
+                "more -L connection failures (not logged one by one)",
+            )
+        };
+        Self {
+            refusals: Throttle::new(REFUSALS_LOGGED_PER_WINDOW, refused),
+            failures: Throttle::new(FAILURES_LOGGED_PER_WINDOW, failed),
+        }
+    }
+}
+
 /// `-L` (`target` set) or `-D` (`None`: each client names its target over
 /// SOCKS5): listens, then serves every accepted connection on its own task.
 async fn run_listener(
@@ -432,6 +587,8 @@ async fn run_listener(
     emit(ctx, id, TunnelEvent::Listening { bind: shown });
 
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let busy_slots = Arc::new(Semaphore::new(BUSY_REPLY_SLOTS));
+    let logs = Arc::new(ListenerLogs::new(flag));
     let (accepted_tx, mut accepted) = tokio::sync::mpsc::channel::<(TcpStream, SocketAddr)>(16);
     for listener in listeners {
         let tx = accepted_tx.clone();
@@ -459,18 +616,23 @@ async fn run_listener(
     loop {
         let (socket, peer) = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Ok(()),
+            () = cancel.cancelled() => break,
             next = accepted.recv() => match next {
                 Some(conn) => conn,
-                None => return Ok(()),
+                None => break,
             },
         };
         let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
-            ctx.log(
-                LogLevel::Warn,
-                "tunnel",
-                format!("{peer} refused: too many connections"),
-            );
+            logs.refusals.warn(ctx, || {
+                format!("{flag} {peer} refused: too many connections")
+            });
+            // A SOCKS client is told why (bounded: its own few slots, a
+            // short timeout); anything else is closed bare.
+            if target.is_none()
+                && let Ok(slot) = Arc::clone(&busy_slots).try_acquire_owned()
+            {
+                tokio::spawn(refuse_busy(socket, slot, cancel.child_token()));
+            }
             continue;
         };
         match target {
@@ -481,6 +643,7 @@ async fn run_listener(
                 peer,
                 socket,
                 permit,
+                Arc::clone(&logs),
                 cancel.child_token(),
             )),
             None => tokio::spawn(serve_dynamic(
@@ -489,59 +652,125 @@ async fn run_listener(
                 peer,
                 socket,
                 permit,
+                Arc::clone(&logs),
                 cancel.child_token(),
             )),
         };
     }
+    logs.refusals.flush(ctx);
+    logs.failures.flush(ctx);
+    Ok(())
+}
+
+/// How a `direct-tcpip` open ended, as seen by the connection that asked.
+enum Opened {
+    Channel(Channel<Msg>),
+    Refused(russh::Error),
+    TimedOut,
+    Cancelled,
+}
+
+/// Opens `direct-tcpip` to `target`, waiting at most the session's
+/// `ConnectTimeout` and never past `cancel`.
+///
+/// russh registers a channel when its confirmation arrives, even if the
+/// future that asked was dropped, and nothing would ever close it. So the
+/// open runs on its own task, which is never dropped mid-flight: when the
+/// caller gives up, a confirmation arriving later (within [`REAP_WINDOW`]) is
+/// closed at once.
+async fn open_direct_tcpip(
+    attached: &Attached,
+    target: &Endpoint,
+    peer: SocketAddr,
+    cancel: &CancellationToken,
+) -> Opened {
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let handle = Arc::clone(&attached.handle);
+    let (host, port) = (target.host.clone(), u32::from(target.port));
+    let (origin, origin_port) = (peer.ip().to_string(), u32::from(peer.port()));
+    tokio::spawn(async move {
+        let opening = handle.channel_open_direct_tcpip(host, port, origin, origin_port);
+        let Ok(result) = tokio::time::timeout(REAP_WINDOW, opening).await else {
+            return;
+        };
+        // The caller gave up: close what the server just opened.
+        if let Err(Ok(channel)) = tx.send(result) {
+            let _ = channel.close().await;
+        }
+    });
+    let limit = attached.ctx.channel_open_timeout();
+    let outcome = tokio::select! {
+        biased;
+        () = cancel.cancelled() => None,
+        r = tokio::time::timeout(limit, &mut rx) => r.ok(),
+    };
+    match outcome {
+        Some(Ok(Ok(channel))) => Opened::Channel(channel),
+        Some(Ok(Err(e))) => Opened::Refused(e),
+        // The opening task ended without an answer (session gone).
+        Some(Err(_)) => Opened::Refused(russh::Error::Disconnect),
+        None => {
+            // From here on the opening task sees the closed receiver and
+            // closes a late channel itself; one that arrived just before is
+            // closed here.
+            rx.close();
+            if let Ok(Ok(channel)) = rx.try_recv() {
+                tokio::spawn(async move {
+                    let _ = channel.close().await;
+                });
+            }
+            if cancel.is_cancelled() {
+                Opened::Cancelled
+            } else {
+                Opened::TimedOut
+            }
+        }
+    }
 }
 
 /// One `-L` connection: opens `direct-tcpip` to the target, then pipes.
+#[allow(clippy::too_many_arguments)] // one connection's whole context, spawned as is
 async fn serve_local(
     attached: Attached,
     id: TunnelId,
     target: Endpoint,
     peer: SocketAddr,
     socket: TcpStream,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: OwnedSemaphorePermit,
+    logs: Arc<ListenerLogs>,
     cancel: CancellationToken,
 ) {
     let ctx = &attached.ctx;
-    let opened = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        attached.handle.channel_open_direct_tcpip(
-            target.host.clone(),
-            u32::from(target.port),
-            peer.ip().to_string(),
-            u32::from(peer.port()),
-        ),
-    )
-    .await;
-    let channel = match opened {
-        Ok(Ok(channel)) => channel,
-        Ok(Err(e)) => {
-            ctx.log(LogLevel::Warn, "tunnel", format!("{peer} → {target}: {e}"));
+    let channel = match open_direct_tcpip(&attached, &target, peer, &cancel).await {
+        Opened::Channel(channel) => channel,
+        Opened::Refused(e) => {
+            logs.failures
+                .warn(ctx, || format!("-L {peer} → {target}: {e}"));
             return;
         }
-        Err(_) => {
-            ctx.log(
-                LogLevel::Warn,
-                "tunnel",
-                format!("{peer} → {target}: timed out"),
-            );
+        Opened::TimedOut => {
+            logs.failures
+                .warn(ctx, || format!("-L {peer} → {target}: timed out"));
             return;
         }
+        Opened::Cancelled => return,
     };
     pipe(ctx, id, peer.to_string(), channel, socket, &cancel).await;
 }
 
 /// One `-D` connection: SOCKS5 handshake (bounded in time), `direct-tcpip`
 /// to the destination the client named, the matching reply, then pipes.
+///
+/// Destinations are browsing history: a connection that succeeds is not
+/// logged with its destination (the `ConnectionOpened` event names the
+/// local peer only); failures are, so they can be diagnosed.
 async fn serve_dynamic(
     attached: Attached,
     id: TunnelId,
     peer: SocketAddr,
     mut socket: TcpStream,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: OwnedSemaphorePermit,
+    logs: Arc<ListenerLogs>,
     cancel: CancellationToken,
 ) {
     use crate::socks::{Reply, SocksError};
@@ -557,62 +786,100 @@ async fn serve_dynamic(
     let target = match negotiated {
         Ok(target) => target,
         Err(e) => {
-            ctx.log(LogLevel::Warn, "tunnel", format!("-D {peer}: {e}"));
+            logs.failures.warn(ctx, || format!("-D {peer}: {e}"));
             if !matches!(e, SocksError::Timeout) {
                 close_gently(&mut socket, &cancel).await;
             }
             return;
         }
     };
-    // Named by a local program: shown in logs, so made display-safe.
-    let shown = format!(
-        "{}:{}",
-        crate::sftp::display_safe(&target.host, 255),
-        target.port
-    );
-    let opened = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return,
-        r = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            attached.handle.channel_open_direct_tcpip(
-                target.host.clone(),
-                u32::from(target.port),
-                peer.ip().to_string(),
-                u32::from(peer.port()),
-            ),
-        ) => r,
-    };
-    let refusal = match opened {
-        Ok(Ok(channel)) => {
+    let refusal = match open_direct_tcpip(&attached, &target, peer, &cancel).await {
+        Opened::Channel(channel) => {
             if crate::socks::reply(&mut socket, Reply::Succeeded)
                 .await
                 .is_ok()
             {
-                ctx.log(LogLevel::Debug, "tunnel", format!("-D {peer} → {shown}"));
                 pipe(ctx, id, peer.to_string(), channel, socket, &cancel).await;
+            } else {
+                // The client left before the answer: `Channel` does not
+                // close itself when dropped.
+                let _ = channel.close().await;
             }
             return;
         }
-        Ok(Err(e)) => {
-            ctx.log(
-                LogLevel::Warn,
-                "tunnel",
-                format!("-D {peer} → {shown}: {e}"),
-            );
+        Opened::Refused(e) => {
+            let why = refusal_reason(&target, &e);
+            logs.failures.warn(ctx, || {
+                format!("-D {peer} → {}: {why}", shown_target(&target))
+            });
             socks_reply_for(&e)
         }
-        Err(_) => {
-            ctx.log(
-                LogLevel::Warn,
-                "tunnel",
-                format!("-D {peer} → {shown}: timed out"),
-            );
+        Opened::TimedOut => {
+            logs.failures.warn(ctx, || {
+                format!("-D {peer} → {}: timed out", shown_target(&target))
+            });
             Reply::HostUnreachable
         }
+        Opened::Cancelled => return,
     };
     // Best effort: the client may be gone already.
     if crate::socks::reply(&mut socket, refusal).await.is_ok() {
+        close_gently(&mut socket, &cancel).await;
+    }
+}
+
+/// A SOCKS destination for logs: named by a local program, so made
+/// display-safe; IPv6 literals in brackets.
+fn shown_target(target: &Endpoint) -> Endpoint {
+    Endpoint {
+        host: crate::sftp::display_safe(&target.host, 255).into_owned(),
+        port: target.port,
+    }
+}
+
+/// Why the server refused a `-D` destination, for the log. sshd reports a
+/// closed port and a name it cannot resolve alike (`ConnectFailed`).
+fn refusal_reason(target: &Endpoint, error: &russh::Error) -> String {
+    match error {
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed) => {
+            if target.host.parse::<std::net::IpAddr>().is_ok() {
+                "refused or unreachable from the server".to_owned()
+            } else {
+                "refused or unresolvable on the server".to_owned()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Answers a SOCKS client that arrived while the tunnel is full: the
+/// handshake goes on until the request, which gets "general failure", so
+/// the client reports an error instead of a dropped connection.
+async fn refuse_busy(
+    mut socket: TcpStream,
+    _slot: OwnedSemaphorePermit,
+    cancel: CancellationToken,
+) {
+    use crate::socks::{Reply, SocksError};
+
+    let refuse = async {
+        crate::socks::negotiate(&mut socket).await?;
+        crate::socks::reply(&mut socket, Reply::GeneralFailure).await?;
+        Ok::<_, SocksError>(())
+    };
+    let answered = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return,
+        r = tokio::time::timeout(BUSY_REPLY_TIMEOUT, refuse) => r,
+    };
+    // Answered (refused after the request, or during the handshake):
+    // close so the client reads the reply. Timeouts and I/O errors: bare.
+    let replied = match answered {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => !matches!(e, SocksError::Io(_)),
+        Err(_) => false,
+    };
+    if replied {
         close_gently(&mut socket, &cancel).await;
     }
 }
@@ -842,10 +1109,104 @@ pub(crate) fn serve_forwarded(
     });
 }
 
+/// Bytes from the server buffered towards local tunnel peers, for one
+/// session ([`SESSION_BUFFER_BUDGET`], shared by all its tunnels).
+///
+/// russh reopens a channel's window when data is *received*, not when it is
+/// consumed, and serves every channel from one loop that must never wait
+/// on a local peer: the only backpressure left is this budget. While it
+/// lasts, a paused reader keeps its connection; once a chunk cannot be
+/// reserved, the session loop is waiting, and each peer that accepted
+/// nothing for the stall limit is cut to free its share.
+#[derive(Debug, Clone)]
+pub(crate) struct ForwardBudget {
+    bytes: Arc<Semaphore>,
+    /// Pipes waiting for budget right now.
+    starved: Arc<AtomicUsize>,
+}
+
+impl Default for ForwardBudget {
+    fn default() -> Self {
+        Self {
+            bytes: Arc::new(Semaphore::new(SESSION_BUFFER_BUDGET)),
+            starved: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl ForwardBudget {
+    /// Reserves room for a chunk of `len` bytes, waiting while the budget is
+    /// exhausted. `None` once the budget is gone (never closed in practice).
+    async fn reserve(&self, len: usize) -> Option<OwnedSemaphorePermit> {
+        let charge = len.clamp(MIN_CHUNK_CHARGE, SESSION_BUFFER_BUDGET);
+        let charge = u32::try_from(charge).unwrap_or(u32::MAX);
+        if let Ok(permit) = Arc::clone(&self.bytes).try_acquire_many_owned(charge) {
+            return Some(permit);
+        }
+        let _starving = Starving::new(&self.starved);
+        Arc::clone(&self.bytes)
+            .acquire_many_owned(charge)
+            .await
+            .ok()
+    }
+
+    /// True while some pipe waits for budget (so russh's loop is waiting).
+    fn exhausted(&self) -> bool {
+        self.starved.load(Ordering::Relaxed) > 0
+    }
+}
+
+/// Counts a pipe as starved for as long as it lives (cancellation included).
+struct Starving<'a>(&'a AtomicUsize);
+
+impl<'a> Starving<'a> {
+    fn new(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for Starving<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Writes `chunk` to the local peer. A peer that accepts nothing for
+/// `stall` is cut only if the session's budget is exhausted meanwhile:
+/// otherwise it is merely paused, and its data waits in the budget.
+async fn write_or_stall(
+    peer: &mut tokio::net::tcp::OwnedWriteHalf,
+    mut chunk: &[u8],
+    stall: Duration,
+    budget: &ForwardBudget,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    while !chunk.is_empty() {
+        // `write` on a TCP stream is cancel-safe: a timed-out attempt wrote
+        // nothing.
+        match tokio::time::timeout(stall, peer.write(chunk)).await {
+            Ok(Ok(0)) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(Ok(n)) => chunk = chunk.get(n..).unwrap_or_default(),
+            Ok(Err(e)) => return Err(e),
+            Err(_) if budget.exhausted() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the local peer stopped reading",
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Copies both ways until both sides are done, the tunnel stops, or the
-/// local peer stalls. SSH → peer data goes through a bounded queue drained
-/// by its own task, so russh's session loop never waits on a slow peer for
-/// more than the session's [`stall_limit`].
+/// local peer stalls. SSH → peer data is read at once and queued within the
+/// session's [`ForwardBudget`], drained by its own task, so russh's session
+/// loop never waits on a slow peer for more than the session's
+/// [`stall_limit`] (and only once the budget is exhausted).
 async fn pipe(
     ctx: &SessionCtx,
     id: TunnelId,
@@ -863,8 +1224,12 @@ async fn pipe(
     );
     let (mut ssh_read, mut ssh_write) = tokio::io::split(channel.into_stream());
     let (mut peer_read, mut peer_write) = socket.into_split();
-    let (queue, mut queued) = tokio::sync::mpsc::channel::<bytes::Bytes>(PIPE_QUEUE);
+    // Bounded in bytes by the budget; the chunk count never limits first.
+    let (queue, mut queued) =
+        tokio::sync::mpsc::channel::<(bytes::Bytes, OwnedSemaphorePermit)>(MAX_QUEUED_CHUNKS);
     let stall = ctx.stall_limit();
+    let budget = ctx.forward_budget.clone();
+    let reserve = ctx.forward_budget.clone();
 
     let from_ssh = async move {
         loop {
@@ -872,21 +1237,18 @@ async fn pipe(
             if ssh_read.read_buf(&mut buf).await? == 0 {
                 return Ok::<_, std::io::Error>(());
             }
-            match tokio::time::timeout(stall, queue.send(buf.freeze())).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Ok(()),
-                Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "the local peer stopped reading",
-                    ));
-                }
+            let Some(permit) = reserve.reserve(buf.len()).await else {
+                return Ok(());
+            };
+            if queue.send((buf.freeze(), permit)).await.is_err() {
+                return Ok(());
             }
         }
     };
     let to_peer = async move {
-        while let Some(chunk) = queued.recv().await {
-            peer_write.write_all(&chunk).await?;
+        // The permit is released once its chunk is handed to the peer.
+        while let Some((chunk, _permit)) = queued.recv().await {
+            write_or_stall(&mut peer_write, &chunk, stall, &budget).await?;
         }
         peer_write.shutdown().await
     };
@@ -985,6 +1347,32 @@ mod tests {
             dynamic("localhost", 0),
             "ephemeral port"
         );
+        // OpenSSH's `bind/port` form (IPv6 needs no brackets there).
+        assert_eq!(
+            ForwardSpec::parse_dynamic("127.0.0.1/1080").unwrap(),
+            dynamic("127.0.0.1", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_cli("-D ::1/1080").unwrap(),
+            dynamic("::1", 1080)
+        );
+        assert_eq!(
+            ForwardSpec::parse_dynamic("localhost/9050").unwrap(),
+            dynamic("localhost", 9050)
+        );
+        assert_eq!(
+            ForwardSpec::parse_dynamic("*/1080").unwrap(),
+            dynamic("0.0.0.0", 1080)
+        );
+        for bad in [
+            "127.0.0.1/",
+            "127.0.0.1/1080/2",
+            "[::1]/1080",
+            "a b/1080",
+            "host/port",
+        ] {
+            assert!(ForwardSpec::parse_dynamic(bad).is_err(), "{bad:?}");
+        }
         for bad in [
             "",
             "-D",
@@ -1018,6 +1406,81 @@ mod tests {
             json,
             r#"{"kind":"dynamic","bind":{"host":"localhost","port":1080}}"#
         );
+    }
+
+    #[test]
+    fn socks_failures_are_logged_readably() {
+        assert_eq!(
+            shown_target(&ep("2001:db8::1", 443)).to_string(),
+            "[2001:db8::1]:443"
+        );
+        let hostile = shown_target(&ep("db\u{202e}.lan", 80)).to_string();
+        assert!(!hostile.contains('\u{202e}') && hostile.ends_with(".lan:80"));
+        let connect_failed = russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed);
+        assert_eq!(
+            refusal_reason(&ep("db.internal", 5432), &connect_failed),
+            "refused or unresolvable on the server"
+        );
+        assert_eq!(
+            refusal_reason(&ep("::1", 5432), &connect_failed),
+            "refused or unreachable from the server"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_throttle_counts_beyond_its_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::Engine::new(crate::EngineConfig {
+            paths: crate::store::Paths::rooted(dir.path()),
+            local_user: "alice".into(),
+            event_capacity: 16,
+            secrets: Arc::new(crate::secrets::MemoryStore::default()),
+            agent_socket: None,
+            connect_timeout: crate::engine::DEFAULT_CONNECT_TIMEOUT,
+            keepalive: crate::engine::DEFAULT_KEEPALIVE,
+        });
+        let ring = Arc::new(Mutex::new(crate::logs::LogRing::new(16)));
+        let ctx = SessionCtx::new(
+            engine,
+            SessionId::next(),
+            CancellationToken::new(),
+            Arc::clone(&ring),
+        );
+        let throttle = Throttle::new(2, "dropped");
+        let mut built = 0;
+        for _ in 0..10 {
+            throttle.warn(&ctx, || {
+                built += 1;
+                "line".to_owned()
+            });
+        }
+        assert_eq!(built, 2, "messages beyond the quota are not even built");
+        throttle.flush(&ctx);
+        let messages: Vec<String> = ring
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l.message.clone())
+            .collect();
+        assert_eq!(messages, ["line", "line", "8 dropped"]);
+    }
+
+    #[tokio::test]
+    async fn budget_reports_starvation_while_waiting() {
+        let budget = ForwardBudget::default();
+        let all = budget.reserve(SESSION_BUFFER_BUDGET).await.unwrap();
+        assert!(!budget.exhausted());
+        let waiting = budget.reserve(1);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert!(budget.exhausted(), "a pipe waits for budget");
+        drop(all);
+        assert!(waiting.await.is_some());
+        assert!(!budget.exhausted());
     }
 
     #[test]

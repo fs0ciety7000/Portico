@@ -685,26 +685,42 @@ async fn openssh_interop() {
         "the stall guard should have fired"
     );
 
-    // 13. Phase 5: -D (SOCKS5) through OpenSSH. A SOCKS5 client written
-    // here asks for a name (resolved by sshd) and for a closed port, then
-    // curl, when installed, fetches a page from a local HTTP server.
-    socks_through_openssh(&mut env, id, echo_port).await;
-
     // 12. Phase 3: generate a key in Portico, install it with copy-id over
     // an authenticated session, log in with it alone, manage it in a real
     // ssh-agent.
     copy_id_and_agent(&sshd, port, &user).await;
+
+    // 13. Phase 5: -D (SOCKS5) through OpenSSH on the session of scenario 9:
+    // a SOCKS5 client written here asks for a name and an IPv4 address (with
+    // pipelined data) and for a closed port, then curl, when installed,
+    // fetches a page from a local HTTP server and is refused as SOCKS4a.
+    socks_through_openssh(&mut env, id, echo_port).await;
 }
 
-/// SOCKS5 CONNECT by domain name; returns the reply code and the stream.
-async fn socks5_connect(proxy: u16, name: &str, port: u16) -> (u8, tokio::net::TcpStream) {
+/// SOCKS5 CONNECT to `host` (IPv4 address → ATYP 1, else a domain name →
+/// ATYP 3), greeting, request and `early` data sent in one write; returns
+/// the reply code and the stream.
+async fn socks5_connect_with(
+    proxy: u16,
+    host: &str,
+    port: u16,
+    early: &[u8],
+) -> (u8, tokio::net::TcpStream) {
     let mut s = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
         .await
         .unwrap();
-    let mut hello = vec![5, 1, 0, 5, 1, 0, 3, u8::try_from(name.len()).unwrap()];
-    hello.extend(name.as_bytes());
+    let mut hello = vec![5, 1, 0, 5, 1, 0];
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        hello.push(1);
+        hello.extend(ip.octets());
+    } else {
+        hello.extend([3, u8::try_from(host.len()).unwrap()]);
+        hello.extend(host.as_bytes());
+    }
     hello.extend(port.to_be_bytes());
-    // Greeting and request pipelined, as curl does not but some clients do.
+    hello.extend(early);
+    // Greeting, request (and data) pipelined, as curl does not but some
+    // clients do.
     s.write_all(&hello).await.unwrap();
     let mut answer = [0_u8; 12];
     tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut answer))
@@ -715,6 +731,16 @@ async fn socks5_connect(proxy: u16, name: &str, port: u16) -> (u8, tokio::net::T
     (answer[3], s)
 }
 
+async fn socks5_connect(proxy: u16, host: &str, port: u16) -> (u8, tokio::net::TcpStream) {
+    socks5_connect_with(proxy, host, port, b"").await
+}
+
+/// Scenario 13. What sshd does with SOCKS destinations: a name, an IPv4
+/// address, data pipelined with the handshake, a closed port; curl both
+/// ways (SOCKS5 with remote names, SOCKS 4a refused). That names are never
+/// resolved locally is proven by the in-process tests (the fixture records
+/// what reached the server); here sshd resolving `localhost` itself is
+/// only consistent with it.
 async fn socks_through_openssh(env: &mut Env, id: portico_core::ids::SessionId, echo_port: u16) {
     let spec = ForwardSpec::Dynamic {
         bind: Endpoint {
@@ -749,12 +775,35 @@ async fn socks_through_openssh(env: &mut Env, id: portico_core::ids::SessionId, 
     assert_eq!(&buf, b"via socks");
     drop(s);
 
+    // ATYP 1 (IPv4), with data sent before the reply in the same write.
+    let (code, mut s) = socks5_connect_with(proxy, "127.0.0.1", echo_port, b"ping").await;
+    assert_eq!(code, 0, "CONNECT 127.0.0.1 through sshd");
+    let mut buf = [0_u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf))
+        .await
+        .expect("pipelined data echoed")
+        .unwrap();
+    assert_eq!(&buf, b"ping");
+    drop(s);
+
     let closed = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
     let (code, _) = socks5_connect(proxy, "127.0.0.1", closed).await;
     assert_eq!(code, 0x05, "sshd's connect failure → connection refused");
+    let (code, _) = socks5_connect(proxy, "localhost", closed).await;
+    assert_eq!(code, 0x05, "by name too");
+    let logs = env.engine.session_logs(id).unwrap();
+    for expected in [
+        format!("→ 127.0.0.1:{closed}: refused or unreachable from the server"),
+        format!("→ localhost:{closed}: refused or unresolvable on the server"),
+    ] {
+        assert!(
+            logs.iter().any(|l| l.message.ends_with(&expected)),
+            "{expected}"
+        );
+    }
 
     // curl --socks5-hostname: the URL's host name goes to sshd unresolved
     // (skipped without curl: the client above covers the protocol).
@@ -777,48 +826,64 @@ async fn socks_through_openssh(env: &mut Env, id: portico_core::ids::SessionId, 
                 });
             }
         });
-        let url = format!("http://localhost:{http_port}/");
-        let socks = format!("127.0.0.1:{proxy}");
-        let out = tokio::task::spawn_blocking(move || {
-            let mut curl = Command::new("curl");
-            for var in ["http_proxy", "https_proxy", "all_proxy", "no_proxy"] {
-                curl.env_remove(var).env_remove(var.to_uppercase());
-            }
-            curl.args(["-sS", "--max-time", "10", "--noproxy", ""])
-                .args(["--socks5-hostname", &socks, &url])
-                .output()
-                .unwrap()
-        })
-        .await
-        .unwrap();
+        let curl = |flag: &'static str| {
+            let url = format!("http://localhost:{http_port}/");
+            let socks = format!("127.0.0.1:{proxy}");
+            tokio::task::spawn_blocking(move || {
+                let mut curl = Command::new("curl");
+                for var in ["http_proxy", "https_proxy", "all_proxy", "no_proxy"] {
+                    curl.env_remove(var).env_remove(var.to_uppercase());
+                }
+                curl.args(["-sS", "--max-time", "10", "--noproxy", ""])
+                    .args([flag, &socks, &url])
+                    .output()
+                    .unwrap()
+            })
+        };
+        let out = curl("--socks5-hostname").await.unwrap();
         assert!(
             out.status.success(),
             "curl: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(out.stdout, b"portico-socks");
-        // SOCKS4a is refused with its own reply: curl fails cleanly.
-        let socks = format!("127.0.0.1:{proxy}");
-        let url = format!("http://localhost:{http_port}/");
-        let out = tokio::task::spawn_blocking(move || {
-            Command::new("curl")
-                .args(["-sS", "--max-time", "10", "--noproxy", ""])
-                .args(["--socks4a", &socks, &url])
-                .output()
-                .unwrap()
-        })
-        .await
-        .unwrap();
-        assert!(!out.status.success(), "SOCKS4a must be refused");
+        // SOCKS4a is refused with its own reply, at once: curl reports a
+        // proxy error (CURLE_PROXY, 97), not a timeout.
+        let started = std::time::Instant::now();
+        let out = curl("--socks4a").await.unwrap();
+        let elapsed = started.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
         assert!(out.stdout.is_empty());
+        assert!(
+            out.status.code() == Some(97)
+                || (stderr.contains("reject") && !stderr.contains("timed out")),
+            "SOCKS4a must be refused: {:?} {stderr}",
+            out.status.code()
+        );
+        assert!(elapsed < Duration::from_secs(2), "refused in {elapsed:?}");
         let logs = env.engine.session_logs(id).unwrap();
         assert!(
             logs.iter()
-                .any(|l| l.message.ends_with(&format!("→ localhost:{http_port}"))),
-            "curl went through the SOCKS tunnel"
+                .any(|l| l.message.contains("SOCKS4 client refused")),
+            "Portico logged the SOCKS4 refusal"
         );
     }
     env.engine.stop_tunnel(tunnel).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let EngineEvent::Tunnel {
+                id: t,
+                event: TunnelEvent::Stopped,
+                ..
+            } = env.events.recv().await.unwrap()
+                && t == tunnel
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("-D stopped");
 }
 
 async fn copy_id_and_agent(sshd: &Sshd, port: u16, user: &str) {

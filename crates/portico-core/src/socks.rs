@@ -67,7 +67,7 @@ impl Reply {
 pub(crate) enum SocksError {
     #[error("not a SOCKS5 client (version byte {0:#04x})")]
     Version(u8),
-    #[error("SOCKS4 client refused: configure it for SOCKS5")]
+    #[error("SOCKS4 client refused: configure the client for SOCKS5")]
     Socks4,
     #[error("the client offers no method Portico accepts (only \"no authentication\")")]
     NoAcceptableMethod,
