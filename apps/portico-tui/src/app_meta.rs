@@ -312,7 +312,10 @@ impl App {
         // session of the selected host.
         let sessions = self.engine.sessions_with_logs();
         let from_terminal = matches!(self.focus, Focus::Terminal | Focus::Files)
-            .then(|| self.active_terminal().map(|t| t.session))
+            .then(|| {
+                self.focused_slot()
+                    .and_then(crate::app_panes::PaneSlot::session)
+            })
             .flatten();
         let host = self.selected_host().map(|h| h.alias.clone());
         let preselect = from_terminal.or_else(|| {

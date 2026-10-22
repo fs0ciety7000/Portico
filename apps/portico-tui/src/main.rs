@@ -15,6 +15,7 @@ mod action;
 mod app;
 mod app_meta;
 mod app_panels;
+mod app_panes;
 mod copy_job;
 mod debug;
 mod dialog;
@@ -26,11 +27,18 @@ mod import_cli;
 mod keydoc;
 mod keymap;
 mod keys;
+mod panes;
 mod snippets;
 mod terminal;
 mod theme;
 mod tunnels;
 mod ui;
+
+/// The in-process SSH server and engine harness of `portico-core`'s
+/// integration tests, shared so TUI tests drive real sessions (no network).
+#[cfg(test)]
+#[path = "../../../crates/portico-core/tests/support/mod.rs"]
+mod ssh_support;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;

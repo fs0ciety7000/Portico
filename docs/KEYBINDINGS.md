@@ -112,7 +112,21 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Onglet suivant | `]`, `Tab` | `prefix.next_tab` |
 | Onglet précédent | `[`, `Shift-Tab` | `prefix.prev_tab` |
 | Nouvel onglet sur le même hôte | `n` | `prefix.new_tab` |
-| Fermer l'onglet (le dernier onglet d'un hôte le déconnecte) | `w` | `prefix.close_tab` |
+| Fermer l'onglet et tous ses panneaux (un hôte qui n'a plus aucun panneau est déconnecté) | `w` | `prefix.close_tab` |
+| Diviser le panneau : nouveau panneau dessous, même hôte (même session si elle est vivante) | `"`, `-` | `prefix.split_horizontal` |
+| Diviser le panneau : nouveau panneau à droite, même hôte | `%`, `\|` | `prefix.split_vertical` |
+| Diviser vers un autre hôte (choisi dans la liste ; sa session vivante est réutilisée, sinon une connexion s'ouvre) | `S` | `prefix.split_host` |
+| Focus au panneau de gauche | `←` | `prefix.pane_left` |
+| Focus au panneau du dessous | `↓` | `prefix.pane_down` |
+| Focus au panneau du dessus | `↑` | `prefix.pane_up` |
+| Focus au panneau de droite | `→` | `prefix.pane_right` |
+| Panneau suivant (ordre de lecture, boucle) | `o` | `prefix.next_pane` |
+| Déplacer la séparation verticale vers la gauche (4 colonnes) | `Shift-←` | `prefix.resize_left` |
+| Déplacer la séparation horizontale vers le bas (2 lignes) | `Shift-↓` | `prefix.resize_down` |
+| Déplacer la séparation horizontale vers le haut (2 lignes) | `Shift-↑` | `prefix.resize_up` |
+| Déplacer la séparation verticale vers la droite (4 colonnes) | `Shift-→` | `prefix.resize_right` |
+| Fermer le panneau (son canal PTY ; le dernier panneau ferme l'onglet, le dernier panneau d'une session la déconnecte) | `x` | `prefix.close_pane` |
+| Zoom : le panneau seul dans l'onglet, ou retour à la division | `z` | `prefix.zoom_pane` |
 | Déconnecter cet hôte | `d` | `prefix.disconnect` |
 | Explorateur de fichiers (SFTP) | `f` | `prefix.files` |
 | Tunnels | `p` | `prefix.tunnels` |
@@ -134,6 +148,18 @@ Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` 
 | Remonter dans l'historique | `Shift-PgUp` | `terminal.scroll_up` |
 | Redescendre dans l'historique (toute frappe revient en bas) | `Shift-PgDn` | `terminal.scroll_down` |
 | Coller | collage du terminal hôte (bracketed paste si le programme distant l'active) | (fixe) |
+
+### TUI : panneaux
+
+Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 cellules. Les commandes sont dans la table du préfixe (`prefix.split_*`, `prefix.pane_*`, `prefix.next_pane`, `prefix.resize_*`, `prefix.close_pane`, `prefix.zoom_pane`). Seul le panneau actif reçoit les frappes, le collage et le défilement (aucune diffusion).
+
+| Action | Touches |
+|---|---|
+| Choisir l'hôte du nouveau panneau (après `Ctrl-Space S` : liste « Split onto… », recherche vide et active, rendue ensuite) | saisie pour filtrer, `↓` / `↑`, `↵` pour diviser |
+| Annuler le choix d'hôte | `Esc`, `Ctrl-C` |
+| Rouvrir un panneau dont la connexion a échoué ou s'est fermée (reconnecte au besoin ; jamais après un changement de clé hôte) | `↵` (dans le panneau) |
+
+Chaque panneau a une ligne de titre : alias, point de statut, phase et latence. Le panneau actif porte la barre d'accent, les autres sont atténués. Le zoom affiche le panneau actif seul ; changer de panneau, diviser ou fermer y met fin. Une division impossible est refusée avec un message (« A tab holds at most 8 panes », « Not enough room to split this pane »).
 
 ### TUI : édition d'un hôte
 
@@ -241,6 +267,21 @@ Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») a
 
 Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien), `Esc` annule.
 <!-- END GENERATED: tui -->
+
+### Panneaux de la TUI, en pratique
+
+Un onglet terminal se partage en panneaux, comme dans tmux, mais chaque panneau est un canal PTY de Portico :
+`Ctrl-Space %` (ou `|`) ouvre un panneau à droite, `Ctrl-Space "` (ou `-`) un panneau dessous, tous deux sur la
+session du panneau actif, donc sans nouvelle authentification. `Ctrl-Space S` ouvre la liste des hôtes
+(« Split onto… ») pour diviser vers un autre hôte : on tape son nom, `↵` choisit, `Esc` revient au panneau ; une session
+vivante vers cet hôte est réutilisée, sinon Portico s'y connecte. Le focus se déplace avec `Ctrl-Space` puis
+les flèches (`o` pour le panneau suivant), la séparation avec `Ctrl-Space` puis `Shift` + flèche, `z` zoome le
+panneau actif et `x` le ferme. Les lettres `h` et `l` du préfixe restant « Retour aux hôtes » et « Logs », les
+déplacements à la vim s'obtiennent en les réassignant dans `settings.toml` (par exemple `"prefix.home" = "0"`,
+`"prefix.debug" = "g"`, puis `"prefix.pane_left" = "h"`, `"prefix.pane_right" = "l"`, `"prefix.pane_down" = "j"`,
+`"prefix.pane_up" = "k"`). Seul le panneau actif reçoit le clavier ; fermer le dernier panneau d'une session la
+déconnecte, comme fermer le dernier onglet. Un panneau dont la connexion échoue affiche l'erreur, son hint et
+`↵ retry`.
 
 ## Dialogues
 

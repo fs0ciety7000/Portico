@@ -65,7 +65,12 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         } else {
             s.border_focus()
         })
-        .title(Line::from(Span::styled(" Hosts ", s.secondary())))
+        .title(if app.pane_pick.is_some() {
+            // `Ctrl-Space S`: the list chooses the new pane's host.
+            Line::from(Span::styled(" Split onto… ", s.accent()))
+        } else {
+            Line::from(Span::styled(" Hosts ", s.secondary()))
+        })
         .padding(Padding::horizontal(1))
         .style(s.surface());
 

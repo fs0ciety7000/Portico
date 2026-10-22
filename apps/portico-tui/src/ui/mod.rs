@@ -10,6 +10,7 @@ mod form;
 mod hosts;
 mod keys;
 mod overlays;
+mod panes;
 mod snippets;
 mod status;
 mod statusbar;
@@ -92,9 +93,8 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
             frame,
             body.inner(ratatui::layout::Margin::new(1, 0)),
         );
-    } else if let Some(view) = app.active_terminal() {
-        let focused = app.dialogs.is_empty() && app.overlay.is_none();
-        terminal::render(view, focused, s, frame, body);
+    } else if let Some(tab) = app.active_tab() {
+        panes::render(app, tab, frame, body);
         toast_zone = body.inner(ratatui::layout::Margin::new(1, 1));
     } else {
         let [sidebar, main] =
@@ -169,24 +169,9 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         None,
         app.active.is_none(),
     ));
-    for (i, view) in app.terminals.iter().enumerate() {
-        let st = status::status(app.session_by_id(view.session), s);
-        let dead = view.closed || view.ended.is_some();
-        let dot = if dead {
-            "○"
-        } else if st.busy {
-            spinner(app.tick)
-        } else {
-            "●"
-        };
-        let color = if dead { s.theme.status.idle } else { st.color };
-        let label = format!("{} {}", i + 1, fmt::truncate(&view.alias, 16));
-        tabs.push(tab_spans(
-            s,
-            &label,
-            Some((dot, color)),
-            app.active == Some(i),
-        ));
+    for (i, tab) in app.tabs.iter().enumerate() {
+        let (label, dot) = tab_label(app, i, tab);
+        tabs.push(tab_spans(s, &label, Some(dot), app.active == Some(i)));
     }
 
     // Window [first, last] around the active tab within the budget.
@@ -246,6 +231,41 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         spans.push(Span::styled(theme, s.muted()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(s.chrome()), area);
+}
+
+/// `1 web-01` (`1 web-01 (3)` with three panes) and its status dot: the
+/// tab shows its focused pane.
+fn tab_label(
+    app: &App,
+    index: usize,
+    tab: &crate::app_panes::Tab,
+) -> (String, (&'static str, portico_theme::Rgb)) {
+    use crate::app_panes::PaneSlot;
+    let s = app.styles();
+    let Some(slot) = tab.focused() else {
+        return (format!("{}", index + 1), ("○", s.theme.status.idle));
+    };
+    let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
+    let dead = match slot {
+        PaneSlot::Live(view) => view.closed || view.ended.is_some(),
+        PaneSlot::Opening { .. } => false,
+        PaneSlot::Failed { .. } => true,
+    };
+    let dot = if dead {
+        "○"
+    } else if st.busy {
+        spinner(app.tick)
+    } else {
+        "●"
+    };
+    let color = if dead { s.theme.status.idle } else { st.color };
+    let alias = fmt::truncate(slot.alias(), 16);
+    let label = if tab.len() > 1 {
+        format!("{} {alias} ({})", index + 1, tab.len())
+    } else {
+        format!("{} {alias}", index + 1)
+    };
+    (label, (dot, color))
 }
 
 fn tab_spans(

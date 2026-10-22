@@ -45,15 +45,15 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     }
 
     // Right side: `● alias · 12 ms · remote title`, only when it fits.
-    if let Some(view) = app
-        .active_terminal()
+    if let Some(slot) = app
+        .focused_slot()
         .filter(|_| matches!(app.focus, Focus::Terminal) || app.prefix)
         .filter(|_| app.focus != Focus::Files)
     {
-        let st = status::status(app.session_by_id(view.session), s);
+        let st = status::status(slot.session().and_then(|id| app.session_by_id(id)), s);
         let mut right = vec![
             Span::styled("● ", s.status(st.color)),
-            Span::styled(fmt::truncate(&view.alias, 24), s.secondary()),
+            Span::styled(fmt::truncate(slot.alias(), 24), s.secondary()),
         ];
         if let Some(rtt) = st.latency {
             let style = if st.slow {
@@ -64,7 +64,10 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             right.push(Span::styled(" · ", s.muted()));
             right.push(Span::styled(rtt, style));
         }
-        if let Some(title) = view.remote_title() {
+        if let Some(title) = slot
+            .view()
+            .and_then(crate::terminal::TerminalView::remote_title)
+        {
             right.push(Span::styled(" · ", s.muted()));
             right.push(Span::styled(fmt::truncate(&title, 32), s.muted()));
         }
@@ -120,6 +123,26 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         _ if app.prefix => {
             let mut hints = keyed(app, &["prefix.home"]);
             hints.push(("1-9".into(), "tab"));
+            // In a tab, the pane commands come first.
+            if app.active_tab().is_some() {
+                hints.extend(keyed(
+                    app,
+                    &["prefix.split_vertical", "prefix.split_horizontal"],
+                ));
+                let arrows = app.keymap.joined(&[
+                    "prefix.pane_left",
+                    "prefix.pane_down",
+                    "prefix.pane_up",
+                    "prefix.pane_right",
+                ]);
+                if !arrows.is_empty() {
+                    hints.push((arrows, "pane"));
+                }
+                hints.extend(keyed(
+                    app,
+                    &["prefix.close_pane", "prefix.zoom_pane", "prefix.split_host"],
+                ));
+            }
             hints.extend(keyed(
                 app,
                 &[
@@ -219,9 +242,26 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             ],
         ),
         Focus::Terminal => {
-            let mut hints = vec![("Ctrl-Space".to_owned(), "commands")];
+            let mut hints = Vec::new();
+            if app
+                .focused_slot()
+                .and_then(|slot| app.pane_failure(slot))
+                .is_some_and(|f| f.retry)
+            {
+                hints.push(("↵".to_owned(), "retry"));
+            }
+            hints.push(("Ctrl-Space".to_owned(), "commands"));
             hints.extend(keyed(app, &["terminal.scroll_up"]));
             return (" TERMINAL ", hints);
+        }
+        // `Ctrl-Space S`: choosing the host of a new pane.
+        Focus::Hosts | Focus::Search if app.pane_pick.is_some() => {
+            let hints = vec![
+                ("↵".to_owned(), "split onto host"),
+                ("↑↓".to_owned(), "move"),
+                ("Esc".to_owned(), "cancel"),
+            ];
+            return (" SPLIT ", hints);
         }
         Focus::Hosts => {
             let mut ids = vec!["hosts.connect"];
