@@ -188,6 +188,16 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 
 **Sortie** : deux machines partagent métadonnées et snippets via un dossier synchronisé, conflit d'édition compris.
 
+### Phase 6b : hôtes gérés par Portico 🔄 *(ADR du 2026-10-22, « Hôtes créés dans Portico »)*
+- Créer, modifier, dupliquer et supprimer des hôtes depuis la TUI et la GUI : alias, `HostName`, `User`, `Port`,
+  clé (`IdentityFile` choisie parmi les clés locales), `ProxyJump` (hôte existant), plus tags, groupe, favori et notes
+- Stockage dans `<config_dir>/hosts.conf` (fragment ssh_config de Portico), lu directement par Portico ; ligne `Include`
+  proposée pour que `ssh`, `scp` et `git` voient aussi ces hôtes. Les hôtes de `~/.ssh/config` restent en lecture seule
+- Mot de passe optionnel mémorisé dans le keyring (ou le vault), jamais dans le fichier
+
+**Sortie** : un hôte créé dans Portico s'y connecte aussitôt, sans rien éditer à la main ; une fois l'`Include` ajouté,
+`ssh <alias>` fonctionne à l'identique.
+
 ### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
 - Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
 - **Modèle de sécurité des fichiers refait avec des ACL** (équivalents de `0600`/`0700`, refus des liens), durcissement du
