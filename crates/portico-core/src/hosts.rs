@@ -317,7 +317,9 @@ pub fn normalize_tags(tags: &[String]) -> std::result::Result<Vec<String>, HostM
     Ok(out)
 }
 
-fn normalize_group(group: Option<&str>) -> std::result::Result<Option<String>, HostMetaError> {
+pub(crate) fn normalize_group(
+    group: Option<&str>,
+) -> std::result::Result<Option<String>, HostMetaError> {
     let Some(group) = group.map(str::trim).filter(|g| !g.is_empty()) else {
         return Ok(None);
     };
@@ -440,6 +442,123 @@ pub(crate) fn update_meta(path: &Path, alias: &str, change: MetaChange) -> Resul
     Ok(meta)
 }
 
+/// Metadata brought by an import (see [`crate::import`]), merged into
+/// what `hosts.toml` already holds for `alias`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportedMeta {
+    pub(crate) alias: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) group: Option<String>,
+    pub(crate) notes: Option<String>,
+}
+
+/// What [`merge_imported_meta`] changed.
+#[derive(Debug, Default)]
+pub(crate) struct MergeOutcome {
+    /// Aliases whose metadata changed, with what the next load reads.
+    pub(crate) changed: Vec<(String, HostMeta)>,
+    /// Aliases that already had [`MAX_TAGS`] tags: some imported tags were
+    /// left out.
+    pub(crate) tags_truncated: Vec<String>,
+}
+
+/// Merges imported metadata in one read-modify-write cycle (same lock,
+/// document editing and atomic write as [`update_meta`]): tags are the
+/// union of the existing and the imported ones (existing first, at most
+/// [`MAX_TAGS`]); a group or notes are only set when the alias has none,
+/// so nothing the user wrote is overwritten. Running it twice with the
+/// same input changes nothing the second time (and writes nothing).
+/// Blocking.
+pub(crate) fn merge_imported_meta(path: &Path, entries: &[ImportedMeta]) -> Result<MergeOutcome> {
+    let mut outcome = MergeOutcome::default();
+    if entries.is_empty() {
+        return Ok(outcome);
+    }
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let text = store::read_capped(path, MAX_HOSTS_FILE_BYTES)?.unwrap_or_default();
+    let mut current: HostMetaFile = store::parse_toml(path, &text)?;
+    let _ = sanitize_meta(path, &text, &mut current);
+    let mut doc = store::parse_document(path, &text)?;
+
+    for entry in entries {
+        check_alias(&entry.alias)?;
+        let mut meta = current.hosts.get(&entry.alias).cloned().unwrap_or_default();
+        let mut changes: Vec<MetaChange> = Vec::new();
+
+        let mut union = meta.tags.clone();
+        union.extend(entry.tags.iter().cloned());
+        let mut tags = match normalize_tags(&union) {
+            Ok(tags) => tags,
+            Err(HostMetaError::TooManyTags { .. }) => {
+                outcome.tags_truncated.push(entry.alias.clone());
+                let mut kept = meta.tags.clone();
+                for tag in normalize_tags_lenient(&entry.tags) {
+                    if kept.len() >= MAX_TAGS {
+                        break;
+                    }
+                    if !kept.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+                        kept.push(tag);
+                    }
+                }
+                kept
+            }
+            Err(e) => return Err(e.into()),
+        };
+        tags.truncate(MAX_TAGS);
+        if tags != meta.tags {
+            changes.push(MetaChange::Tags(tags));
+        }
+        if meta.group.is_none() {
+            let group = normalize_group(entry.group.as_deref())?;
+            if group.is_some() {
+                changes.push(MetaChange::Group(group));
+            }
+        }
+        if meta.notes.is_none() {
+            let notes = normalize_notes(entry.notes.as_deref())?;
+            if notes.is_some() {
+                changes.push(MetaChange::Notes(notes));
+            }
+        }
+        if changes.is_empty() {
+            continue;
+        }
+        let hosts = store::child_table(doc.as_table_mut(), "hosts", path)?;
+        let table = store::child_table(hosts, &entry.alias, path)?;
+        table.set_implicit(false);
+        for change in &changes {
+            match change {
+                MetaChange::Tags(tags) => {
+                    let array: toml_edit::Array = tags.iter().map(String::as_str).collect();
+                    table.insert("tags", toml_edit::value(array));
+                }
+                MetaChange::Group(Some(group)) => {
+                    table.insert("group", toml_edit::value(group.as_str()));
+                }
+                MetaChange::Notes(Some(notes)) => {
+                    table.insert("notes", toml_edit::value(notes.as_str()));
+                }
+                MetaChange::Group(None) | MetaChange::Notes(None) | MetaChange::Favorite(_) => {}
+            }
+            change.apply(&mut meta);
+        }
+        current.hosts.insert(entry.alias.clone(), meta.clone());
+        outcome.changed.push((entry.alias.clone(), meta));
+    }
+    if !outcome.changed.is_empty() {
+        store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)?;
+    }
+    Ok(outcome)
+}
+
+/// The valid tags of `tags`, normalized one by one (invalid ones skipped).
+fn normalize_tags_lenient(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .filter_map(|t| normalize_tags(std::slice::from_ref(t)).ok())
+        .flatten()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -448,6 +567,54 @@ mod tests {
 
     fn tags(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn imported_metadata_is_merged_without_overwriting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        let full: Vec<String> = (0..MAX_TAGS).map(|i| format!("t{i}")).collect();
+        let mut doc = String::from("[hosts.full]\ntags = [");
+        doc.push_str(
+            &full
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        doc.push_str("]\n[hosts.mine]\ngroup = \"Mine\"\nnotes = \"keep\"\n");
+        std::fs::write(&path, &doc).expect("write");
+        let entry = |alias: &str, tags: &[&str]| ImportedMeta {
+            alias: alias.to_owned(),
+            tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            group: Some("Prod/EU".to_owned()),
+            notes: Some("Termius: x".to_owned()),
+        };
+        let entries = [
+            entry("full", &["T1", "new"]),
+            entry("mine", &["a"]),
+            entry("fresh", &["b", "B"]),
+        ];
+        let outcome = merge_imported_meta(&path, &entries).expect("merge");
+        assert_eq!(outcome.tags_truncated, ["full"]);
+        assert_eq!(outcome.changed.len(), 3);
+        let (file, _) = load_meta(&path).expect("load");
+        let full_meta = file.hosts.get("full").expect("full");
+        assert_eq!(full_meta.tags, full, "already at the limit");
+        assert_eq!(full_meta.group.as_deref(), Some("Prod/EU"));
+        let mine = file.hosts.get("mine").expect("mine");
+        assert_eq!(
+            (mine.group.as_deref(), mine.notes.as_deref()),
+            (Some("Mine"), Some("keep"))
+        );
+        assert_eq!(mine.tags, ["a"]);
+        assert_eq!(file.hosts.get("fresh").expect("fresh").tags, ["b"]);
+
+        // Same input again: nothing changes, nothing is written.
+        let before = std::fs::read(&path).expect("read");
+        let outcome = merge_imported_meta(&path, &entries).expect("merge");
+        assert!(outcome.changed.is_empty());
+        assert_eq!(std::fs::read(&path).expect("read"), before);
     }
 
     #[test]

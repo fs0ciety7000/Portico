@@ -129,6 +129,20 @@ pub fn load_toml<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
 /// non-blocking, which closes the window where the path is swapped for a
 /// FIFO between the check and the open; the opened file is checked again.
 pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Option<String>> {
+    match read_capped_bytes(path, max)? {
+        None => Ok(None),
+        Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|e| {
+            Error::io(
+                path,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()),
+            )
+        }),
+    }
+}
+
+/// [`read_capped`] without the UTF-8 decoding: the raw bytes (callers that
+/// may hold secrets wrap them in `Zeroizing`).
+pub(crate) fn read_capped_bytes(path: &Path, max: u64) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
 
     let too_large = || Error::FileTooLarge {
@@ -165,14 +179,16 @@ pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Option<String>> {
     if meta.len() > max {
         return Err(too_large());
     }
-    let mut text = String::new();
+    // Sized up front: no reallocation leaves stray copies of the content.
+    let capacity = usize::try_from(meta.len()).unwrap_or(0).saturating_add(1);
+    let mut bytes = Vec::with_capacity(capacity);
     file.take(max.saturating_add(1))
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|e| Error::io(path, e))?;
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > max {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
         return Err(too_large());
     }
-    Ok(Some(text))
+    Ok(Some(bytes))
 }
 
 /// Writes a file that [`read_capped`] with the same `max` reads back:

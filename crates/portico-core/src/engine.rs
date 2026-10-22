@@ -1140,6 +1140,47 @@ impl Drop for WithdrawPrompt<'_> {
     }
 }
 
+// ════ Phase 5: imports (additive block) ═══════════════════════════════════
+
+impl Engine {
+    /// Reads a Termius export and returns what importing it would do.
+    /// Nothing is written (see [`crate::import`]).
+    pub async fn plan_termius_import(
+        &self,
+        path: impl Into<PathBuf>,
+        options: crate::import::ImportOptions,
+    ) -> Result<crate::import::ImportPlan> {
+        let paths = self.inner.config.paths.clone();
+        let path = path.into();
+        tokio::task::spawn_blocking(move || crate::import::termius::plan(&paths, &path, options))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
+    /// Writes `plan`: `<config_dir>/imports/termius.conf` (replaced in
+    /// full) and the metadata in `hosts.toml` (merged). Emits
+    /// [`EngineEvent::HostMeta`] for each alias whose metadata changed;
+    /// UIs reload the inventory afterwards (new aliases appear once
+    /// `~/.ssh/config` includes the file, see [`crate::import::ImportReport`]).
+    pub async fn apply_import(
+        &self,
+        plan: crate::import::ImportPlan,
+    ) -> Result<crate::import::ImportReport> {
+        let paths = self.inner.config.paths.clone();
+        let now = time::OffsetDateTime::now_utc();
+        let (report, changed) =
+            tokio::task::spawn_blocking(move || crate::import::apply(&paths, &plan, now))
+                .await
+                .map_err(|_| Error::EngineClosed)??;
+        for (alias, meta) in changed {
+            self.emit(EngineEvent::HostMeta { alias, meta });
+        }
+        Ok(report)
+    }
+}
+
+// ════ end Phase 5 ════════════════════════════════════════════════════════
+
 #[cfg(test)]
 mod tests {
     use super::*;
