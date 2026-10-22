@@ -146,7 +146,7 @@ avant la première release publique : la re-mesure du CPU au repos de la GUI (`b
 Mêmes règles que pour le MVP : une phase n'est close qu'après `agent-security` (et `agent-design-review` si elle
 touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
 
-### Phase 5 : gains rapides et distribution ⏳ *(Opus pour le core, Sonnet pour l'UI)*
+### Phase 5 : gains rapides et distribution ✅ *(code livré ; sortie à confirmer sur une vraie release et un vrai export)* *(Opus pour le core, Sonnet pour l'UI)*
 - `-D` (SOCKS5) dans `forward/` : SOCKS5 sans authentification (CONNECT, IPv4/IPv6/domaine), écoute sur `localhost`
   par défaut, écoute exposée sur confirmation armée, panneau Tunnels des deux UIs ; `DynamicForward` de `ssh_config` proposé
   ✅ *(livré : core, TUI, GUI ; `curl --socks5-hostname` vérifié contre OpenSSH, interop scénario 13 ; GUI vérifiée en mode démo
@@ -166,6 +166,10 @@ touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
 
 **Sortie** : `curl --socks5-hostname localhost:1080` passe par un hôte via Portico (les deux UIs) ; `brew install` et
 l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Termius de test donne les mêmes hôtes dans Portico.
+
+État de la sortie (2026-10-22) : `curl --socks5-hostname` ✅ (interop OpenSSH, TUI ; GUI en mode démo). En attente du
+propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première release taguée) ; import d'un vrai export Termius
+(fixtures synthétiques seulement à ce jour).
 
 ### Phase 6 : terminal ⏳
 - **Split panes** : divisions horizontales et verticales dans un onglet, focus et redimensionnement au clavier, chaque
@@ -220,10 +224,21 @@ l'installation depuis l'AUR fonctionnent sur une release taguée ; un export Ter
 | 2 SFTP / tunnels | ✅ | 146 + 12 GUI + interop (11 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, tmux 80×24 et 110×28, re-vérifiée) |
 | 3 Clés / secrets / snippets | ✅ | 245 + 21 GUI + interop (12 scénarios + 1 Gio) | ✅ (voir ci-dessous) | ✅ (captures 3 thèmes, 880–1200 px, tmux 80×24 et 110×28) |
 | 4 Finition | ✅ | 319 + 31 GUI + interop (12 scénarios) | ✅ (UIs + audit final MVP) | ✅ (captures 3 thèmes, 880–1400 px, tmux 80×24 et 110×28) |
-| 5 SOCKS5, distribution, import Termius | ⏳ | | | |
+| 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
 | 6 Split panes, asciicast | ⏳ | | | |
 | 7 Sync locale | ⏳ | | | |
 | 8 Windows | ⏳ | | | |
+
+## Revues de la phase 5 (2026-10-22)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les autres ont été traités, sauf mention.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-ssh-protocols` `-D` | 4 IMPORTANT, 4 MINOR | Canaux `direct-tcpip` confirmés en retard ou orphelins toujours fermés (`-L` et `-D`), budget d'octets de 64 Mio par session au lieu d'une coupure à 2 s (un flux en pause survit), refus SOCKS explicite quand le tunnel est plein, IPv6 entre crochets dans les logs, syntaxe `bind/port`, interop scénario 13 renforcé (SOCKS4a, ATYP IPv4, pipelining, arrêt) |
+| `agent-security` phase 5 | 2 MOYEN, 5 FAIBLE | E2E : `tauri-driver` sur ports aléatoires (RCE cross-origin reproduite sur 4444), reviewers obligatoires et tags `v*` protégés pour `distribution`, confirmation « open proxy » pour un `-D` exposé, logs limités en rafale, destinations SOCKS réussies non journalisées, `SECURITY.md` risques 11 et 12. Non fait : attestation de provenance des artefacts (couverte par l'approbation obligatoire) |
+| `agent-security` import Termius | 3 MOYEN, 4 FAIBLE | Copie utilisateur après l'`Include` détectée au réimport, ligne CSV décalée sautée (aucun mot de passe déplacé), alias en forme de nom d'hôte préfixé `termius-`, ligne `Include` recalculée à l'application, avis bornés, application tout-ou-rien, hygiène `Zeroizing` |
+| `agent-design-review` import Termius | 2 BLOQUANT, 6 IMPORTANT | Import vide refusé et remplacement annoncé (« Replaces the N hosts »), `Include` détecté par directive, `↵` et focus dans le dialogue, colonnes alignées, option de préfixe visible, étape `Include` mise en avant, kbd dans les boutons, état vide, aide TUI, CLI plus lisible |
 
 ## Revues de la phase 4 (2026-10-21)
 
