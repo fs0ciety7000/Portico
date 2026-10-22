@@ -82,7 +82,11 @@ impl App {
     /// modules).
     pub(crate) fn update_recording(&mut self, action: Action) {
         match action {
-            Action::EngineLagged => self.resync_recordings(),
+            Action::EngineLagged => {
+                self.resync_recordings();
+                // A `HostsChanged` may have been dropped with the rest.
+                self.on_hosts_changed();
+            }
             Action::ToggleRecording => self.toggle_recording(),
             // Success says nothing (falls through): the badge waits for
             // `Started`.
@@ -114,7 +118,7 @@ impl App {
                     player.feed(msg, Instant::now());
                 }
             }
-            _ => {}
+            other => self.update_hosts(other),
         }
     }
 

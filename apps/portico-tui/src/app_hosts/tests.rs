@@ -1,0 +1,571 @@
+//! Hosts created in Portico, end to end on a throwaway HOME (`Paths::rooted`
+//! through the core's test harness): add, edit, rename, delete and
+//! duplicate through the form and its keys, the read-only refusal, the
+//! `Include` banner, renders at 80×24, and one connection with a
+//! remembered password against the in-process SSH server (no network).
+
+use std::time::{Duration, Instant};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use portico_core::EngineEvent;
+use portico_core::events::SessionPhase;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use tokio::sync::broadcast;
+
+use super::*;
+use crate::dialog::ARM_DELAY;
+use crate::host_form::{HostField, READ_ONLY_HINT};
+use crate::ssh_support::{Behaviour, Env, TestServer, target_config};
+
+fn screen(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+    terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..rows)
+        .map(|y| {
+            (0..cols)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect()
+        })
+        .collect()
+}
+
+fn text(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// An app on a throwaway HOME whose `~/.ssh/config` holds `config`.
+struct Lab {
+    env: Env,
+    events: broadcast::Receiver<EngineEvent>,
+    app: App,
+}
+
+impl Lab {
+    async fn new(config: &str) -> Self {
+        let env = Env::new(config);
+        let events = env.engine.subscribe();
+        let mut app = App::new(env.engine.clone());
+        app.clipboard = false;
+        let inventory = env
+            .engine
+            .load_hosts()
+            .await
+            .map_err(|e| e.summary().message);
+        app.update(Action::HostsLoaded(inventory));
+        let mut lab = Self { env, events, app };
+        // Let the first `Include` check (if any) come back.
+        lab.settle().await;
+        lab
+    }
+
+    async fn until(&mut self, done: impl FnMut(&App) -> bool) {
+        self.app.pump_until(&mut self.events, done).await;
+    }
+
+    /// Runs queued actions and events for a short while.
+    async fn settle(&mut self) {
+        let end = Instant::now() + Duration::from_millis(150);
+        self.until(|_| Instant::now() >= end).await;
+    }
+
+    fn form_key(&mut self, code: KeyCode) {
+        self.app.update(Action::HostFormKey(key(code)));
+    }
+
+    fn type_text(&mut self, text: &str) {
+        for c in text.chars() {
+            self.form_key(KeyCode::Char(c));
+        }
+    }
+
+    fn clear_field(&mut self) {
+        self.app.update(Action::HostFormKey(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+    }
+
+    fn focus(&mut self, field: HostField) {
+        for _ in 0..16 {
+            if self
+                .app
+                .host_form
+                .as_ref()
+                .is_some_and(|f| f.focus == field)
+            {
+                return;
+            }
+            self.form_key(KeyCode::Tab);
+        }
+        panic!("no field {field:?}");
+    }
+
+    fn selected(&self) -> Option<&str> {
+        self.app.selected_host().map(|h| h.alias.as_str())
+    }
+
+    fn select(&mut self, alias: &str) {
+        self.app.update(Action::SearchClear);
+        for c in alias.chars() {
+            self.app.update(Action::SearchInput(c));
+        }
+        self.app.update(Action::BlurSearch);
+        assert_eq!(self.selected(), Some(alias));
+    }
+
+    fn host(&self, alias: &str) -> Option<&portico_core::hosts::HostEntry> {
+        self.app
+            .inventory
+            .as_ref()?
+            .hosts
+            .iter()
+            .find(|h| h.alias == alias)
+    }
+
+    fn hosts_conf(&self) -> String {
+        std::fs::read_to_string(self.env.dir.path().join("config/hosts.conf")).unwrap_or_default()
+    }
+
+    /// "Add host…" with an alias and a host name, saved; waits for the
+    /// reload that selects it.
+    async fn add(&mut self, alias: &str, hostname: &str) {
+        self.app.update(Action::AddHost);
+        self.type_text(alias);
+        self.form_key(KeyCode::Tab);
+        self.type_text(hostname);
+        self.form_key(KeyCode::Enter);
+        let alias = alias.to_owned();
+        self.until(|app| {
+            app.host_form.is_none()
+                && app.selected_host().is_some_and(|h| h.alias == alias)
+                && app.pending_select.is_none()
+        })
+        .await;
+    }
+}
+
+const USER_CONFIG: &str =
+    "Host web\n  HostName 10.0.0.1\n  User deploy\n\nHost bastion\n  HostName 10.0.0.9\n";
+
+#[tokio::test]
+async fn add_selects_the_new_host_marks_it_and_offers_the_include_line() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    // No Portico host yet: no banner.
+    assert!(!lab.app.include_banner());
+    assert!(!text(&screen(&mut lab.app, 80, 24)).contains("ssh · scp · git"));
+
+    lab.add("db", "10.0.0.5").await;
+    assert_eq!(lab.selected(), Some("db"));
+    assert_eq!(lab.host("db").map(|h| h.origin), Some(HostOrigin::Portico));
+    assert!(lab.hosts_conf().contains("Host db\n"));
+    // `~/.ssh/config` is never written.
+    assert_eq!(
+        std::fs::read_to_string(lab.env.ssh("config")).unwrap(),
+        USER_CONFIG
+    );
+    lab.until(|app| app.include.active.is_some()).await;
+    assert!(lab.app.include_banner());
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    // The list marks it, the details say where it lives.
+    assert!(lines.iter().any(|l| l.contains("db ◆")), "{shown}");
+    assert!(shown.contains("Portico · e edits"), "{shown}");
+    // The banner: the shared sentence, the exact line, never-edits, keys.
+    assert!(
+        shown.contains("To use your Portico hosts with ssh, scp"),
+        "{shown}"
+    );
+    assert!(shown.contains("Include ~/config/hosts.conf"), "{shown}");
+    assert!(shown.contains("Portico never edits that file."), "{shown}");
+    assert!(shown.contains(" y  copy"), "{shown}");
+
+    lab.app.update(Action::CopyInclude);
+    assert!(
+        lab.app
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.message.contains("copied"))
+    );
+    lab.app.update(Action::HideInclude);
+    assert!(!lab.app.include_banner());
+    assert!(!text(&screen(&mut lab.app, 80, 24)).contains("ssh · scp · git"));
+}
+
+#[tokio::test]
+async fn the_banner_goes_once_the_include_line_is_added() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    lab.add("db", "10.0.0.5").await;
+    lab.until(|app| app.include.active.is_some()).await;
+    assert!(lab.app.include_banner());
+    let line = lab.env.engine.managed_include_line();
+    std::fs::write(lab.env.ssh("config"), format!("{line}\n\n{USER_CONFIG}")).unwrap();
+    lab.app.update(Action::Reload);
+    lab.until(|app| app.include.active == Some(true)).await;
+    assert!(!lab.app.include_banner());
+    // Still a Portico host, listed once.
+    let count = lab
+        .app
+        .inventory
+        .as_ref()
+        .map_or(0, |i| i.hosts.iter().filter(|h| h.alias == "db").count());
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn edit_and_rename_keep_the_selection_on_the_host() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    lab.add("db", "10.0.0.5").await;
+    lab.app.update(Action::EditHost);
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert!(matches!(&form.mode, FormMode::Edit { original } if original == "db"));
+    // Its own values, never inherited ones.
+    assert_eq!(form.hostname, "10.0.0.5");
+    assert_eq!(form.user, "");
+    lab.clear_field();
+    lab.type_text("db-main");
+    lab.focus(HostField::User);
+    lab.type_text("postgres");
+    lab.focus(HostField::Jump);
+    lab.type_text("b");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| {
+        app.host_form.is_none() && app.selected_host().is_some_and(|h| h.alias == "db-main")
+    })
+    .await;
+    assert!(lab.host("db").is_none());
+    let conf = lab.hosts_conf();
+    assert!(conf.contains("Host db-main\n"), "{conf}");
+    assert!(conf.contains("User postgres"), "{conf}");
+    assert!(conf.contains("ProxyJump bastion"), "{conf}");
+    assert!(
+        lab.app
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.message.contains("Saved db-main"))
+    );
+}
+
+#[tokio::test]
+async fn engine_refusals_show_inline_with_their_hint() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    lab.app.update(Action::AddHost);
+    // Uppercase is refused, under the alias.
+    lab.type_text("Web");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("10.0.0.7");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.busy))
+        .await;
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert_eq!(form.focus, HostField::Alias);
+    assert!(
+        matches!(&form.error, Some((Some(HostField::Alias), e)) if e.code == "host_invalid_alias")
+    );
+    lab.clear_field();
+    lab.focus(HostField::HostName);
+    lab.clear_field();
+    lab.focus(HostField::Alias);
+    // `web` is taken by ~/.ssh/config.
+    lab.type_text("web");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("10.0.0.7");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.busy))
+        .await;
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert_eq!(form.focus, HostField::Alias);
+    assert!(
+        matches!(&form.error, Some((Some(HostField::Alias), e)) if e.code == "host_alias_taken")
+    );
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains("Pick another alias"), "{shown}");
+
+    // A bad host name goes under HostName.
+    lab.clear_field();
+    lab.type_text("api");
+    lab.focus(HostField::HostName);
+    lab.clear_field();
+    lab.type_text("-bad host");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| app.host_form.as_ref().is_some_and(|f| !f.busy))
+        .await;
+    let form = lab.app.host_form.as_ref().unwrap();
+    assert!(
+        matches!(&form.error, Some((Some(HostField::HostName), e)) if e.code == "host_invalid_hostname")
+    );
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    let field = lines.iter().position(|l| l.contains("HostName"));
+    let message = lines.iter().position(|l| l.contains("Invalid host name"));
+    assert!(field < message && message.is_some(), "{shown}");
+    assert!(shown.contains("Use a DNS name or an IP address"), "{shown}");
+    assert!(lab.hosts_conf().is_empty());
+}
+
+#[tokio::test]
+async fn ssh_config_hosts_are_read_only_and_duplicate() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    lab.select("web");
+    lab.app.update(Action::EditHost);
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    assert!(
+        matches!(
+            lab.app.host_form.as_ref().map(|f| &f.mode),
+            Some(FormMode::ReadOnly { .. })
+        ),
+        "{shown}"
+    );
+    // The shared hint, on two lines at 80 columns.
+    let joined = lines
+        .iter()
+        .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains(READ_ONLY_HINT), "{shown}");
+    assert!(READ_ONLY_HINT.starts_with("Defined in ~/.ssh/config"));
+    assert!(shown.contains("~/.ssh/config · read-only"), "{shown}");
+
+    // The engine refuses to edit it, whatever the UI does.
+    let refused = lab
+        .env
+        .engine
+        .update_host(
+            "web",
+            portico_core::managed_hosts::HostDraft {
+                alias: "web".into(),
+                hostname: "10.0.0.1".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| e.summary().code);
+    assert_eq!(refused.err().as_deref(), Some("host_read_only"));
+
+    // Delete on it: the hint, no confirmation.
+    lab.app.update(Action::CloseOverlay);
+    lab.app.update(Action::DeleteHost);
+    assert!(lab.app.dialogs.is_empty());
+    let toast = lab.app.toast.clone().unwrap();
+    assert_eq!(toast.hint.as_deref(), Some(READ_ONLY_HINT));
+
+    // `t` from the read-only view: its tags, group and notes.
+    lab.app.update(Action::EditHost);
+    lab.form_key(KeyCode::Char('t'));
+    assert_eq!(lab.app.overlay, Some(Overlay::Edit));
+    lab.app.update(Action::CloseOverlay);
+
+    // Duplicate (`D` from the list): the copy is a Portico host, selected.
+    lab.app.update(Action::DuplicateHost);
+    assert_eq!(
+        lab.app.host_form.as_ref().map(|f| f.alias.as_str()),
+        Some("web-copy")
+    );
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| {
+        app.host_form.is_none() && app.selected_host().is_some_and(|h| h.alias == "web-copy")
+    })
+    .await;
+    assert_eq!(
+        lab.host("web-copy").map(|h| h.origin),
+        Some(HostOrigin::Portico)
+    );
+    let conf = lab.hosts_conf();
+    assert!(conf.contains("HostName 10.0.0.1"), "{conf}");
+    assert!(conf.contains("User deploy"), "{conf}");
+}
+
+#[tokio::test]
+async fn delete_asks_armed_then_selects_the_neighbour() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    lab.add("db", "10.0.0.5").await;
+    lab.add("lab", "10.0.0.6").await;
+    assert!(lab.app.select_alias("db"));
+    lab.app.update(Action::DeleteHost);
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    assert!(shown.contains("Delete host db?"), "{shown}");
+    assert!(shown.contains("~/.ssh/config is not touched."), "{shown}");
+    assert!(shown.contains("any key  cancel"), "{shown}");
+    // Too soon: ignored. Then any other key cancels.
+    lab.app.update(Action::DialogKey(key(KeyCode::Char('y'))));
+    assert_eq!(lab.app.dialogs.len(), 1);
+    arm(&mut lab.app);
+    lab.app.update(Action::DialogKey(key(KeyCode::Char('n'))));
+    assert!(lab.app.dialogs.is_empty());
+    assert!(lab.host("db").is_some());
+
+    lab.app.update(Action::DeleteHost);
+    arm(&mut lab.app);
+    lab.app.update(Action::DialogKey(key(KeyCode::Char('y'))));
+    lab.until(|app| {
+        app.inventory
+            .as_ref()
+            .is_some_and(|i| !i.hosts.iter().any(|h| h.alias == "db"))
+            && app.pending_select.is_none()
+    })
+    .await;
+    assert_eq!(lab.selected(), Some("lab"));
+    assert!(!lab.hosts_conf().contains("Host db\n"));
+    assert!(
+        lab.app
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.message == "Deleted db")
+    );
+}
+
+/// The front confirmation, armed as if opened long enough ago.
+fn arm(app: &mut App) {
+    if let Some(Dialog::Confirm(c)) = app.dialogs.front_mut() {
+        c.armed = Some(
+            Instant::now()
+                .checked_sub(ARM_DELAY * 2)
+                .unwrap_or_else(Instant::now),
+        );
+    }
+}
+
+#[tokio::test]
+async fn hosts_changed_elsewhere_reloads_in_place() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    // Not the first host: a reload that lost the selection would show.
+    assert_eq!(lab.selected(), Some("web"));
+    assert!(lab.app.select_alias("bastion"));
+    // Another UI creates a host: the list reloads, `bastion` stays selected.
+    lab.env
+        .engine
+        .create_host(portico_core::managed_hosts::HostDraft {
+            alias: "api".into(),
+            hostname: "10.0.0.8".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    lab.until(|app| {
+        app.inventory
+            .as_ref()
+            .is_some_and(|i| i.hosts.iter().any(|h| h.alias == "api"))
+    })
+    .await;
+    assert_eq!(lab.selected(), Some("bastion"));
+}
+
+#[tokio::test]
+async fn renders_fit_80x24() {
+    let mut lab = Lab::new(USER_CONFIG).await;
+    // The form, empty.
+    lab.app.update(Action::AddHost);
+    lab.settle().await;
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    for needle in [
+        "Add host…",
+        "Alias",
+        "HostName",
+        "User",
+        "Port",
+        "Key",
+        "ProxyJump",
+        "‹ none ›",
+        "Tags",
+        "Group",
+        "Favorite",
+        "Notes",
+        "Password",
+        "↵  save",
+        "Portico never edits ~/.ssh/config",
+        "Esc cancel",
+    ] {
+        assert!(shown.contains(needle), "missing `{needle}`:\n{shown}");
+    }
+    assert!(lines.get(23).is_some_and(|l| l.contains("HOST")), "{shown}");
+    // The password is a fixed mask, never the text.
+    lab.focus(HostField::Password);
+    lab.type_text("hunter2");
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(
+        shown.contains("••••••••") && !shown.contains("hunter2"),
+        "{shown}"
+    );
+    assert!(shown.contains("remembered in"), "{shown}");
+    // Esc with changes: the question, in place of the keys.
+    lab.form_key(KeyCode::Esc);
+    let shown = text(&screen(&mut lab.app, 80, 24));
+    assert!(shown.contains("Discard your changes?"), "{shown}");
+    lab.form_key(KeyCode::Char('y'));
+    assert!(lab.app.host_form.is_none());
+
+    // The list with its badges.
+    lab.add("db", "10.0.0.5").await;
+    lab.until(|app| app.include.active.is_some()).await;
+    let lines = screen(&mut lab.app, 80, 24);
+    let shown = text(&lines);
+    assert!(lines.iter().any(|l| l.contains("db ◆")), "{shown}");
+    assert!(lines.iter().any(|l| l.contains("● web ")), "{shown}");
+    assert!(!lines.iter().any(|l| l.contains("web ◆")), "{shown}");
+    assert!(shown.contains(" a  add host"), "{shown}");
+}
+
+#[tokio::test]
+async fn a_remembered_password_connects_without_a_prompt() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "hunter2".into())),
+        pty_echo: true,
+        ..Behaviour::default()
+    })
+    .await;
+    // `~/.ssh/config` only knows another host.
+    let mut lab = Lab::new(&target_config("other", 1, "")).await;
+    lab.env.trust(&server);
+    lab.app.update(Action::AddHost);
+    lab.type_text("pw");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("127.0.0.1");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text("alice");
+    lab.form_key(KeyCode::Tab);
+    lab.type_text(&server.port.to_string());
+    lab.focus(HostField::Password);
+    lab.type_text("hunter2");
+    lab.form_key(KeyCode::Enter);
+    lab.until(|app| {
+        app.host_form.is_none() && app.selected_host().is_some_and(|h| h.alias == "pw")
+    })
+    .await;
+    // Never in the file.
+    assert!(!lab.hosts_conf().contains("hunter2"));
+
+    lab.app.update(Action::Connect);
+    lab.until(|app| {
+        assert!(
+            app.dialogs.is_empty(),
+            "a prompt was shown: {:?}",
+            app.dialogs
+        );
+        app.session_for("pw").is_some_and(|s| {
+            matches!(
+                s.phase,
+                SessionPhase::Connected | SessionPhase::Failed { .. }
+            )
+        })
+    })
+    .await;
+    assert_eq!(
+        lab.app.session_for("pw").map(|s| s.phase.clone()),
+        Some(SessionPhase::Connected)
+    );
+    assert_eq!(
+        server
+            .behaviour
+            .logins
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}

@@ -170,12 +170,52 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::OpenSnippets
     ),
     bind!(
+        "hosts.add",
+        Hosts,
+        ["a", "n"],
+        "add host",
+        "« Add host… » : créer un hôte Portico (dans `hosts.conf`, jamais dans `~/.ssh/config`)",
+        Action::AddHost
+    ),
+    bind!(
         "hosts.edit",
         Hosts,
         ["e"],
         "edit",
-        "Éditer tags, groupe et notes de l'hôte (`hosts.toml`)",
+        "« Edit host… » : modifier un hôte Portico ; un hôte de `~/.ssh/config` (ou importé) reste en lecture seule : la vue propose de le dupliquer (`D`) ou d'éditer ses tags, groupe et notes (`t`, `hosts.toml`)",
         Action::EditHost
+    ),
+    bind!(
+        "hosts.duplicate",
+        Hosts,
+        ["D"],
+        "duplicate",
+        "« Duplicate as Portico host… » : copie modifiable de l'hôte sélectionné, sous un nouvel alias",
+        Action::DuplicateHost
+    ),
+    bind!(
+        "hosts.delete",
+        Hosts,
+        ["delete"],
+        "delete",
+        "« Delete host » : supprimer un hôte Portico, ses métadonnées et son mot de passe mémorisé (confirmation armée : seul `y` supprime)",
+        Action::DeleteHost
+    ),
+    bind!(
+        "hosts.copy_include",
+        Hosts,
+        ["y"],
+        "copy Include",
+        "Copier (OSC 52) la ligne `Include` à ajouter en tête de `~/.ssh/config`, quand le bandeau est affiché",
+        Action::CopyInclude
+    ),
+    bind!(
+        "hosts.hide_include",
+        Hosts,
+        ["z"],
+        "hide Include",
+        "Masquer le bandeau `Include` jusqu'au prochain lancement",
+        Action::HideInclude
     ),
     bind!(
         "hosts.favorite",
@@ -902,6 +942,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                 "Keys · snippets",
             ),
             (
+                &[Id("hosts.add", 2), Id("hosts.duplicate", 1)],
+                "Add · duplicate",
+            ),
+            (
                 &[Id("hosts.edit", 1), Id("hosts.favorite", 1)],
                 "Edit · favorite",
             ),
@@ -925,7 +969,10 @@ const HELP: &[(&str, usize, HelpRows)] = &[
                 &[Id("hosts.reload", 1), Id("hosts.theme", 1)],
                 "Reload · theme",
             ),
-            (&[Id("hosts.quit", 1)], "Quit"),
+            (
+                &[Id("hosts.delete", 1), Id("hosts.quit", 1)],
+                "Delete host · quit",
+            ),
         ],
     ),
     (
@@ -981,13 +1028,13 @@ const HELP: &[(&str, usize, HelpRows)] = &[
         ],
     ),
     (
-        "Edit host",
+        "Host form",
         0,
         &[
             (&[Fixed("Tab · S-Tab")], "Next · prev field"),
-            (&[Fixed("Ctrl-S")], "Save"),
-            (&[Fixed("Ctrl-U")], "Clear field"),
-            (&[Fixed("↵")], "New line in notes"),
+            (&[Fixed("↵ · Esc")], "Save · cancel"),
+            (&[Fixed("← → Space")], "Pick key, jump"),
+            (&[Fixed("Alt-↵")], "New line in notes"),
         ],
     ),
     (
@@ -1316,6 +1363,7 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
         Overlay::Keys => Action::KeysKey,
         Overlay::Snippets => Action::SnippetsKey,
         Overlay::Edit => Action::EditKey,
+        Overlay::HostForm => Action::HostFormKey,
         Overlay::Debug => Action::DebugKey,
         Overlay::Recordings => Action::RecordingsKey,
         // Every key drives the player's controls; none goes further.
@@ -1323,6 +1371,13 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
         Overlay::Help => return None,
     };
     if ctrl && key.code == KeyCode::Char('c') {
+        // The host form asks before dropping typed changes, like `Esc`.
+        if overlay == Some(Overlay::HostForm) {
+            return Some(Action::HostFormKey(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )));
+        }
         return Some(Action::CloseOverlay);
     }
     Some(wrap(key))
@@ -1469,12 +1524,12 @@ mod tests {
         ));
         // Several keys, swapped keys: no conflict.
         let (map, ignored) = overrides(&[
-            ("hosts.down", "n down"),
+            ("hosts.down", "J down"),
             ("hosts.files", "p"),
             ("hosts.tunnels", "f"),
         ]);
         assert!(ignored.is_empty(), "{ignored:?}");
-        assert_eq!(map.shown("hosts.down", 4), "n ↓");
+        assert_eq!(map.shown("hosts.down", 4), "J ↓");
         assert_eq!(map.shown("hosts.tunnels", 1), "f");
     }
 
@@ -1624,6 +1679,67 @@ mod tests {
     }
 
     #[test]
+    fn host_commands_and_the_host_form() {
+        for (code, m) in [
+            (KeyCode::Char('a'), KeyModifiers::NONE),
+            (KeyCode::Char('n'), KeyModifiers::NONE),
+        ] {
+            assert!(matches!(
+                map(code, m, Focus::Hosts, false),
+                Some(Action::AddHost)
+            ));
+        }
+        assert!(matches!(
+            map(KeyCode::Char('D'), KeyModifiers::SHIFT, Focus::Hosts, false),
+            Some(Action::DuplicateHost)
+        ));
+        assert!(matches!(
+            map(KeyCode::Delete, KeyModifiers::NONE, Focus::Hosts, false),
+            Some(Action::DeleteHost)
+        ));
+        assert!(matches!(
+            map(KeyCode::Char('y'), KeyModifiers::NONE, Focus::Hosts, false),
+            Some(Action::CopyInclude)
+        ));
+        // Picking a pane's host: none of them.
+        let keymap = Keymap::defaults();
+        let picking = KeyContext {
+            picking: true,
+            ..cx(Focus::Hosts, None, false, false, &keymap)
+        };
+        for code in [KeyCode::Char('a'), KeyCode::Char('D'), KeyCode::Delete] {
+            assert!(map_key(key(code, KeyModifiers::NONE), picking).is_none());
+        }
+        // The form takes every key; Ctrl-C asks like Esc.
+        let form = cx(Focus::Hosts, Some(Overlay::HostForm), false, false, &keymap);
+        assert!(matches!(
+            map_key(key(KeyCode::Char('q'), KeyModifiers::NONE), form),
+            Some(Action::HostFormKey(_))
+        ));
+        let Some(Action::HostFormKey(k)) =
+            map_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL), form)
+        else {
+            panic!("ctrl-c goes to the form");
+        };
+        assert_eq!(k.code, KeyCode::Esc);
+        // No two actions of one context share a default key.
+        let defaults = Keymap::defaults();
+        for (i, a) in BINDINGS.iter().enumerate() {
+            for b in BINDINGS
+                .iter()
+                .skip(i + 1)
+                .filter(|b| b.context == a.context)
+            {
+                let shared = defaults
+                    .keys(a.id)
+                    .iter()
+                    .any(|k| defaults.keys(b.id).contains(k));
+                assert!(!shared, "{} and {} share a key", a.id, b.id);
+            }
+        }
+    }
+
+    #[test]
     fn files_and_tunnels_capture_their_keys() {
         let keymap = Keymap::defaults();
         assert!(matches!(
@@ -1694,7 +1810,15 @@ mod tests {
             "{hosts:?}"
         );
         assert!(
+            hosts.contains(&("a n · D".to_owned(), "Add · duplicate")),
+            "{hosts:?}"
+        );
+        assert!(
             hosts.contains(&("e · *".to_owned(), "Edit · favorite")),
+            "{hosts:?}"
+        );
+        assert!(
+            hosts.contains(&("Del · q".to_owned(), "Delete host · quit")),
             "{hosts:?}"
         );
         assert!(
@@ -1704,7 +1828,7 @@ mod tests {
         let defaults = help(&Keymap::defaults());
         // The logs panel and the edit form have their own sections.
         let titles: Vec<&str> = defaults.iter().map(|s| s.title).collect();
-        assert!(titles.contains(&"Session logs") && titles.contains(&"Edit host"));
+        assert!(titles.contains(&"Session logs") && titles.contains(&"Host form"));
         // Never "star": the word is "favorite" everywhere.
         assert!(
             defaults

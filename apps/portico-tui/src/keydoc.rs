@@ -38,9 +38,36 @@ const SEARCH: Panel = Panel {
     outro: "",
 };
 
+const HOST_FORM: Panel = Panel {
+    title: "TUI : hôtes créés dans Portico",
+    intro: "« Add host… » (`a` ou `n`), « Edit host… » (`e`, hôte Portico), « Duplicate as Portico host… » (`D`) et « Delete host » (`Del`) depuis la liste. Ces hôtes vivent dans le fragment `hosts.conf` de Portico ; Portico n'écrit jamais `~/.ssh/config`. Champs : alias, `HostName`, `User`, `Port`, clé (choisie parmi les clés locales découvertes, ou « none »), `ProxyJump` (un hôte existant, ou « none »), tags, groupe, favori, notes, et mot de passe facultatif, masqué, mémorisé dans le trousseau (ou le vault) ; à l'édition : `Keep`, `Change` ou `Forget`. Chaque valeur est vérifiée par le moteur : un refus s'affiche sous le champ concerné (choisi par son code d'erreur), avec son hint. Un hôte de `~/.ssh/config` (ou importé) s'ouvre en lecture seule : « Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it. » (`D` duplique, `t` édite ses tags, groupe et notes).",
+    rows: &[
+        (
+            "Champ suivant / précédent",
+            "`Tab` / `Shift-Tab`, `↓` / `↑`",
+        ),
+        (
+            "Choisir (clé, `ProxyJump`, favori, mot de passe)",
+            "`←` / `→`, `Space` ; une lettre saute au choix suivant qui commence par elle",
+        ),
+        ("Nouvelle ligne dans les notes", "`Alt-↵`"),
+        ("Enregistrer", "`↵` (ou `Ctrl-S`)"),
+        ("Vider le champ", "`Ctrl-U`"),
+        (
+            "Annuler (avec des changements : `y` les abandonne, toute autre touche revient au formulaire)",
+            "`Esc`, `Ctrl-C`",
+        ),
+        (
+            "Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime)",
+            "`Del` depuis la liste",
+        ),
+    ],
+    outro: "Après un enregistrement, la liste se recharge (`HostsChanged`) et sélectionne l'hôte. Les hôtes Portico portent `◆` dans la liste, les hôtes importés `◇` ; les détails indiquent l'origine. Tant que `~/.ssh/config` n'inclut pas `hosts.conf`, un bandeau sous les détails donne la ligne `Include` à ajouter en tête du fichier (`y` la copie, `z` masque le bandeau jusqu'au prochain lancement).",
+};
+
 const EDIT: Panel = Panel {
-    title: "TUI : édition d'un hôte",
-    intro: "« Edit <alias> » (`e` depuis la liste). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.",
+    title: "TUI : tags, groupe et notes d'un hôte en lecture seule",
+    intro: "« Edit <alias> » (`e` puis `t` sur un hôte de `~/.ssh/config` ou importé). Tags, groupe et notes vivent dans `hosts.toml` ; Portico n'écrit jamais `~/.ssh/config`. Les tags se tapent librement, séparés par des espaces ou des virgules, `#` facultatif, et s'affichent en chips ; ils sont validés dès la saisie avec les règles du moteur : le tag refusé est marqué en couleur d'erreur et la raison s'affiche sous le champ, avec son hint.",
     rows: &[
         (
             "Champ suivant / précédent",
@@ -352,6 +379,7 @@ pub(crate) fn block() -> String {
     );
     for panel in [
         &PANES,
+        &HOST_FORM,
         &EDIT,
         &DEBUG,
         &FILES,

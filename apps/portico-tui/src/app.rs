@@ -59,6 +59,9 @@ pub(crate) enum Overlay {
     Recordings,
     /// A recording being played (`App::player`).
     Player,
+    /// "Add host…", "Edit host…", "Duplicate as Portico host…"
+    /// (`App::host_form`).
+    HostForm,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -195,6 +198,13 @@ pub(crate) struct App {
     pub(crate) recordings_panel: Option<crate::recordings::RecordingsPanel>,
     /// The playback in progress, while `overlay == Some(Overlay::Player)`.
     pub(crate) player: Option<crate::player::Player>,
+    /// The host form, while `overlay == Some(Overlay::HostForm)`.
+    pub(crate) host_form: Option<crate::host_form::HostForm>,
+    /// The `Include` banner of Portico's `hosts.conf`.
+    pub(crate) include: crate::app_hosts::IncludeBanner,
+    /// Host to select once the inventory is reloaded (created, edited,
+    /// or the neighbour of a deleted one).
+    pub(crate) pending_select: Option<String>,
     search: HostSearch,
     pub(crate) tx: mpsc::UnboundedSender<Action>,
     rx: mpsc::UnboundedReceiver<Action>,
@@ -286,6 +296,9 @@ impl App {
             recording: HashMap::new(),
             recordings_panel: None,
             player: None,
+            host_form: None,
+            include: crate::app_hosts::IncludeBanner::default(),
+            pending_select: None,
             search: HostSearch::default(),
             tx,
             rx,
@@ -421,6 +434,7 @@ impl App {
                 .recordings_panel
                 .as_ref()
                 .is_some_and(crate::recordings::RecordingsPanel::busy)
+            || self.host_form.as_ref().is_some_and(|f| f.busy)
     }
 
     fn spawn_load_hosts(&self) {
@@ -505,6 +519,7 @@ impl App {
                 let warnings = inv.warnings.len();
                 self.inventory = Some(inv);
                 self.refilter();
+                self.hosts_reloaded();
                 if warnings > 0 {
                     self.notify(format!("{warnings} ssh_config warning(s)"));
                 }
@@ -649,6 +664,8 @@ impl App {
         self.edit_panel = None;
         self.debug_panel = None;
         self.recordings_panel = None;
+        // Dropping the form wipes a typed password.
+        self.host_form = None;
         // The playback ends with its panel (its reader thread stops).
         self.player = None;
         self.help.over_panel = false;
@@ -719,6 +736,12 @@ impl App {
             None if self.overlay == Some(Overlay::Edit) => {
                 if let Some(panel) = &mut self.edit_panel {
                     panel.paste(text);
+                }
+            }
+            // A password manager may paste the host's password here.
+            None if self.overlay == Some(Overlay::HostForm) => {
+                if let Some(form) = &mut self.host_form {
+                    form.paste(text);
                 }
             }
             // Other panels, the recordings list and the player included,
