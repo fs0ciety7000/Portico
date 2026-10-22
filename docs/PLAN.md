@@ -95,7 +95,7 @@ reste à démontrer manuellement.
 
 **Sortie** ✅ : en TUI contre OpenSSH réel, clé générée dans Portico (avec passphrase), installée par copy-id, vérifiée (prompt de
 passphrase de la sonde), puis reconnexion avec cette clé seule acceptée par sshd, ajout à l'agent et reconnexion depuis Portico.
-Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié en mode démo (pas encore dans l'app de bureau réelle).
+Couvert aussi par le scénario d'interop 12. En GUI : parcours complet vérifié dans l'app de bureau réelle par l'E2E (`pnpm e2e`, 2026-10-22).
 
 ## Phase 4 : finition MVP ✅ *(Opus ; revues `agent-security` ×2 et `agent-design-review`)*
 - [x] Sessions récentes (`state/recent.toml`, 50 entrées), favoris (`*` / `⌘D`), édition des tags, groupes et notes (`e`) dans
@@ -153,6 +153,8 @@ touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
   seulement)*
 - Distribution : tap **Homebrew** (formula TUI, cask GUI) et paquet **AUR** `-bin`, générés depuis les artefacts et
   checksums de la release, mis à jour par le workflow de release
+  ✅ *(gabarits et scripts de rendu dans `packaging/`, job sur release publiée, voir `docs/RELEASE.md` ; à exercer sur une
+  vraie release : dépôt du tap, compte AUR et secrets du propriétaire)*
 - Import **Termius** (après vérification du format d'export réel) : génère un fichier de config dans le dossier de Portico
   (jamais dans `~/.ssh`) et indique la ligne `Include` à ajouter soi-même ; tags et groupes importés dans `hosts.toml`.
   Aucun secret importé en clair
