@@ -511,10 +511,9 @@ async fn record_stop_list_and_play_back() {
     let all = text(&lines);
     assert!(all.contains("Record this terminal?"), "{all}");
     // The shared wording, with the folder the file goes to.
-    let folder = format!(
-        "{}/",
-        crate::ui::fmt::display_path(&lab.recordings_dir().display().to_string())
-    );
+    // Shortened like the dialog does (long temp dirs, e.g. macOS
+    // `/var/folders/…`, get a middle ellipsis).
+    let folder = super::folder_label(&lab.recordings_dir(), super::FOLDER_WIDTH);
     let Some(Dialog::Confirm(dialog)) = lab.app.dialogs.front() else {
         panic!("no confirmation")
     };
