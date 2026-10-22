@@ -5,7 +5,7 @@
 // runs it under Node. The engine validates everything; the only checks here
 // are those the IPC types need (a port must be a number) and the form's own
 // (a password to set must be typed).
-import type { ErrorSummary, Host, HostDraft, IdentityChoice, ManagedHost, PasswordChange } from "./api";
+import type { ErrorSummary, Host, HostDraft, IdentityChoice, ImportSource, ManagedHost, PasswordChange } from "./api";
 
 export type FieldName = "alias" | "hostname" | "user" | "port" | "identity" | "proxyJump" | "password" | "tags" | "group" | "notes";
 
@@ -40,9 +40,74 @@ export const PASSWORD_DESTINATION_NOTE =
   "Sent automatically to the server that answers at this address, after its host key is verified; then tied to that key.";
 
 /** True when the form sets a password (typed) or keeps the remembered one. */
-export function sendsPassword(form: HostForm, editing: boolean): boolean {
+export function sendsPassword(form: HostForm, editing: boolean, remembered = true): boolean {
   if (!editing) return form.password !== "";
-  return form.passwordMode === "keep" || (form.passwordMode === "set" && form.password !== "");
+  return (form.passwordMode === "keep" && remembered) || (form.passwordMode === "set" && form.password !== "");
+}
+
+// ── Shared wording with the TUI (phase 6b closing fixes) ────────────────
+
+/** Replaces the Keep and destination lines once HostName, User or Port changed. */
+export const DESTINATION_CHANGED_NOTE =
+  "Changing the server or user forgets the remembered password. Choose Change to set one for the new destination.";
+export const PASSWORD_REMEMBERED = "A password is remembered";
+export const NO_PASSWORD_REMEMBERED = "No password remembered";
+/** The "no key" choice of the key picker. */
+export const KEY_NONE_LABEL = "none · agent and default keys";
+/** The Include line banner and the import report (and the CLI). */
+export const INCLUDE_MESSAGE = "Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config:";
+/** Read-only body of a host of ~/.ssh/config. */
+export const READ_ONLY_SSH_CONFIG = "Defined in ~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it.";
+/** Read-only body of a host of the old imports/termius.conf. */
+export const READ_ONLY_IMPORTED =
+  "Imported by an earlier version of Portico (imports/termius.conf), which it never edits. Duplicate it as a Portico host to change it.";
+/** Under the edit form of a Portico host created by an import. */
+export const IMPORTED_EDIT_HELP = "Editing it keeps later imports from updating it.";
+
+const SOURCE_LABELS: Record<ImportSource, string> = { termius: "Termius", termix: "Termix" };
+
+/** "Portico", or "Portico · from Termix" for a host an import created. */
+export function originLabel(origin: Host["origin"], importedFrom: ImportSource | null | undefined): string {
+  if (origin === "portico") return importedFrom ? `Portico · from ${SOURCE_LABELS[importedFrom]}` : "Portico";
+  return origin === "imported" ? "Imported" : "~/.ssh/config";
+}
+
+/** `user@host:port` of a host as the list resolves it. */
+export function accountText(host: Pick<Host, "user" | "hostname" | "port">): string {
+  return `${host.user ? `${host.user}@` : ""}${host.hostname}:${host.port}`;
+}
+
+/** The delete confirmation (same text as the TUI), cut where the alias and
+ * the account are shown in mono. */
+export function deleteConfirmation(host: Pick<Host, "alias" | "user" | "hostname" | "port">): { alias: string; account: string; rest: string } {
+  return {
+    alias: host.alias,
+    account: accountText(host),
+    rest: "and its tags and notes. Its remembered password is forgotten unless another host uses the same account. Open sessions stay connected. This cannot be undone.",
+  };
+}
+
+/** The whole delete confirmation as one sentence (tests, accessibility). */
+export function deleteConfirmationText(host: Pick<Host, "alias" | "user" | "hostname" | "port">): string {
+  const d = deleteConfirmation(host);
+  return `Delete ${d.alias} (${d.account}) ${d.rest}`;
+}
+
+/** Title of the read-only dialog opened by "Delete host" on a host Portico does not own. */
+export const cannotDeleteTitle = (alias: string) => `${alias} can't be deleted here`;
+
+/** True when HostName, User or Port differ from the values the form opened with. */
+export function destinationChanged(initial: HostForm, form: HostForm): boolean {
+  return form.hostname.trim() !== initial.hostname.trim() || form.user.trim() !== initial.user.trim() || form.port.trim() !== initial.port.trim();
+}
+
+/** B1: a password could not be saved because there is no vault (create
+ * one) or it is locked (unlock it): the vault dialog to chain before
+ * retrying; `null` for any other error. */
+export function vaultFix(code: string): "create" | "unlock" | null {
+  if (code === "vault_missing") return "create";
+  if (code === "vault_locked") return "unlock";
+  return null;
 }
 
 export function emptyForm(): HostForm {
@@ -66,7 +131,8 @@ export function emptyForm(): HostForm {
  * (`ManagedHost`, never the resolved config: an earlier value elsewhere could
  * hide one, and saving would erase it). Its key is preselected when it is a
  * discovered one (`keyId`, mapped in Rust); otherwise "keep" stands for it
- * (the path stays in Rust). */
+ * (the path stays in Rust). With no password remembered, Keep and Forget
+ * mean nothing: the form starts on "Change" with an empty field. */
 export function formFromHost(host: Host, own: ManagedHost): HostForm {
   return {
     alias: host.alias,
@@ -79,7 +145,7 @@ export function formFromHost(host: Host, own: ManagedHost): HostForm {
     group: host.group ?? "",
     favorite: host.favorite,
     notes: host.notes ?? "",
-    passwordMode: "keep",
+    passwordMode: own.passwordRemembered ? "keep" : "set",
     password: "",
   };
 }
@@ -119,8 +185,10 @@ export function parsePort(text: string): number | null | undefined {
 export type DraftResult = { ok: true; draft: HostDraft } | { ok: false; field: FieldName; error: ErrorSummary };
 
 /** The IPC draft. `editing`: the dialog edits an existing host (password
- * choices, "keep" key); creating, a typed password is remembered. */
-export function toDraft(form: HostForm, editing: boolean): DraftResult {
+ * choices, "keep" key); creating, a typed password is remembered.
+ * `remembered`: a password is remembered for the host (edit); without one,
+ * an empty "Change" field changes nothing. */
+export function toDraft(form: HostForm, editing: boolean, remembered = true): DraftResult {
   const port = parsePort(form.port);
   if (port === undefined) {
     return { ok: false, field: "port", error: { code: "host_invalid_port", message: "the port must be a number", hint: PORT_HINT } };
@@ -131,15 +199,19 @@ export function toDraft(form: HostForm, editing: boolean): DraftResult {
   } else if (form.passwordMode === "forget") {
     password = { kind: "forget" };
   } else if (form.passwordMode === "set") {
-    if (!form.password) {
+    if (!form.password && !remembered) {
+      password = { kind: "keep" };
+    } else if (!form.password) {
       return {
         ok: false,
         field: "password",
         error: { code: "host_password_empty", message: "type the new password", hint: "Or choose Keep to leave the remembered one as it is." },
       };
+    } else {
+      password = { kind: "set", value: form.password };
     }
-    password = { kind: "set", value: form.password };
   }
+
   let identity: IdentityChoice = { kind: "none" };
   if (form.identity === KEEP_IDENTITY) identity = editing ? { kind: "keep" } : { kind: "none" };
   else if (form.identity.startsWith("key:")) identity = { kind: "key", id: form.identity.slice(4) };

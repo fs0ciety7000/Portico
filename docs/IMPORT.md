@@ -104,26 +104,38 @@ non (`no passphrase`), et quels hôtes l'utilisent. Un changement de destination
 par un import précédent, n'est plus utilisée par aucun hôte le dit dans « Updated hosts » :
 `hbd — key ~/.ssh/portico/hbd no longer used` (le fichier reste sur le disque).
 
-**GUI** : palette (`⌘K` / `Ctrl-K`), « Import hosts… » (Termius ou Termix, reconnu par le contenu). Le fichier se
-choisit dans le sélecteur natif (la webview ne nomme jamais un chemin) ; le plan reste côté Rust, clés comprises,
-derrière un jeton à usage unique. L'aperçu liste les hôtes (ceux qui mettent à jour un import précédent portent
-« update »), les **clés privées** (type, empreinte courte, hôtes qui l'utilisent, badge « encrypted », « already in
-~/.ssh · reused » pour une copie locale, « fingerprint not verified (encrypted key) » pour une clé OpenSSH chiffrée
-dont l'empreinte n'est que déclarée ; aucune cochée, `1`…`9` ou `Espace` pour cocher), les enregistrements
-ignorés, les avertissements (un hôte `edited_since_import` est expliqué : modifié à la main, laissé tel quel) et les
-secrets ignorés. Un hôte dont le réimport **change la destination** porte la puce « destination changed » et
-montre l'ancienne et la nouvelle (`user@hôte:port`, ancienne → nouvelle) avec une case « Accept the new destination »,
-**décochée** par défaut (`Tab` puis `Espace`) : non cochée, l'hôte est sauté et n'est pas compté dans le bouton
-« Import N hosts » ; cochée, il est redirigé et perd son ancienne clé (le dialogue la nomme). Les alias acceptés sont
-vérifiés côté Rust contre les changements de destination du plan (`import_redirect_unknown` sinon), puis remplissent
-`allow_redirect`. Une clé cochée est écrite dans `~/.ssh/portico/`, lisible par vous seul ; dès qu'une clé non
-chiffrée doit être écrite, un champ de passphrase facultatif (masqué, avec confirmation) chiffre les copies. Les
-identifiants cochés sont vérifiés côté Rust contre ceux du plan, la passphrase est désérialisée directement en
-`SecretString` puis effacée du dialogue après l'appel. « Import » écrit ; le rapport donne les clés importées
-(chemins `~/…`), réutilisées et ignorées, les hôtes mis à jour, les changements de destination sautés (section
-« Destination changes skipped »), le conseil de supprimer l'export, et la ligne
-`Include` (facultative : les hôtes sont déjà dans Portico) avec un bouton de copie (`c`). La TUI n'a pas d'écran
-d'import : son aide `?` rappelle la commande ci-dessus.
+**GUI** : « Import hosts… » (palette `⌘K` / `Ctrl-K`, ou directement `⌘⇧M` / `Ctrl-Shift-M`, Termius ou Termix,
+reconnu par le contenu). Le fichier se choisit dans le sélecteur natif (la webview ne nomme jamais un chemin) ; le
+plan reste côté Rust, clés comprises, derrière un jeton à usage unique. L'aperçu donne d'abord l'action « Delete
+<fichier> now: … » (encadré d'avertissement) puis « Not imported: … » (note), et liste les hôtes (ceux qui mettent à
+jour un import précédent portent « update »), les **clés privées** (type, empreinte complète en mono, renvoyée à la
+ligne plutôt que coupée, hôtes qui l'utilisent, badge « encrypted », « already in ~/.ssh · reused » pour une copie
+locale, « fingerprint not verified (encrypted key) » pour une clé OpenSSH chiffrée dont l'empreinte n'est que
+déclarée ; aucune cochée, `1`…`9` ou `Espace` pour cocher), les enregistrements ignorés et les avertissements (le
+message d'un hôte `edited_since_import` se suffit : pas de paraphrase). Un hôte dont le réimport **change la
+destination** porte la puce « destination changed » ; sa colonne d'adresse montre la destination **actuelle**
+(`previous`) tant que la case n'est pas cochée, et la ligne « ancienne → nouvelle » est suivie d'une case « Accept
+the new destination », **décochée** par défaut (`Tab` puis `Espace`) : non cochée, l'hôte est sauté et n'est pas
+compté dans le bouton « Import N hosts » ; cochée, il est redirigé (« Pointed at the new server; key
+~/.ssh/portico/<x> no longer used. »). Le pied dit « Updates N hosts of an earlier import », N comptant les mises à
+jour en place et les changements acceptés (comme `ImportPlan::updates`). Les alias acceptés sont vérifiés côté Rust
+contre les changements de destination du plan (`import_redirect_unknown` sinon), puis remplissent `allow_redirect`.
+Une clé cochée est écrite dans `~/.ssh/portico/`, lisible par vous seul ; dès qu'une clé non chiffrée doit être
+écrite, un champ de passphrase facultatif (masqué, avec confirmation) chiffre les copies. Tant que les deux saisies
+diffèrent, le pied l'indique (« Passphrases differ ») et `↵` amène l'erreur à l'écran. Les identifiants cochés sont
+vérifiés côté Rust contre ceux du plan, la passphrase est désérialisée directement en `SecretString` puis effacée du
+dialogue après l'appel. Un export dont aucun hôte n'est importable propose « Choose another file ↵ ». Un format
+inconnu affiche le message et le conseil du moteur, la commande `termius export-ssh-config` en span de code.
+« Import » écrit ; le rapport commence par le résumé puis l'action « Delete <fichier> now: … » (encadré
+d'avertissement, et en version courte « Delete <fichier> now: it holds secrets. » dans le pied), puis les clés
+importées (« written · 0600 · encrypted » ou « · no passphrase », puis « used by a, b »), réutilisées et ignorées,
+les hôtes mis à jour, les changements de destination sautés (section « Destination changes skipped »), la ligne
+`Include` (« Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config: »,
+facultative : les hôtes sont déjà dans Portico) avec un bouton de copie (`c`), et enfin « Not imported: … ». Un
+hôte Portico créé par un import affiche « Portico · from Termix » (détail et titre du formulaire, qui
+précise « Editing it keeps later imports from updating it. »). La TUI n'a pas d'écran d'import : son aide `?`
+rappelle la commande ci-dessus.
+
 
 Un nouvel import **met à jour** les hôtes que le précédent a créés et que personne n'a modifiés : l'aperçu les compte
 (« Updates N hosts from an earlier import », `replaces`) et les marque `(update)`. `replaces` ne compte que les hôtes

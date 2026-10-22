@@ -6,8 +6,10 @@ import { backend } from "../backend";
 
 export type VaultMode = "unlock" | "create" | "change";
 
-/** Why a vault dialog is open (changes its wording). */
-export type VaultReason = "startup" | "keys" | "remember";
+/** Why a vault dialog is open (changes its wording). `host`: a host form
+ * could not save its password (no vault, or a locked one); it saves again
+ * once the vault is ready (B1). */
+export type VaultReason = "startup" | "keys" | "remember" | "host";
 
 class Vault {
   status: VaultStatus | null = $state(null);
@@ -15,6 +17,8 @@ class Vault {
   dialog: { mode: VaultMode; reason: VaultReason } | null = $state(null);
   /** The user chose "Continue without" at startup. */
   skipped = $state(false);
+  /** Told how the open dialog ended: `true` once created or unlocked. */
+  private then: ((ready: boolean) => void) | null = null;
 
   /** False when secrets are kept in the system keyring. */
   inUse: boolean = $derived(this.status !== null && this.status !== "not_in_use");
@@ -33,14 +37,30 @@ class Vault {
     if ((await this.refresh()) === "locked") this.dialog = { mode: "unlock", reason: "startup" };
   }
 
-  open(mode: VaultMode, reason: VaultReason) {
+  open(mode: VaultMode, reason: VaultReason, then: ((ready: boolean) => void) | null = null) {
+    this.then = then;
     this.dialog = { mode, reason };
   }
 
+  /** Dismissed ("Not now", "Cancel", `Esc`). */
   close() {
     if (this.dialog?.reason === "startup" && this.status === "locked") this.skipped = true;
+    this.settle(false);
     this.dialog = null;
   }
+
+  /** Created, unlocked or changed: the dialog closes. */
+  done() {
+    this.settle(true);
+    this.dialog = null;
+  }
+
+  private settle(ready: boolean) {
+    const then = this.then;
+    this.then = null;
+    then?.(ready);
+  }
+
 
   /** After a prompt answered with "remember": a missing or locked vault
    * could not keep the secret, so offer to fix that. */

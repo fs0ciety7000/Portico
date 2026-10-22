@@ -7,6 +7,7 @@
   import { keymap } from "../state/keymap.svelte";
   import { hosts } from "../state/hosts.svelte";
   import OriginBadge from "./OriginBadge.svelte";
+  import { INCLUDE_MESSAGE, READ_ONLY_IMPORTED } from "../hostform";
 
   let {
     host,
@@ -64,12 +65,12 @@
     <div class="banner" role="note" aria-label="Include line for Portico hosts" transition:fly={{ y: -6, duration: dur("base") }}>
       <svg class="info" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 7.25v4M8 4.9v.1" /></svg>
       <div class="banner-body">
-        <p>To use your Portico hosts with ssh, scp and git, add this line at the top of <span class="mono">~/.ssh/config</span>:</p>
+        <p class="message" title={INCLUDE_MESSAGE}>{INCLUDE_MESSAGE.slice(0, -"~/.ssh/config:".length)}<span class="mono">~/.ssh/config</span>:</p>
         <div class="include">
           <input class="mono" readonly value={line} bind:this={includeEl} aria-label="Include line" onfocus={(e) => e.currentTarget.select()} />
-          <button class="secondary small" onclick={() => void copyInclude(line)}>{copied ? "Copied" : "Copy"}</button>
+          <button class="secondary small" title={line} aria-label="Copy the Include line" onclick={() => void copyInclude(line)}>{copied ? "Copied" : "Copy"}</button>
         </div>
-        <p class="muted small">Portico never edits that file. Your Portico hosts already work here without it.</p>
+        <p class="small more">Portico never edits that file. Your Portico hosts already work here without it.</p>
       </div>
       <button class="dismiss" onclick={() => hosts.dismissBanner()} aria-label="Dismiss" title="Dismiss">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
@@ -93,7 +94,7 @@
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m8 1.9 1.8 3.8 4.1.5-3 2.8.8 4.1L8 11.1l-3.7 2 .8-4.1-3-2.8 4.1-.5Z" /></svg>
               </button>
-              <OriginBadge origin={host.origin} />
+              <OriginBadge origin={host.origin} importedFrom={host.importedFrom} />
             </div>
             <p class="target mono">
               {host.user ?? "(local user)"}@{host.hostname}<span class="port">:{host.port}</span>
@@ -156,7 +157,7 @@
               <span class="origin-note">Portico's own file, editable here.</span>
               <button class="link" onclick={() => ondelete(host)}>Delete host{#if keymap.label("host.delete")} <kbd>{keymap.label("host.delete")}</kbd>{/if}</button>
             {:else}
-              <span class="origin-note">Read-only: Portico never edits {host.origin === "imported" ? "imported hosts" : "~/.ssh/config"}.</span>
+              <span class="origin-note">{host.origin === "imported" ? READ_ONLY_IMPORTED : "Read-only: Portico never edits ~/.ssh/config."}</span>
               <button class="link" onclick={() => onduplicate(host)}>
                 Duplicate as Portico host…{#if keymap.label("host.duplicate")} <kbd>{keymap.label("host.duplicate")}</kbd>{/if}
               </button>
@@ -200,7 +201,7 @@
     min-height: 0;
   }
   .details > .placeholder { flex: 1 1 auto; height: auto; }
-  /* The Include line (phase 6b): information, not an alarm. */
+  /* The Include line (phase 6b): optional information, quiet (no accent). */
   .banner {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
@@ -209,19 +210,27 @@
     margin-bottom: var(--space-5);
     padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
     border: 1px solid var(--border-subtle);
-    border-left: 2px solid var(--accent);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
   .banner p { margin: 0; }
+  .banner .mono { color: var(--text-secondary); }
   .banner-body { display: grid; gap: var(--space-2); min-width: 0; }
-  .banner .info { width: 16px; height: 16px; margin-top: 2px; fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linecap: round; }
+  .banner .info {
+    width: var(--size-badge-sm);
+    height: var(--size-badge-sm);
+    margin-top: calc(var(--space-1) / 2);
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+  }
   .include { display: flex; gap: var(--space-2); align-items: center; max-width: 72ch; }
   .include input {
     flex: 1;
     min-width: 0;
-    height: 30px;
+    height: var(--size-control-sm);
     padding: 0 var(--space-3);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
@@ -231,13 +240,24 @@
     outline: none;
   }
   .include input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  button.secondary.small { height: 30px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+  button.secondary.small { height: var(--size-control-sm); padding: 0 var(--space-3); font-size: var(--text-sm); }
   .small { font-size: var(--text-xs); }
+  /* Narrow window (880): one line. The message (whole in its tooltip) and
+     Copy; the Include line itself is in Copy's tooltip and the palette. */
+  @media (max-width: 1100px) {
+    .banner { align-items: center; padding-block: var(--space-2); }
+    .banner .info { margin-top: 0; }
+    .banner-body { display: flex; align-items: center; gap: var(--space-3); }
+    .banner .message { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .include { flex: none; }
+    .include input { display: none; }
+    .banner .more { display: none; }
+  }
   .dismiss {
     display: grid;
     place-items: center;
-    width: 24px;
-    height: 24px;
+    width: var(--space-5);
+    height: var(--space-5);
     padding: 0;
     border: 0;
     border-radius: var(--radius-sm);
@@ -246,11 +266,11 @@
     transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
   }
   .dismiss:hover { background: var(--bg-elevated); color: var(--text-primary); }
-  .dismiss svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .dismiss svg { width: var(--size-icon-sm); height: var(--size-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
   .defined { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); word-break: normal; }
   .defined .mono { word-break: break-all; }
   .origin-note { color: var(--text-muted); font-size: var(--text-sm); }
-  .defined button.link { margin-left: 0; height: 24px; font-size: var(--text-sm); color: var(--text-secondary); }
+  .defined button.link { margin-left: 0; height: var(--space-5); font-size: var(--text-sm); color: var(--text-secondary); }
   .defined button.link:hover { color: var(--text-primary); }
   header {
     display: flex;
@@ -315,7 +335,8 @@
   .hint {
     margin-top: var(--space-5);
     padding: var(--space-3) var(--space-4);
-    border-left: 2px solid var(--status-error);
+    border-left: var(--size-bar) solid var(--status-error);
+
     background: color-mix(in srgb, var(--status-error) 8%, transparent);
     color: var(--text-secondary);
     border-radius: var(--radius-sm);
@@ -345,12 +366,12 @@
   }
   button.star:hover { background: var(--bg-elevated); color: var(--text-secondary); }
   button.star:active { transform: scale(0.92); }
-  button.star svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
+  button.star svg { width: var(--size-badge-sm); height: var(--size-badge-sm); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
   button.star.on { color: var(--accent); }
   button.star.on svg { fill: currentColor; }
   .tags { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
   .group {
-    padding: 2px var(--space-2);
+    padding: calc(var(--space-1) / 2) var(--space-2);
     border-radius: var(--radius-sm);
     background: var(--bg-elevated);
     color: var(--text-secondary);
@@ -390,7 +411,7 @@
   }
   .placeholder p { margin: 0; }
   .tag {
-    padding: 2px var(--space-2);
+    padding: calc(var(--space-1) / 2) var(--space-2);
     border-radius: var(--radius-pill);
     border: 1px solid var(--border-strong);
     color: var(--text-secondary);

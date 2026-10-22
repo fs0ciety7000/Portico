@@ -69,9 +69,10 @@ export const GUI_FIXED: DocTable[] = [
     rows: [
       ["Champ suivant / précédent", "`Tab` / `Shift-Tab`"],
       ["Enregistrer (après 400 ms sans frappe)", "`↵` dans un champ d'une ligne ou une liste, `Ctrl-S` / `Ctrl-↵` (macOS : `⌘S`, `⌘↵`)"],
-      ["Mot de passe (modification) : garder, changer, oublier", "boutons « Keep », « Change », « Forget »"],
+      ["Mot de passe (modification) : garder, changer, oublier (« Keep » et « Forget » inactifs quand aucun n'est mémorisé)", "boutons « Keep », « Change », « Forget »"],
+      ["Mot de passe sans vault (ou vault verrouillé) : créer ou déverrouiller le vault, puis l'hôte est enregistré ; « Not now » revient au formulaire", "`↵` / `Esc`"],
       ["Annuler ; avec des modifications, « Discard your changes? »", "`Esc`, puis `y` (abandonner) ou `n` / `Esc` (continuer)"],
-      ["Lecture seule (hôte de `~/.ssh/config` ou importé) : dupliquer / éditer tags et notes", "`d` ou `↵` / `e`"],
+      ["Lecture seule (hôte de `~/.ssh/config` ou importé ; aussi « Delete host » sur ces hôtes) : dupliquer / éditer tags et notes", "`D` ou `↵` / `t`"],
       ["Dupliquer : nouvel alias", "`↵`"],
       ["Supprimer un hôte Portico : confirmer / garder", "`y` / `n`"],
     ],
@@ -79,12 +80,12 @@ export const GUI_FIXED: DocTable[] = [
   {
     title: "Import d'hôtes (GUI)",
     intro:
-      "« Import hosts… » (palette) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. " +
+      "« Import hosts… » (palette, `⌘⇧M` / `Ctrl-Shift-M`) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. " +
       "Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.",
     rows: [
       ["Préfixer les alias (`termius-`, `termix-`) on/off", "`p`"],
       ["Cocher / décocher la n-ième clé privée", "`1` … `9`, ou `Espace` sur la case"],
-      ["Importer (après 400 ms sans frappe ; désactivé si les passphrases diffèrent)", "`↵`"],
+      ["Importer (après 400 ms sans frappe ; si les passphrases diffèrent, le pied l'indique et `↵` montre l'erreur) ; aucun hôte à importer : choisir un autre fichier", "`↵`"],
       ["Rapport : copier la ligne `Include`", "`c`"],
       ["Annuler / fermer", "`Esc`"],
     ],

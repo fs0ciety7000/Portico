@@ -5,7 +5,10 @@
 //
 // URL switches: `?include=active` (the Include line is already in
 // ~/.ssh/config: no banner), `?banner=none` (no Portico host at startup).
-import type { EngineEvent, ErrorSummary, Host, HostDraft, LocalKey, ManagedHost, ManagedInclude } from "./api";
+// A password typed in the form needs the demo vault (`?vault=absent` starts
+// without one: saving chains "Create a vault", then saves). `nas` has a
+// remembered password; `ci-runner` was created by a Termix import.
+import type { EngineEvent, ErrorSummary, Host, HostDraft, ImportSource, LocalKey, ManagedHost, ManagedInclude, VaultStatus } from "./api";
 import type { Backend } from "./backend";
 import { normalizeTags } from "./demo-meta";
 
@@ -33,14 +36,20 @@ export interface HostsHooks {
   emit(e: EngineEvent): void;
   hosts: Host[];
   keys(): Promise<LocalKey[]>;
+  vaultStatus(): Promise<VaultStatus>;
 }
 
 /** What hosts.conf holds for each Portico host (by alias): the edit form starts from it. */
-type Own = Omit<ManagedHost, "alias" | "keyId">;
+type Own = Omit<ManagedHost, "alias" | "keyId" | "passwordRemembered" | "importedFrom">;
 const own = new Map<string, Own>([
   ["nas", { hostname: "192.168.1.20", user: "admin", port: 2222, identityFile: "~/.ssh/id_ed25519", proxyJump: null }],
   ["ci-runner", { hostname: "10.0.9.4", user: "ci", port: null, identityFile: null, proxyJump: "bastion" }],
 ]);
+/** Accounts (`user@host:port`) with a remembered password (never the value). */
+const remembered = new Set<string>(["admin@192.168.1.20:2222"]);
+/** Portico hosts an import created (`[hosts.<alias>.import]`). */
+const provenance = new Map<string, ImportSource>([["ci-runner", "termix"]]);
+const account = (v: Pick<Own, "hostname" | "user" | "port">) => `${v.user ?? "demo"}@${v.hostname}:${v.port ?? 22}`;
 
 const NO_FORWARDS = { localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [] as string[] };
 
@@ -62,6 +71,7 @@ export function demoPorticoHosts(): Host[] {
       notes: "Synology, nightly snapshots at 03:00.",
       source: `${MANAGED_FILE}:5`,
       origin: "portico",
+      importedFrom: null,
     },
     {
       ...NO_FORWARDS,
@@ -77,6 +87,7 @@ export function demoPorticoHosts(): Host[] {
       notes: null,
       source: `${MANAGED_FILE}:11`,
       origin: "portico",
+      importedFrom: "termix",
     },
     {
       ...NO_FORWARDS,
@@ -92,6 +103,7 @@ export function demoPorticoHosts(): Host[] {
       notes: "Termius: web eu 1",
       source: "~/.config/portico/imports/termius.conf:4",
       origin: "imported",
+      importedFrom: null,
     },
   ];
 }
@@ -159,11 +171,26 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     const group = draft.group?.trim() || null;
     if (group && group.length > 64) throw fail("host_group", "invalid group: longer than 64 characters", "A group is one line of at most 64 visible characters.");
     if (draft.notes && draft.notes.length > 2000) throw fail("host_notes", "notes are too long (2000 characters at most)", "Notes hold at most 2000 characters of plain text.");
-    if (draft.password.kind === "set" && params.get("vault") === "locked") {
-      throw fail("vault_locked", "the vault is locked", "Unlock the vault (Keys, then v) to remember passwords.");
+    if (draft.password.kind === "set") {
+      // As the engine: no vault file, or a locked one, cannot remember it.
+      const status = await hooks.vaultStatus();
+      if (status === "absent") {
+        throw fail("vault_missing", "no vault at /home/demo/.local/share/portico/vault.toml", "Create the vault (Keys, then V) to remember passwords, or leave the password empty.");
+      }
+      if (status === "locked") throw fail("vault_locked", "the vault is locked", "Unlock the vault (Keys, then v) to remember passwords.");
     }
+    const before = existing ? own.get(existing.alias) : undefined;
+    const values = { hostname, user, port: draft.port, identityFile, proxyJump: jump };
+    // The password is tied to its account: another server or user forgets it.
+    if (before && account(before) !== account(values)) remembered.delete(account(before));
+    if (draft.password.kind === "set") remembered.add(account(values));
+    if (draft.password.kind === "forget") remembered.delete(account(values));
     if (existing) own.delete(existing.alias);
-    own.set(alias, { hostname, user, port: draft.port, identityFile, proxyJump: jump });
+    own.set(alias, values);
+    if (existing && existing.alias !== alias && provenance.has(existing.alias)) {
+      provenance.set(alias, provenance.get(existing.alias) ?? "termix");
+      provenance.delete(existing.alias);
+    }
     return {
       ...NO_FORWARDS,
       alias,
@@ -178,6 +205,7 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
       notes: draft.notes?.trim() ? draft.notes : null,
       source: existing?.source ?? `${MANAGED_FILE}:${(nextLine += 6)}`,
       origin: "portico",
+      importedFrom: provenance.get(alias) ?? null,
     };
   }
 
@@ -230,7 +258,10 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
       const by = hosts.find((h) => h.proxyJump.includes(existing.alias));
       if (by) throw fail("host_in_use", `${existing.alias} is the jump host of ${by.alias}`, HINTS.inUse);
       hosts.splice(hosts.indexOf(existing), 1);
+      const values = own.get(existing.alias);
+      if (values) remembered.delete(account(values));
       own.delete(existing.alias);
+      provenance.delete(existing.alias);
       changed(null);
     },
     async duplicateHost(alias, newAlias) {
@@ -276,7 +307,14 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
       const values = host && host.origin === "portico" ? own.get(host.alias) : undefined;
       if (!host || !values) return null;
       const key = values.identityFile ? (await hooks.keys()).find((k) => k.hasPrivate && k.privateDisplay === values.identityFile) : undefined;
-      return { alias: host.alias, ...values, keyId: key?.id ?? null };
+      return {
+        alias: host.alias,
+        ...values,
+        keyId: key?.id ?? null,
+        passwordRemembered: remembered.has(account(values)),
+        importedFrom: provenance.get(host.alias) ?? null,
+      };
+
     },
   };
 }

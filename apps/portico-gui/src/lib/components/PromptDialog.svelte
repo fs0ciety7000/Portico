@@ -2,9 +2,11 @@
   // Engine prompts: new host key (TOFU), password, key passphrase,
   // keyboard-interactive. Secrets live in this component only until they are
   // sent, then the fields are cleared.
-  import { displayPath, SENDS_REMEMBERED_PASSWORD, type Prompt, type PromptAnswer } from "../api";
+  import { displayPath, sendsRememberedPassword, type Prompt, type PromptAnswer } from "../api";
   import { sanitizeRemote } from "../keys";
+  import { hosts } from "../state/hosts.svelte";
   import { vault } from "../state/vault.svelte";
+  import Caution from "./Caution.svelte";
   import Modal from "./Modal.svelte";
 
   let {
@@ -71,9 +73,16 @@
     }
   }
 
-  const target = $derived(
-    kind.kind === "unknown_host_key" ? (kind.port === 22 ? kind.host : `[${kind.host}]:${kind.port}`) : "",
-  );
+  /** `host:port` in prose (the bracket form is for known_hosts only). */
+  const target = $derived(kind.kind === "unknown_host_key" ? `${kind.host}:${kind.port}` : "");
+  /** The account whose remembered password the key would unlock: the user
+   * of the host this prompt is for, when it answers at that address. */
+  const account = $derived.by(() => {
+    if (kind.kind !== "unknown_host_key") return null;
+    const own = alias ? hosts.byAlias[alias] : undefined;
+    const match = own && own.hostname === kind.host && own.port === kind.port ? own : hosts.all.find((h) => h.hostname === kind.host && h.port === kind.port);
+    return match?.user ?? null;
+  });
 </script>
 
 <Modal bind:armed bind:armedAt onescape={cancel}>
@@ -95,7 +104,7 @@
         <dt>Fingerprint</dt><dd class="fingerprint">{kind.fingerprint}</dd>
       </dl>
       {#if kind.sends_remembered_password}
-        <p class="warning" data-testid="sends-password">{SENDS_REMEMBERED_PASSWORD}</p>
+        <Caution testid="sends-password">{sendsRememberedPassword(account, kind.host, kind.port)}</Caution>
       {/if}
       {#if unusual}
         <p class="warning">
@@ -187,7 +196,7 @@
   .field { display: grid; gap: var(--space-1); }
   .field span { color: var(--text-muted); font-size: var(--text-sm); }
   .field input {
-    height: 34px;
+    height: var(--size-row);
     padding: 0 var(--space-3);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
@@ -203,7 +212,8 @@
     display: grid;
     gap: var(--space-1);
     padding: var(--space-3) var(--space-4);
-    border-left: 2px solid var(--border-strong);
+    border-left: var(--size-bar) solid var(--border-strong);
+
     background: var(--bg-elevated);
     border-radius: var(--radius-sm);
     white-space: pre-wrap;

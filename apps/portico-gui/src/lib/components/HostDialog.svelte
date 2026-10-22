@@ -3,28 +3,37 @@
   // hosts.conf. The engine validates every field; its errors come back by
   // code and show under their field, with the hint. The key is picked among
   // the keys the engine discovered (by id): the webview never names a path.
-  // The password goes to the engine once, then the field is cleared.
+  // The password goes to the engine once; the field is cleared once saved or
+  // closed (a failed save keeps it typed). With no vault (or a locked one),
+  // saving a password chains the vault dialog, then saves again (B1).
   import { onMount, untrack } from "svelte";
   import { asError, sentence, type ErrorSummary, type Host, type LocalKey, type ManagedHost } from "../api";
   import { backend } from "../backend";
   import {
     capitalizable,
+    DESTINATION_CHANGED_NOTE,
+    destinationChanged,
     emptyForm,
     fieldOf,
-    FIELD_ORDER,
     formFromHost,
+    IMPORTED_EDIT_HELP,
     isDirty,
     KEEP_IDENTITY,
+    KEY_NONE_LABEL,
     keyValue,
+    NO_PASSWORD_REMEMBERED,
     PASSWORD_DESTINATION_NOTE,
+    PASSWORD_REMEMBERED,
     sendsPassword,
     toDraft,
+    vaultFix,
     type FieldName,
     type HostForm,
     type PasswordMode,
   } from "../hostform";
   import { isMac } from "../keys";
   import { hosts } from "../state/hosts.svelte";
+  import { vault } from "../state/vault.svelte";
   import { workspace } from "../state/workspace.svelte";
   import GroupField from "./GroupField.svelte";
   import Modal from "./Modal.svelte";
@@ -46,10 +55,17 @@
   let keysError: ErrorSummary | null = $state(null);
   /** The "(current)" key choice: hosts.conf's file, when not a discovered key. */
   const currentKey = untrack(() => managed?.identityFile ?? null);
+  /** A password is remembered for the host's account (edit; presence only). */
+  const remembered = untrack(() => managed?.passwordRemembered ?? false);
+  const importedFrom = untrack(() => managed?.importedFrom ?? null);
+  /** Back from the vault dialog (B1): the form as it was, password included. */
+  const parked = hosts.unpark();
   // Snapshot at opening, from hosts.conf itself (never the resolved config).
-  let initial: HostForm = $state(untrack(() => (host && managed ? formFromHost(host, managed) : emptyForm())));
-  let form: HostForm = $state(structuredClone($state.snapshot(initial)));
-  let errors: Partial<Record<FieldName, ErrorSummary>> = $state({});
+  let initial: HostForm = $state(untrack(() => parked?.initial ?? (host && managed ? formFromHost(host, managed) : emptyForm())));
+  let form: HostForm = $state(untrack(() => parked?.form ?? structuredClone($state.snapshot(initial))));
+  let errors: Partial<Record<FieldName, ErrorSummary>> = $state(parked?.outcome === "declined" ? { password: parked.error } : {});
+  /** The vault is ready now: save again as soon as the dialog is armed. */
+  let retry = $state(parked?.outcome === "ready");
   let formError: ErrorSummary | null = $state(null);
   let busy = $state(false);
   let confirmDiscard = $state(false);
@@ -59,6 +75,8 @@
 
   const saveKey = isMac ? "⌘S" : "Ctrl-S";
   const dirty = $derived(isDirty(initial, form));
+  /** HostName, User or Port changed: the remembered password does not follow. */
+  const moved = $derived(editing && destinationChanged(initial, form));
   const usableKeys = $derived(keys.filter((k) => k.hasPrivate));
   /** Jump hosts: every other host (a cycle is the engine's to refuse, with its chain). */
   const jumpChoices = $derived.by(() => {
@@ -68,6 +86,7 @@
   });
 
   onMount(() => {
+    if (parked?.outcome === "declined") focusField("password");
     backend.listKeys().then(
       (list) => {
         keys = list;
@@ -78,6 +97,13 @@
         keysError = asError(e);
       },
     );
+  });
+
+  $effect(() => {
+    if (armed && retry) {
+      retry = false;
+      void save();
+    }
   });
 
   // The discard question takes the keyboard (y / n, or ↵ on "Keep editing").
@@ -102,6 +128,16 @@
 
   function showError(e: unknown) {
     const error = asError(e);
+    // No vault, or a locked one: the vault dialog first, then this save again.
+    const fix = vaultFix(error.code);
+    if (fix && form.password) {
+      const entry = { form: $state.snapshot(form), initial: $state.snapshot(initial), error, outcome: "pending" as const };
+      hosts.park(entry);
+      vault.open(fix, "host", (ready) => {
+        if (hosts.parked === entry) hosts.parked = { ...entry, outcome: ready ? "ready" : "declined" };
+      });
+      return;
+    }
     const field = fieldOf(error.code);
     if (field === "tags") tagsField?.setError(e);
     else if (field) errors[field] = error;
@@ -114,7 +150,7 @@
     tagsField?.commitPending();
     errors = {};
     formError = null;
-    const result = toDraft(form, editing);
+    const result = toDraft(form, editing, remembered);
     if (!result.ok) {
       errors[result.field] = result.error;
       focusField(result.field);
@@ -123,14 +159,16 @@
     busy = true;
     try {
       const alias = editing ? await backend.updateHost(original, result.draft) : await backend.createHost(result.draft);
+      // Saved: the password crossed the IPC once, nothing keeps it here.
+      form.password = "";
+      hosts.dropParked();
       hosts.dialog = null;
       hosts.changed(alias);
       workspace.notify({ code: "host_saved", message: editing ? `${alias} saved` : `${alias} added to your hosts`, hint: null }, "info");
     } catch (e) {
+      // Not saved: the password stays typed, to fix the error and save again.
       showError(e);
     } finally {
-      // The password crossed the IPC once: nothing keeps it here.
-      form.password = "";
       if (result.draft.password.kind === "set") result.draft.password = { kind: "keep" };
       busy = false;
     }
@@ -138,6 +176,7 @@
 
   function close() {
     form.password = "";
+    hosts.dropParked();
     hosts.dialog = null;
   }
 
@@ -196,13 +235,16 @@
 <Modal bind:armed {onescape} {onshortcut} {onkey} size="wide" footerWrap={false} labelledBy="host-dialog-title">
   {#snippet title()}
     {#if editing}
-      <span class="title-line">Edit <span class="mono">{original}</span><OriginBadge origin="portico" /></span>
+      <span class="title-line">Edit <span class="mono">{original}</span><OriginBadge origin="portico" {importedFrom} /></span>
     {:else}
       Add host
     {/if}
   {/snippet}
 
   <div class="form" bind:this={body}>
+    {#if editing && importedFrom}
+      <p class="note" data-testid="imported-edit-help">{IMPORTED_EDIT_HELP}</p>
+    {/if}
     <div class="grid">
       <label class="field">
         <span>Alias</span>
@@ -270,7 +312,7 @@
         <span>Key</span>
         <span class="select">
           <select data-field="identity" bind:value={form.identity} aria-invalid={!!errors.identity} onchange={() => clear("identity")} onkeydown={onEnter}>
-            <option value="">None · agent and default keys</option>
+            <option value="">{KEY_NONE_LABEL}</option>
             {#if form.identity === KEEP_IDENTITY || initial.identity === KEEP_IDENTITY}
               <option value={KEEP_IDENTITY}>{currentKey ?? "Current key"} (current)</option>
             {/if}
@@ -312,10 +354,19 @@
     <div class="field password-field">
       <span id="host-password-label">Password</span>
       {#if editing}
-        <div class="segmented" role="group" aria-labelledby="host-password-label">
-          {#each passwordModes as [mode, label] (mode)}
-            <button type="button" aria-pressed={form.passwordMode === mode} onclick={() => setPasswordMode(mode)}>{label}</button>
-          {/each}
+        <div class="password-head">
+          <div class="segmented" role="group" aria-labelledby="host-password-label">
+            {#each passwordModes as [mode, label] (mode)}
+              <button
+                type="button"
+                aria-pressed={form.passwordMode === mode}
+                disabled={mode !== "set" && !remembered}
+                title={mode !== "set" && !remembered ? NO_PASSWORD_REMEMBERED : undefined}
+                onclick={() => setPasswordMode(mode)}>{label}</button
+              >
+            {/each}
+          </div>
+          <span class="password-state" data-testid="password-state">{remembered ? PASSWORD_REMEMBERED : NO_PASSWORD_REMEMBERED}</span>
         </div>
       {/if}
       {#if !editing || form.passwordMode === "set"}
@@ -323,7 +374,7 @@
           type="password"
           data-field="password"
           bind:value={form.password}
-          placeholder={editing ? "New password" : "Optional"}
+          placeholder={editing ? (remembered ? "New password" : "Optional") : "Optional"}
           autocomplete="new-password"
           aria-labelledby="host-password-label"
           aria-invalid={!!errors.password}
@@ -335,14 +386,16 @@
         {@render fieldError("password", null)}
       {:else if editing && form.passwordMode === "forget"}
         <span class="help">The remembered password is forgotten when you save.</span>
+      {:else if editing && form.passwordMode === "keep" && moved}
+        <span class="help" data-testid="destination-changed">{DESTINATION_CHANGED_NOTE}</span>
       {:else if editing && form.passwordMode === "keep"}
-        <span class="help">The remembered password, if any, stays as it is.</span>
+        <span class="help">The remembered password stays as it is.</span>
       {:else if form.password}
         <span class="help">Remembered in your keyring (or the vault), never written to a file.</span>
       {:else}
         <span class="help">Remembered in your keyring (or the vault), never written to a file. Offered only once the host key is verified.</span>
       {/if}
-      {#if !errors.password && sendsPassword(form, editing)}
+      {#if !errors.password && !moved && sendsPassword(form, editing, remembered)}
         <span class="help" data-testid="password-destination">{PASSWORD_DESTINATION_NOTE}</span>
       {/if}
     </div>
@@ -407,8 +460,8 @@
   .select { position: relative; display: grid; }
   .select select {
     appearance: none;
-    height: 34px;
-    padding: 0 calc(var(--space-3) + 16px) 0 var(--space-3);
+    height: var(--size-row);
+    padding: 0 calc(var(--space-3) + var(--size-badge-sm)) 0 var(--space-3);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
     background: var(--bg-elevated);
@@ -420,15 +473,17 @@
     transition: border-color var(--motion-fast) var(--ease-standard);
   }
   .select select:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  .select select[aria-invalid="true"] { border-color: var(--status-error); }
+  .select select[aria-invalid="true"],
+  .select select[aria-invalid="true"]:focus { border-color: var(--status-error); }
+  .select select[aria-invalid="true"]:focus { box-shadow: 0 0 0 1px var(--status-error); }
   .select select option { background: var(--bg-overlay); color: var(--text-primary); }
   .select svg {
     position: absolute;
     right: var(--space-3);
     top: 50%;
-    width: 12px;
-    height: 12px;
-    margin-top: -6px;
+    width: var(--size-icon-sm);
+    height: var(--size-icon-sm);
+    margin-top: calc(var(--size-icon-sm) / -2);
     fill: none;
     stroke: var(--text-muted);
     stroke-width: 1.5;
@@ -438,17 +493,20 @@
   }
   .password-field { gap: var(--space-2); }
   .password-field input { max-width: 40ch; }
-  .favorite { height: 34px; }
+  .password-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+  .password-state { color: var(--text-muted); font-size: var(--text-sm); }
+  .favorite { height: var(--size-row); }
   .muted { color: var(--text-muted); }
   .warn { color: var(--status-warning); }
-  .help .spinner { width: 10px; height: 10px; vertical-align: -1px; }
+  .help .spinner { width: var(--size-icon-xs); height: var(--size-icon-xs); vertical-align: -1px; }
   /* Notes are prose: the UI font, not the shared mono textarea. */
   .field.notes-field textarea { font-family: var(--font-ui); font-size: var(--text-base); min-height: calc(3 * 1.5em + 2 * var(--space-2)); }
   .counter { justify-self: end; font-variant-numeric: tabular-nums; }
   .counter.over { color: var(--status-error); }
   .form-error {
     padding: var(--space-2) var(--space-3);
-    border-left: 2px solid var(--status-error);
+    border-left: var(--size-bar) solid var(--status-error);
+
     border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--status-error) 8%, transparent);
   }

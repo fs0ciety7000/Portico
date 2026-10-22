@@ -257,3 +257,24 @@ test("host commands (phase 6b): shared titles, keys without conflict", () => {
   assert.equal(linux.hosts.get(ev("Delete", "Delete")), "host.delete");
   assert.equal(formatCombo(parseCombo("Mod+Backspace")!, "mac", "hosts"), "⌘Backspace");
 });
+
+test("Import hosts… has a free default shortcut, everywhere (phase 6b fixes)", () => {
+  const action = ACTIONS.find((a) => a.id === "app.import-termius");
+  assert.equal(action?.title, "Import hosts…");
+  assert.equal(action?.scope, "global");
+  for (const p of ["mac", "linux"] as Platform[]) {
+    const combos = defaultBindings(p)["app.import-termius"] ?? [];
+    assert.ok(combos.length > 0, `${p}: a default`);
+    // No other action answers to it, in the host list or in a terminal.
+    assert.deepEqual(resolveKeymap({}, p).problems, []);
+  }
+  const mac = matchTables(defaultBindings("mac"), "mac");
+  const linux = matchTables(defaultBindings("linux"), "linux");
+  const ev = (k: string, code: string, mods: Partial<KeyLike> = {}) => eventSignature(key(k, code, mods))!;
+  assert.equal(mac.hosts.get(ev("M", "KeyM", { metaKey: true, shiftKey: true })), "app.import-termius");
+  assert.equal(mac.terminal.get(ev("M", "KeyM", { metaKey: true, shiftKey: true })), "app.import-termius");
+  assert.equal(linux.hosts.get(ev("M", "KeyM", { ctrlKey: true, shiftKey: true })), "app.import-termius");
+  assert.equal(linux.terminal.get(ev("M", "KeyM", { ctrlKey: true, shiftKey: true })), "app.import-termius");
+  // Plain Ctrl-M (Enter in a shell) stays the terminal's.
+  assert.equal(linux.terminal.get(ev("m", "KeyM", { ctrlKey: true })), undefined);
+});

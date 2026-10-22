@@ -18,8 +18,9 @@
 
 use std::path::PathBuf;
 
+use portico_core::import::ImportSource;
 use portico_core::keys::LocalKey;
-use portico_core::managed_hosts::{HostDraft, ManagedHost, PasswordChange};
+use portico_core::managed_hosts::{HostDraft, ManagedHostDetails, PasswordChange};
 use portico_core::{Engine, ErrorSummary};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -225,7 +226,10 @@ pub(crate) async fn managed_include(
 /// The values `hosts.conf` itself holds for a Portico host: the edit form
 /// starts from them, never from the resolved config, where an earlier value
 /// (an `Include` placed lower in `~/.ssh/config`) could hide one, and saving
-/// would then erase it.
+/// would then erase it. Plus what the form shows besides the values
+/// (`Engine::managed_host_details`): whether a password is remembered for
+/// the host's account (presence only, never the secret) and the import it
+/// comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ManagedHostDto {
@@ -239,12 +243,23 @@ pub(crate) struct ManagedHostDto {
     /// `~/…`, display only (the "(current)" choice when `key_id` is
     /// `None`); never sent back (see [`IdentityChoiceDto::Keep`]).
     pub identity_file: Option<String>,
+    /// A password is remembered for `user@host:port` (`false` also when
+    /// the store cannot tell: vault locked or missing).
+    pub password_remembered: bool,
+    /// `termius` or `termix` for a host created by an import (`None`
+    /// otherwise), still set once the host was edited.
+    pub imported_from: Option<ImportSource>,
 }
 
 impl ManagedHostDto {
     /// `keys`: a listing from the engine. The key maps to an id only when
     /// that id resolves back to the very same file.
-    pub(crate) fn new(host: ManagedHost, keys: &[LocalKey]) -> Self {
+    pub(crate) fn new(details: ManagedHostDetails, keys: &[LocalKey]) -> Self {
+        let ManagedHostDetails {
+            host,
+            password_remembered,
+            imported_from,
+        } = details;
         let key_id = host.identity_file.as_ref().and_then(|file| {
             let key = keys.iter().find(|k| &k.private_path == file)?;
             let id = key_id(key)?;
@@ -258,6 +273,8 @@ impl ManagedHostDto {
             proxy_jump: host.proxy_jump,
             key_id,
             identity_file: host.identity_file.as_deref().map(display_path),
+            password_remembered,
+            imported_from,
         }
     }
 }
@@ -276,17 +293,17 @@ async fn managed_host_dto(
     engine: &Engine,
     alias: &str,
 ) -> Result<Option<ManagedHostDto>, ErrorSummary> {
-    let Some(host) = engine.managed_host(alias).await.map_err(summary)? else {
+    let Some(details) = engine.managed_host_details(alias).await.map_err(summary)? else {
         return Ok(None);
     };
     // No key listing when there is no key (and a failed listing only
     // loses the preselection: the form offers "(current)").
-    let keys = if host.identity_file.is_some() {
+    let keys = if details.host.identity_file.is_some() {
         engine.local_keys().await.unwrap_or_default()
     } else {
         Vec::new()
     };
-    Ok(Some(ManagedHostDto::new(host, &keys)))
+    Ok(Some(ManagedHostDto::new(details, &keys)))
 }
 
 #[cfg(test)]
@@ -471,6 +488,7 @@ mod tests {
             let web = inventory.hosts.iter().find(|h| h.alias == "web").unwrap();
             let shown = crate::dto::HostDto::from(web);
             assert_eq!(shown.origin, portico_core::hosts::HostOrigin::Portico);
+            assert_eq!(shown.imported_from, None, "created in Portico");
             // Inherited from `Host *`: effective, but not the host's own.
             assert_eq!(shown.user.as_deref(), Some("other"));
 
@@ -543,6 +561,130 @@ mod tests {
             );
             assert_eq!(own.port, Some(2222));
         });
+    }
+
+    /// B1 (password with no vault): saving a password with no vault file
+    /// fails with `vault_missing` (the form chains "Create a vault"), with a
+    /// locked vault `vault_locked` (it chains "Unlock"); once the vault is
+    /// ready, the same draft saves, and the form then reads
+    /// `passwordRemembered` (never the secret).
+    #[test]
+    fn password_without_vault_chains_to_the_vault_then_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        let vault = std::sync::Arc::new(portico_core::vault::VaultStore::open(
+            root.join("vault.toml"),
+        ));
+        let engine = Engine::new(portico_core::EngineConfig {
+            paths: portico_core::store::Paths::rooted(root),
+            local_user: "alice".into(),
+            event_capacity: 16,
+            secrets: vault.clone(),
+            agent_socket: None,
+            connect_timeout: portico_core::engine::DEFAULT_CONNECT_TIMEOUT,
+            keepalive: portico_core::engine::DEFAULT_KEEPALIVE,
+        });
+        let with_password = || {
+            let mut json = base();
+            json["identity"] = serde_json::json!({ "kind": "none" });
+            draft(json).unwrap().into_draft(None)
+        };
+        block_on(async {
+            let missing = engine.create_host(with_password()).await.unwrap_err();
+            let summary = missing.summary();
+            assert_eq!(summary.code, "vault_missing");
+            assert_eq!(
+                summary.hint.as_deref(),
+                Some(portico_core::vault::VAULT_MISSING_HINT)
+            );
+            assert_eq!(
+                crate::dto::safe_summary(&summary).code,
+                "vault_missing",
+                "the code the form maps to its vault dialog"
+            );
+            assert!(
+                managed_host_dto(&engine, "web").await.unwrap().is_none(),
+                "nothing written"
+            );
+
+            // "Create a vault", then the same draft again.
+            engine
+                .vault_create(SecretString::from("correct horse battery".to_owned()))
+                .await
+                .unwrap();
+            engine.create_host(with_password()).await.unwrap();
+            let own = managed_host_dto(&engine, "web").await.unwrap().unwrap();
+            assert!(own.password_remembered);
+            assert_eq!(own.imported_from, None);
+            let json = serde_json::to_value(&own).unwrap();
+            assert_eq!(json["passwordRemembered"], true);
+            assert!(json["importedFrom"].is_null(), "{json}");
+            assert!(!json.to_string().contains("hunter2"));
+
+            // Locked: `vault_locked` (the form chains "Unlock"), and the
+            // form cannot tell whether a password is remembered.
+            engine.vault_lock().await.unwrap();
+            let mut json = base();
+            json["alias"] = serde_json::json!("web2");
+            json["identity"] = serde_json::json!({ "kind": "none" });
+            let locked = engine
+                .create_host(draft(json).unwrap().into_draft(None))
+                .await
+                .unwrap_err();
+            assert_eq!(locked.summary().code, "vault_locked");
+            let own = managed_host_dto(&engine, "web").await.unwrap().unwrap();
+            assert!(!own.password_remembered);
+        });
+    }
+
+    /// B4: a host created by an import is a Portico host that remembers its
+    /// source, in the inventory (`HostDto.importedFrom`) and in the form.
+    #[test]
+    fn imported_portico_host_carries_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        let export = root.join("hosts.csv");
+        std::fs::write(
+            &export,
+            "Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,Password,SSH_KEY\nProd,web,,203.0.113.10,ssh,22,deploy,,\n",
+        )
+        .unwrap();
+        let engine = engine_at(root);
+        block_on(async {
+            let plan = engine
+                .plan_import(export, portico_core::import::ImportOptions::default())
+                .await
+                .unwrap();
+            let options = plan.options.clone();
+            engine.apply_import(plan, options).await.unwrap();
+            let inventory = engine.load_hosts().await.unwrap();
+            let web = inventory.hosts.iter().find(|h| h.alias == "web").unwrap();
+            let shown = serde_json::to_value(crate::dto::HostDto::from(web)).unwrap();
+            assert_eq!(shown["origin"], "portico", "{shown}");
+            assert_eq!(shown["importedFrom"], "termius", "{shown}");
+            let own = managed_host_dto(&engine, "web").await.unwrap().unwrap();
+            assert_eq!(own.imported_from, Some(ImportSource::Termius));
+        });
+    }
+
+    #[test]
+    fn managed_host_dto_names_the_import_source() {
+        let dto = ManagedHostDto {
+            alias: "termix-web".into(),
+            hostname: "203.0.113.10".into(),
+            user: None,
+            port: None,
+            proxy_jump: None,
+            key_id: None,
+            identity_file: None,
+            password_remembered: false,
+            imported_from: Some(ImportSource::Termix),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["importedFrom"], "termix");
+        assert_eq!(json["passwordRemembered"], false);
     }
 
     #[test]

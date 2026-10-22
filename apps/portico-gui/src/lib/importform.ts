@@ -6,7 +6,7 @@
 // Pure module (no DOM, no Svelte, type-only imports): `scripts/test-import.ts`
 // runs it under Node. Rust checks every key id against the plan again; the
 // passphrase becomes a SecretString there and is cleared here after the call.
-import type { IgnoredSecrets, ImportApplyRequest, ImportDestination, ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey } from "./api";
+import type { IgnoredSecrets, ImportApplyRequest, ImportDestination, ImportNotice, ImportPreview, ImportReport, PlannedHost, PlannedKey, WrittenKey } from "./api";
 
 export const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
@@ -67,6 +67,9 @@ export function passphraseError(passphrase: string, confirm: string): string | n
   return null;
 }
 
+/** The footer's reason while the passphrases differ (Import is disabled). */
+export const PASSPHRASE_MISMATCH_NOTE = "Passphrases differ";
+
 /** `user@host:port` of a destination (the port only when not 22). */
 export function destinationText(d: Pick<ImportDestination, "hostname" | "user" | "port">): string {
   return `${d.user ? `${d.user}@` : ""}${d.hostname}${d.port ? `:${d.port}` : ""}`;
@@ -103,6 +106,24 @@ export function hostsToWrite(hosts: PlannedHost[], accepted: readonly string[]):
   return hosts.filter((h) => h.previous === null || set.has(h.alias));
 }
 
+/** "Updates N": hosts of an earlier import the import writes (in-place
+ * updates, plus the destination changes accepted), as
+ * `ImportPlan::updates` counts them. */
+export function updatesCount(hosts: PlannedHost[], accepted: readonly string[]): number {
+  return hostsToWrite(hosts, accepted).filter((h) => h.update).length;
+}
+
+/** The address column of a preview row: a destination change keeps showing
+ * where the alias points today (`previous`) until it is accepted. */
+export function rowAddress(h: PlannedHost, accepted: readonly string[]): string {
+  return h.previous && !accepted.includes(h.alias) ? destinationText(h.previous) : destinationText(h);
+}
+
+/** Under an accepted destination change (same wording as the CLI). */
+export function redirectNote(previous: ImportDestination): string {
+  return previous.identityFile ? `Pointed at the new server; key ${previous.identityFile} no longer used.` : "Pointed at the new server.";
+}
+
 /** The request for `import_apply`. The passphrase rides along only when the
  * field shows and is filled (Rust ignores it otherwise too). */
 export function applyRequest(preview: ImportPreview, selected: readonly string[], passphrase: string, accepted: readonly string[] = []): ImportApplyRequest {
@@ -132,7 +153,6 @@ export function applyLabel(preview: ImportPreview, selected: readonly string[], 
 
 /** What a notice code means beyond its message, when the message alone is not enough. */
 const EXPLAIN: Record<string, string> = {
-  edited_since_import: "The host was changed by hand since it was imported: it is left as is.",
   key_unreadable: "Its text is never shown, here or in the logs.",
   key_not_used: "The host does not log in with a key: the key is not offered.",
   key_skipped: "Selected, but not imported.",
@@ -157,17 +177,58 @@ export function splitDestinationChanges(list: ImportNotice[]): { changes: Import
   };
 }
 
-/** The advice on ignored secrets, as the engine words it (`IgnoredSecrets::advice`),
- * leaving out zero counts; `null` when the export held no secret. The desktop
- * app shows the engine's own text: this one serves the demo. */
+/** What was not imported, by cause, as the engine words it
+ * (`IgnoredSecrets::advice`): "Not imported: 1 password, 2 unticked keys,
+ * 1 unreadable key."; `null` when nothing was left out. The desktop app
+ * shows the engine's own text: this one serves the demo. */
 export function ignoredSecretsAdvice(secrets: IgnoredSecrets): string | null {
-  const { passwords, keys, keysInExport } = secrets;
-  if (passwords === 0 && keys === 0 && keysInExport === 0) return null;
-  const counts = [passwords ? plural(passwords, "password") : null, keys ? plural(keys, "key") : null].filter((p): p is string => p !== null);
-  const holds = keysInExport ? `The export holds ${plural(keysInExport, "private key")} in clear text or encrypted` : "The export holds them in clear text";
-  const tail = "delete it once the import is done, and keep secrets in your keychain or ssh-agent.";
-  return counts.length ? `${counts.join(" and ")} ignored (never imported). ${holds}: ${tail}` : `${holds}: ${tail}`;
+  const { passwords, keys, untickedKeys, unreadableKeys } = secrets;
+  const other = Math.max(0, keys - untickedKeys - unreadableKeys);
+  const otherWord = untickedKeys > 0 || unreadableKeys > 0 ? "other key" : "key";
+  const parts = (
+    [
+      [passwords, "password"],
+      [untickedKeys, "unticked key"],
+      [unreadableKeys, "unreadable key"],
+      [other, otherWord],
+    ] as const
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, word]) => plural(n, word));
+  return parts.length ? `Not imported: ${parts.join(", ")}.` : null;
 }
+
+/** The action on the export, as the engine words it
+ * (`IgnoredSecrets::delete_export_advice`): "Delete hosts.json now: it holds
+ * 1 password and 4 private keys (in clear text or encrypted)."; `null` when
+ * it held no secret. Demo only (the desktop app shows the engine's text). */
+export function deleteExportAdvice(secrets: IgnoredSecrets, fileName: string): string | null {
+  const keys = Math.max(secrets.keysInExport, secrets.keys);
+  const held = (
+    [
+      [secrets.passwords, "password"],
+      [keys, "private key"],
+    ] as const
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, word]) => plural(n, word));
+  return held.length ? `Delete ${fileName} now: it holds ${held.join(" and ")} (in clear text or encrypted).` : null;
+}
+
+/** The short version of the delete action, for the report's footer note. */
+export function shortDeleteAdvice(fileName: string): string {
+  return `Delete ${fileName} now: it holds secrets.`;
+}
+
+/** A key file the import wrote: "written · 0600 · encrypted" (or "· no
+ * passphrase"), then "used by a, b" (same wording as the CLI). */
+export function writtenKeyLine(key: WrittenKey): string {
+  const parts = ["written", "0600"];
+  if (key.encrypted !== null) parts.push(key.encrypted ? "encrypted" : "no passphrase");
+  if (key.usedBy.length) parts.push(`used by ${key.usedBy.join(", ")}`);
+  return parts.join(" · ");
+}
+
 
 /** One line on the keys of a report, `null` when the export had none. */
 export function reportKeysLine(report: ImportReport): string | null {

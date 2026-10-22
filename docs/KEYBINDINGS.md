@@ -498,8 +498,10 @@ qui sert de rebond est refusé avec la raison. La clé se choisit parmi celles q
 (la GUI n'envoie qu'un identifiant, jamais un chemin) ; un mot de passe facultatif est confié au trousseau (ou au
 vault) et le champ est vidé après l'envoi. Origines dans la liste et le détail : badge « Portico », « Imported »,
 et « ~/.ssh/config » (cadenas) dans le détail. Tant qu'un hôte Portico existe sans que `~/.ssh/config` l'inclue, le
-détail affiche « To use your Portico hosts with ssh, scp and git, add this line at the top of ~/.ssh/config: »,
+détail affiche « Optional: for ssh, scp and git to see these hosts too, add this line at the top of ~/.ssh/config: »,
 la ligne `Include …` et « Copy » (aussi dans la palette) ; le bandeau se ferme et ne revient pas pour la même ligne.
+Sur un hôte de `~/.ssh/config` ou importé, la vue en lecture seule (aussi ouverte par « Delete host », titrée
+« <alias> can't be deleted here ») propose `D` (dupliquer) et `t` (tags et notes), comme la TUI.
 
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
@@ -534,7 +536,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
-| Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`) | `app.import-termius` | — | — |
+| Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`) | `app.import-termius` | `⌘⇧M` | `Ctrl-Shift-M` |
 
 ## Panneaux (GUI)
 
@@ -638,21 +640,22 @@ Sans recherche, la liste montre « Recent » (les 5 derniers hôtes encore prés
 |---|---|
 | Champ suivant / précédent | `Tab` / `Shift-Tab` |
 | Enregistrer (après 400 ms sans frappe) | `↵` dans un champ d'une ligne ou une liste, `Ctrl-S` / `Ctrl-↵` (macOS : `⌘S`, `⌘↵`) |
-| Mot de passe (modification) : garder, changer, oublier | boutons « Keep », « Change », « Forget » |
+| Mot de passe (modification) : garder, changer, oublier (« Keep » et « Forget » inactifs quand aucun n'est mémorisé) | boutons « Keep », « Change », « Forget » |
+| Mot de passe sans vault (ou vault verrouillé) : créer ou déverrouiller le vault, puis l'hôte est enregistré ; « Not now » revient au formulaire | `↵` / `Esc` |
 | Annuler ; avec des modifications, « Discard your changes? » | `Esc`, puis `y` (abandonner) ou `n` / `Esc` (continuer) |
-| Lecture seule (hôte de `~/.ssh/config` ou importé) : dupliquer / éditer tags et notes | `d` ou `↵` / `e` |
+| Lecture seule (hôte de `~/.ssh/config` ou importé ; aussi « Delete host » sur ces hôtes) : dupliquer / éditer tags et notes | `D` ou `↵` / `t` |
 | Dupliquer : nouvel alias | `↵` |
 | Supprimer un hôte Portico : confirmer / garder | `y` / `n` |
 
 ## Import d'hôtes (GUI)
 
-« Import hosts… » (palette) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.
+« Import hosts… » (palette, `⌘⇧M` / `Ctrl-Shift-M`) : export Termius ou Termix, format reconnu par le contenu, choisi dans le sélecteur natif. Aucune clé privée n'est cochée par défaut. Voir `docs/IMPORT.md`.
 
 | Action | Touches |
 |---|---|
 | Préfixer les alias (`termius-`, `termix-`) on/off | `p` |
 | Cocher / décocher la n-ième clé privée | `1` … `9`, ou `Espace` sur la case |
-| Importer (après 400 ms sans frappe ; désactivé si les passphrases diffèrent) | `↵` |
+| Importer (après 400 ms sans frappe ; si les passphrases diffèrent, le pied l'indique et `↵` montre l'erreur) ; aucun hôte à importer : choisir un autre fichier | `↵` |
 | Rapport : copier la ligne `Include` | `c` |
 | Annuler / fermer | `Esc` |
 
