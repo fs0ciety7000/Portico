@@ -75,6 +75,13 @@ pub trait SecretStore: Send + Sync + std::fmt::Debug {
     fn set(&self, key: &SecretKey, secret: &SecretString) -> Result<()>;
     fn delete(&self, key: &SecretKey) -> Result<()>;
 
+    /// `true` when a secret is stored under `key`. The default reads it
+    /// (dropped, zeroized, at once); stores that can tell without reading
+    /// the secret override it.
+    fn contains(&self, key: &SecretKey) -> Result<bool> {
+        Ok(self.get(key)?.is_some())
+    }
+
     /// The vault behind this store, when it is one (lock / unlock from the
     /// [`crate::Engine`]).
     fn vault(&self) -> Option<&VaultStore> {
@@ -146,6 +153,14 @@ impl SecretStore for MemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&key.account())
             .cloned())
+    }
+
+    fn contains(&self, key: &SecretKey) -> Result<bool> {
+        Ok(self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&key.account()))
     }
 
     fn set(&self, key: &SecretKey, secret: &SecretString) -> Result<()> {

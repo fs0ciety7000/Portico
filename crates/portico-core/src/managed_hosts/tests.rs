@@ -1106,3 +1106,158 @@ fn update_rolls_back_the_password_when_the_file_cannot_be_written() {
     assert_eq!(fx.secret(&other), None);
     assert_eq!(fx.secret(&account).as_deref(), Some("old-pw"));
 }
+
+#[test]
+fn details_tell_whether_a_password_is_remembered() {
+    let fx = Fixture::new("");
+    fx.create(&HostDraft {
+        user: Some("root".into()),
+        port: Some(2200),
+        password: PasswordChange::Set(SecretString::from("s3cret".to_owned())),
+        ..draft("db", "db.example.test")
+    })
+    .expect("create");
+    fx.create(&draft("web", "web.example.test"))
+        .expect("create");
+    let remembered = |alias: &str| {
+        details(&fx.config, alias)
+            .expect("details")
+            .expect("host")
+            .password_remembered
+    };
+
+    let db = details(&fx.config, "DB").expect("details").expect("db");
+    assert_eq!(db.host.alias, "db");
+    assert!(db.password_remembered, "unbound password");
+    assert_eq!(db.imported_from, None);
+    assert!(!remembered("web"));
+    assert_eq!(details(&fx.config, "nope").expect("details"), None);
+
+    // Bound to the server key (found through known_hosts): still remembered.
+    let unbound = SecretKey::UnboundHostPassword {
+        user: "root".into(),
+        host: "db.example.test".into(),
+        port: 2200,
+    };
+    fx.secrets.delete(&unbound).expect("delete");
+    assert!(!remembered("db"));
+    let host_key = russh::keys::PrivateKey::random(
+        &mut russh::keys::key::safe_rng(),
+        russh::keys::Algorithm::Ed25519,
+    )
+    .expect("key");
+    let public = host_key.public_key().clone();
+    let fingerprint = public.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+    std::fs::write(
+        fx.paths().known_hosts(),
+        format!(
+            "[db.example.test]:2200 {}\n",
+            public.to_openssh().expect("openssh")
+        ),
+    )
+    .expect("known_hosts");
+    let bound = SecretKey::HostPassword {
+        user: "root".into(),
+        host: "db.example.test".into(),
+        port: 2200,
+        host_key: fingerprint.clone(),
+    };
+    fx.secrets
+        .set(&bound, &SecretString::from("s3cret".to_owned()))
+        .expect("set");
+    assert!(remembered("db"));
+
+    // Bound to a key known_hosts no longer lists: found through the index.
+    std::fs::write(fx.paths().known_hosts(), "").expect("known_hosts");
+    assert!(!remembered("db"));
+    crate::hosts::record_bound_password(
+        &fx.paths().hosts_meta(),
+        "root",
+        "db.example.test",
+        2200,
+        &fingerprint,
+    )
+    .expect("index");
+    assert!(remembered("db"));
+}
+
+#[test]
+fn details_and_inventory_name_the_import_a_host_comes_from() {
+    let fx = Fixture::new("Host mine\n    HostName 10.0.0.1\n");
+    fx.create(&draft("termix-web", "10.0.0.2")).expect("create");
+    fx.create(&draft("own", "10.0.0.3")).expect("create");
+    let meta = fx.paths().hosts_meta();
+    let mut text = std::fs::read_to_string(&meta).unwrap_or_default();
+    text.push_str(
+        "\n[hosts.termix-web.import]\nsource = \"termix\"\nid = \"7\"\nvalues = \"x\"\n\n[hosts.mine.import]\nsource = \"termius\"\nid = \"8\"\nvalues = \"y\"\n",
+    );
+    std::fs::write(&meta, text).expect("hosts.toml");
+
+    let web = details(&fx.config, "termix-web")
+        .expect("details")
+        .expect("web");
+    assert_eq!(web.imported_from, Some(ImportSource::Termix));
+    let json = serde_json::to_value(&web).expect("json");
+    assert_eq!(json["alias"], "termix-web");
+    assert_eq!(json["passwordRemembered"], false);
+    assert_eq!(json["importedFrom"], "termix");
+    let own = details(&fx.config, "own").expect("details").expect("own");
+    assert_eq!(own.imported_from, None);
+    assert_eq!(
+        serde_json::to_value(&own).expect("json")["importedFrom"],
+        serde_json::Value::Null
+    );
+
+    let config = load_config(fx.paths()).expect("load");
+    let (meta, _) = crate::hosts::load_meta(&fx.paths().hosts_meta()).expect("meta");
+    let mut hosts = crate::hosts::inventory(&config, &meta, &fx.config.resolve_context(None));
+    mark_origins(fx.paths(), &mut hosts);
+    let sources: Vec<(&str, Option<ImportSource>)> = hosts
+        .iter()
+        .map(|h| (h.alias.as_str(), h.imported_from))
+        .collect();
+    // Only Portico hosts carry a provenance (a stray table elsewhere is
+    // ignored).
+    assert_eq!(
+        sources,
+        [
+            ("termix-web", Some(ImportSource::Termix)),
+            ("own", None),
+            ("mine", None),
+        ]
+    );
+}
+
+#[test]
+fn a_password_with_no_vault_says_vault_missing() {
+    let mut fx = Fixture::new("");
+    fx.config.secrets = Arc::new(crate::vault::VaultStore::open(fx.paths().vault()));
+    let typed = HostDraft {
+        password: PasswordChange::Set(SecretString::from("pw".to_owned())),
+        ..draft("db", "db.example.test")
+    };
+    let e = fx.create(&typed).expect_err("no vault");
+    let summary = e.summary();
+    assert_eq!(summary.code, "vault_missing");
+    assert_eq!(
+        summary.hint.as_deref(),
+        Some("Create the vault (Keys, then V) to remember passwords, or leave the password empty.")
+    );
+    // Nothing was written.
+    assert!(!fx.target().exists() || !fx.file().contains("Host db"));
+    // Without a password the host is created, then moved and deleted: a
+    // vault that does not exist holds nothing to forget.
+    fx.create(&draft("db", "db.example.test")).expect("create");
+    let db = details(&fx.config, "db").expect("details").expect("db");
+    assert!(!db.password_remembered);
+    update(
+        &fx.config,
+        "db",
+        &HostDraft {
+            password: PasswordChange::Forget,
+            ..draft("db", "other.example.test")
+        },
+    )
+    .expect("update");
+    assert_eq!(delete(&fx.config, "db").expect("delete"), "db");
+}

@@ -149,10 +149,15 @@ async fn template_csv_plan() {
     );
 
     assert_eq!((plan.secrets.passwords, plan.secrets.keys), (2, 1));
-    let advice = plan.secrets.advice().expect("advice");
-    assert!(
-        advice.starts_with("2 passwords and 1 key ignored"),
-        "{advice}"
+    assert_eq!(
+        plan.secrets.advice().as_deref(),
+        Some("Not imported: 2 passwords, 1 key.")
+    );
+    assert_eq!(
+        plan.delete_export_advice().as_deref(),
+        Some(
+            "Delete termius_template.csv now: it holds 2 passwords and 1 private key (in clear text or encrypted)."
+        )
     );
     assert!(plan.identity_files.is_empty());
 

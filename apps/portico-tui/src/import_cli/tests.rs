@@ -272,7 +272,7 @@ async fn termius_plan_and_report_texts() {
         "{text}"
     );
     assert!(
-        text.contains("  1 password ignored (never imported). The export holds them"),
+        text.contains("Secrets\n  Not imported: 1 password.\n"),
         "{text}"
     );
     assert!(!text.contains("0 keys"), "{text}");
@@ -413,7 +413,7 @@ async fn termix_plan_lists_keys_and_how_to_select_them() {
         "{text}"
     );
     assert!(
-        text.contains("3 private keys in clear text or encrypted"),
+        text.contains("Not imported: 3 passwords, 1 unreadable key, 1 other key."),
         "{text}"
     );
     assert!(
@@ -523,7 +523,7 @@ async fn termix_apply_with_one_key_end_to_end() {
     );
     assert!(!text.contains("Keys reused"), "{text}");
     assert!(
-        text.contains("\nDelete the export now: it holds 3 passwords and 3 private keys"),
+        text.contains("\nDelete the export now: it holds 3 passwords and 5 private keys"),
         "{text}"
     );
     assert!(
@@ -685,6 +685,8 @@ fn report_lists_reused_keys_and_new_warnings_only() {
         secrets: portico_core::import::IgnoredSecrets {
             passwords: 0,
             keys: 0,
+            unticked_keys: 0,
+            unreadable_keys: 0,
             keys_in_export: 1,
         },
         identity_files: Vec::new(),

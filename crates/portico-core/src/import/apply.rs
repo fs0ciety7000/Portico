@@ -94,6 +94,12 @@ pub(crate) fn apply(
     let managed = paths.managed_hosts();
     let mut secrets = plan.secrets;
     secrets.keys = secrets.keys.saturating_add(keys.skipped);
+    let unticked = plan
+        .keys
+        .iter()
+        .filter(|k| !options.keys.contains(&k.id))
+        .count();
+    secrets.unticked_keys = secrets.unticked_keys.saturating_add(unticked);
     let report = ImportReport {
         format: plan.format,
         unchanged: !hosts_changed,

@@ -69,7 +69,9 @@ use serde::Serialize;
 use crate::engine::EngineConfig;
 use crate::error::{Error, Result};
 use crate::hosts::{HostEntry, HostMeta, HostOrigin, MetaChange};
-use crate::import::{clean_hostname, clean_user, display_text, include_line, is_valid_alias};
+use crate::import::{
+    ImportSource, clean_hostname, clean_user, display_text, include_line, is_valid_alias,
+};
 use crate::known_hosts::KnownHosts;
 use crate::secrets::{SecretKey, SecretStore};
 use crate::ssh_config::lexer::tokenize;
@@ -144,6 +146,27 @@ pub struct ManagedHost {
     /// Absolute path (written `~/…` under the home directory).
     pub identity_file: Option<PathBuf>,
     pub proxy_jump: Option<String>,
+}
+
+/// What an edit form needs about a Portico host
+/// ([`crate::Engine::managed_host_details`]): the values `hosts.conf` holds,
+/// whether a password is remembered for its account, and the import it
+/// comes from. Never holds a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedHostDetails {
+    #[serde(flatten)]
+    pub host: ManagedHost,
+    /// A password is remembered for the account this host logs in to
+    /// (`user@host:port`), unbound (typed in a form, not used yet) or bound
+    /// to one of the server's keys. Only the presence is looked up, never
+    /// the value. `false` when the secret store cannot tell (vault locked
+    /// or missing, keyring unavailable).
+    pub password_remembered: bool,
+    /// The tool the host was imported from (`[hosts.<alias>.import]` of
+    /// `hosts.toml`), still set once it was edited; `None` for a host
+    /// created in Portico.
+    pub imported_from: Option<ImportSource>,
 }
 
 /// A host created, edited or duplicated in Portico, with its metadata.
@@ -736,13 +759,15 @@ pub(crate) fn load_config(paths: &Paths) -> Result<SshConfig> {
 
 /// Marks each host with the file it comes from: `hosts.conf` is
 /// [`HostOrigin::Portico`], the Termius import file
-/// [`HostOrigin::Imported`], anything else [`HostOrigin::SshConfig`].
-/// Blocking (paths are compared canonicalized).
+/// [`HostOrigin::Imported`], anything else [`HostOrigin::SshConfig`]; and
+/// each Portico host created by an import with its source
+/// ([`HostEntry::imported_from`]; an unreadable `hosts.toml` leaves it
+/// `None`). Blocking (paths are compared canonicalized).
 pub(crate) fn mark_origins(paths: &Paths, hosts: &mut [HostEntry]) {
     let managed = paths.managed_hosts();
     let imported = crate::import::termius_target(paths);
     let mut known: HashMap<PathBuf, HostOrigin> = HashMap::new();
-    for host in hosts {
+    for host in hosts.iter_mut() {
         let file = &host.source.file;
         let origin = *known.entry(file.clone()).or_insert_with(|| {
             if same_file(file, &managed) {
@@ -754,6 +779,18 @@ pub(crate) fn mark_origins(paths: &Paths, hosts: &mut [HostEntry]) {
             }
         });
         host.origin = origin;
+        host.imported_from = None;
+    }
+    if !hosts.iter().any(|h| h.origin == HostOrigin::Portico) {
+        return;
+    }
+    let Ok(provenance) = crate::hosts::load_provenance(&paths.hosts_meta()) else {
+        return;
+    };
+    for host in hosts.iter_mut().filter(|h| h.origin == HostOrigin::Portico) {
+        host.imported_from = provenance
+            .get(&host.alias)
+            .and_then(|p| ImportSource::from_name(&p.source));
     }
 }
 
@@ -790,6 +827,40 @@ impl PasswordTarget {
             host: self.host.clone(),
             port: self.port,
         }
+    }
+
+    /// `true` when a password is remembered for this account: the unbound
+    /// one, or one bound to a key `known_hosts` or the index of
+    /// `hosts.toml` lists for it. Only presence is checked. A store that
+    /// cannot tell (locked vault) counts as none. Blocking.
+    fn remembered(&self, secrets: &dyn SecretStore) -> bool {
+        if secrets.contains(&self.unbound_key()).unwrap_or(false) {
+            return true;
+        }
+        let mut fingerprints = KnownHosts::load(&self.known_hosts_files)
+            .map(|known| known.fingerprints(&self.host, self.port))
+            .unwrap_or_default();
+        fingerprints.extend(
+            crate::hosts::bound_password_fingerprints(
+                &self.meta_path,
+                &self.user,
+                &self.host,
+                self.port,
+            )
+            .unwrap_or_default(),
+        );
+        fingerprints.sort();
+        fingerprints.dedup();
+        fingerprints.into_iter().any(|fingerprint| {
+            secrets
+                .contains(&SecretKey::HostPassword {
+                    user: self.user.clone(),
+                    host: self.host.clone(),
+                    port: self.port,
+                    host_key: fingerprint,
+                })
+                .unwrap_or(false)
+        })
     }
 
     /// Forgets the unbound password and every one bound to a key that
@@ -1212,6 +1283,29 @@ impl<'a> Editor<'a> {
         Ok(self.summary(host, meta?))
     }
 
+    /// See [`details`].
+    fn details(&self, alias: &str) -> Result<Option<ManagedHostDetails>> {
+        let Some(host) = self
+            .hosts
+            .iter()
+            .find(|h| h.alias.eq_ignore_ascii_case(alias))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let config = self.config_with(&self.hosts)?;
+        let account = self.password_target(&config, &host.alias);
+        let password_remembered = account.remembered(self.config.secrets.as_ref());
+        let imported_from = crate::hosts::load_provenance(&self.paths().hosts_meta())?
+            .get(&host.alias)
+            .and_then(|p| ImportSource::from_name(&p.source));
+        Ok(Some(ManagedHostDetails {
+            host,
+            password_remembered,
+            imported_from,
+        }))
+    }
+
     /// See [`delete`].
     fn delete(&self, alias: &str) -> Result<String> {
         let paths = self.paths();
@@ -1512,6 +1606,13 @@ pub(crate) fn update(config: &EngineConfig, alias: &str, draft: &HostDraft) -> R
 /// alias as it was declared. Blocking.
 pub(crate) fn delete(config: &EngineConfig, alias: &str) -> Result<String> {
     Editor::open(config)?.delete(alias)
+}
+
+/// The Portico host `alias` (ignoring case) with what an edit form needs
+/// besides its values ([`ManagedHostDetails`]); `None` when `hosts.conf`
+/// has no such host. Reads only (no lock, nothing created). Blocking.
+pub(crate) fn details(config: &EngineConfig, alias: &str) -> Result<Option<ManagedHostDetails>> {
+    Editor::read(config, None)?.details(alias)
 }
 
 /// Copies the effective `HostName`, `User`, `Port`, first usable

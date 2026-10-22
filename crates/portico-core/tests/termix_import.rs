@@ -242,18 +242,29 @@ async fn the_plan_is_exact_and_writes_nothing() {
         ]
     );
     assert_eq!(plan.key_material.len(), 3);
-    // 2 passwords + 1 key passphrase; the garbage key and the unused one.
+    // 2 passwords + 1 key passphrase; the garbage key and the unused one
+    // (not offered), the 3 offered keys (nothing ticked yet).
     assert_eq!(
         (
             plan.secrets.passwords,
             plan.secrets.keys,
+            plan.secrets.unticked_keys,
+            plan.secrets.unreadable_keys,
             plan.secrets.keys_in_export
         ),
-        (3, 2, 3)
+        (3, 2, 0, 1, 5)
     );
-    let advice = plan.secrets.advice().unwrap();
-    assert!(advice.contains("3 private keys"), "{advice}");
-    assert!(advice.contains("delete it"), "{advice}");
+    assert_eq!(
+        plan.secrets.advice().as_deref(),
+        Some("Not imported: 3 passwords, 1 unreadable key, 1 other key.")
+    );
+    assert_eq!(plan.file_name(), "termix_export.json");
+    assert_eq!(
+        plan.delete_export_advice().as_deref(),
+        Some(
+            "Delete termix_export.json now: it holds 3 passwords and 5 private keys (in clear text or encrypted)."
+        )
+    );
 
     assert_eq!(plan.target, env.dir.path().join("config/hosts.conf"));
     assert_eq!(plan.include_line, "Include ~/config/hosts.conf");
@@ -289,6 +300,14 @@ async fn no_key_is_imported_unless_selected() {
     assert!(report.keys.imported.is_empty() && report.keys.reused.is_empty());
     assert_eq!(report.keys.skipped, 3);
     assert_eq!(report.secrets.keys, 5, "2 unusable + 3 not selected");
+    assert_eq!(
+        (report.secrets.unticked_keys, report.secrets.unreadable_keys),
+        (3, 1)
+    );
+    assert_eq!(
+        report.secrets.advice().as_deref(),
+        Some("Not imported: 3 passwords, 3 unticked keys, 1 unreadable key, 1 other key.")
+    );
     let conf = hosts_conf(&env);
     assert!(!conf.contains("IdentityFile"), "{conf}");
     assert!(!env.ssh("portico").exists());
@@ -440,6 +459,7 @@ async fn all_keys_with_a_passphrase() {
     );
     assert_eq!(report.keys.skipped, 0);
     assert_eq!(report.secrets.keys, 2, "the two unusable keys");
+    assert_eq!(report.secrets.unticked_keys, 0);
 
     // Clear keys are encrypted with the passphrase given…
     for (file, fingerprint) in [("hbd", ED25519), ("legacy-rsa", RSA)] {
@@ -616,7 +636,19 @@ async fn a_reimport_only_updates_hosts_it_created_and_nobody_edited() {
     assert!(skipped.contains(&(Some("Hbd".into()), NoticeCode::EditedSinceImport)));
     assert!(skipped.contains(&(Some("manual".into()), NoticeCode::AliasCollision)));
     assert!(plan.hosts.iter().all(|h| h.update), "{:?}", plan.hosts);
-    assert_eq!(plan.replaces, Some(7));
+    // Counts only the hosts written as they are: not `hbd` (edited, so
+    // skipped) nor `locked-box` (a destination change, skipped unless
+    // accepted).
+    assert_eq!(plan.hosts.len(), 7);
+    assert_eq!(plan.replaces, Some(6));
+    assert_eq!(plan.updates(&ImportOptions::default()), 6);
+    assert_eq!(
+        plan.updates(&ImportOptions {
+            allow_redirect: ["locked-box".to_owned()].into(),
+            ..ImportOptions::default()
+        }),
+        7
+    );
     // `locked-box` now points elsewhere: a destination change, applied
     // only with the user's consent for that alias.
     let redirected: Vec<&str> = plan
@@ -884,6 +916,9 @@ async fn reimport_never_redirects_an_alias_silently() {
         .unwrap();
     let planned = plan.hosts.first().unwrap();
     assert!(planned.update);
+    // Not counted as an update until accepted.
+    assert_eq!(plan.replaces, None);
+    assert_eq!(plan.updates(&ImportOptions::default()), 0);
     let previous = planned.previous.as_ref().expect("a destination change");
     assert_eq!(
         (previous.hostname.as_str(), previous.port),

@@ -584,6 +584,8 @@ pub(crate) fn read(text: &str, source: &Path) -> Result<Collected> {
                     Ok(id) => Some(id),
                     Err(reason) => {
                         collected.secrets.keys = collected.secrets.keys.saturating_add(1);
+                        collected.secrets.unreadable_keys =
+                            collected.secrets.unreadable_keys.saturating_add(1);
                         collected.notice(
                             NoticeCode::KeyUnreadable,
                             Some(record),

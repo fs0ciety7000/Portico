@@ -117,6 +117,10 @@ pub struct HostEntry {
     pub origin: HostOrigin,
     pub resolved: ResolvedHost,
     pub meta: HostMeta,
+    /// For a [`HostOrigin::Portico`] host created by an import: the tool it
+    /// was imported from (`[hosts.<alias>.import]` of `hosts.toml`), still
+    /// set once the host was edited. `None` for every other host.
+    pub imported_from: Option<crate::import::ImportSource>,
 }
 
 impl HostEntry {
@@ -152,6 +156,7 @@ pub fn inventory(config: &SshConfig, meta: &HostMetaFile, ctx: &ResolveContext) 
             alias: name,
             source,
             origin: HostOrigin::SshConfig,
+            imported_from: None,
         })
         .collect()
 }

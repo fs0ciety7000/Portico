@@ -106,6 +106,15 @@ impl ImportSource {
         }
     }
 
+    /// The source named `name` ([`Self::as_str`]), if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "termius" => Some(Self::Termius),
+            "termix" => Some(Self::Termix),
+            _ => None,
+        }
+    }
+
     /// Human name (`Termius`), also the start of generated notes.
     pub fn label(self) -> &'static str {
         match self {
@@ -546,10 +555,19 @@ fn hidden_count(notice: &ImportNotice) -> usize {
 pub struct IgnoredSecrets {
     /// Passwords (and key passphrases) never imported.
     pub passwords: usize,
-    /// Private keys not imported (unreadable, unused or not selected).
+    /// Private keys not imported, whatever the cause: the
+    /// [`Self::unticked_keys`], the [`Self::unreadable_keys`] and the others
+    /// (a key stored for a host that does not use keys, a key of a skipped
+    /// host, a key found in a Termius cell or field).
     pub keys: usize,
-    /// Distinct private keys the export holds in clear text or encrypted,
-    /// whether imported or not (Termix).
+    /// Of [`Self::keys`]: keys offered for import and left unticked. Always
+    /// 0 in a plan (nothing is ticked yet); counted by the report.
+    pub unticked_keys: usize,
+    /// Of [`Self::keys`]: keys Portico cannot read
+    /// ([`NoticeCode::KeyUnreadable`]).
+    pub unreadable_keys: usize,
+    /// Private keys the export holds in clear text or encrypted, whether
+    /// imported or not.
     pub keys_in_export: usize,
 }
 
@@ -559,43 +577,61 @@ impl IgnoredSecrets {
         self.passwords.saturating_add(self.keys)
     }
 
-    /// Advice shown when the export held secrets (`None` otherwise): it
-    /// must be deleted once imported. Only the non-zero counts are named
-    /// ("1 password ignored", never "0 keys"); with nothing ignored but
-    /// keys in the export (all imported), only the deletion advice is left.
+    /// What was not imported, by cause: `"Not imported: 1 password, 2
+    /// unticked keys, 1 unreadable key."`. Only the non-zero parts are
+    /// named; keys of no named cause are `"N keys"`, or `"N other keys"`
+    /// next to a named cause. `None` when nothing was left out.
     pub fn advice(self) -> Option<String> {
-        if self.total() == 0 && self.keys_in_export == 0 {
-            return None;
-        }
-        let plural =
-            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-        let ignored: Vec<String> = [
-            (self.passwords, "password", "passwords"),
-            (self.keys, "key", "keys"),
+        let other = self
+            .keys
+            .saturating_sub(self.unticked_keys)
+            .saturating_sub(self.unreadable_keys);
+        let other_word = if self.unticked_keys > 0 || self.unreadable_keys > 0 {
+            "other key"
+        } else {
+            "key"
+        };
+        let parts: Vec<String> = [
+            (self.passwords, "password"),
+            (self.unticked_keys, "unticked key"),
+            (self.unreadable_keys, "unreadable key"),
+            (other, other_word),
         ]
         .into_iter()
-        .filter(|(n, _, _)| *n > 0)
-        .map(|(n, one, many)| plural(n, one, many))
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, word)| plural(n, word))
         .collect();
-        let holds = if self.keys_in_export > 0 {
+        (!parts.is_empty()).then(|| format!("Not imported: {}.", parts.join(", ")))
+    }
+
+    /// The action to take on the export once imported, naming it:
+    /// `"Delete hosts.json now: it holds 1 password and 4 private keys (in
+    /// clear text or encrypted)."`. Only the non-zero counts are named;
+    /// `None` when the export held no secret. `file_name` is the export's
+    /// file name (control characters are dropped); UIs show this first.
+    pub fn delete_export_advice(self, file_name: &str) -> Option<String> {
+        let keys = self.keys_in_export.max(self.keys);
+        let held: Vec<String> = [(self.passwords, "password"), (keys, "private key")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, word)| plural(n, word))
+            .collect();
+        (!held.is_empty()).then(|| {
             format!(
-                "The export holds {} in clear text or encrypted",
-                plural(self.keys_in_export, "private key", "private keys")
-            )
-        } else {
-            "The export holds them in clear text".to_owned()
-        };
-        let delete = format!(
-            "{holds}: delete it once the import is done, and keep secrets in your keychain or ssh-agent."
-        );
-        Some(if ignored.is_empty() {
-            delete
-        } else {
-            format!(
-                "{} ignored (never imported). {delete}",
-                ignored.join(" and ")
+                "Delete {} now: it holds {} (in clear text or encrypted).",
+                display_text(file_name, 255),
+                held.join(" and ")
             )
         })
+    }
+}
+
+/// `"1 password"`, `"2 passwords"`.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
     }
 }
 
@@ -624,7 +660,10 @@ pub struct ImportPlan {
     /// The line to add at the top of `~/.ssh/config` so OpenSSH sees them.
     pub include_line: String,
     /// Hosts of an earlier import of the same source that this plan
-    /// updates; `None` when there are none.
+    /// updates in place (same `HostName`, `User` and `Port`); `None` when
+    /// there are none. Destination changes are not counted (they are
+    /// skipped unless accepted: see [`Self::updates`]), nor hosts edited
+    /// since the import (skipped).
     pub replaces: Option<usize>,
     /// Private keys found (Termix), offered for import; none is selected
     /// by default.
@@ -638,6 +677,30 @@ impl ImportPlan {
     /// The tool the export comes from.
     pub fn source_kind(&self) -> ImportSource {
         self.format.source()
+    }
+
+    /// Hosts of an earlier import that applying this plan with `options`
+    /// would update: the [`Self::replaces`] ones, plus the destination
+    /// changes accepted in [`ImportOptions::allow_redirect`].
+    pub fn updates(&self, options: &ImportOptions) -> usize {
+        self.hosts
+            .iter()
+            .filter(|h| h.update && (h.previous.is_none() || options.redirect_allowed(&h.alias)))
+            .count()
+    }
+
+    /// The export's file name (never its path), control characters
+    /// dropped.
+    pub fn file_name(&self) -> String {
+        self.source
+            .file_name()
+            .map(|n| display_text(&n.to_string_lossy(), 255))
+            .unwrap_or_default()
+    }
+
+    /// [`IgnoredSecrets::delete_export_advice`] for this export.
+    pub fn delete_export_advice(&self) -> Option<String> {
+        self.secrets.delete_export_advice(&self.file_name())
     }
 }
 
@@ -753,7 +816,7 @@ impl ImportError {
             Self::UnknownFormat { .. } => (
                 "import_unknown_format",
                 Some(
-                    "Use a CSV with the Termius import template header (Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,…), a termius-local-export hosts.json or credentials.csv, the output of `termius export-ssh-config`, or a Termix JSON export. See docs/IMPORT.md.",
+                    "Use a CSV with the Termius import template header (Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,…), a termius-local-export hosts.json or credentials.csv, the output of `termius export-ssh-config`, or a Termix JSON export. See Portico's import guide.",
                 ),
             ),
             Self::Csv { .. } => (
@@ -1173,73 +1236,95 @@ mod tests {
         );
     }
 
-    #[test]
-    fn secrets_advice() {
-        assert_eq!(IgnoredSecrets::default().advice(), None);
-        let advice = IgnoredSecrets {
-            passwords: 2,
-            keys: 1,
-            keys_in_export: 0,
+    fn secrets(
+        passwords: usize,
+        keys: usize,
+        unticked_keys: usize,
+        unreadable_keys: usize,
+        keys_in_export: usize,
+    ) -> IgnoredSecrets {
+        IgnoredSecrets {
+            passwords,
+            keys,
+            unticked_keys,
+            unreadable_keys,
+            keys_in_export,
         }
-        .advice()
-        .expect("advice");
-        assert!(
-            advice.starts_with("2 passwords and 1 key ignored"),
-            "{advice}"
-        );
-        assert!(advice.contains("delete it"), "{advice}");
-        // Every key imported, no password: still told to delete the export.
-        let advice = IgnoredSecrets {
-            passwords: 0,
-            keys: 0,
-            keys_in_export: 2,
-        }
-        .advice()
-        .expect("advice");
-        assert!(advice.contains("2 private keys"), "{advice}");
-        assert!(advice.contains("delete it"), "{advice}");
     }
 
     #[test]
-    fn secrets_advice_names_only_non_zero_counts() {
-        // Every key imported, no password: no "0 passwords and 0 keys".
-        let advice = IgnoredSecrets {
-            passwords: 0,
-            keys: 0,
-            keys_in_export: 2,
-        }
-        .advice()
-        .expect("advice");
+    fn secrets_advice_details_the_causes() {
+        assert_eq!(IgnoredSecrets::default().advice(), None);
+        // Every key imported, no password: nothing was left out.
+        assert_eq!(secrets(0, 0, 0, 0, 2).advice(), None);
         assert_eq!(
-            advice,
-            "The export holds 2 private keys in clear text or encrypted: delete it once the import is done, and keep secrets in your keychain or ssh-agent."
+            secrets(1, 3, 2, 1, 4).advice().as_deref(),
+            Some("Not imported: 1 password, 2 unticked keys, 1 unreadable key.")
         );
-        assert!(!advice.contains("ignored"), "{advice}");
-        // One password only (Termius without keys).
-        let advice = IgnoredSecrets {
-            passwords: 1,
-            keys: 0,
-            keys_in_export: 0,
-        }
-        .advice()
-        .expect("advice");
+        // Keys of no named cause: "keys", or "other keys" next to a cause.
         assert_eq!(
-            advice,
-            "1 password ignored (never imported). The export holds them in clear text: delete it once the import is done, and keep secrets in your keychain or ssh-agent."
+            secrets(2, 1, 0, 0, 1).advice().as_deref(),
+            Some("Not imported: 2 passwords, 1 key.")
         );
-        // Keys only.
-        let advice = IgnoredSecrets {
-            passwords: 0,
-            keys: 1,
-            keys_in_export: 3,
-        }
-        .advice()
-        .expect("advice");
-        assert!(
-            advice.starts_with("1 key ignored (never imported). The export holds 3 private keys"),
-            "{advice}"
+        assert_eq!(
+            secrets(0, 4, 1, 1, 4).advice().as_deref(),
+            Some("Not imported: 1 unticked key, 1 unreadable key, 2 other keys.")
         );
-        assert!(!advice.contains("0 "), "{advice}");
+        assert_eq!(
+            secrets(1, 0, 0, 0, 0).advice().as_deref(),
+            Some("Not imported: 1 password.")
+        );
+    }
+
+    #[test]
+    fn delete_export_advice_names_the_file_and_what_it_holds() {
+        assert_eq!(
+            IgnoredSecrets::default().delete_export_advice("x.json"),
+            None
+        );
+        assert_eq!(
+            secrets(1, 0, 0, 0, 4)
+                .delete_export_advice("termix.json")
+                .as_deref(),
+            Some(
+                "Delete termix.json now: it holds 1 password and 4 private keys (in clear text or encrypted)."
+            )
+        );
+        // Only the non-zero counts.
+        assert_eq!(
+            secrets(2, 0, 0, 0, 0)
+                .delete_export_advice("hosts.csv")
+                .as_deref(),
+            Some("Delete hosts.csv now: it holds 2 passwords (in clear text or encrypted).")
+        );
+        assert_eq!(
+            secrets(0, 1, 0, 0, 1)
+                .delete_export_advice("a.json")
+                .as_deref(),
+            Some("Delete a.json now: it holds 1 private key (in clear text or encrypted).")
+        );
+        // A control character of the name never reaches the text.
+        assert_eq!(
+            secrets(1, 0, 0, 0, 0)
+                .delete_export_advice("evil\nname.csv")
+                .as_deref(),
+            Some("Delete evilname.csv now: it holds 1 password (in clear text or encrypted).")
+        );
+    }
+
+    #[test]
+    fn unknown_format_hint_points_to_no_file() {
+        let e = crate::Error::from(ImportError::UnknownFormat {
+            path: PathBuf::from("x.csv"),
+        });
+        let summary = e.summary();
+        assert_eq!(summary.code, "import_unknown_format");
+        let hint = summary.hint.expect("hint");
+        assert!(!hint.contains("docs/"), "{hint}");
+        assert!(hint.ends_with("See Portico's import guide."), "{hint}");
+        // Code spans only around the command (the UIs render them).
+        assert_eq!(hint.matches('`').count(), 2, "{hint}");
+        assert!(hint.contains("`termius export-ssh-config`"), "{hint}");
     }
 
     #[test]

@@ -631,8 +631,7 @@ mod tests {
             collected.secrets,
             super::super::IgnoredSecrets {
                 passwords: 1,
-                keys: 0,
-                keys_in_export: 0,
+                ..Default::default()
             }
         );
         let raw = collected.raw.first().expect("one");

@@ -140,12 +140,21 @@ pub(crate) fn plan(
     let hosts = builder.hosts;
     let (keys, material) = planned_keys(paths, &hosts, &mut collected.keys);
     let mut secrets = collected.secrets;
+    // The keys counted while reading (unreadable, unused, found in a
+    // Termius cell) are held by the export too.
+    secrets.keys_in_export = secrets
+        .keys
+        .saturating_add(keys.len())
+        .saturating_add(collected.keys.len());
     secrets.keys = secrets.keys.saturating_add(collected.keys.len());
-    secrets.keys_in_export = keys.len().saturating_add(collected.keys.len());
     drop(collected.keys);
 
     let managed = paths.managed_hosts();
-    let updates = hosts.iter().filter(|h| h.update).count();
+    // Destination changes are skipped unless accepted: not counted here.
+    let updates = hosts
+        .iter()
+        .filter(|h| h.update && h.previous.is_none())
+        .count();
     Ok(ImportPlan {
         source: source.to_path_buf(),
         format,

@@ -68,7 +68,8 @@ déclarée par l'export), et un hôte dont la destination change s'affiche
 
 Le rapport liste les hôtes mis à jour, les **changements de destination non appliqués** (avec l'option qui les
 applique), les clés importées (`~/.ssh/portico/<alias>`), les clés réutilisées, le
-nombre de clés ignorées, les avertissements apparus à l'écriture, puis rappelle de **supprimer l'export**.
+nombre de clés ignorées, les avertissements apparus à l'écriture, et l'action **supprimer l'export** (« Delete
+<fichier> now: … », voir plus bas).
 
 **GUI** : palette (`⌘K` / `Ctrl-K`), « Import hosts… » (Termius ou Termix, reconnu par le contenu). Le fichier se
 choisit dans le sélecteur natif (la webview ne nomme jamais un chemin) ; le plan reste côté Rust, clés comprises,
@@ -92,8 +93,37 @@ identifiants cochés sont vérifiés côté Rust contre ceux du plan, la passphr
 d'import : son aide `?` rappelle la commande ci-dessus.
 
 Un nouvel import **met à jour** les hôtes que le précédent a créés et que personne n'a modifiés : l'aperçu les compte
-(« Updates N hosts from an earlier import », `replaces`) et les marque `(update)`. Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse, le bouton est
-désactivé) : les hôtes déjà importés restent en place.
+(« Updates N hosts from an earlier import », `replaces`) et les marque `(update)`. `replaces` ne compte que les hôtes
+réellement écrits tels quels : ni un hôte `edited_since_import` (ignoré), ni un changement de destination tant qu'il
+n'est pas accepté ; `ImportPlan::updates(options)` y ajoute les changements acceptés (`allowRedirect`). Un export dont
+aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse, le bouton est désactivé) : les hôtes déjà importés
+restent en place.
+
+### Secrets de l'export : les deux phrases du moteur
+
+Les UIs (CLI, TUI, GUI) affichent les textes du moteur, à l'identique :
+
+- **Action sur l'export**, affichée en premier, juste après le résumé (`IgnoredSecrets::delete_export_advice(nom)`,
+  ou `ImportPlan::delete_export_advice()` qui prend le nom du fichier, jamais son chemin) :
+  « Delete termix.json now: it holds 1 password and 4 private keys (in clear text or encrypted). » Seuls les
+  compteurs non nuls sont nommés (« it holds 2 passwords (in clear text or encrypted). ») ; rien quand l'export ne
+  contient aucun secret. Les clés comptées sont celles que l'export contient (`keysInExport`), importées ou non.
+- **Ce qui n'a pas été importé, par cause** (`IgnoredSecrets::advice()`) : « Not imported: 1 password, 2 unticked
+  keys, 1 unreadable key. » Seules les parties non nulles : `password(s)` (mots de passe et passphrases de clé),
+  `unticked key(s)` (clés proposées mais non cochées : compté par le rapport, toujours 0 dans l'aperçu),
+  `unreadable key(s)` (`key_unreadable`), puis les autres clés (clé stockée pour un hôte sans authentification par
+  clé, clé d'un hôte ignoré, clé trouvée dans une cellule Termius) : `key(s)` seules, `other key(s)` à côté d'une
+  cause nommée (« Not imported: 2 passwords, 1 key. »).
+
+Compteurs JSON (`secrets`) : `passwords`, `keys` (toutes les clés non importées), `untickedKeys` et `unreadableKeys`
+(parties de `keys`), `keysInExport`.
+
+### Provenance visible
+
+Un hôte Portico créé par un import garde sa source : `HostEntry::imported_from` (inventaire) et
+`ManagedHostDetails::imported_from` (`Engine::managed_host_details`, JSON `importedFrom` : `"termius"`, `"termix"` ou
+`null`), lus dans `[hosts.<alias>.import]` de `hosts.toml`, et conservés après une modification. Les UIs affichent
+« Portico · from Termix ».
 
 ## 3. Ajouter la ligne `Include`
 
@@ -121,7 +151,7 @@ hôtes.
 | Groups | Groupe Portico (`Production/EU`, 64 caractères au plus), seulement si l'hôte n'en a pas déjà un. |
 | Tags | Tags Portico, ajoutés à ceux qui existent (16 au plus) ; `Web Serveur` devient `web-serveur` avec un avertissement. |
 | Protocol | Seul `ssh` (ou vide) est importé : telnet, mosh… sont ignorés. |
-| Password, SSH_KEY, PrivateKeyPath, identityFile | **Jamais importés**. Portico compte seulement les cellules non vides (« 2 mots de passe et 1 clé ignorés ») et les efface de la mémoire. Une clé privée collée dans une autre colonne est aussi détectée et ignorée. |
+| Password, SSH_KEY, PrivateKeyPath, identityFile | **Jamais importés**. Portico compte seulement les cellules non vides (« Not imported: 2 passwords, 1 key. ») et les efface de la mémoire. Une clé privée collée dans une autre colonne est aussi détectée et ignorée. |
 
 Les hôtes importés rejoignent `hosts.conf` (dossier de configuration de Portico, `0600`, dossier `0700`), avec
 seulement `Host`, `HostName`, `User`, `Port` et, pour une clé importée, `IdentityFile` et `IdentitiesOnly yes`.
@@ -152,6 +182,11 @@ passe dans `User`) ; sans colonne secrète, seules les cellules manquantes en fi
 **Collisions** : un alias déjà défini dans votre configuration (sans tenir compte de la casse) n'est pas importé,
 avec un avertissement, pour ne pas masquer votre propre entrée. L'option `--prefix` (case « Prefix aliases with
 termius- », ou `termix-`, dans la GUI, touche `p`) préfixe tous les alias importés et garde les deux.
+
+Un fichier que Portico ne reconnaît pas donne `import_unknown_format`, avec le hint : « Use a CSV with the Termius
+import template header (Groups,Label,Tags,Hostname/IP,Protocol,Port,Username,…), a termius-local-export hosts.json or
+credentials.csv, the output of `termius export-ssh-config`, or a Termix JSON export. See Portico's import guide. »
+(les accents graves délimitent un span de code, rendu comme tel par la GUI).
 
 Limites connues : ni `ProxyJump`, ni clés, ni snippets, ni identités partagées Termius (formats non confirmés) ;
 5000 hôtes et 4 Mio par fichier au plus ; 500 avertissements listés au plus (les suivants sont comptés).

@@ -1299,6 +1299,22 @@ impl Engine {
         .map_err(|_| Error::EngineClosed)?
     }
 
+    /// Like [`Self::managed_host`], plus what an edit form shows besides
+    /// the values: whether a password is remembered for the host's account
+    /// ([`crate::managed_hosts::ManagedHostDetails::password_remembered`],
+    /// presence only) and the import it comes from. `None` when `alias` is
+    /// not a Portico host.
+    pub async fn managed_host_details(
+        &self,
+        alias: &str,
+    ) -> Result<Option<crate::managed_hosts::ManagedHostDetails>> {
+        let config = self.inner.config.clone();
+        let alias = alias.to_owned();
+        tokio::task::spawn_blocking(move || crate::managed_hosts::details(&config, &alias))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
+
     /// Deletes the Portico host `alias`, its metadata and its remembered
     /// password. Emits [`EngineEvent::HostsChanged`].
     pub async fn delete_host(&self, alias: &str) -> Result<()> {
