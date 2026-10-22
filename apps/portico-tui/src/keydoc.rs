@@ -58,7 +58,7 @@ const HOST_FORM: Panel = Panel {
             "`Esc`, `Ctrl-C`",
         ),
         (
-            "Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime)",
+            "Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime ; `n` ou `Esc` annule, les autres touches sont ignorées)",
             "`Del` depuis la liste",
         ),
     ],
@@ -260,7 +260,7 @@ const PANES: Panel = Panel {
 
 const RECORDINGS: Panel = Panel {
     title: "TUI : enregistrements et lecture",
-    intro: "« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début (UTC), durée, taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` pour un fichier invalide (non lisible, mais supprimable). Le nom du fichier sélectionné s'affiche sous la liste.",
+    intro: "« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début en heure locale sur 24 h (`22 Oct 13:34`, l'année seulement si ce n'est pas l'année en cours ; suffixe « UTC » si le fuseau local n'a pas pu être lu au démarrage), durée (`m:ss` ou `h:mm:ss`), taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` en couleur d'avertissement pour un fichier invalide (non lisible, mais supprimable : « Not a valid asciicast v2 recording: it cannot be played, it can be deleted. » s'affiche quand il est sélectionné). Le nom du fichier sélectionné s'affiche sous la liste ; les touches sont dans la barre de statut.",
     rows: &[
         (
             "Se déplacer",
@@ -268,20 +268,25 @@ const RECORDINGS: Panel = Panel {
         ),
         ("Lire l'enregistrement", "`↵`"),
         (
-            "Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, toute autre touche annule ; refusé tant que l'enregistrement est en cours)",
+            "Supprimer (« The file is removed from the recordings folder. This cannot be undone. » ; confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, `n` ou `Esc` garde le fichier, les autres touches sont ignorées). Un enregistrement en cours d'écriture est refusé d'emblée (« This recording is still being written » · « Stop the recording first ») et `d` n'est pas proposé sur sa ligne",
             "`d` ou `Suppr`, puis `y`",
         ),
         ("Rafraîchir", "`Ctrl-R`"),
         ("Fermer", "`Esc`, `q`, `Ctrl-C`"),
-        ("Lecture : pause / reprise", "`Espace`"),
+        (
+            "Lecture : pause / reprise ; une fois terminée, rejouer depuis le début",
+            "`Espace`",
+        ),
         ("Lecture : vitesse (×0,5 à ×8)", "`+` / `-`"),
         ("Lecture : sauter le silence en cours", "`→`"),
+        ("Lecture : revenir de 5 s", "`←`"),
+        ("Lecture : reprendre au début", "`Home`"),
         (
             "Lecture : revenir à la liste",
             "`q`, `Esc` (`Ctrl-C` ferme tout)",
         ),
     ],
-    outro: "Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total », la taille et la vitesse. Les silences de plus de 2 s sont raccourcis. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.",
+    outro: "Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre ; puis l'état et la vitesse), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total » (jauge en accent) et la taille, ou ce qui ne tient pas (« 2 rows hidden »). Sur un écran de 24 lignes, la ligne de titre disparaît : nom du fichier, état et vitesse passent sur la ligne de progression, et la grille gagne une ligne. `←` et `Home` rouvrent le fichier et rejouent instantanément jusqu'au point visé (l'émulateur repart de zéro). Les silences de plus de 2 s sont raccourcis. Une erreur de lecture s'affiche à la place de la jauge (message · conseil). Le statut de la session (`● alias · latence`) et `● REC` restent visibles dans la barre de statut. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.",
 };
 
 /// Fixed keys of the configurable contexts (not rebindable).

@@ -317,6 +317,7 @@ impl App {
         }
         self.dialogs.push_back(Dialog::Confirm(ConfirmDialog {
             title: format!("{DELETE_COMMAND} {}?", fmt::truncate(&alias, 40)),
+            subject: None,
             body: format!(
                 "Removes {} from Portico's hosts.conf, with its tags, notes and remembered password.\n~/.ssh/config is not touched.",
                 fmt::truncate(&alias, 40)

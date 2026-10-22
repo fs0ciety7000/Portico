@@ -392,11 +392,14 @@ async fn delete_asks_armed_then_selects_the_neighbour() {
     let shown = text(&lines);
     assert!(shown.contains("Delete host db?"), "{shown}");
     assert!(shown.contains("~/.ssh/config is not touched."), "{shown}");
-    assert!(shown.contains("any key  cancel"), "{shown}");
-    // Too soon: ignored. Then any other key cancels.
+    assert!(shown.contains("n / Esc  cancel"), "{shown}");
+    // Too soon: ignored. Then a key that is not an answer is ignored too,
+    // and `n` cancels.
     lab.app.update(Action::DialogKey(key(KeyCode::Char('y'))));
     assert_eq!(lab.app.dialogs.len(), 1);
     arm(&mut lab.app);
+    lab.app.update(Action::DialogKey(key(KeyCode::Enter)));
+    assert_eq!(lab.app.dialogs.len(), 1);
     lab.app.update(Action::DialogKey(key(KeyCode::Char('n'))));
     assert!(lab.app.dialogs.is_empty());
     assert!(lab.host("db").is_some());

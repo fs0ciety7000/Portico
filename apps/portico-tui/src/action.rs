@@ -195,6 +195,13 @@ pub(crate) enum Action {
         result: Result<PlaybackStart, ErrorSummary>,
     },
     PlayerKey(KeyEvent),
+    /// The recording reopened for a seek (`←`, `Home`, replay): the
+    /// player starts over and fast-replays to the target. `generation`
+    /// tells a stale reopening from the last one asked.
+    PlaybackSeek {
+        generation: u64,
+        result: Result<PlaybackStart, ErrorSummary>,
+    },
     /// Next message of the playback reader (`None`: the reader is gone).
     PlayerFeed(Option<ReaderMsg>),
     // Hosts created in Portico (phase 6b)

@@ -49,14 +49,37 @@ fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
     .min(frame.area().width);
     // Wrapped here, word by word, so the height is exact.
     let inner = usize::from(width.saturating_sub(6)).max(1);
-    let mut lines: Vec<Line<'static>> = c
-        .body
-        .split('\n')
-        .flat_map(|paragraph| crate::ui::fmt::wrap(paragraph, inner))
-        .map(|l| Line::from(Span::styled(l, s.secondary())))
-        .collect();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(subject) = &c.subject {
+        lines.push(Line::from(Span::styled(
+            crate::ui::fmt::truncate(subject, inner),
+            s.title(),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.extend(
+        c.body
+            .split('\n')
+            .flat_map(|paragraph| crate::ui::fmt::wrap(paragraph, inner))
+            .map(|l| Line::from(Span::styled(l, s.secondary()))),
+    );
     lines.push(Line::from(""));
-    lines.push(footer(s, &[c.cancel_hint(), ("y", c.confirm)]));
+    // An armed question: `y` stays muted until it is taken (the app wakes
+    // at that instant to redraw it in the accent; no ticking meanwhile).
+    if c.ready(std::time::Instant::now()) {
+        lines.push(footer(s, &[c.cancel_hint(), ("y", c.confirm)]));
+    } else {
+        let (key, label) = c.cancel_hint();
+        lines.push(
+            Line::from(vec![
+                Span::styled(format!(" {key} "), s.key_hint()),
+                Span::styled(format!(" {label}   "), s.muted()),
+                Span::styled(" y ", s.key_hint()),
+                Span::styled(format!(" {}", c.confirm), s.muted()),
+            ])
+            .right_aligned(),
+        );
+    }
     let area = modal(frame, width, wrapped_height(&lines, width));
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(

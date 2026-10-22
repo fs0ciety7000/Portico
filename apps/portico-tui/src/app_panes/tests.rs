@@ -866,3 +866,73 @@ async fn pane_mode_repeats_arrows_then_hands_keys_back() {
     press(&mut lab.app, KeyCode::Left, none);
     assert_eq!(focused(&lab.app).as_deref(), Some("beta"));
 }
+
+/// SECURITY: a shell that arrives after the user moved to another tab must
+/// not take the keyboard (the rest of a line and its Enter would run on
+/// the wrong host).
+#[tokio::test]
+async fn a_late_terminal_never_steals_the_focus() {
+    let mut lab = lab().await;
+    // Tab A: alpha, live, with the focus.
+    lab.select("alpha");
+    lab.app.update(Action::Connect);
+    lab.until(|app| app.tabs.len() == 1 && all_live(app)).await;
+
+    // Connecting to beta opens its tab at once, at the action (waiting
+    // for its shell), and shows it.
+    lab.app.update(Action::GoHome);
+    lab.select("beta");
+    lab.app.update(Action::Connect);
+    assert_eq!(lab.app.tabs.len(), 2);
+    assert_eq!(lab.app.active, Some(1));
+    assert!(matches!(
+        lab.app.focused_slot(),
+        Some(PaneSlot::Opening { alias, .. }) if alias == "beta"
+    ));
+    let all = text(&screen(&mut lab.app, 80, 24));
+    assert!(all.contains("Opening a shell on beta"), "{all}");
+    // The user goes back to A and types while beta's shell is on its way.
+    lab.app.update(Action::GoTab(0));
+    lab.typed("ear");
+    lab.until(|app| {
+        app.tabs
+            .get(1)
+            .is_some_and(|t| t.items().iter().all(|(_, s)| s.live()))
+    })
+    .await;
+    // Beta's shell filled its pane; A kept the focus.
+    assert_eq!(lab.app.active, Some(0));
+    assert_eq!(lab.app.focus, Focus::Terminal);
+    assert_eq!(lab.app.focused_slot().map(PaneSlot::alias), Some("alpha"));
+    lab.typed("ly\r");
+    let alpha = &lab.alpha;
+    eventually(|| received(alpha).contains("early")).await;
+    assert!(!received(&lab.beta).contains("ear"), "nothing went to beta");
+
+    // A shell delivered without a pane (`TerminalOpened { pane: None }`)
+    // lands in a background tab: A keeps the focus and the keys.
+    let session = lab.app.session_for("beta").map(|s| s.id).unwrap();
+    let handle = lab
+        .app
+        .engine
+        .open_terminal(session, GridSize { cols: 80, rows: 24 }.pty())
+        .await
+        .unwrap();
+    lab.app.update(Action::TerminalOpened {
+        alias: "beta".into(),
+        pane: None,
+        result: Ok(Box::new(handle)),
+    });
+    assert_eq!(lab.app.tabs.len(), 3);
+    assert_eq!(lab.app.active, Some(0));
+    assert_eq!(lab.app.focus, Focus::Terminal);
+    assert_eq!(lab.app.focused_slot().map(PaneSlot::alias), Some("alpha"));
+    lab.typed("still-a");
+    let alpha = &lab.alpha;
+    eventually(|| received(alpha).contains("still-a")).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !received(&lab.beta).contains("still"),
+        "nothing went to beta"
+    );
+}
