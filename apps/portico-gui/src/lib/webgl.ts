@@ -1,7 +1,7 @@
 // Whether the terminal should use xterm.js's WebGL renderer.
 //
-// With WebKitGTK's DMA-BUF renderer off (Linux, see src-tauri `lib.rs`), or
-// on machines without a usable GPU driver, WebGL runs on a CPU rasterizer
+// Without a usable GPU path (no GPU driver, a VM, WebKitGTK's DMA-BUF
+// renderer turned off by the user), WebGL runs on a CPU rasterizer
 // (llvmpipe, SwiftShader…). There the WebGL renderer repaints far slower than
 // the DOM renderer and typing lags, so it is only used on a real GPU.
 
