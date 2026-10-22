@@ -1,0 +1,246 @@
+//! The "Recordings" panel (phase 6): the files of
+//! `Engine::list_recordings`, newest first, to play or delete.
+//!
+//! Only names that came from the listing are ever handed back to the
+//! engine (`open_recording`, `delete_recording`). A deletion is an armed
+//! confirmation: keys are ignored for [`ARM_DELAY`], then only `y`
+//! deletes and any other key cancels. A recording still being written is
+//! refused by the engine (`recording_active`), and the panel shows that
+//! error's summary. Files whose header is invalid stay listed, marked, and
+//! can be deleted.
+
+use std::time::Instant;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use portico_core::ErrorSummary;
+use portico_core::recording::RecordingEntry;
+use ratatui::widgets::ListState;
+
+use crate::dialog::ARM_DELAY;
+use crate::keys::{Load, Notice};
+
+/// What the app should do after a key in the panel.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RecOutcome {
+    None,
+    Close,
+    Reload,
+    /// Play this entry (name from the listing).
+    Play(String, Option<f64>),
+    /// Delete this entry (name from the listing), confirmed.
+    Delete(String),
+}
+
+/// A deletion waiting for `y`.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfirmDelete {
+    pub(crate) name: String,
+    pub(crate) opened_at: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct RecordingsPanel {
+    pub(crate) entries: Load<Vec<RecordingEntry>>,
+    pub(crate) list: ListState,
+    pub(crate) confirm: Option<ConfirmDelete>,
+    pub(crate) notice: Option<Notice>,
+    /// The recordings folder (shown in the empty state).
+    pub(crate) folder: String,
+    /// A playback is being opened.
+    pub(crate) opening: bool,
+}
+
+impl RecordingsPanel {
+    pub(crate) fn new(folder: String) -> Self {
+        Self {
+            entries: Load::Loading,
+            list: ListState::default(),
+            confirm: None,
+            notice: None,
+            folder,
+            opening: false,
+        }
+    }
+
+    pub(crate) fn busy(&self) -> bool {
+        matches!(self.entries, Load::Loading) || self.opening
+    }
+
+    /// New listing: the selection stays on its file when it is still there.
+    pub(crate) fn loaded(&mut self, result: Result<Vec<RecordingEntry>, ErrorSummary>) {
+        let before = self.selected().map(|e| e.name.clone());
+        self.entries = match result {
+            Ok(entries) => Load::Ready(entries),
+            Err(error) => Load::Failed(error),
+        };
+        let entries = self.entries.ready().map_or(&[][..], Vec::as_slice);
+        let index = before
+            .and_then(|name| entries.iter().position(|e| e.name == name))
+            .or_else(|| (!entries.is_empty()).then_some(0));
+        let index = index.map(|i| i.min(entries.len().saturating_sub(1)));
+        self.list.select(index);
+        if self
+            .confirm
+            .as_ref()
+            .is_some_and(|c| !entries.iter().any(|e| e.name == c.name))
+        {
+            self.confirm = None;
+        }
+    }
+
+    pub(crate) fn selected(&self) -> Option<&RecordingEntry> {
+        self.entries.ready()?.get(self.list.selected()?)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.ready().map_or(0, Vec::len)
+    }
+
+    fn select(&mut self, index: usize) {
+        let len = self.len();
+        if len > 0 {
+            self.list.select(Some(index.min(len - 1)));
+        }
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> RecOutcome {
+        if key.kind == KeyEventKind::Release {
+            return RecOutcome::None;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(confirm) = &self.confirm {
+            // Keys typed before the question showed are not an answer.
+            if confirm.opened_at.elapsed() < ARM_DELAY {
+                return RecOutcome::None;
+            }
+            let name = confirm.name.clone();
+            self.confirm = None;
+            return match key.code {
+                KeyCode::Char('y') if !ctrl => RecOutcome::Delete(name),
+                _ => RecOutcome::None,
+            };
+        }
+        self.notice = None;
+        let current = self.list.selected().unwrap_or(0);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return RecOutcome::Close,
+            KeyCode::Char('c') if ctrl => return RecOutcome::Close,
+            KeyCode::Char('r') if ctrl => return RecOutcome::Reload,
+            KeyCode::Down | KeyCode::Char('j') => self.select(current.saturating_add(1)),
+            KeyCode::Up | KeyCode::Char('k') => self.select(current.saturating_sub(1)),
+            KeyCode::PageDown => self.select(current.saturating_add(5)),
+            KeyCode::PageUp => self.select(current.saturating_sub(5)),
+            KeyCode::Home | KeyCode::Char('g') => self.select(0),
+            KeyCode::End | KeyCode::Char('G') => self.select(usize::MAX),
+            // A file whose header is invalid cannot be played (deleted, yes).
+            KeyCode::Enter if !self.opening => {
+                if let Some(entry) = self.selected().filter(|e| e.valid) {
+                    return RecOutcome::Play(entry.name.clone(), entry.duration);
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let Some(entry) = self.selected() {
+                    self.confirm = Some(ConfirmDelete {
+                        name: entry.name.clone(),
+                        opened_at: Instant::now(),
+                    });
+                }
+            }
+            _ => {}
+        }
+        RecOutcome::None
+    }
+
+    /// Footer keys (most important first).
+    pub(crate) fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        if self.confirm.is_some() {
+            return vec![("any key", "keep"), ("y", "delete")];
+        }
+        match self.selected() {
+            Some(entry) if entry.valid => vec![
+                ("↵", "play"),
+                ("d", "delete"),
+                ("Ctrl-R", "refresh"),
+                ("Esc", "close"),
+            ],
+            Some(_) => vec![("d", "delete"), ("Ctrl-R", "refresh"), ("Esc", "close")],
+            None => vec![("Ctrl-R", "refresh"), ("Esc", "close")],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, valid: bool) -> RecordingEntry {
+        RecordingEntry {
+            name: name.into(),
+            alias: name.trim_end_matches(".cast").into(),
+            started: None,
+            size: 120,
+            duration: Some(3.0),
+            width: Some(80),
+            height: Some(24),
+            valid,
+        }
+    }
+
+    fn press(panel: &mut RecordingsPanel, code: KeyCode) -> RecOutcome {
+        panel.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn arm(panel: &mut RecordingsPanel) {
+        if let Some(c) = &mut panel.confirm {
+            c.opened_at = Instant::now()
+                .checked_sub(ARM_DELAY * 2)
+                .unwrap_or_else(Instant::now);
+        }
+    }
+
+    #[test]
+    fn play_and_delete_use_listed_names_only() {
+        let mut panel = RecordingsPanel::new("/r".into());
+        panel.loaded(Ok(vec![entry("b.cast", true), entry("a.cast", false)]));
+        assert_eq!(panel.selected().map(|e| e.name.as_str()), Some("b.cast"));
+        assert_eq!(
+            press(&mut panel, KeyCode::Enter),
+            RecOutcome::Play("b.cast".into(), Some(3.0))
+        );
+        press(&mut panel, KeyCode::Down);
+        // An invalid entry cannot be played, but it is still deletable.
+        assert_eq!(press(&mut panel, KeyCode::Enter), RecOutcome::None);
+        assert!(!panel.hints().contains(&("↵", "play")));
+        assert_eq!(press(&mut panel, KeyCode::Char('d')), RecOutcome::None);
+        assert!(panel.confirm.is_some());
+        // Not armed yet: ignored, the question stays.
+        assert_eq!(press(&mut panel, KeyCode::Char('y')), RecOutcome::None);
+        assert!(panel.confirm.is_some());
+        arm(&mut panel);
+        assert_eq!(
+            press(&mut panel, KeyCode::Char('y')),
+            RecOutcome::Delete("a.cast".into())
+        );
+        // Anything but `y` cancels.
+        press(&mut panel, KeyCode::Char('d'));
+        arm(&mut panel);
+        assert_eq!(press(&mut panel, KeyCode::Enter), RecOutcome::None);
+        assert!(panel.confirm.is_none());
+        assert_eq!(press(&mut panel, KeyCode::Esc), RecOutcome::Close);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_selection_on_its_file() {
+        let mut panel = RecordingsPanel::new("/r".into());
+        panel.loaded(Ok(vec![entry("c.cast", true), entry("b.cast", true)]));
+        press(&mut panel, KeyCode::Down);
+        panel.loaded(Ok(vec![
+            entry("d.cast", true),
+            entry("c.cast", true),
+            entry("b.cast", true),
+        ]));
+        assert_eq!(panel.selected().map(|e| e.name.as_str()), Some("b.cast"));
+        panel.loaded(Ok(vec![]));
+        assert_eq!(panel.list.selected(), None);
+    }
+}

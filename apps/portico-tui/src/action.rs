@@ -10,6 +10,7 @@ use portico_core::hosts::HostMeta;
 use portico_core::ids::{SessionId, TerminalId, TunnelId};
 use portico_core::keys::LocalKey;
 use portico_core::recent::RecentHost;
+use portico_core::recording::RecordingEntry;
 use portico_core::settings::Settings;
 use portico_core::snippets::Snippet;
 use portico_core::vault::VaultStatus;
@@ -17,6 +18,7 @@ use portico_core::{AgentKey, CopyIdOutcome, EngineEvent, ErrorSummary};
 
 use crate::files::FilesEvent;
 use crate::panes::{Dir, PaneId, Split};
+use crate::player::{PlaybackStart, ReaderMsg};
 
 #[derive(Debug)]
 pub(crate) enum Action {
@@ -169,4 +171,29 @@ pub(crate) enum Action {
     // Settings
     SettingsLoaded(Result<Settings, ErrorSummary>),
     ThemeSaved(Result<(), ErrorSummary>),
+    /// The engine bus dropped events for us: state is resynchronised
+    /// through requests.
+    EngineLagged,
+    // Session recording (phase 6)
+    /// "Record session" / "Stop recording" on the focused pane.
+    ToggleRecording,
+    /// `start_recording` answered. Never turns the REC badge on: only
+    /// `RecordingState::Started` does.
+    RecordingStart(Result<(), ErrorSummary>),
+    OpenRecordings,
+    RecordingsKey(KeyEvent),
+    RecordingsLoaded(Result<Vec<RecordingEntry>, ErrorSummary>),
+    RecordingDeleted {
+        name: String,
+        result: Result<(), ErrorSummary>,
+    },
+    /// A recording opened for playback (its reader thread is running).
+    PlaybackOpened {
+        name: String,
+        total: Option<f64>,
+        result: Result<PlaybackStart, ErrorSummary>,
+    },
+    PlayerKey(KeyEvent),
+    /// Next message of the playback reader (`None`: the reader is gone).
+    PlayerFeed(Option<ReaderMsg>),
 }

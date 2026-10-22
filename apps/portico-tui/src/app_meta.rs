@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use portico_core::settings::Settings;
 use portico_core::{EngineEvent, ErrorSummary};
 use portico_theme::{THEMES, Theme};
@@ -13,7 +13,7 @@ use portico_theme::{THEMES, Theme};
 use crate::action::Action;
 use crate::app::{App, Focus, Overlay};
 use crate::debug::{DebugOutcome, DebugPanel};
-use crate::dialog::{ConfirmAction, ConfirmDialog, Dialog};
+use crate::dialog::{ConfirmAction, ConfirmDialog, ConfirmOutcome, Dialog};
 use crate::edit_host::{EditField, EditHostPanel, EditOutcome, EditRequest, field_of};
 use crate::host_list::RECENT_FETCHED;
 use crate::keymap::Keymap;
@@ -107,6 +107,7 @@ impl App {
                                 .into(),
                         confirm: "clear",
                         action: ConfirmAction::ClearRecent,
+                        armed: None,
                     }));
                 }
             }
@@ -122,7 +123,7 @@ impl App {
                 message: format!("theme not saved: {}", e.message),
                 ..e
             }),
-            _ => {}
+            other => self.update_recording(other),
         }
     }
 
@@ -131,6 +132,9 @@ impl App {
         match event {
             EngineEvent::HostMeta { alias, meta } => self.set_meta(&alias, &meta),
             EngineEvent::RecentChanged => self.spawn_load_recent(),
+            EngineEvent::Recording {
+                terminal, state, ..
+            } => self.on_recording_event(terminal, state),
             EngineEvent::Log(record) => {
                 if let Some(panel) = &mut self.debug_panel {
                     panel.push(record);
@@ -282,8 +286,8 @@ impl App {
             return;
         };
         let action = dialog.action;
-        match key.code {
-            KeyCode::Char('y' | 'Y') => {
+        match dialog.handle_key(key) {
+            ConfirmOutcome::Confirm => {
                 self.dialogs.pop_front();
                 match action {
                     ConfirmAction::ClearRecent => {
@@ -295,12 +299,13 @@ impl App {
                             )
                         });
                     }
+                    ConfirmAction::StartRecording(terminal) => self.start_recording(terminal),
                 }
             }
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+            ConfirmOutcome::Cancel => {
                 self.dialogs.pop_front();
             }
-            _ => {}
+            ConfirmOutcome::None => {}
         }
     }
 

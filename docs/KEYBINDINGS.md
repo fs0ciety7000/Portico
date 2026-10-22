@@ -78,6 +78,7 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Éditer tags, groupe et notes de l'hôte (`hosts.toml`) | `e` | `hosts.edit` |
 | Favori on/off | `*` | `hosts.favorite` |
 | Journaux de session (panneau debug) et config effective | `l` | `hosts.debug` |
+| « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `hosts.recordings` |
 | Retirer l'hôte des récents (ligne de la section Recent) | `x` | `hosts.forget_recent` |
 | Vider les récents (confirmation `y`) | `X` | `hosts.clear_recent` |
 | Onglet suivant | `]`, `Tab` | `hosts.next_tab` |
@@ -134,6 +135,8 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Clés (locales, agent, vault) | `i` | `prefix.keys` |
 | Snippets de l'hôte de l'onglet | `s` | `prefix.snippets` |
 | Panneau debug (présélectionne la session de l'onglet) | `l` | `prefix.debug` |
+| « Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation | `R` | `prefix.record` |
+| « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `prefix.recordings` |
 | Rechercher un hôte | `/` | `prefix.search` |
 | Aide | `?` | `prefix.help` |
 | Onglet n | `1`-`9` | (fixe) |
@@ -268,6 +271,24 @@ Liste des snippets qui s'appliquent à l'hôte de l'onglet actif (portée affich
 Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante : `Esc`, puis `↵` pour se connecter.
 
 Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien), `Esc` annule.
+
+### TUI : enregistrements et lecture
+
+« Recordings » : `v` depuis la liste, `Ctrl-Space v` partout. Les fichiers asciicast v2 du dossier `recordings/`, du plus récent au plus ancien : alias, début (UTC), durée, taille ; `●` en couleur d'erreur pour un fichier en cours d'écriture, `▲` pour un fichier invalide (non lisible, mais supprimable). Le nom du fichier sélectionné s'affiche sous la liste.
+
+| Action | Touches |
+|---|---|
+| Se déplacer | `j` / `k`, `↓` / `↑`, `PgUp` / `PgDn`, `g` / `G` |
+| Lire l'enregistrement | `↵` |
+| Supprimer (confirmation armée : touches ignorées 400 ms, puis seul `y` supprime, toute autre touche annule ; refusé tant que l'enregistrement est en cours) | `d` ou `Suppr`, puis `y` |
+| Rafraîchir | `Ctrl-R` |
+| Fermer | `Esc`, `q`, `Ctrl-C` |
+| Lecture : pause / reprise | `Espace` |
+| Lecture : vitesse (×0,5 à ×8) | `+` / `-` |
+| Lecture : sauter le silence en cours | `→` |
+| Lecture : revenir à la liste | `q`, `Esc` (`Ctrl-C` ferme tout) |
+
+Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total », la taille et la vitesse. Les silences de plus de 2 s sont raccourcis. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique
@@ -296,6 +317,24 @@ déconnecte, comme fermer le dernier onglet. Un panneau dont la connexion échou
 panneau actif. Une division refusée s'affiche sur une ligne de la barre de statut (4 s), jamais par-dessus un
 panneau ; diviser un panneau zoomé dézoome puis divise. Depuis un onglet divisé, `Ctrl-Space ?` ouvre l'aide sur
 la page « Panes ».
+
+### Enregistrer une session dans la TUI
+
+`Ctrl-Space R` (« Record session ») enregistre le panneau actif au format asciicast v2. Une confirmation
+« Record this terminal? » rappelle ce qui est enregistré : tout ce qui s'affiche, y compris un secret imprimé par
+une commande ou une saisie que le distant fait écho ; ce que l'on tape ne l'est jamais ; le fichier va dans le
+dossier `recordings/` des données de Portico, lisible par soi seul. Les touches tapées dans les 400 ms qui suivent
+son ouverture sont ignorées, puis seul `y` démarre : toute autre touche annule. Le badge `REC` (couleur d'erreur)
+s'allume sur le titre du panneau, ou sur l'onglet quand il n'a qu'un panneau, et `● REC` dans la barre de statut,
+dès que le moteur annonce le début de l'enregistrement, et s'éteint quand il en annonce la fin (jamais sur la
+seule réponse de la commande). La même touche l'arrête, sans confirmation (« Stop recording »). Si
+l'enregistrement s'arrête de lui-même, une ligne de la barre de statut le dit, avec quoi faire (« Recording
+stopped: the disk could not keep up », « … the file could not be written », « … size limit reached (512 MiB) »).
+`v` (liste des hôtes) ou `Ctrl-Space v` ouvre « Recordings » pour relire ou supprimer ; un enregistrement en
+cours ne peut pas être supprimé. Un fichier relu est traité comme non fiable : il est rejoué dans un émulateur
+dédié dont les réponses aux requêtes, le titre et le presse-papiers ne vont nulle part, ses modes (souris,
+collage, écran alternatif) ne touchent pas le vrai terminal, et aucune touche ni aucun collage ne part vers une
+session pendant la lecture.
 
 ## Dialogues
 
