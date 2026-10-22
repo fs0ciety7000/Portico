@@ -148,6 +148,8 @@ touche l'UI), et tout choix structurant passe par une ADR dans `docs/STACK.md`.
 ### Phase 5 : gains rapides et distribution ⏳ *(Opus pour le core, Sonnet pour l'UI)*
 - `-D` (SOCKS5) dans `forward/` : SOCKS5 sans authentification (CONNECT, IPv4/IPv6/domaine), écoute sur `localhost`
   par défaut, écoute exposée sur confirmation armée, panneau Tunnels des deux UIs ; `DynamicForward` de `ssh_config` proposé
+  ✅ *(livré : core, TUI, GUI ; `curl --socks5-hostname` vérifié contre OpenSSH, interop scénario 13 ; GUI vérifiée en mode démo
+  seulement)*
 - Distribution : tap **Homebrew** (formula TUI, cask GUI) et paquet **AUR** `-bin`, générés depuis les artefacts et
   checksums de la release, mis à jour par le workflow de release
 - Import **Termius** (après vérification du format d'export réel) : génère un fichier de config dans le dossier de Portico
