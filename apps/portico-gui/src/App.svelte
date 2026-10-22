@@ -15,6 +15,7 @@
   import { keymap } from "./lib/state/keymap.svelte";
   import { logs } from "./lib/state/logs.svelte";
   import { settings } from "./lib/state/settings.svelte";
+  import { importer } from "./lib/state/importer.svelte";
   import { emptyDraft, NEEDS_PASTE_MODE, scopeLabel, snippets, type SnippetTarget } from "./lib/state/snippets.svelte";
   import type { Snippet } from "./lib/api";
   import KeysDialog from "./lib/components/KeysDialog.svelte";
@@ -27,6 +28,7 @@
   import TunnelsDialog from "./lib/components/TunnelsDialog.svelte";
   import EditHostDialog from "./lib/components/EditHostDialog.svelte";
   import LogsDialog from "./lib/components/LogsDialog.svelte";
+  import ImportDialog from "./lib/components/ImportDialog.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -73,7 +75,8 @@
       !!vault.dialog ||
       !!editing ||
       hosts.confirmClear ||
-      logs.open,
+      logs.open ||
+      importer.open,
   );
   /** Favorite, edit: the active tab's host, else the selected one. */
   const targetAlias = $derived(tab ? tab.alias : selectedHost?.alias);
@@ -368,6 +371,13 @@
       shortcut: k("files.download-dir"),
       run: () => void files.chooseDownloadDir(),
     },
+    {
+      id: "app.import-termius",
+      title: "Import from Termius…",
+      hint: "CSV or JSON export, previewed before anything is written",
+      shortcut: k("app.import-termius"),
+      run: () => void importer.start(),
+    },
     { id: "tab.hosts", title: "Go to hosts", shortcut: k("tab.hosts"), run: () => (workspace.active = null) },
     ...workspace.tabs.map((t, i) => ({
       id: `tab-${t.key}`,
@@ -515,6 +525,8 @@
   }
 
   onMount(() => {
+    // New aliases (and their metadata) show up once the Include line is in place.
+    importer.onimported = () => void load();
     load();
     void files.init();
     void vault.init();
@@ -741,6 +753,8 @@
   </Modal>
 {:else if logs.open}
   <LogsDialog />
+{:else if importer.open}
+  <ImportDialog />
 {/if}
 
 {#if workspace.toast}

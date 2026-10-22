@@ -319,6 +319,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
+| Importer depuis Termius (aperçu, puis fichier à inclure dans `~/.ssh/config`, voir `docs/IMPORT.md`) | `app.import-termius` | — | — |
 
 ## Liste des hôtes (GUI)
 

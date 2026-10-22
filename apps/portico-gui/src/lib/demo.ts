@@ -9,6 +9,7 @@ import type { EngineEvent, ErrorSummary, Host, Phase, PromptAnswer, PromptKind, 
 import type { Backend } from "./backend";
 import { demoKeys } from "./demo-keys";
 import { demoMeta } from "./demo-meta";
+import { demoImport } from "./demo-import";
 
 const base = { identityFiles: [], localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [], group: null as string | null, notes: null as string | null };
 
@@ -358,6 +359,7 @@ function demoSearch(q: string): Host[] {
 export const demoBackend: Backend = {
   ...keyDemo,
   ...meta.backend,
+  ...demoImport,
   listHosts: async () => demoHosts,
   searchHosts: async (q) => demoSearch(q),
   listThemes: async () => demoThemes,
