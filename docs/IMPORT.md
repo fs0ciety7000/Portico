@@ -1,8 +1,11 @@
-# Importer depuis Termius
+# Importer depuis Termius ou Termix
 
-Portico lit un export de vos hôtes Termius, montre ce qu'il va importer, puis écrit ces hôtes dans **son propre
-fichier** de configuration SSH. Vous ajoutez vous-même une ligne `Include` en tête de `~/.ssh/config` : Portico ne
-modifie jamais ce fichier. Les tags et les groupes vont dans `hosts.toml`. Aucun secret n'est importé.
+Portico lit un export de vos hôtes Termius ou Termix, montre ce qu'il va importer, puis en fait des **hôtes Portico**,
+modifiables, dans son propre fichier de configuration SSH (`hosts.conf`, voir ADR « Hôtes créés dans Portico ») : ils
+apparaissent aussitôt dans Portico ; pour les voir aussi avec `ssh`, `scp` ou `git`, ajoutez vous-même la ligne
+`Include` proposée en tête de `~/.ssh/config` (Portico ne modifie jamais ce fichier). Les tags, groupes et favoris
+vont dans `hosts.toml`. Aucun mot de passe n'est importé ; les clés privées d'un export Termix ne le sont que si vous
+les cochez (voir « Termix » plus bas).
 
 > **Attention** : un export Termius contient souvent vos **mots de passe et clés privées en clair**. Gardez-le hors de
 > tout dossier synchronisé, et supprimez-le une fois l'import terminé (`shred -u export.csv` sous Linux, ou la corbeille
@@ -36,9 +39,9 @@ l'aperçu liste les hôtes, les enregistrements ignorés, les avertissements et 
 puis la ligne `Include` s'affiche avec un bouton de copie. La TUI n'a pas d'écran d'import : son aide `?` rappelle la
 commande ci-dessus.
 
-Un nouvel import **remplace** les hôtes du précédent : l'aperçu l'annonce (« Replaces the 6 hosts of … », bouton
-« Replace with N hosts »). Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse avec
-« nothing to import: termius.conf left as is », le bouton est désactivé) : l'import précédent reste en place.
+Un nouvel import **met à jour** les hôtes que le précédent a créés et que personne n'a modifiés : l'aperçu les compte
+(`replaces`). Un export dont aucun hôte n'est importable n'est jamais appliqué (`--apply` refuse, le bouton est
+désactivé) : les hôtes déjà importés restent en place.
 
 ## 3. Ajouter la ligne `Include`
 
@@ -47,13 +50,13 @@ après un bloc, elle ne s'appliquerait qu'à ce bloc) :
 
 ```sshconfig
 # Linux
-Include ~/.config/portico/imports/termius.conf
+Include ~/.config/portico/hosts.conf
 # macOS (chemin avec un espace : entre guillemets)
-Include "~/Library/Application Support/dev.Portico.portico/imports/termius.conf"
+Include "~/Library/Application Support/dev.Portico.portico/hosts.conf"
 ```
 
-Rechargez ensuite la liste des hôtes (`r` dans la TUI, `⌘R` / `Ctrl-R` dans la GUI). OpenSSH (`ssh`, `scp`, `rsync`…)
-voit les mêmes hôtes.
+Portico affiche les hôtes importés sans cette ligne ; avec elle, OpenSSH (`ssh`, `scp`, `rsync`…) voit les mêmes
+hôtes.
 
 ## Ce qui est importé, et ce qui ne l'est pas
 
@@ -68,13 +71,17 @@ voit les mêmes hôtes.
 | Protocol | Seul `ssh` (ou vide) est importé : telnet, mosh… sont ignorés. |
 | Password, SSH_KEY, PrivateKeyPath, identityFile | **Jamais importés**. Portico compte seulement les cellules non vides (« 2 mots de passe et 1 clé ignorés ») et les efface de la mémoire. Une clé privée collée dans une autre colonne est aussi détectée et ignorée. |
 
-Le fichier `imports/termius.conf` (dossier de configuration de Portico, `0600`, dossier `0700`) ne contient que des
-directives `Host`, `HostName`, `User` et `Port`. Il est **remplacé en entier** à chaque import et n'est réécrit que si
-un hôte change : réimporter le même export ne modifie rien.
+Les hôtes importés rejoignent `hosts.conf` (dossier de configuration de Portico, `0600`, dossier `0700`), avec
+seulement `Host`, `HostName`, `User`, `Port` et, pour une clé importée, `IdentityFile` et `IdentitiesOnly yes`.
+`hosts.toml` garde leur **provenance** (`[hosts.<alias>.import]` : source, identifiant de l'enregistrement, empreinte
+des valeurs écrites). **Réimporter** met à jour les hôtes que l'import a créés et que personne n'a modifiés depuis ;
+un hôte modifié à la main (valeurs différentes de l'empreinte), créé à la main, ou défini ailleurs n'est jamais
+touché : l'enregistrement est ignoré (`edited_since_import`, `alias_collision`). Modifier seulement les tags, le
+groupe ou le favori n'empêche pas les mises à jour. Un réimport ne supprime aucun hôte ; réimporter le même export ne
+modifie rien.
 
-**Modifier un hôte importé** : copiez son bloc dans `~/.ssh/config`, puis **réimportez**. Tant que vous ne réimportez
-pas, la copie placée après la ligne `Include` est masquée (OpenSSH garde la première valeur trouvée, celle de
-`termius.conf`). Au réimport, Portico voit votre copie et retire cet hôte de `termius.conf`.
+Un ancien fichier `imports/termius.conf` (premières versions de l'import) reste lu tel quel, en lecture seule ; ses
+alias ne sont jamais masqués par un nouvel import.
 
 **Sécurité** : chaque valeur est vérifiée avant d'être écrite (`HostName` : lettres, chiffres, `.`, `-`, `_`, `:` ;
 `User` : lettres, chiffres, `.`, `-`, `_`, `@`, `+` ; ni espace, ni saut de ligne, ni `#`, ni guillemet, ni `%`). Un
@@ -90,3 +97,24 @@ termius- » dans la GUI) préfixe tous les alias importés et garde les deux.
 
 Limites connues : ni `ProxyJump`, ni clés, ni snippets, ni identités partagées Termius (formats non confirmés) ;
 5000 hôtes et 4 Mio par fichier au plus ; 500 avertissements listés au plus (les suivants sont comptés).
+
+## Termix
+
+Un export JSON de Termix (`{"hosts":[{"name","ip","port","username","authType","password","key","keyPassword",
+"folder","tags","pin",…}]}`) est reconnu par son contenu (des entrées avec `ip`). `name` devient l'alias (mêmes règles
+que les labels Termius, préfixe `termix-`), `ip` le `HostName`, `username` le `User`, `port` le `Port` (absent : 22),
+`folder` le groupe, `tags` les tags et `pin` le favori (posé à la création seulement). `tunnelConnections` et
+`socks5ProxyChain` ne sont pas importés : l'aperçu les signale. `password` et `keyPassword` ne sont **jamais**
+importés (comptés).
+
+**Clés privées** : l'aperçu liste chaque clé distincte (type, empreinte `SHA256:…`, hôtes qui l'utilisent, chiffrée
+ou non, copie locale déjà présente) ; aucune n'est cochée. Formats lus : OpenSSH (en clair ou chiffrée) et PEM
+(`RSA PRIVATE KEY` PKCS#1, `EC PRIVATE KEY` SEC1, `PRIVATE KEY` PKCS#8 : RSA, ECDSA, Ed25519 ; une PEM chiffrée
+seulement si l'export contient son `keyPassword`, utilisé en mémoire pour lire l'empreinte puis effacé). Une clé
+PuTTY, DSA ou illisible est ignorée avec un avertissement qui ne la cite jamais. Une clé cochée dont une clé locale a
+la même empreinte (`~/.ssh`, `~/.ssh/portico`) est **réutilisée** ; sinon elle est écrite dans
+`~/.ssh/portico/<alias>` (`0600`, dossier `0700`, jamais d'écrasement : `-2`, `-3`… si le nom est pris) avec son
+`.pub`, au format OpenSSH, chiffrée par la passphrase que vous donnez ; une clé déjà chiffrée dans l'export est
+écrite telle quelle (sa passphrase ne change pas). Les hôtes qui l'utilisent reçoivent `IdentityFile` et
+`IdentitiesOnly yes` ; sans clé cochée, aucun `IdentityFile` (un réimport garde celle qu'un hôte a déjà). Le rapport
+compte les clés importées, réutilisées et ignorées, et rappelle de **supprimer l'export**.

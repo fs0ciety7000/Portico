@@ -817,14 +817,21 @@ struct Editor<'a> {
     /// `~/.ssh/config` has an `Include` resolving to `hosts.conf`.
     explicit: bool,
     ctx: ResolveContext,
-    _lock: std::fs::File,
+    /// `None` for a read-only look (an import plan): never written then.
+    lock: Option<std::fs::File>,
 }
 
 impl<'a> Editor<'a> {
     fn open(config: &'a EngineConfig) -> Result<Self> {
+        let target = config.paths.managed_hosts();
+        let lock = store::lock_exclusive(&store::lock_path(&target))?;
+        Self::read(config, Some(lock))
+    }
+
+    /// Reads everything an edit needs; `lock` is held until dropped.
+    fn read(config: &'a EngineConfig, lock: Option<std::fs::File>) -> Result<Self> {
         let paths = &config.paths;
         let target = paths.managed_hosts();
-        let lock = store::lock_exclusive(&store::lock_path(&target))?;
         let hosts = read_hosts(paths)?;
         let user = SshConfig::load(&paths.ssh_config(), &paths.ssh_dir)?;
         let explicit = crate::import::includes(&user, &target);
@@ -834,7 +841,7 @@ impl<'a> Editor<'a> {
             target,
             hosts,
             explicit,
-            _lock: lock,
+            lock,
         })
     }
 
@@ -1011,6 +1018,13 @@ impl<'a> Editor<'a> {
     }
 
     fn write(&self, hosts: &[ManagedHost]) -> Result<()> {
+        if self.lock.is_none() {
+            // Read without the lock: writing would race another editor.
+            return Err(Error::io(
+                &self.target,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ));
+        }
         let text = render(self.paths(), hosts);
         store::write_atomic_capped(&self.target, text.as_bytes(), MAX_MANAGED_FILE_BYTES)
     }
@@ -1066,6 +1080,8 @@ impl<'a> Editor<'a> {
             Ok(())
         };
         let meta = crate::hosts::replace_meta(&paths.hosts_meta(), &host.alias, None, changes)?;
+        // Created by hand: never taken for a host an import may update.
+        crate::hosts::remove_provenance(&paths.hosts_meta(), &host.alias)?;
         forgotten?;
         Ok(self.summary(host, meta))
     }
@@ -1243,6 +1259,141 @@ impl<'a> Editor<'a> {
         };
         self.create(&draft)
     }
+}
+
+// ── Imports ─────────────────────────────────────────────────────────────
+
+/// Hash of the values Portico writes for `host` (alias, `HostName`,
+/// `User`, `Port`, `IdentityFile`, `ProxyJump`), as lowercase hex SHA-256.
+/// Stored with an imported host (`crate::hosts::ImportProvenance`): a host
+/// whose values no longer hash to it was edited by hand, and a re-import
+/// leaves it alone. Metadata (tags, group, favorite, notes) is not part of
+/// it: editing them does not stop later imports from updating the host.
+pub(crate) fn values_hash(home: &Path, host: &ManagedHost) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::from("portico-host-v1");
+    for field in [
+        host.alias.clone(),
+        host.hostname.clone(),
+        host.user.clone().unwrap_or_default(),
+        host.port.map(|p| p.to_string()).unwrap_or_default(),
+        host.identity_file
+            .as_deref()
+            .map(|p| identity_value(home, p))
+            .unwrap_or_default(),
+        host.proxy_jump.clone().unwrap_or_default(),
+    ] {
+        text.push('\0');
+        text.push_str(&field);
+    }
+    let digest = russh::keys::HashAlg::Sha256.digest(text.as_bytes());
+    let mut hex = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// `hosts.conf` held under its lock for an import ([`crate::import`]): the
+/// same lock, strict reading and allowlists as the editing commands.
+pub(crate) struct ImportTarget<'a> {
+    editor: Editor<'a>,
+}
+
+impl<'a> ImportTarget<'a> {
+    /// Takes the lock and reads `hosts.conf` strictly (a hand-edited file
+    /// Portico would not rewrite fails with `host_file_unmanaged`).
+    pub(crate) fn open(config: &'a EngineConfig) -> Result<Self> {
+        Ok(Self {
+            editor: Editor::open(config)?,
+        })
+    }
+
+    /// Reads `hosts.conf` strictly, without taking the lock nor creating
+    /// anything (an import plan writes nothing); [`Self::write`] refuses.
+    pub(crate) fn read_only(config: &'a EngineConfig) -> Result<Self> {
+        Ok(Self {
+            editor: Editor::read(config, None)?,
+        })
+    }
+
+    /// The hosts of `hosts.conf`, in file order.
+    pub(crate) fn hosts(&self) -> &[ManagedHost] {
+        &self.editor.hosts
+    }
+
+    /// `hosts.conf` itself.
+    pub(crate) fn file(&self) -> &Path {
+        &self.editor.target
+    }
+
+    /// Every concrete alias occurrence the engine loads, plus those of the
+    /// old Termius import file when it is not included (the aliases an
+    /// import must never shadow, its own updatable hosts aside).
+    pub(crate) fn every_alias(&self) -> Result<Vec<HostAlias>> {
+        let config = self.editor.config_with(&self.editor.hosts)?;
+        Ok(self.editor.every_alias(&config))
+    }
+
+    /// Checks every host of `hosts` that differs from the file (same
+    /// allowlists as [`create`]; an `IdentityFile` must be an existing
+    /// regular file under the home directory), checks the result still
+    /// loads, then writes it. Nothing is written when a check fails.
+    pub(crate) fn write(&self, hosts: &[ManagedHost]) -> Result<()> {
+        let home = &self.editor.paths().home;
+        for host in hosts {
+            if self.editor.hosts.contains(host) {
+                continue;
+            }
+            check_imported(home, host)?;
+        }
+        let _ = self.editor.config_with(hosts)?;
+        self.editor.write(hosts)
+    }
+}
+
+/// The checks of [`checked_draft`] on a host built by an import.
+fn check_imported(home: &Path, host: &ManagedHost) -> Result<()> {
+    let alias = check_alias(&host.alias)?;
+    if alias != host.alias {
+        return Err(ManagedHostError::InvalidAlias {
+            reason: "surrounding blanks",
+        }
+        .into());
+    }
+    if clean_hostname(&host.hostname).as_deref() != Some(host.hostname.as_str()) {
+        return Err(ManagedHostError::InvalidHostname {
+            reason: "use letters, digits, dot, dash, underscore and colon, not starting with a dash or a dot",
+        }
+        .into());
+    }
+    if let Some(user) = &host.user
+        && clean_user(user).as_deref() != Some(user.as_str())
+    {
+        return Err(ManagedHostError::InvalidUser {
+            reason: "use letters, digits, dot, dash, underscore, @ and +, not starting with a dash",
+        }
+        .into());
+    }
+    if host.port == Some(0) {
+        return Err(ManagedHostError::InvalidPort { port: 0 }.into());
+    }
+    if let Some(path) = &host.identity_file
+        && check_identity_file(home, path)? != *path
+    {
+        return Err(ManagedHostError::InvalidIdentityFile {
+            reason: "use an absolute path",
+        }
+        .into());
+    }
+    if host.proxy_jump.is_some() {
+        return Err(ManagedHostError::InvalidProxyJump {
+            reason: "an import never sets a jump host",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Depth-first walk of `ProxyJump` hops looking for `start` again.

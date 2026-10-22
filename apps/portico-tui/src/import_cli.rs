@@ -79,6 +79,7 @@ pub(crate) async fn run(args: ImportArgs) -> Result<String, Failure> {
 async fn run_with(engine: &Engine, home: &Path, args: ImportArgs) -> Result<String, Failure> {
     let options = ImportOptions {
         prefix: args.prefix,
+        ..ImportOptions::default()
     };
     let plan = engine
         .plan_termius_import(args.file.clone(), options)
@@ -95,10 +96,13 @@ async fn run_with(engine: &Engine, home: &Path, args: ImportArgs) -> Result<Stri
         });
     }
     let shown_skipped = plan.skipped.len();
-    let report = engine.apply_import(plan).await.map_err(|e| Failure {
-        stdout: text.clone(),
-        summary: e.summary(),
-    })?;
+    let report = engine
+        .apply_import(plan, ImportOptions::default())
+        .await
+        .map_err(|e| Failure {
+            stdout: text.clone(),
+            summary: e.summary(),
+        })?;
     text.push('\n');
     text.push_str(&report_text(&report, shown_skipped, home));
     Ok(text)
@@ -417,10 +421,13 @@ mod tests {
         );
         assert!(!text.contains("FAKEPASS123"));
 
-        let report = engine.apply_import(plan).await.unwrap();
+        let report = engine
+            .apply_import(plan, ImportOptions::default())
+            .await
+            .unwrap();
         let text = report_text(&report, 1, dir.path());
         assert!(
-            text.starts_with("Wrote 1 host to ~/config/imports/termius.conf.\n"),
+            text.starts_with("Wrote 1 host to ~/config/hosts.conf.\n"),
             "{text}"
         );
         assert!(
@@ -434,7 +441,7 @@ mod tests {
             "advice printed once: {text}"
         );
         assert!(
-            text.ends_with("\n    Include ~/config/imports/termius.conf\n"),
+            text.ends_with("\n    Include ~/config/hosts.conf\n"),
             "{text}"
         );
         assert!(!text.contains("FAKEPASS123"));
@@ -446,7 +453,7 @@ mod tests {
             .unwrap();
         let text = plan_text(&plan, dir.path(), &cli);
         assert!(
-            text.contains("\nReplaces the 1 host already in ~/config/imports/termius.conf.\n"),
+            text.contains("\nReplaces the 1 host already in ~/config/hosts.conf.\n"),
             "{text}"
         );
     }
@@ -472,9 +479,7 @@ mod tests {
         };
         let text = plan_text(&plan, dir.path(), &cli);
         assert!(
-            text.ends_with(
-                "\nNothing to import: ~/config/imports/termius.conf would be left as is.\n"
-            ),
+            text.ends_with("\nNothing to import: ~/config/hosts.conf would be left as is.\n"),
             "{text}"
         );
         let target = plan.target.clone();
@@ -513,6 +518,8 @@ mod tests {
             target: "/t/termius.conf".into(),
             include_line: "Include /t/termius.conf".into(),
             replaces: None,
+            keys: Vec::new(),
+            key_material: portico_core::import::KeyMaterial::default(),
         };
         let cli = ImportArgs {
             file: "x".into(),

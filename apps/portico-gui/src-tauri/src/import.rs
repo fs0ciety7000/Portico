@@ -191,7 +191,13 @@ async fn plan(
 ) -> Result<ImportPreviewDto, ErrorSummary> {
     imports.clear();
     let plan = engine
-        .plan_termius_import(source.clone(), ImportOptions { prefix })
+        .plan_termius_import(
+            source.clone(),
+            ImportOptions {
+                prefix,
+                ..ImportOptions::default()
+            },
+        )
         .await
         .map_err(|e| e.summary())?;
     let token = imports.keep(source, plan.clone());
@@ -207,7 +213,7 @@ pub(crate) async fn import_apply(
 ) -> Result<ImportReportDto, ErrorSummary> {
     let pending = imports.take(token).ok_or_else(expired)?;
     let report = engine
-        .apply_import(pending.plan)
+        .apply_import(pending.plan, ImportOptions::default())
         .await
         .map_err(|e| e.summary())?;
     Ok(ImportReportDto {
@@ -244,6 +250,8 @@ mod tests {
             target: portico_core::import::termius_target(&paths),
             include_line: "Include x".into(),
             replaces: None,
+            keys: Vec::new(),
+            key_material: portico_core::import::KeyMaterial::default(),
         };
         let imports = Imports::default();
         let first = imports.keep("a".into(), plan.clone());
