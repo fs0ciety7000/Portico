@@ -119,7 +119,15 @@ export const ACTIONS: ActionDef[] = [
   { id: "hosts.down", title: "Next host", doc: "Hôte suivant", scope: "hosts", defaults: both("J", "Down") },
   { id: "hosts.up", title: "Previous host", doc: "Hôte précédent", scope: "hosts", defaults: both("K", "Up") },
   { id: "hosts.connect", title: "Connect", doc: "Se connecter (ouvre un onglet terminal, ou y revient ; aussi double-clic)", scope: "hosts", defaults: both("Enter") },
-  { id: "hosts.edit", title: "Edit host", doc: "Éditer tags, groupe et notes de l'hôte sélectionné (depuis un onglet : palette, « Edit <alias> »)", scope: "hosts", defaults: both("E") },
+  { id: "hosts.edit", title: "Edit host", doc: "Éditer tags, groupe et notes de l'hôte sélectionné ; un hôte Portico ouvre le formulaire complet (depuis un onglet : palette, « Edit <alias> »)", scope: "hosts", defaults: both("E") },
+  // Hosts created in Portico (phase 6b, ADR "Hôtes créés dans Portico"). Same
+  // palette wording as the TUI. Linux: not Mod+N, which the search field
+  // keeps for "next host" (Ctrl-N).
+  { id: "host.add", title: "Add host…", doc: "Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste", scope: "global", defaults: both("Mod+Shift+N") },
+  { id: "host.edit", title: "Edit host…", doc: "Modifier un hôte Portico ; sur un hôte de `~/.ssh/config` ou importé : lecture seule, duplication proposée", scope: "hosts", defaults: both("Shift+E") },
+  { id: "host.duplicate", title: "Duplicate as Portico host…", doc: "Dupliquer l'hôte sélectionné comme hôte Portico (nouvel alias), puis le modifier", scope: "hosts", defaults: both("Shift+D") },
+  // macOS: ⌘⌫ as in Finder; never while typing in a field (App.svelte).
+  { id: "host.delete", title: "Delete host", doc: "Supprimer un hôte Portico (confirmation `y` / `n`) ; refusé pour les autres", scope: "hosts", defaults: per(["Mod+Backspace"], ["Delete"]) },
   { id: "hosts.disconnect", title: "Disconnect selected host", doc: "Se déconnecter (hôte sélectionné)", scope: "hosts", defaults: both("D") },
   { id: "hosts.files", title: "Files on selected host", doc: "Fichiers (SFTP) de l'hôte sélectionné (se connecte au besoin)", scope: "hosts", defaults: both("F") },
   { id: "hosts.tunnels", title: "Tunnels", doc: "Tunnels", scope: "hosts", defaults: both("P") },

@@ -61,6 +61,22 @@ export const GUI_FIXED: DocTable[] = [
     ],
   },
   {
+    title: "Hôtes Portico (GUI) : dialogues",
+    intro:
+      "« Add host… » et « Edit host… » (hôte Portico) : alias, HostName, User, Port, clé (parmi les clés découvertes dans `~/.ssh`), " +
+      "ProxyJump (hôte existant), mot de passe, tags, groupe, favori, notes. Les erreurs du moteur s'affichent sous le champ concerné, " +
+      "avec un conseil ; le premier champ en erreur prend le focus.",
+    rows: [
+      ["Champ suivant / précédent", "`Tab` / `Shift-Tab`"],
+      ["Enregistrer (après 400 ms sans frappe)", "`↵` dans un champ d'une ligne ou une liste, `Ctrl-S` / `Ctrl-↵` (macOS : `⌘S`, `⌘↵`)"],
+      ["Mot de passe (modification) : garder, changer, oublier", "boutons « Keep », « Change », « Forget »"],
+      ["Annuler ; avec des modifications, « Discard your changes? »", "`Esc`, puis `y` (abandonner) ou `n` / `Esc` (continuer)"],
+      ["Lecture seule (hôte de `~/.ssh/config` ou importé) : dupliquer / éditer tags et notes", "`d` ou `↵` / `e`"],
+      ["Dupliquer : nouvel alias", "`↵`"],
+      ["Supprimer un hôte Portico : confirmer / garder", "`y` / `n`"],
+    ],
+  },
+  {
     title: "Journaux de session (GUI)",
     intro:
       "Panneau debug : sessions à gauche (vivantes et 20 dernières terminées, sondes « probe » de copy-id comprises), à droite " +

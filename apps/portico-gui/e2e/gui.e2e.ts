@@ -445,6 +445,83 @@ test("restart: theme kept, vault unlocked at startup, key login without prompt",
   await capture("restart");
 });
 
+test("Portico host: add with a key and a remembered password, connect, edit the port, delete", async () => {
+  const hostsConf = join(configDir, "hosts.conf");
+  const port = env("E2E_PORT");
+  const PASSWORD = "remembered-e2e-pw";
+  await hostsView();
+  await press(Key.Control, Key.Shift, "N");
+  await dialog("Add host");
+  await type("delta");
+  await press(Key.Tab);
+  await type("127.0.0.1");
+  await press(Key.Tab);
+  await type(env("E2E_USER"));
+  await press(Key.Tab);
+  await type(port);
+  // The key: one the engine discovered, by id (the webview never names a path).
+  await waitFor("keys listed", () => s.exec<boolean>("return !!document.querySelector('.modal option[value=\"key:bootstrap\"]')"));
+  await s.exec(`const sel = document.querySelector('.modal [data-field=identity]');
+    sel.value = 'key:bootstrap'; sel.dispatchEvent(new Event('change', { bubbles: true }));`);
+  await s.exec("document.querySelector('.modal [data-field=password]').focus()");
+  await type(PASSWORD);
+  await capture("host-add");
+  await press(Key.Enter);
+  await noDialog();
+  const conf = readFileSync(hostsConf, "utf8");
+  assert.match(conf, /^Host delta$/m);
+  assert.match(conf, new RegExp(`^\\s+Port ${port}$`, "m"));
+  assert.match(conf, /^\s+IdentityFile ~\/\.ssh\/bootstrap$/m);
+  assert.match(conf, /^\s+IdentitiesOnly yes$/m);
+  assert.equal(statSync(hostsConf).mode & 0o777, 0o600);
+  assert.ok(!conf.includes(PASSWORD), "never in hosts.conf");
+  assert.ok(!readFileSync(join(dataDir, "vault.toml"), "utf8").includes(PASSWORD), "encrypted in the vault");
+  assert.ok(!readFileSync(join(home, ".ssh/config"), "utf8").includes("delta"), "~/.ssh/config untouched");
+  // Selected, with its badge and the Include banner.
+  await waitFor("delta selected", async () => (await text(".hosts li[aria-selected=true] .name")).includes("delta"));
+  assert.match(await text(".hosts li[aria-selected=true] .name"), /Portico/);
+  assert.match(await text(".details .banner"), /add this line at the top of ~\/\.ssh\/config/);
+  assert.equal(
+    await s.exec<string>("return document.querySelector('.details .banner input')?.value ?? ''"),
+    `Include ${hostsConf}`,
+    "the exact line (outside the home directory here, so absolute)",
+  );
+  await capture("host-added");
+
+  // Connects at once (known host key, the chosen key): no prompt.
+  await press(Key.Enter);
+  await waitFor("delta connected", async () => {
+    const st = await status();
+    return st.includes("delta") && st.includes("Connected");
+  });
+  assert.equal(await s.find(".modal"), null, "no prompt");
+  await shellReady();
+
+  // Edit: the port to 1, then back.
+  for (const value of ["1", port]) {
+    await selectHost("delta");
+    await press(Key.Shift, "E");
+    await dialog("Saved in Portico");
+    assert.equal(await s.exec<string>("return document.querySelector('.modal [data-field=alias]').value"), "delta");
+    await s.exec("const p = document.querySelector('.modal [data-field=port]'); p.focus(); p.select();");
+    await type(value);
+    await press(Key.Enter);
+    await noDialog();
+    await waitFor(`port ${value}`, () => new RegExp(`^\\s+Port ${value}$`, "m").test(readFileSync(hostsConf, "utf8")));
+  }
+  assert.match(readFileSync(hostsConf, "utf8"), /IdentityFile ~\/\.ssh\/bootstrap/, "key kept");
+
+  // Delete (armed confirmation).
+  await selectHost("delta");
+  await press(Key.Delete);
+  await dialog("Delete delta?");
+  await capture("host-delete");
+  await type("y");
+  await noDialog();
+  await waitFor("deleted", () => !/^Host delta$/m.test(readFileSync(hostsConf, "utf8")));
+  await waitFor("gone from the list", async () => !(await text(".hosts")).includes("delta"));
+});
+
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();

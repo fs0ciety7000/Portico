@@ -12,6 +12,8 @@ import {
   type SnippetDraft,
   type VaultStatus,
   type HostMeta,
+  type HostDraft,
+  type ManagedInclude,
   type ImportPreview,
   type ImportReport,
   type RecentHost,
@@ -94,6 +96,11 @@ export interface Backend {
   checkTags(tags: string[]): Promise<string[]>;
   setGroup(alias: string, group: string | null): Promise<HostMeta>;
   setNotes(alias: string, notes: string | null): Promise<HostMeta>;
+  createHost(draft: HostDraft): Promise<string>;
+  updateHost(alias: string, draft: HostDraft): Promise<string>;
+  deleteHost(alias: string): Promise<void>;
+  duplicateHost(alias: string, newAlias: string): Promise<string>;
+  managedInclude(): Promise<ManagedInclude>;
   recentHosts(limit: number): Promise<RecentHost[]>;
   clearRecent(): Promise<void>;
   forgetRecent(alias: string): Promise<boolean>;

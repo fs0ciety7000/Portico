@@ -19,7 +19,51 @@ export interface Host {
   /** Free text from hosts.toml (`\n` allowed, nothing else invisible). */
   notes: string | null;
   source: string;
+  /** Which file declares the host: only `portico` hosts are editable. */
+  origin: HostOrigin;
+  /** A Portico host's own directives in hosts.conf (null otherwise). */
+  managed: ManagedFields | null;
   warnings: string[];
+}
+
+/** Mirrors `portico_core::hosts::HostOrigin`. */
+export type HostOrigin = "ssh_config" | "portico" | "imported";
+
+/** Mirrors `dto::ManagedFieldsDto`: what hosts.conf says, nothing inherited. */
+export interface ManagedFields {
+  hostname: string;
+  user: string | null;
+  port: number | null;
+  /** `~/…`, display and preselection only: never sent back. */
+  identityFile: string | null;
+  proxyJump: string | null;
+}
+
+/** Mirrors `hosts::IdentityChoiceDto`: a discovered key by id, never a path. */
+export type IdentityChoice = { kind: "none" } | { kind: "keep" } | { kind: "key"; id: string };
+
+/** Mirrors `hosts::PasswordChangeDto`: `value` becomes a SecretString in Rust. */
+export type PasswordChange = { kind: "keep" } | { kind: "set"; value: string } | { kind: "forget" };
+
+/** Mirrors `hosts::HostDraftDto` (validated by the engine). */
+export interface HostDraft {
+  alias: string;
+  hostname: string;
+  user: string | null;
+  port: number | null;
+  identity: IdentityChoice;
+  proxyJump: string | null;
+  tags: string[];
+  group: string | null;
+  favorite: boolean;
+  notes: string | null;
+  password: PasswordChange;
+}
+
+/** Mirrors `hosts::ManagedIncludeDto`. */
+export interface ManagedInclude {
+  line: string;
+  active: boolean;
 }
 
 export interface ThemeInfo {
@@ -133,6 +177,8 @@ export type EngineEvent =
   | { type: "log"; session: number | null }
   /** `hosts.toml` changed for `alias`: update the host in place. */
   | { type: "host_meta"; alias: string; meta: HostMeta }
+  /** Portico's hosts.conf changed (created, edited, deleted): reload the inventory. */
+  | { type: "hosts_changed" }
   /** The recent-sessions list changed: fetch it again if shown. */
   | { type: "recent_changed" }
   /** A terminal recording started or stopped: `REC` shows between the two. */
@@ -519,6 +565,13 @@ export const api = {
   checkTags: (tags: string[]) => invoke<string[]>("check_tags", { tags }),
   setGroup: (alias: string, group: string | null) => invoke<HostMeta>("set_group", { alias, group }),
   setNotes: (alias: string, notes: string | null) => invoke<HostMeta>("set_notes", { alias, notes }),
+  /** Returns the alias as written (the engine validates everything). */
+  createHost: (draft: HostDraft) => invoke<string>("create_host", { draft }),
+  /** Returns the new alias (a rename included). */
+  updateHost: (alias: string, draft: HostDraft) => invoke<string>("update_host", { alias, draft }),
+  deleteHost: (alias: string) => invoke<void>("delete_host", { alias }),
+  duplicateHost: (alias: string, newAlias: string) => invoke<string>("duplicate_host", { alias, newAlias }),
+  managedInclude: () => invoke<ManagedInclude>("managed_include"),
   recentHosts: (limit: number) => invoke<RecentHost[]>("recent_hosts", { limit }),
   clearRecent: () => invoke<void>("clear_recent"),
   forgetRecent: (alias: string) => invoke<boolean>("forget_recent", { alias }),

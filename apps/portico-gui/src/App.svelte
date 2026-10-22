@@ -29,6 +29,8 @@
   import FilesPanel from "./lib/components/FilesPanel.svelte";
   import TunnelsDialog from "./lib/components/TunnelsDialog.svelte";
   import EditHostDialog from "./lib/components/EditHostDialog.svelte";
+  import HostDialog from "./lib/components/HostDialog.svelte";
+  import HostActionDialog from "./lib/components/HostActionDialog.svelte";
   import LogsDialog from "./lib/components/LogsDialog.svelte";
   import ImportDialog from "./lib/components/ImportDialog.svelte";
   import RecordingsDialog from "./lib/components/RecordingsDialog.svelte";
@@ -74,7 +76,11 @@
   const alert = $derived(workspace.alerts[0]);
   const conflict = $derived(files.conflicts[0]);
   const editing = $derived(hosts.editing ? hosts.byAlias[hosts.editing] : undefined);
+  /** The host a host dialog is about (phase 6b): shown once the list has it. */
+  const dialogHost = $derived(hosts.dialog && hosts.dialog.kind !== "create" ? hosts.byAlias[hosts.dialog.alias] : undefined);
+  const hostDialogOpen = $derived(!!hosts.dialog && (hosts.dialog.kind === "create" || !!dialogHost));
   const modalOpen = $derived(
+    hostDialogOpen ||
     !!prompt ||
       !!alert ||
       !!conflict ||
@@ -118,6 +124,52 @@
   });
   /** First host row (the list starts with a section header when grouped). */
   const firstHost = () => Math.max(0, rows.findIndex((r) => r.kind === "host"));
+
+  // After a create, rename or duplicate: once the reloaded list has the
+  // host, it gets the selection, in the host list, with nothing focused
+  // (so its shortcuts act at once).
+  $effect(() => {
+    const alias = hosts.pendingSelect;
+    if (!alias) return;
+    const now = rows;
+    untrack(() => {
+      const at = now.findIndex((r) => r.kind === "host" && r.section.kind !== "recent" && r.host.alias === alias);
+      const host = hosts.byAlias[alias];
+      if (at < 0) {
+        if (!host) return;
+        // Hidden by the search or a folded section: show it.
+        if (searching) query = "";
+        else hosts.toggleSection(host.group ? `group:${host.group}` : "other", false);
+        return;
+      }
+      hosts.pendingSelect = null;
+      workspace.active = null;
+      selected = at;
+      anchor = now[at];
+      requestAnimationFrame(() => {
+        const el = document.activeElement;
+        if (el instanceof HTMLElement && !el.closest(".modal")) el.blur();
+      });
+    });
+  });
+
+  /** Palette: the Include line for ~/.ssh/config (Portico never writes it). */
+  async function copyInclude() {
+    const line = hosts.include?.line;
+    if (!line) return;
+    try {
+      await navigator.clipboard.writeText(line);
+      workspace.notify({ code: "include_copied", message: "Include line copied", hint: "Paste it at the top of ~/.ssh/config." }, "info");
+    } catch {
+      workspace.notify({ code: "clipboard", message: "The clipboard is not available here", hint: `Copy it from the host details: ${line}` });
+    }
+  }
+
+  /** "Edit": the whole host for a Portico host, its metadata otherwise. */
+  function editHost(alias: string) {
+    if (hosts.byAlias[alias]?.origin === "portico") hosts.openEdit(alias);
+    else hosts.editing = alias;
+  }
 
   /** Where snippets run: the active pane's shell. */
   const snippetTarget: SnippetTarget | null = $derived(
@@ -447,11 +499,32 @@
           {
             id: "hosts.edit",
             title: `Edit ${targetHost.alias}`,
-            hint: "tags, group, notes",
+            hint: targetHost.origin === "portico" ? "Portico host: every field" : "tags, group, notes",
             shortcut: pane ? undefined : k("hosts.edit"),
-            run: () => (hosts.editing = targetHost.alias),
+            run: () => editHost(targetHost.alias),
           },
+          {
+            id: "host.edit",
+            title: "Edit host…",
+            hint: targetHost.origin === "portico" ? targetHost.alias : `${targetHost.alias} · read-only, can be duplicated`,
+            shortcut: pane ? undefined : k("host.edit"),
+            run: () => hosts.openEdit(targetHost.alias),
+          },
+          {
+            id: "host.duplicate",
+            title: "Duplicate as Portico host…",
+            hint: targetHost.alias,
+            shortcut: pane ? undefined : k("host.duplicate"),
+            run: () => (hosts.dialog = { kind: "duplicate", alias: targetHost.alias }),
+          },
+          ...(targetHost.origin === "portico"
+            ? [{ id: "host.delete", title: "Delete host", hint: targetHost.alias, shortcut: pane ? undefined : k("host.delete"), run: () => hosts.openDelete(targetHost.alias) }]
+            : []),
         ]
+      : []),
+    { id: "host.add", title: "Add host…", hint: "saved in Portico's hosts.conf", shortcut: k("host.add"), run: () => (hosts.dialog = { kind: "create" }) },
+    ...(hosts.showBanner && hosts.include
+      ? [{ id: "host.copy-include", title: "Copy the Include line for Portico hosts", hint: "for ~/.ssh/config", run: () => void copyInclude() }]
       : []),
     { id: "app.logs", title: "Session logs", hint: "debug panel, effective config", shortcut: k("app.logs"), run: showLogs },
     ...(recentRow
@@ -595,7 +668,19 @@
         if (targetAlias) void hosts.toggleFavorite(targetAlias);
         return;
       case "hosts.edit":
-        if (targetAlias) hosts.editing = targetAlias;
+        if (targetAlias) editHost(targetAlias);
+        return;
+      case "host.add":
+        hosts.dialog = { kind: "create" };
+        return;
+      case "host.edit":
+        if (targetAlias) hosts.openEdit(targetAlias);
+        return;
+      case "host.duplicate":
+        if (targetAlias) hosts.dialog = { kind: "duplicate", alias: targetAlias };
+        return;
+      case "host.delete":
+        if (targetAlias) hosts.openDelete(targetAlias);
         return;
       case "hosts.search":
         return searchEl?.focus();
@@ -652,6 +737,8 @@
     // In a field (search, xterm's textarea) or the palette, plain keys type.
     const id = keymap.match(e, pane ? "terminal" : "hosts", paletteOpen || pickerOpen || isField(e.target));
     if (!id) return;
+    // ⌘⌫ (macOS "Delete host") deletes text in a field, never a host.
+    if (id === "host.delete" && isField(e.target)) return;
     e.preventDefault();
     if ((paletteOpen || pickerOpen) && id !== "app.palette") return;
     runAction(id);
@@ -698,6 +785,8 @@
   onMount(() => {
     // New aliases (and their metadata) show up once the Include line is in place.
     importer.onimported = () => void load();
+    // hosts.conf changed (here or in another UI): reload, keeping the selection.
+    hosts.onchanged = () => void load();
     measurePanes();
     // The mono font may arrive after the first measure.
     void document.fonts.ready.then(measurePanes);
@@ -717,7 +806,11 @@
         }
       }),
       // Events were lost: REC is resynchronised from the engine.
-      backend.onEngineLagged(() => void recordings.resync()),
+      backend.onEngineLagged(() => {
+        void recordings.resync();
+        // A `hosts_changed` may be among the lost events.
+        void load();
+      }),
       backend.onDragging((d) => (files.dragging = d)),
       backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
     ];
@@ -797,6 +890,7 @@
         onactivate={activate}
         onforget={(alias) => void hosts.forgetRecent(alias)}
         ontoggle={(id) => hosts.toggleSection(id)}
+        onadd={() => (hosts.dialog = { kind: "create" })}
       />
       <HostDetails
         host={selectedHost}
@@ -805,8 +899,10 @@
         onconnect={(h) => workspace.open(h.alias)}
         ondisconnect={(h) => workspace.disconnect(h.alias)}
         onfavorite={(h) => void hosts.toggleFavorite(h.alias)}
-        onedit={(h) => (hosts.editing = h.alias)}
+        onedit={(h) => editHost(h.alias)}
         onlogs={showLogs}
+        onduplicate={(h) => (hosts.dialog = { kind: "duplicate", alias: h.alias })}
+        ondelete={(h) => hosts.openDelete(h.alias)}
       />
     </div>
     <div class="stage" bind:clientWidth={stageW} bind:clientHeight={stageH}>
@@ -969,6 +1065,16 @@
     host={tunnelSession ? hosts.byAlias[tunnelSession.alias] : undefined}
     onclose={() => (tunnelsOpen = false)}
   />
+{:else if hostDialogOpen && hosts.dialog}
+  {#key hosts.dialog}
+    {#if hosts.dialog.kind === "create"}
+      <HostDialog />
+    {:else if hosts.dialog.kind === "edit" && dialogHost}
+      <HostDialog host={dialogHost} />
+    {:else if dialogHost && hosts.dialog.kind !== "edit"}
+      <HostActionDialog dialog={hosts.dialog} host={dialogHost} />
+    {/if}
+  {/key}
 {:else if editing}
   {#key editing.alias}
     <EditHostDialog host={editing} onclose={() => (hosts.editing = null)} />

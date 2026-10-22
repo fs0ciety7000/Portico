@@ -462,6 +462,23 @@ s'écrit. La lecture se fait dans une instance xterm.js dédiée, en lecture seu
 requêtes (`ESC[6n`, `ESC[c`), et les modes que joue l'enregistrement (souris, bracketed paste, focus) restent dans
 le lecteur. « Show in folder » n'existe pas : il faudrait un plugin d'ouverture et une capability de plus.
 
+## Hôtes créés dans Portico (GUI) : principe
+
+Les hôtes créés depuis la GUI vivent dans le fichier de Portico, `hosts.conf` (ADR « Hôtes créés dans Portico ») ;
+`~/.ssh/config` n'est jamais modifié. « Add host… » (`host.add`, `⌘⇧N` / `Ctrl-Shift-N`, partout, ou le bouton
+« + » à côté de la recherche) ouvre le formulaire ; « Edit host… » (`host.edit`, `⇧E`) le rouvre pour un hôte
+Portico, et `e` (`hosts.edit`) aussi : sur un hôte Portico, il édite tout l'hôte, sur les autres seulement tags,
+groupe et notes. Sur un hôte de `~/.ssh/config` (ou importé de Termius), « Edit host… » affiche « Defined in
+~/.ssh/config, which Portico never edits. Duplicate it as a Portico host to change it. » et propose « Duplicate as
+Portico host… » (`host.duplicate`, `⇧D`), qui demande un nouvel alias puis ouvre le formulaire de la copie.
+« Delete host » (`host.delete`, `⌘⌫` / `Suppr`, jamais pendant la saisie dans un champ) demande `y` / `n` ; un hôte
+qui sert de rebond est refusé avec la raison. La clé se choisit parmi celles que le moteur a trouvées dans `~/.ssh`
+(la GUI n'envoie qu'un identifiant, jamais un chemin) ; un mot de passe facultatif est confié au trousseau (ou au
+vault) et le champ est vidé après l'envoi. Origines dans la liste et le détail : badge « Portico », « Imported »,
+et « ~/.ssh/config » (cadenas) dans le détail. Tant qu'un hôte Portico existe sans que `~/.ssh/config` l'inclue, le
+détail affiche « To use your Portico hosts with ssh, scp and git, add this line at the top of ~/.ssh/config: »,
+la ligne `Include …` et « Copy » (aussi dans la palette) ; le bandeau se ferme et ne revient pas pour la même ligne.
+
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->
 
@@ -490,6 +507,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Coller (macOS : `⌘V` ; Linux aussi `Shift-Insert`, clic milieu) | `tab.paste` (fixe) | — | `Ctrl-Shift-V` |
 | Reconnecter l'hôte de l'onglet | `tab.reconnect` | — | — |
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
+| Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
 | Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut : palette | `recordings.open` | — | — |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
@@ -529,7 +547,10 @@ Actives quand la liste des hôtes est affichée et que le focus n'est pas dans u
 | Hôte suivant | `hosts.down` | `j`, `↓` | `j`, `↓` |
 | Hôte précédent | `hosts.up` | `k`, `↑` | `k`, `↑` |
 | Se connecter (ouvre un onglet terminal, ou y revient ; aussi double-clic) | `hosts.connect` | `↵` | `↵` |
-| Éditer tags, groupe et notes de l'hôte sélectionné (depuis un onglet : palette, « Edit <alias> ») | `hosts.edit` | `e` | `e` |
+| Éditer tags, groupe et notes de l'hôte sélectionné ; un hôte Portico ouvre le formulaire complet (depuis un onglet : palette, « Edit <alias> ») | `hosts.edit` | `e` | `e` |
+| Modifier un hôte Portico ; sur un hôte de `~/.ssh/config` ou importé : lecture seule, duplication proposée | `host.edit` | `⇧E` | `Shift-E` |
+| Dupliquer l'hôte sélectionné comme hôte Portico (nouvel alias), puis le modifier | `host.duplicate` | `⇧D` | `Shift-D` |
+| Supprimer un hôte Portico (confirmation `y` / `n`) ; refusé pour les autres | `host.delete` | `⌘Backspace` | `Del` |
 | Se déconnecter (hôte sélectionné) | `hosts.disconnect` | `d` | `d` |
 | Fichiers (SFTP) de l'hôte sélectionné (se connecte au besoin) | `hosts.files` | `f` | `f` |
 | Tunnels | `hosts.tunnels` | `p` | `p` |
@@ -585,6 +606,20 @@ Sans recherche, la liste montre « Recent » (les 5 derniers hôtes encore prés
 | Champ suivant | `Tab` |
 | Enregistrer | `Ctrl-S` (macOS : `⌘S`), `Ctrl-↵`, ou `↵` dans un champ d'une ligne |
 | Annuler | `Esc` |
+
+## Hôtes Portico (GUI) : dialogues
+
+« Add host… » et « Edit host… » (hôte Portico) : alias, HostName, User, Port, clé (parmi les clés découvertes dans `~/.ssh`), ProxyJump (hôte existant), mot de passe, tags, groupe, favori, notes. Les erreurs du moteur s'affichent sous le champ concerné, avec un conseil ; le premier champ en erreur prend le focus.
+
+| Action | Touches |
+|---|---|
+| Champ suivant / précédent | `Tab` / `Shift-Tab` |
+| Enregistrer (après 400 ms sans frappe) | `↵` dans un champ d'une ligne ou une liste, `Ctrl-S` / `Ctrl-↵` (macOS : `⌘S`, `⌘↵`) |
+| Mot de passe (modification) : garder, changer, oublier | boutons « Keep », « Change », « Forget » |
+| Annuler ; avec des modifications, « Discard your changes? » | `Esc`, puis `y` (abandonner) ou `n` / `Esc` (continuer) |
+| Lecture seule (hôte de `~/.ssh/config` ou importé) : dupliquer / éditer tags et notes | `d` ou `↵` / `e` |
+| Dupliquer : nouvel alias | `↵` |
+| Supprimer un hôte Portico : confirmer / garder | `y` / `n` |
 
 ## Journaux de session (GUI)
 

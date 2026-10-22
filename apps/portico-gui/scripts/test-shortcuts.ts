@@ -217,3 +217,30 @@ test("closing: Mod+W closes the focused pane (or the tab), close-all the whole t
 test("palette titles of pane commands say \"pane\"", () => {
   for (const a of ACTIONS.filter((a) => a.id.startsWith("pane."))) assert.match(a.title, /\bpane\b/, a.id);
 });
+
+test("host commands (phase 6b): shared titles, keys without conflict", () => {
+  const titles = Object.fromEntries(ACTIONS.filter((a) => a.id.startsWith("host.")).map((a) => [a.id, a.title]));
+  assert.deepEqual(titles, {
+    "host.add": "Add host…",
+    "host.edit": "Edit host…",
+    "host.duplicate": "Duplicate as Portico host…",
+    "host.delete": "Delete host",
+  });
+  const mac = matchTables(defaultBindings("mac"), "mac");
+  const linux = matchTables(defaultBindings("linux"), "linux");
+  const ev = (k: string, code: string, mods: Partial<KeyLike> = {}) => eventSignature(key(k, code, mods))!;
+  // Add host: everywhere, a terminal included.
+  assert.equal(mac.hosts.get(ev("N", "KeyN", { metaKey: true, shiftKey: true })), "host.add");
+  assert.equal(linux.terminal.get(ev("N", "KeyN", { ctrlKey: true, shiftKey: true })), "host.add");
+  // Ctrl-N stays "next host" in the search field (Sidebar).
+  assert.equal(linux.hosts.get(ev("n", "KeyN", { ctrlKey: true })), undefined);
+  for (const t of [mac, linux]) {
+    assert.equal(t.hosts.get(ev("E", "KeyE", { shiftKey: true })), "host.edit");
+    assert.equal(t.hosts.get(ev("e", "KeyE")), "hosts.edit");
+    assert.equal(t.hosts.get(ev("D", "KeyD", { shiftKey: true })), "host.duplicate");
+    assert.equal(t.hosts.get(ev("d", "KeyD")), "hosts.disconnect");
+  }
+  assert.equal(mac.hosts.get(ev("Backspace", "Backspace", { metaKey: true })), "host.delete");
+  assert.equal(linux.hosts.get(ev("Delete", "Delete")), "host.delete");
+  assert.equal(formatCombo(parseCombo("Mod+Backspace")!, "mac", "hosts"), "⌘Backspace");
+});

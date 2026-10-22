@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use portico_core::engine::{PromptResponse, PtySize};
-use portico_core::hosts::HostEntry;
+use portico_core::hosts::{HostEntry, HostOrigin};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,69 @@ pub(crate) struct HostDto {
     /// control character, no bidi or invisible character).
     pub notes: Option<String>,
     pub source: String,
+    /// Which file declares the host: only `portico` hosts are editable.
+    pub origin: HostOrigin,
+    /// What `hosts.conf` itself says for a `portico` host (the edit form
+    /// starts from it, never from values inherited from elsewhere).
+    pub managed: Option<ManagedFieldsDto>,
     pub warnings: Vec<String>,
+}
+
+/// The directives of a host's own `Host` block in `hosts.conf`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedFieldsDto {
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// `~/…` for display and to preselect the matching discovered key; the
+    /// webview never sends it back (see `hosts::IdentityChoiceDto`).
+    pub identity_file: Option<String>,
+    pub proxy_jump: Option<String>,
+}
+
+impl ManagedFieldsDto {
+    fn of(h: &HostEntry) -> Option<Self> {
+        if h.origin != HostOrigin::Portico {
+            return None;
+        }
+        let own = |key: &str| own_value(h, key);
+        Some(Self {
+            hostname: own("hostname").unwrap_or_else(|| h.resolved.hostname.clone()),
+            user: own("user"),
+            port: own("port").and_then(|p| p.parse().ok()),
+            identity_file: own_identity_file(h).map(|p| display_path(&p)),
+            proxy_jump: own("proxyjump"),
+        })
+    }
+}
+
+/// First value of `key` set by the host's own file (its `Host` block in
+/// `hosts.conf`), not inherited from another file.
+fn own_value(h: &HostEntry, key: &str) -> Option<String> {
+    h.resolved
+        .options
+        .get(key)?
+        .iter()
+        .find(|(_, source)| source.file == h.source.file)
+        .and_then(|(args, _)| args.first().cloned())
+}
+
+/// The `IdentityFile` set by the host's own file, as the engine expanded it
+/// (`resolved.identity_files` lists the `identityfile` values in order,
+/// `none` left out).
+pub(crate) fn own_identity_file(h: &HostEntry) -> Option<PathBuf> {
+    let at = h
+        .resolved
+        .options
+        .get("identityfile")?
+        .iter()
+        .filter(|(args, _)| {
+            args.first()
+                .is_some_and(|a| !a.eq_ignore_ascii_case("none"))
+        })
+        .position(|(_, source)| source.file == h.source.file)?;
+    h.resolved.identity_files.get(at).cloned()
 }
 
 impl From<&HostEntry> for HostDto {
@@ -48,6 +110,8 @@ impl From<&HostEntry> for HostDto {
             favorite: h.meta.favorite,
             notes: h.meta.notes.clone(),
             source: format!("{}:{}", display_path(&h.source.file), h.source.line),
+            origin: h.origin,
+            managed: ManagedFieldsDto::of(h),
             warnings: r.warnings.iter().map(|w| w.message.clone()).collect(),
         }
     }

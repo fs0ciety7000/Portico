@@ -28,7 +28,7 @@ const MINUTE = 60_000;
 const NOW = Date.now();
 
 /** Same rules as `portico_core::hosts::normalize_tags` (demo only). */
-function normalizeTags(tags: string[]): string[] {
+export function normalizeTags(tags: string[]): string[] {
   const out: string[] = [];
   tags.forEach((raw, i) => {
     const tag = raw.trim().replace(/^#/, "").trim();
