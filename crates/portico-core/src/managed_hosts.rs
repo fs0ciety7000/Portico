@@ -50,9 +50,14 @@
 //! stored as [`SecretKey::UnboundHostPassword`] (user, `known_hosts` name,
 //! port): sessions offer it only after the host key passed verification, and
 //! the first login it opens binds it to that key
-//! ([`SecretKey::HostPassword`], the usual remember-password scheme).
-//! Deleting a host forgets both forms, unless another host still reaches the
-//! same account.
+//! ([`SecretKey::HostPassword`], the usual remember-password scheme), unless
+//! the key was accepted automatically (`StrictHostKeyChecking accept-new`):
+//! it is then withheld. Deleting a host forgets both forms, unless another
+//! host still reaches the same account: the bound ones are found through
+//! `known_hosts` **and** the non-secret index of bound fingerprints in
+//! `hosts.toml` (a password bound through a host certificate, or to a key
+//! whose `known_hosts` line is gone). An edit that cannot write the file
+//! restores the password it replaced.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -770,6 +775,8 @@ struct PasswordTarget {
     port: u16,
     /// `known_hosts` files holding the keys the password may be bound to.
     known_hosts_files: Vec<PathBuf>,
+    /// `hosts.toml`, whose index lists the keys passwords were bound to.
+    meta_path: PathBuf,
 }
 
 impl PasswordTarget {
@@ -792,11 +799,23 @@ impl PasswordTarget {
         self.forget_bound(secrets)
     }
 
-    /// Forgets the passwords bound to a key `known_hosts` records for this
-    /// host (the unbound one is kept). Blocking.
+    /// Forgets the passwords bound to a key of this host (the unbound one is
+    /// kept): the keys `known_hosts` records for it, and every key the
+    /// index of `hosts.toml` lists for this account (a password bound
+    /// through a host certificate, or to a key whose `known_hosts` line is
+    /// gone). Blocking.
     fn forget_bound(&self, secrets: &dyn SecretStore) -> Result<()> {
         let known = KnownHosts::load(&self.known_hosts_files)?;
-        for fingerprint in known.fingerprints(&self.host, self.port) {
+        let mut fingerprints = known.fingerprints(&self.host, self.port);
+        fingerprints.extend(crate::hosts::bound_password_fingerprints(
+            &self.meta_path,
+            &self.user,
+            &self.host,
+            self.port,
+        )?);
+        fingerprints.sort();
+        fingerprints.dedup();
+        for fingerprint in fingerprints {
             secrets.delete(&SecretKey::HostPassword {
                 user: self.user.clone(),
                 host: self.host.clone(),
@@ -804,7 +823,7 @@ impl PasswordTarget {
                 host_key: fingerprint,
             })?;
         }
-        Ok(())
+        crate::hosts::remove_bound_passwords(&self.meta_path, &self.user, &self.host, self.port)
     }
 }
 
@@ -961,6 +980,7 @@ impl<'a> Editor<'a> {
             host,
             port,
             known_hosts_files,
+            meta_path: paths.hosts_meta(),
         }
     }
 
@@ -1140,10 +1160,27 @@ impl<'a> Editor<'a> {
         let secrets = Arc::clone(&self.config.secrets);
         let old_account = self.password_target(&before, &old.alias);
         let new_account = self.password_target(&after, &host.alias);
-        if let PasswordChange::Set(password) = &draft.password {
-            secrets.set(&new_account.unbound_key(), password)?;
+        // The value the new password replaces, restored should the file
+        // not be written (`create` deletes it instead: there was none).
+        let replaced = match &draft.password {
+            PasswordChange::Set(password) => {
+                let unbound = new_account.unbound_key();
+                let previous = secrets.get(&unbound)?;
+                secrets.set(&unbound, password)?;
+                Some(previous)
+            }
+            PasswordChange::Keep | PasswordChange::Forget => None,
+        };
+        if let Err(e) = self.write(&hosts) {
+            if let Some(previous) = replaced {
+                let unbound = new_account.unbound_key();
+                let _ = match previous {
+                    Some(old) => secrets.set(&unbound, &old),
+                    None => secrets.delete(&unbound),
+                };
+            }
+            return Err(e);
         }
-        self.write(&hosts)?;
 
         let mut first_error: Option<Error> = None;
         let mut keep = |result: Result<()>| {
@@ -1334,6 +1371,28 @@ impl<'a> ImportTarget<'a> {
     pub(crate) fn every_alias(&self) -> Result<Vec<HostAlias>> {
         let config = self.editor.config_with(&self.editor.hosts)?;
         Ok(self.editor.every_alias(&config))
+    }
+
+    /// The `ProxyJump` hosts and the `HostName` values (lowercased) of
+    /// every host of the configuration as the engine loads it; the
+    /// `HostName`s of the aliases in `skip` (lowercased) are left out.
+    pub(crate) fn routing_names(
+        &self,
+        skip: &HashSet<String>,
+    ) -> Result<(HashSet<String>, HashSet<String>)> {
+        let config = self.editor.config_with(&self.editor.hosts)?;
+        let mut jumps = HashSet::new();
+        let mut hostnames = HashSet::new();
+        for alias in config.host_aliases() {
+            let resolved = config.resolve(&alias.name, &self.editor.ctx);
+            for jump in &resolved.proxy_jump {
+                jumps.insert(jump.host.to_lowercase());
+            }
+            if !skip.contains(&alias.name.to_lowercase()) {
+                hostnames.insert(resolved.hostname.to_lowercase());
+            }
+        }
+        Ok((jumps, hostnames))
     }
 
     /// Checks every host of `hosts` that differs from the file (same

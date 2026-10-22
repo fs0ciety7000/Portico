@@ -51,3 +51,19 @@ publions un correctif puis un avis (GitHub Security Advisory) une fois les utili
     loopback (confirmation explicite), c'est un relais ouvert pour le réseau.
 12. **Destinations SOCKS** : les destinations en échec apparaissent dans le panneau debug (donc dans
     « Copier ») et, en mode diagnostic, dans `portico-tui.log` ; elles révèlent une partie de la navigation.
+13. **Mot de passe saisi avec un hôte Portico** : avant la première connexion, il n'est lié à aucune clé
+    d'hôte. Il part vers **le premier serveur qui répond à cette adresse** une fois sa clé acceptée par
+    TOFU (le dialogue de clé inconnue le signale : `sends_remembered_password`) ; il est ensuite lié à
+    cette clé. Avec `StrictHostKeyChecking accept-new|no`, aucune personne n'a regardé la clé : il est
+    alors **retenu** (jamais envoyé) et le mot de passe est demandé. Un mot de passe refusé est oublié.
+14. **« Oublier » un mot de passe lié** : Portico tient dans `hosts.toml` un index non secret des
+    empreintes auxquelles un mot de passe a été lié (au plus 32 par compte). Un mot de passe lié par une
+    version antérieure, via un certificat d'hôte ou une ligne `known_hosts` disparue depuis, et jamais
+    réutilisé depuis, n'y figure pas : il reste dans le trousseau jusqu'à suppression manuelle.
+15. **Import Termix** : les clés PEM chiffrées ne sont déchiffrées (pour leur empreinte) qu'après contrôle
+    des paramètres de dérivation (PBKDF2 ≤ 10 000 000 itérations ; scrypt `log2 N` ≤ 20, `r` et `p` ≤ 16,
+    1 Gio au plus), au plus 32 par aperçu ; un scrypt à la limite reste coûteux (quelques secondes). Une
+    clé OpenSSH chiffrée n'a qu'une empreinte **déclarée** (sa moitié publique en clair) : elle n'est
+    jamais rapprochée d'une clé locale et l'aperçu la marque non vérifiée. Les secrets de l'export sont lus
+    sans tampon intermédiaire de `serde_json` ; le texte complet de l'export reste en mémoire (`Zeroizing`)
+    le temps de l'aperçu.

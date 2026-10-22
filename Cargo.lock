@@ -4151,6 +4151,7 @@ dependencies = [
  "hmac",
  "keyring",
  "nucleo-matcher",
+ "pkcs8",
  "pretty_assertions",
  "rand 0.10.3",
  "russh",

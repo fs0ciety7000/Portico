@@ -13,7 +13,14 @@
 //! ([`SecretKey::HostPassword`]). A password typed when a host was created in
 //! Portico has no key yet ([`SecretKey::UnboundHostPassword`]): it is offered
 //! only after the host key passed verification, when no bound one exists, and
-//! the first login it opens binds it to that key (moved, never copied).
+//! the first login it opens binds it to that key (moved, never copied). It is
+//! withheld when the key was accepted with no user gesture
+//! (`StrictHostKeyChecking accept-new|no`, [`HostTrust::AutoAccepted`]), it
+//! is forgotten when the server rejects it, and after a login another typed
+//! password opened; a rejected one is never bound (keyboard-interactive
+//! tracks whether the last password answer came from the store). Every
+//! binding is recorded in the non-secret index of `hosts.toml`
+//! ([`crate::hosts::record_bound_password`]) so "forget" finds it.
 //!
 //! Secrets never reach logs: only fingerprints, paths and method names do.
 
@@ -25,7 +32,7 @@ use russh::keys::{Certificate, HashAlg, PublicKey};
 use russh::{MethodKind, MethodSet};
 use secrecy::{ExposeSecret, SecretString};
 
-use super::handler::{ClientHandler, HostIdentity};
+use super::handler::{ClientHandler, HostIdentity, HostTrust};
 use super::route::Hop;
 use super::signer::{Agent, FileSigner, KeySigner, Outcome, SignError};
 use super::{SessionCtx, transport};
@@ -90,6 +97,15 @@ impl Attempt<'_> {
             ),
         }
     }
+}
+
+/// The answers to one keyboard-interactive info request.
+struct InfoAnswer {
+    answers: Vec<String>,
+    /// The secret to remember (the user asked for it).
+    remember: Option<SecretString>,
+    /// Answered from the secret store (the remembered password).
+    from_store: bool,
 }
 
 struct Auth<'a> {
@@ -466,8 +482,6 @@ impl Auth<'_> {
             None => (None, false),
         };
         for _ in 0..self.password_attempts {
-            // Whether this attempt answered with the stored password.
-            let had_stored = stored.is_some();
             if !self.allows(MethodKind::KeyboardInteractive) {
                 return Ok(false);
             }
@@ -482,13 +496,25 @@ impl Auth<'_> {
                 .map_err(|e| transport(self.hop, &e))?;
             let mut remember: Option<SecretString> = None;
             let mut asked = false;
+            // The remembered password answered a password prompt of this
+            // exchange and was not rejected since.
+            let mut store_answer_pending = false;
+            // The user typed the answer to a password prompt.
+            let mut typed_password = false;
             for _ in 0..MAX_INFO_ROUNDS {
                 match response {
                     KeyboardInteractiveAuthResponse::Success => {
                         if let Some(secret) = remember {
                             self.save_password(secret).await;
-                        } else if unbound && had_stored && stored.is_none() {
-                            self.bind_unbound_password().await;
+                        }
+                        if store_answer_pending {
+                            if unbound {
+                                self.bind_unbound_password().await;
+                            } else {
+                                self.index_bound_password().await;
+                            }
+                        } else if typed_password {
+                            self.forget_unbound_after_other_secret().await;
                         }
                         return Ok(true);
                     }
@@ -497,6 +523,9 @@ impl Auth<'_> {
                     } => {
                         if !remaining_methods.is_empty() {
                             self.methods = remaining_methods;
+                        }
+                        if store_answer_pending && unbound {
+                            self.forget_rejected_unbound_password().await;
                         }
                         if !asked {
                             // Rejected without a single question: retrying is pointless.
@@ -510,17 +539,38 @@ impl Auth<'_> {
                         prompts,
                     } => {
                         asked |= !prompts.is_empty();
-                        let Some((answers, keep)) = self
+                        let password_prompt = is_password_prompt(&prompts);
+                        if store_answer_pending && password_prompt {
+                            // Asked for the password again: the remembered
+                            // one was rejected. It is never bound now, even
+                            // if the user then types the right one.
+                            store_answer_pending = false;
+                            if unbound {
+                                self.forget_rejected_unbound_password().await;
+                            } else {
+                                self.ctx.log(
+                                    LogLevel::Warn,
+                                    "auth",
+                                    "remembered password was rejected",
+                                );
+                            }
+                        }
+                        let Some(answer) = self
                             .answer_info_request(name, instructions, &prompts, &mut stored)
                             .await?
                         else {
                             self.abandon_keyboard_interactive(prompts.len()).await?;
                             return Ok(false);
                         };
-                        remember = keep;
+                        if answer.from_store {
+                            store_answer_pending = true;
+                        } else if password_prompt {
+                            typed_password = true;
+                        }
+                        remember = answer.remember;
                         response = self
                             .handle
-                            .authenticate_keyboard_interactive_respond(answers)
+                            .authenticate_keyboard_interactive_respond(answer.answers)
                             .await
                             .map_err(|e| transport(self.hop, &e))?;
                     }
@@ -563,18 +613,21 @@ impl Auth<'_> {
     }
 
     /// Answers one info request: from the secret store for a lone password
-    /// prompt, otherwise by asking the user. Returns the answers and the
-    /// secret to remember (only when the user asked for it); `None` if the
-    /// user dismissed the prompt.
+    /// prompt (once), otherwise by asking the user. `None` if the user
+    /// dismissed the prompt.
     async fn answer_info_request(
         &self,
         name: String,
         instructions: String,
         prompts: &[russh::client::Prompt],
         stored: &mut Option<SecretString>,
-    ) -> Result<Option<(Vec<String>, Option<SecretString>)>> {
+    ) -> Result<Option<InfoAnswer>> {
         if prompts.is_empty() {
-            return Ok(Some((Vec::new(), None)));
+            return Ok(Some(InfoAnswer {
+                answers: Vec::new(),
+                remember: None,
+                from_store: false,
+            }));
         }
         if is_password_prompt(prompts)
             && let Some(pw) = stored.take()
@@ -584,7 +637,11 @@ impl Auth<'_> {
                 "auth",
                 "answering password prompt from the secret store",
             );
-            return Ok(Some((vec![pw.expose_secret().to_owned()], None)));
+            return Ok(Some(InfoAnswer {
+                answers: vec![pw.expose_secret().to_owned()],
+                remember: None,
+                from_store: true,
+            }));
         }
         let kind = PromptKind::KeyboardInteractive {
             name,
@@ -599,16 +656,21 @@ impl Auth<'_> {
         };
         Ok(match self.ctx.ask(kind).await? {
             // sshd drops the connection when the answer count is wrong.
-            PromptResponse::Answers(values) if values.len() == prompts.len() => Some((
-                values
+            PromptResponse::Answers(values) if values.len() == prompts.len() => Some(InfoAnswer {
+                answers: values
                     .iter()
                     .map(|v| v.expose_secret().to_owned())
                     .collect(),
-                None,
-            )),
+                remember: None,
+                from_store: false,
+            }),
             PromptResponse::Secret { value, remember } if prompts.len() == 1 => {
-                let answer = vec![value.expose_secret().to_owned()];
-                Some((answer, remember.then_some(value)))
+                let answers = vec![value.expose_secret().to_owned()];
+                Some(InfoAnswer {
+                    answers,
+                    remember: remember.then_some(value),
+                    from_store: false,
+                })
             }
             _ => None,
         })
@@ -636,11 +698,18 @@ impl Auth<'_> {
             if self.settle(r) {
                 if unbound {
                     self.bind_unbound_password().await;
+                } else {
+                    // Bound before the index existed: indexed now.
+                    self.index_bound_password().await;
                 }
                 return Ok(true);
             }
-            self.ctx
-                .log(LogLevel::Warn, "auth", "remembered password was rejected");
+            if unbound {
+                self.forget_rejected_unbound_password().await;
+            } else {
+                self.ctx
+                    .log(LogLevel::Warn, "auth", "remembered password was rejected");
+            }
         }
         for attempt in 1..=self.password_attempts {
             if !self.allows(MethodKind::Password) {
@@ -673,6 +742,7 @@ impl Auth<'_> {
                 if remember {
                     self.save_password(value).await;
                 }
+                self.forget_unbound_after_other_secret().await;
                 return Ok(true);
             }
             self.ctx.log(
@@ -701,13 +771,21 @@ impl Auth<'_> {
         }
     }
 
+    /// `true` when the host key was accepted with no user gesture
+    /// (`StrictHostKeyChecking accept-new|no`): a password never bound to a
+    /// key is then withheld.
+    fn auto_accepted(&self) -> bool {
+        self.identity.trust == HostTrust::AutoAccepted
+    }
+
     /// The remembered password: the one bound to this host key, else the
-    /// one typed when the host was created in Portico (`true`: unbound).
+    /// one typed when the host was created in Portico (`true`: unbound),
+    /// unless the key was accepted automatically.
     async fn stored_password(&self) -> Option<(SecretString, bool)> {
         let store = std::sync::Arc::clone(&self.ctx.engine.config().secrets);
         let bound = self.password_key();
         let unbound = self.unbound_password_key();
-        tokio::task::spawn_blocking(move || {
+        let found = tokio::task::spawn_blocking(move || {
             if let Ok(Some(secret)) = store.get(&bound) {
                 return Some((secret, false));
             }
@@ -719,7 +797,99 @@ impl Auth<'_> {
         })
         .await
         .ok()
-        .flatten()
+        .flatten();
+        match found {
+            Some((_, true)) if self.auto_accepted() => {
+                self.ctx.log(
+                    LogLevel::Warn,
+                    "auth",
+                    "remembered password withheld: new host key accepted automatically",
+                );
+                None
+            }
+            other => other,
+        }
+    }
+
+    /// Forgets the unbound password: the server rejected it.
+    async fn forget_rejected_unbound_password(&self) {
+        if self.delete_unbound_password().await {
+            self.ctx.log(
+                LogLevel::Warn,
+                "auth",
+                "remembered password was rejected and forgotten",
+            );
+        }
+    }
+
+    /// Forgets the unbound password after a login that another secret (a
+    /// password the user typed) opened: it was not the right one, or no
+    /// longer needed. Kept when it was withheld (never tried).
+    async fn forget_unbound_after_other_secret(&self) {
+        if self.auto_accepted() {
+            return;
+        }
+        if self.delete_unbound_password().await {
+            self.ctx.log(
+                LogLevel::Info,
+                "secrets",
+                "remembered password forgotten: another password opened the session",
+            );
+        }
+    }
+
+    /// Deletes the unbound password; `true` when one was deleted.
+    async fn delete_unbound_password(&self) -> bool {
+        let store = std::sync::Arc::clone(&self.ctx.engine.config().secrets);
+        let unbound = self.unbound_password_key();
+        let deleted = tokio::task::spawn_blocking(move || -> crate::error::Result<bool> {
+            if store.get(&unbound)?.is_none() {
+                return Ok(false);
+            }
+            store.delete(&unbound)?;
+            Ok(true)
+        })
+        .await;
+        match deleted {
+            Ok(Ok(deleted)) => deleted,
+            // The error code only: never a secret.
+            Ok(Err(e)) => {
+                self.ctx.log(
+                    LogLevel::Warn,
+                    "secrets",
+                    format!("could not forget the password ({})", e.summary().code),
+                );
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Records, in the non-secret index of `hosts.toml`, that the password
+    /// of this account is bound to this host key (so "forget" finds it
+    /// whatever `known_hosts` says later). Blocking work off the runtime.
+    async fn index_bound_password(&self) {
+        let path = self.ctx.engine.config().paths.hosts_meta();
+        let (user, host, port, fingerprint) = (
+            self.hop.user.clone(),
+            self.identity.name.clone(),
+            self.identity.port,
+            self.identity.fingerprint.clone(),
+        );
+        let recorded = tokio::task::spawn_blocking(move || {
+            crate::hosts::record_bound_password(&path, &user, &host, port, &fingerprint)
+        })
+        .await;
+        if let Ok(Err(e)) = recorded {
+            self.ctx.log(
+                LogLevel::Warn,
+                "secrets",
+                format!(
+                    "could not index the remembered password ({})",
+                    e.summary().code
+                ),
+            );
+        }
     }
 
     /// Moves the unbound password to the key of this (verified) server:
@@ -737,6 +907,9 @@ impl Auth<'_> {
             Ok(true)
         })
         .await;
+        if matches!(moved, Ok(Ok(true))) {
+            self.index_bound_password().await;
+        }
         match moved {
             Ok(Ok(true)) => self.ctx.log(
                 LogLevel::Info,
@@ -766,11 +939,14 @@ impl Auth<'_> {
         let key = self.password_key();
         let saved = tokio::task::spawn_blocking(move || store.set(&key, &secret)).await;
         match saved {
-            Ok(Ok(())) => self.ctx.log(
-                LogLevel::Info,
-                "secrets",
-                "password remembered in the secret store",
-            ),
+            Ok(Ok(())) => {
+                self.ctx.log(
+                    LogLevel::Info,
+                    "secrets",
+                    "password remembered in the secret store",
+                );
+                self.index_bound_password().await;
+            }
             // The error code only (`vault_locked`, `secrets`…): never a secret.
             Ok(Err(e)) => self.ctx.log(
                 LogLevel::Warn,

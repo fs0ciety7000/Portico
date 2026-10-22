@@ -156,6 +156,7 @@ fn render_prompt(p: &PromptDialog, s: Styles, frame: &mut Frame<'_>) {
             algorithm,
             fingerprint,
             other_algorithms,
+            ..
         } => {
             host_key_lines(
                 p,

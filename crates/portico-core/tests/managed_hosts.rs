@@ -206,10 +206,17 @@ async fn the_password_waits_for_host_key_verification() {
         .unwrap();
     let (_, out) = env.connect("new", accept_host).await;
     assert!(out.connected(), "{:?}", out.phases);
-    assert!(matches!(
-        out.prompts.as_slice(),
-        [PromptKind::UnknownHostKey { .. }]
-    ));
+    assert!(
+        matches!(
+            out.prompts.as_slice(),
+            [PromptKind::UnknownHostKey {
+                sends_remembered_password: true,
+                ..
+            }]
+        ),
+        "the prompt says a remembered password follows: {:?}",
+        out.prompts
+    );
 
     // Changed key: refused before any authentication.
     let mut env = Env::new("");
@@ -258,6 +265,183 @@ async fn a_wrong_remembered_password_falls_back_to_the_prompt() {
         None,
         "a rejected one is not bound"
     );
+    assert_eq!(
+        stored(&env, &unbound(server.port)),
+        None,
+        "a rejected one is forgotten"
+    );
+}
+
+/// The joined session log of `id`.
+fn logs(env: &Env, id: portico_core::ids::SessionId) -> String {
+    serde_json::to_string(&env.engine.session_logs(id).unwrap()).unwrap()
+}
+
+/// With `StrictHostKeyChecking accept-new`, nobody looked at the new host
+/// key: the password typed with the host (never bound to a key) is not
+/// sent to whichever server answered; the user is asked instead.
+#[tokio::test]
+async fn unbound_password_is_withheld_after_accept_new() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "s3cret-pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new("Host *\n    StrictHostKeyChecking accept-new\n");
+    env.engine
+        .create_host(with_password("db", server.port, "s3cret-pw"))
+        .await
+        .unwrap();
+    let behaviour = std::sync::Arc::clone(&server.behaviour);
+    let mut logins_at_prompt = None;
+    let (id, out) = env
+        .connect("db", |kind| match kind {
+            PromptKind::Password { .. } => {
+                logins_at_prompt = Some(behaviour.logins.load(Ordering::SeqCst));
+                PromptResponse::Secret {
+                    value: SecretString::from("s3cret-pw".to_owned()),
+                    remember: false,
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(logins_at_prompt, Some(0), "nothing sent before the prompt");
+    assert_eq!(server.behaviour.logins.load(Ordering::SeqCst), 1);
+    assert!(
+        env.known_hosts().contains(&server.known_hosts_line()),
+        "key accepted automatically"
+    );
+    assert_eq!(
+        stored(&env, &unbound(server.port)).as_deref(),
+        Some("s3cret-pw"),
+        "kept, never tried"
+    );
+    assert_eq!(stored(&env, &bound(&server)), None);
+    let logs = logs(&env, id);
+    assert!(
+        logs.contains("remembered password withheld: new host key accepted automatically"),
+        "{logs}"
+    );
+    assert!(!logs.contains("s3cret-pw") && !out.transcript().contains("s3cret-pw"));
+}
+
+/// keyboard-interactive: the server asks "Password:" again after the
+/// remembered (wrong) one; the right one typed then opens the session, and
+/// the wrong one is never bound to the key: it is forgotten.
+#[tokio::test]
+async fn a_rejected_unbound_password_is_never_bound() {
+    let server = TestServer::start(Behaviour {
+        keyboard_interactive: Some(("alice".into(), "right".into())),
+        kbd_reask: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let mut env = Env::new("");
+    env.trust(&server);
+    env.engine
+        .create_host(with_password("kbd", server.port, "wrong"))
+        .await
+        .unwrap();
+    let (id, out) = env
+        .connect("kbd", |kind| match kind {
+            PromptKind::KeyboardInteractive { .. } => {
+                PromptResponse::Answers(vec![SecretString::from("right".to_owned())])
+            }
+            other => panic!("unexpected {other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(
+        matches!(
+            out.prompts.as_slice(),
+            [PromptKind::KeyboardInteractive { .. }]
+        ),
+        "{:?}",
+        out.prompts
+    );
+    assert_eq!(stored(&env, &bound(&server)), None, "never bound");
+    assert_eq!(stored(&env, &unbound(server.port)), None, "forgotten");
+    let logs = logs(&env, id);
+    assert!(
+        logs.contains("remembered password was rejected and forgotten"),
+        "{logs}"
+    );
+
+    // The same with the right one typed and remembered: that one is bound.
+    env.engine
+        .update_host(
+            "kbd",
+            HostDraft {
+                password: PasswordChange::Set(SecretString::from("wrong".to_owned())),
+                ..with_password("kbd", server.port, "unused")
+            },
+        )
+        .await
+        .unwrap();
+    let (_, out) = env
+        .connect("kbd", |kind| match kind {
+            PromptKind::KeyboardInteractive { .. } => PromptResponse::Secret {
+                value: SecretString::from("right".to_owned()),
+                remember: true,
+            },
+            other => panic!("unexpected {other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(stored(&env, &bound(&server)).as_deref(), Some("right"));
+    assert_eq!(stored(&env, &unbound(server.port)), None);
+}
+
+/// A password bound to a server presenting a **host certificate** (no
+/// `known_hosts` line names its key) is still forgotten with the host.
+#[tokio::test]
+async fn delete_forgets_a_password_bound_through_a_host_certificate() {
+    let (host_ca, host_key) = (new_key(), new_key());
+    let cert = support::user_cert(
+        &host_ca,
+        &host_key,
+        "127.0.0.1",
+        russh::keys::ssh_key::certificate::CertType::Host,
+    );
+    let server = TestServer::start_with(
+        Behaviour {
+            password: Some(("alice".into(), "s3cret-pw".into())),
+            ..Behaviour::default()
+        },
+        host_key,
+        vec![cert],
+    )
+    .await;
+    let mut env = Env::new("");
+    env.append_known_hosts(&format!(
+        "@cert-authority [127.0.0.1]:{} {}",
+        server.port,
+        host_ca.public_key().to_openssh().unwrap()
+    ));
+    env.engine
+        .create_host(with_password("db", server.port, "s3cret-pw"))
+        .await
+        .unwrap();
+    let (_, out) = env.connect("db", never).await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert_eq!(stored(&env, &bound(&server)).as_deref(), Some("s3cret-pw"));
+    assert_eq!(stored(&env, &unbound(server.port)), None);
+    // The index names the key; no `known_hosts` line does.
+    let meta = std::fs::read_to_string(env.engine.config().paths.hosts_meta()).unwrap();
+    let fingerprint = server
+        .host_key
+        .public_key()
+        .fingerprint(russh::keys::HashAlg::Sha256)
+        .to_string();
+    assert!(meta.contains(&fingerprint), "{meta}");
+    assert!(!meta.contains("s3cret-pw"));
+
+    env.engine.delete_host("db").await.unwrap();
+    assert_eq!(stored(&env, &bound(&server)), None, "forgotten");
+    let meta = std::fs::read_to_string(env.engine.config().paths.hosts_meta()).unwrap_or_default();
+    assert!(!meta.contains(&fingerprint), "index entry removed: {meta}");
 }
 
 /// `ssh -G` (OpenSSH's own resolution, no connection) agrees with Portico

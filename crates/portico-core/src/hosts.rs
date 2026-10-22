@@ -616,6 +616,119 @@ pub(crate) fn remove_provenance(path: &Path, alias: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Index of bound passwords ────────────────────────────────────────────
+
+/// Top-level table of `hosts.toml` listing, per account
+/// (`"<user>@<known_hosts name>:<port>"`), the host key fingerprints a
+/// remembered password was bound to (`SecretKey::HostPassword`). Not a
+/// secret: fingerprints are public. It lets "forget" find a password bound
+/// through a host certificate or a `known_hosts` line that has since
+/// disappeared.
+const BOUND_PASSWORDS: &str = "bound_passwords";
+/// Most fingerprints kept per account (the oldest is dropped first).
+pub(crate) const MAX_BOUND_FINGERPRINTS: usize = 32;
+/// Longest fingerprint recorded (`SHA256:` + 43 base64 characters).
+const MAX_FINGERPRINT_CHARS: usize = 128;
+
+/// The index key of an account.
+fn account_key(user: &str, host: &str, port: u16) -> String {
+    format!("{user}@{host}:{port}")
+}
+
+/// Records that the password of `user@host:port` was bound to the host key
+/// `fingerprint`. Blocking.
+pub(crate) fn record_bound_password(
+    path: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+) -> Result<()> {
+    if fingerprint.is_empty()
+        || fingerprint.chars().count() > MAX_FINGERPRINT_CHARS
+        || fingerprint.chars().any(char::is_control)
+    {
+        return Ok(());
+    }
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let text = store::read_capped(path, MAX_HOSTS_FILE_BYTES)?.unwrap_or_default();
+    let _: HostMetaFile = store::parse_toml(path, &text)?;
+    let mut doc = store::parse_document(path, &text)?;
+    let index = store::child_table(doc.as_table_mut(), BOUND_PASSWORDS, path)?;
+    let key = account_key(user, host, port);
+    let mut fingerprints = bound_fingerprints_in(index, &key);
+    if fingerprints.iter().any(|f| f == fingerprint) {
+        return Ok(());
+    }
+    fingerprints.push(fingerprint.to_owned());
+    let excess = fingerprints.len().saturating_sub(MAX_BOUND_FINGERPRINTS);
+    fingerprints.drain(..excess);
+    let array: toml_edit::Array = fingerprints.iter().map(String::as_str).collect();
+    index.insert(&key, toml_edit::value(array));
+    store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)
+}
+
+/// The fingerprints recorded for `user@host:port` (none when the file or
+/// the entry is missing or malformed). Blocking.
+pub(crate) fn bound_password_fingerprints(
+    path: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+) -> Result<Vec<String>> {
+    let Some(text) = store::read_capped(path, MAX_HOSTS_FILE_BYTES)? else {
+        return Ok(Vec::new());
+    };
+    let doc = store::parse_document(path, &text)?;
+    let Some(index) = doc
+        .get(BOUND_PASSWORDS)
+        .and_then(toml_edit::Item::as_table_like)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(bound_fingerprints_in(index, &account_key(user, host, port)))
+}
+
+/// Removes the entry of `user@host:port` from the index (its passwords
+/// were forgotten). Nothing is written when there is none. Blocking.
+pub(crate) fn remove_bound_passwords(path: &Path, user: &str, host: &str, port: u16) -> Result<()> {
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let Some(text) = store::read_capped(path, MAX_HOSTS_FILE_BYTES)? else {
+        return Ok(());
+    };
+    let mut doc = store::parse_document(path, &text)?;
+    let Some(index) = doc
+        .as_table_mut()
+        .get_mut(BOUND_PASSWORDS)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(());
+    };
+    if index.remove(&account_key(user, host, port)).is_none() {
+        return Ok(());
+    }
+    if index.is_empty() {
+        doc.as_table_mut().remove(BOUND_PASSWORDS);
+    }
+    store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)
+}
+
+/// The valid fingerprints listed under `key` of the index table.
+fn bound_fingerprints_in(index: &dyn toml_edit::TableLike, key: &str) -> Vec<String> {
+    index
+        .get(key)
+        .and_then(toml_edit::Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(toml_edit::Value::as_str)
+                .filter(|f| !f.is_empty() && f.chars().count() <= MAX_FINGERPRINT_CHARS)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Metadata brought by an import (see [`crate::import`]), merged into
 /// what `hosts.toml` already holds for `alias`.
 #[derive(Debug, Clone, PartialEq, Eq)]

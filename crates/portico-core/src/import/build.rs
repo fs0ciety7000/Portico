@@ -12,8 +12,8 @@ use super::private_keys::{self, KeySecret};
 use super::{
     BoundedNotices, IgnoredSecrets, ImportError, ImportFormat, ImportNotice, ImportOptions,
     ImportPlan, ImportSource, KeyId, KeyMaterial, MAX_ALIAS_CHARS, MAX_IMPORT_FILE_BYTES,
-    NoticeCode, Occupancy, PlannedHost, PlannedKey, clean_hostname, clean_user, display_text,
-    include_line, looks_like_other_host, slug,
+    NoticeCode, Occupancy, PlannedHost, PlannedKey, clean_hostname, clean_user, destination,
+    display_text, include_line, same_destination, shadows_a_name, slug,
 };
 use crate::engine::EngineConfig;
 use crate::error::{Error, Result};
@@ -138,36 +138,7 @@ pub(crate) fn plan(
         builder.add(raw);
     }
     let hosts = builder.hosts;
-
-    // The keys used by a planned host, in host order; the others are
-    // ignored (their hosts were skipped).
-    let local = if collected.keys.is_empty() {
-        Vec::new()
-    } else {
-        private_keys::local_keys(paths)
-    };
-    let mut keys: Vec<PlannedKey> = Vec::new();
-    let mut material = BTreeMap::new();
-    for host in &hosts {
-        let Some(id) = &host.key else { continue };
-        if let Some(planned) = keys.iter_mut().find(|k| &k.id == id) {
-            planned.aliases.push(host.alias.clone());
-            continue;
-        }
-        let Some(secret) = collected.keys.remove(id) else {
-            continue;
-        };
-        keys.push(PlannedKey {
-            id: id.clone(),
-            algorithm: secret.public.algorithm().to_string(),
-            fingerprint: id.as_str().to_owned(),
-            format: secret.format,
-            encrypted: secret.encrypted,
-            aliases: vec![host.alias.clone()],
-            local: private_keys::local_copy(paths, &local, id),
-        });
-        material.insert(id.clone(), secret);
-    }
+    let (keys, material) = planned_keys(paths, &hosts, &mut collected.keys);
     let mut secrets = collected.secrets;
     secrets.keys = secrets.keys.saturating_add(collected.keys.len());
     secrets.keys_in_export = keys.len().saturating_add(collected.keys.len());
@@ -191,6 +162,49 @@ pub(crate) fn plan(
         keys,
         key_material: KeyMaterial::new(material),
     })
+}
+
+/// The keys used by a planned host, in host order, moved out of `found`
+/// with their material; the others stay in `found` (their hosts were
+/// skipped). Blocking (local keys are read).
+fn planned_keys(
+    paths: &store::Paths,
+    hosts: &[PlannedHost],
+    found: &mut BTreeMap<KeyId, KeySecret>,
+) -> (Vec<PlannedKey>, BTreeMap<KeyId, KeySecret>) {
+    let local = if found.is_empty() {
+        Vec::new()
+    } else {
+        private_keys::local_keys(paths)
+    };
+    let mut keys: Vec<PlannedKey> = Vec::new();
+    let mut material = BTreeMap::new();
+    for host in hosts {
+        let Some(id) = &host.key else { continue };
+        if let Some(planned) = keys.iter_mut().find(|k| &k.id == id) {
+            planned.aliases.push(host.alias.clone());
+            continue;
+        }
+        let Some(secret) = found.remove(id) else {
+            continue;
+        };
+        let verified = secret.fingerprint_verified();
+        keys.push(PlannedKey {
+            id: id.clone(),
+            algorithm: secret.public.algorithm().to_string(),
+            fingerprint: id.as_str().to_owned(),
+            format: secret.format,
+            encrypted: secret.encrypted,
+            fingerprint_verified: verified,
+            aliases: vec![host.alias.clone()],
+            // A claimed fingerprint never selects a local key.
+            local: verified
+                .then(|| private_keys::local_copy(paths, &local, id))
+                .flatten(),
+        });
+        material.insert(id.clone(), secret);
+    }
+    (keys, material)
 }
 
 /// UTF-8 (BOM optional) or UTF-16 with a BOM; `None` otherwise.
@@ -290,7 +304,7 @@ impl Builder<'_> {
         let prefix = self.source.prefix();
         if self.prefix {
             base = slug(&format!("{prefix}{base}"), MAX_ALIAS_CHARS);
-        } else if looks_like_other_host(&base, &hostname, prefix) {
+        } else if shadows_a_name(&base, &hostname, prefix, self.occupancy) {
             let prefixed = slug(&format!("{prefix}{base}"), MAX_ALIAS_CHARS);
             self.warnings.push(notice(
                 NoticeCode::AliasLooksLikeHost,
@@ -298,6 +312,10 @@ impl Builder<'_> {
             ));
             base = prefixed;
         }
+        let source_id = match &raw.import_id {
+            Some(id) => format!("id:{}", display_text(id, 128)),
+            None => format!("label:{}", slug(&label, MAX_ALIAS_CHARS)),
+        };
         let blocked = &self.occupancy.blocked;
         let alias = if self.taken.contains(&base) {
             let mut n = self.next_suffix.get(&base).copied().unwrap_or(2);
@@ -330,6 +348,19 @@ impl Builder<'_> {
                 ),
             ));
             return;
+        } else if self
+            .occupancy
+            .updatable
+            .get(&base)
+            .is_some_and(|u| u.id != source_id)
+        {
+            self.skipped.push(notice(
+                NoticeCode::AliasCollision,
+                format!(
+                    "`{base}` was imported earlier from another record of the export: left as it is (import with the {prefix} prefix to keep both)"
+                ),
+            ));
+            return;
         } else {
             base
         };
@@ -338,12 +369,22 @@ impl Builder<'_> {
         let group = self.group(&raw.group, &notice);
         let tags = self.tags(&raw.tags, &notice);
         let notes = (alias != label).then(|| format!("{}: {label}", self.source.label()));
-        let update = self.occupancy.updatable.contains(&alias);
-        let source_id = match &raw.import_id {
-            Some(id) => format!("id:{}", display_text(id, 128)),
-            None => format!("label:{}", slug(&label, MAX_ALIAS_CHARS)),
-        };
+        let existing = self.occupancy.updatable.get(&alias);
+        let update = existing.is_some();
+        let previous = existing
+            .filter(|u| !same_destination(&u.host, &hostname, user.as_deref(), port))
+            .map(|u| u.host.clone());
+        if let Some(old) = &previous {
+            self.warnings.push(notice(
+                NoticeCode::DestinationChanged,
+                format!(
+                    "`{alias}` was imported earlier for {}: the export now points it elsewhere (skipped unless you accept this change)",
+                    destination(old)
+                ),
+            ));
+        }
         self.hosts.push(PlannedHost {
+            previous,
             source_id,
             alias,
             label,

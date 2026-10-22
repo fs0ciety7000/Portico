@@ -1014,3 +1014,95 @@ fn origins_are_marked() {
     );
     assert_eq!(include_line_for(fx.paths()), "Include ~/config/hosts.conf");
 }
+
+/// Fills `hosts.conf` (which holds `hosts`) with filler hosts until it is
+/// `room` bytes short of [`MAX_MANAGED_FILE_BYTES`], so any edit that grows
+/// it by more cannot be written.
+fn fill_up_to(fx: &Fixture, mut hosts: Vec<ManagedHost>, room: usize) {
+    let max = usize::try_from(MAX_MANAGED_FILE_BYTES).expect("fits");
+    let host = |alias: String, hostname: String| ManagedHost {
+        alias,
+        hostname,
+        user: None,
+        port: None,
+        identity_file: None,
+        proxy_jump: None,
+    };
+    let mut n = 0usize;
+    while render(fx.paths(), &hosts).len() < max - 200 {
+        hosts.push(host(format!("f{n}"), "h".repeat(100)));
+        n += 1;
+    }
+    let base = {
+        let mut probe = hosts.clone();
+        probe.push(host("pad".into(), "a".into()));
+        render(fx.paths(), &probe).len()
+    };
+    let target = max - room;
+    assert!(base <= target, "{base} > {target}");
+    hosts.push(host("pad".into(), "a".repeat(1 + target - base)));
+    let text = render(fx.paths(), &hosts);
+    assert_eq!(text.len(), target);
+    std::fs::write(fx.target(), text).expect("fill");
+}
+
+#[test]
+fn update_rolls_back_the_password_when_the_file_cannot_be_written() {
+    let fx = Fixture::new("");
+    let account = SecretKey::UnboundHostPassword {
+        user: "alice".into(),
+        host: "db.example.test".into(),
+        port: 22,
+    };
+    let other = SecretKey::UnboundHostPassword {
+        user: "alice".into(),
+        host: "other.example.test".into(),
+        port: 22,
+    };
+    fx.create(&HostDraft {
+        password: PasswordChange::Set(SecretString::from("old-pw".to_owned())),
+        ..draft("db", "db.example.test")
+    })
+    .expect("create");
+    let hosts = read_hosts(fx.paths()).expect("hosts");
+    fill_up_to(&fx, hosts, 20);
+    let before = fx.file();
+
+    // Same account, a longer alias: the file would exceed its cap.
+    let err = update(
+        &fx.config,
+        "db",
+        &HostDraft {
+            password: PasswordChange::Set(SecretString::from("new-pw".to_owned())),
+            ..draft(&"d".repeat(60), "db.example.test")
+        },
+    )
+    .expect_err("too large");
+    assert_eq!(err.summary().code, "file_too_large");
+    assert_eq!(fx.file(), before, "file untouched");
+    assert_eq!(
+        fx.secret(&account).as_deref(),
+        Some("old-pw"),
+        "the password it replaced is back"
+    );
+
+    // Another account: the new password is not left behind.
+    let err = update(
+        &fx.config,
+        "db",
+        &HostDraft {
+            password: PasswordChange::Set(SecretString::from("new-pw".to_owned())),
+            ..draft("db", &format!("other.example.test{}", ".x".repeat(20)))
+        },
+    )
+    .expect_err("too large");
+    assert_eq!(err.summary().code, "file_too_large");
+    let moved = SecretKey::UnboundHostPassword {
+        user: "alice".into(),
+        host: format!("other.example.test{}", ".x".repeat(20)),
+        port: 22,
+    };
+    assert_eq!(fx.secret(&moved), None);
+    assert_eq!(fx.secret(&other), None);
+    assert_eq!(fx.secret(&account).as_deref(), Some("old-pw"));
+}

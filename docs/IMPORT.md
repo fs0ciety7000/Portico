@@ -78,7 +78,12 @@ des valeurs écrites). **Réimporter** met à jour les hôtes que l'import a cr�
 un hôte modifié à la main (valeurs différentes de l'empreinte), créé à la main, ou défini ailleurs n'est jamais
 touché : l'enregistrement est ignoré (`edited_since_import`, `alias_collision`). Modifier seulement les tags, le
 groupe ou le favori n'empêche pas les mises à jour. Un réimport ne supprime aucun hôte ; réimporter le même export ne
-modifie rien.
+modifie rien. Un alias importé depuis **un autre enregistrement** de l'export n'est jamais mis à jour
+(`alias_collision`). Si l'export **change la destination** d'un hôte (`HostName`, `User` ou `Port`), l'aperçu le
+signale avec les valeurs actuelles (`destination_changed`) et l'hôte n'est modifié que si vous l'acceptez pour cet
+alias (`allowRedirect`) ; il perd alors son ancienne clé (`IdentityFile`), qui ne suit jamais un alias vers un autre
+serveur. Un alias qui masquerait un nom utilisé par la config (`localhost`, un hôte de `ProxyJump`, un `HostName` sans
+point) reçoit le préfixe de la source.
 
 Un ancien fichier `imports/termius.conf` (premières versions de l'import) reste lu tel quel, en lecture seule ; ses
 alias ne sont jamais masqués par un nouvel import.
@@ -111,10 +116,15 @@ importés (comptés).
 ou non, copie locale déjà présente) ; aucune n'est cochée. Formats lus : OpenSSH (en clair ou chiffrée) et PEM
 (`RSA PRIVATE KEY` PKCS#1, `EC PRIVATE KEY` SEC1, `PRIVATE KEY` PKCS#8 : RSA, ECDSA, Ed25519 ; une PEM chiffrée
 seulement si l'export contient son `keyPassword`, utilisé en mémoire pour lire l'empreinte puis effacé). Une clé
-PuTTY, DSA ou illisible est ignorée avec un avertissement qui ne la cite jamais. Une clé cochée dont une clé locale a
+PuTTY, DSA ou illisible est ignorée avec un avertissement qui ne la cite jamais. Une PEM chiffrée dont les paramètres
+de dérivation sont démesurés (PBKDF2 > 10 000 000 itérations, scrypt `log2 N` > 20, `r` ou `p` > 16) n'est pas
+déchiffrée ; au plus 32 PEM chiffrées sont déchiffrées par aperçu. L'empreinte d'une clé OpenSSH **chiffrée** vient de
+sa moitié publique, en clair : elle est marquée **non vérifiée** (`fingerprintVerified: false`) et n'est jamais
+rapprochée d'une clé locale. Une clé cochée dont une clé locale (relue dans son fichier privé, pas son `.pub`) a
 la même empreinte (`~/.ssh`, `~/.ssh/portico`) est **réutilisée** ; sinon elle est écrite dans
-`~/.ssh/portico/<alias>` (`0600`, dossier `0700`, jamais d'écrasement : `-2`, `-3`… si le nom est pris) avec son
+`~/.ssh/portico/<alias>` (nom sans fin `.pub`, `-cert` ou `-cert.pub` : `x.pub` devient `x_pub` ; `0600`, dossier
+`0700`, jamais d'écrasement : `-2`, `-3`… si le nom est pris) avec son
 `.pub`, au format OpenSSH, chiffrée par la passphrase que vous donnez ; une clé déjà chiffrée dans l'export est
 écrite telle quelle (sa passphrase ne change pas). Les hôtes qui l'utilisent reçoivent `IdentityFile` et
-`IdentitiesOnly yes` ; sans clé cochée, aucun `IdentityFile` (un réimport garde celle qu'un hôte a déjà). Le rapport
+`IdentitiesOnly yes` ; sans clé cochée, aucun `IdentityFile` (un réimport vers la même destination garde celle qu'un hôte a déjà). Le rapport
 compte les clés importées, réutilisées et ignorées, et rappelle de **supprimer l'export**.

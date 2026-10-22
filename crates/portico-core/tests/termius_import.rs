@@ -442,6 +442,7 @@ async fn a_tampered_plan_is_checked_again() {
         favorite: false,
         key: None,
         update: false,
+        previous: None,
         source_id: "label:github.com".into(),
     });
     let report = engine
@@ -518,8 +519,22 @@ async fn a_host_the_user_defines_since_is_never_overwritten() {
         codes(&plan.skipped),
         [(Some("web".into()), NoticeCode::AliasCollision)]
     );
+    // `db` now points elsewhere: applied only because the user accepts it.
+    assert_eq!(
+        plan.hosts
+            .first()
+            .and_then(|h| h.previous.as_ref())
+            .map(|p| p.hostname.as_str()),
+        Some("192.0.2.2")
+    );
     let report = engine
-        .apply_import(plan, ImportOptions::default())
+        .apply_import(
+            plan,
+            ImportOptions {
+                allow_redirect: ["db".to_owned()].into(),
+                ..ImportOptions::default()
+            },
+        )
         .await
         .expect("apply again");
     assert_eq!(report.imported, ["db"]);
