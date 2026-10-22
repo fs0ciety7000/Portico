@@ -1083,6 +1083,22 @@ async fn dynamic_forward_reports_channel_failures() {
     let (code, mut ok) = socks_connect(proxy, "127.0.0.1", echo).await;
     assert_eq!(code, 0);
     echo_through(&mut ok).await;
+    // A name the server cannot reach: also "connection refused".
+    let (code, _) = socks_connect(proxy, "localhost", closed).await;
+    assert_eq!(code, 0x05);
+    // Failures name their destination; a success does not (browsing
+    // history stays out of the logs).
+    let logs = session_messages(&f);
+    for expected in [
+        format!("→ 127.0.0.1:{closed}: refused or unreachable from the server"),
+        format!("→ localhost:{closed}: refused or unresolvable on the server"),
+    ] {
+        assert!(logs.iter().any(|m| m.ends_with(&expected)), "{logs:#?}");
+    }
+    assert!(
+        !logs.iter().any(|m| m.contains(&format!(":{echo}"))),
+        "{logs:#?}"
+    );
 
     // A server that forbids forwarding → "not allowed by ruleset".
     let mut f = connected(Behaviour {
@@ -1148,4 +1164,285 @@ async fn dynamic_forward_exposure_and_stop() {
             .is_err(),
         "port released"
     );
+}
+
+/// Polls `check` for up to `within`.
+async fn eventually(within: Duration, mut check: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    check()
+}
+
+fn session_messages(f: &Fixture) -> Vec<String> {
+    f.env
+        .engine
+        .session_logs(f.id)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.message)
+        .collect()
+}
+
+/// A server that confirms `direct-tcpip` after Portico stopped waiting
+/// (`ConnectTimeout 1`): the late channel is closed, for -D and -L alike,
+/// instead of staying open on the server forever.
+#[tokio::test]
+async fn late_channel_confirmations_are_closed() {
+    let echo = echo_server().await;
+    let mut f = connected_with(
+        Behaviour {
+            allow_direct_tcpip: true,
+            delay_direct_tcpip: Some(Duration::from_millis(2500)),
+            ..Behaviour::default()
+        },
+        "  ConnectTimeout 1\n",
+    )
+    .await;
+    let b = std::sync::Arc::clone(&f.server.behaviour);
+    let (_, proxy) = start_socks(&mut f).await;
+    let started = std::time::Instant::now();
+    let (code, _socks) = socks_connect(proxy, "127.0.0.1", echo).await;
+    assert_eq!(code, 0x04, "open timed out → host unreachable");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            b.direct_accepted.load(Ordering::SeqCst) == 1
+                && b.closed_channels.load(Ordering::SeqCst) == 1
+        })
+        .await,
+        "the late -D channel must be closed (accepted {}, closed {})",
+        b.direct_accepted.load(Ordering::SeqCst),
+        b.closed_channels.load(Ordering::SeqCst)
+    );
+
+    let local = f
+        .env
+        .engine
+        .start_tunnel(
+            f.id,
+            ForwardSpec::Local {
+                bind: ep("127.0.0.1", 0),
+                target: ep("127.0.0.1", echo),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    let TunnelEvent::Listening { bind } = tunnel_event(&mut f.env, local).await else {
+        panic!("expected Listening");
+    };
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port_of(&bind)))
+        .await
+        .unwrap();
+    let mut buf = [0_u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+        .await
+        .expect("-L gives up after ConnectTimeout");
+    assert!(matches!(n, Ok(0) | Err(_)), "{n:?}");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            b.direct_accepted.load(Ordering::SeqCst) == 2
+                && b.closed_channels.load(Ordering::SeqCst) == 2
+        })
+        .await,
+        "the late -L channel must be closed"
+    );
+    let logs = session_messages(&f);
+    let timed_out = format!("→ 127.0.0.1:{echo}: timed out");
+    assert!(
+        logs.iter()
+            .any(|m| m.starts_with("-D ") && m.ends_with(&timed_out)),
+        "{logs:#?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|m| m.starts_with("-L ") && m.ends_with(&timed_out)),
+        "{logs:#?}"
+    );
+}
+
+/// A SOCKS client that leaves before the server confirmed: the channel
+/// opened for it is closed, not dropped bare.
+#[tokio::test]
+async fn a_client_gone_before_confirmation_leaves_no_channel_open() {
+    let echo = echo_server().await;
+    let mut f = connected(Behaviour {
+        allow_direct_tcpip: true,
+        delay_direct_tcpip: Some(Duration::from_millis(800)),
+        ..Behaviour::default()
+    })
+    .await;
+    let b = std::sync::Arc::clone(&f.server.behaviour);
+    let (_, proxy) = start_socks(&mut f).await;
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+        .await
+        .unwrap();
+    let mut request = vec![5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1];
+    request.extend(echo.to_be_bytes());
+    s.write_all(&request).await.unwrap();
+    let mut chosen = [0_u8; 2];
+    s.read_exact(&mut chosen).await.unwrap();
+    assert_eq!(chosen, [5, 0]);
+    // Reset (RST), so the success reply cannot be written.
+    #[allow(deprecated)] // `set_linger(0)` is exactly the reset wanted here
+    s.set_linger(Some(Duration::ZERO)).unwrap();
+    drop(s);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            b.direct_accepted.load(Ordering::SeqCst) == 1
+                && b.closed_channels.load(Ordering::SeqCst) == 1
+        })
+        .await,
+        "accepted {}, closed {}",
+        b.direct_accepted.load(Ordering::SeqCst),
+        b.closed_channels.load(Ordering::SeqCst)
+    );
+}
+
+/// A TCP service that sends `len` bytes of [`content`], then waits for the
+/// client to close; returns its port.
+async fn finite_source(len: usize) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = s.write_all(&content(len)).await;
+                let mut sink = [0_u8; 64];
+                while matches!(s.read(&mut sink).await, Ok(n) if n > 0) {}
+            });
+        }
+    });
+    port
+}
+
+/// Sibling of `a_stalled_local_peer_does_not_freeze_the_session`: a SOCKS
+/// reader that pauses (a paused video) far longer than the stall limit
+/// keeps its connection while the session's buffer budget lasts, and the
+/// session keeps serving meanwhile.
+#[tokio::test]
+async fn a_paused_socks_reader_keeps_its_connection() {
+    const LEN: usize = 16 * 1024 * 1024;
+    let source = finite_source(LEN).await;
+    let echo = echo_server().await;
+    let mut f = connected_with(
+        Behaviour {
+            allow_direct_tcpip: true,
+            ..Behaviour::default()
+        },
+        // Keepalive budget 3 s, stall limit 1.5 s: both shorter than the pause.
+        "  ServerAliveInterval 1\n",
+    )
+    .await;
+    let (id, proxy) = start_socks(&mut f).await;
+    let (code, mut video) = socks_connect(proxy, "127.0.0.1", source).await;
+    assert_eq!(code, 0);
+    let mut received = vec![0_u8; 1024 * 1024];
+    tokio::time::timeout(Duration::from_secs(10), video.read_exact(&mut received))
+        .await
+        .expect("first MiB in time")
+        .unwrap();
+
+    // Pause for 5 s; meanwhile the session serves another connection.
+    let paused = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (code, mut other) = socks_connect(proxy, "127.0.0.1", echo).await;
+    assert_eq!(code, 0);
+    echo_through(&mut other).await;
+    tokio::time::sleep_until(paused + Duration::from_secs(5)).await;
+
+    let mut buf = vec![0_u8; 256 * 1024];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while received.len() < LEN {
+            let n = video.read(&mut buf).await.unwrap();
+            assert!(n > 0, "connection cut after {} bytes", received.len());
+            received.extend_from_slice(&buf[..n]);
+        }
+    })
+    .await
+    .expect("the rest after the pause");
+    assert!(received == content(LEN), "every byte, in order");
+
+    let logs = session_messages(&f);
+    assert!(
+        !logs.iter().any(|m| m.contains("stopped reading")),
+        "{logs:#?}"
+    );
+    assert!(
+        !logs.iter().any(|m| m.contains("closed (Timeout)")),
+        "{logs:#?}"
+    );
+    assert!(f.env.engine.tunnels().iter().any(|t| t.id == id));
+    echo_through(&mut other).await;
+}
+
+/// A full -D tunnel answers SOCKS clients "general failure" (not a bare
+/// close), and a burst of refusals is logged once, not once per connection.
+#[tokio::test]
+async fn refused_connections_are_logged_once_per_burst() {
+    let echo = echo_server().await;
+    let mut f = connected(Behaviour {
+        allow_direct_tcpip: true,
+        ..Behaviour::default()
+    })
+    .await;
+    let (id, proxy) = start_socks(&mut f).await;
+    // 256 clients that never finish their handshake fill the tunnel.
+    let mut idle = Vec::new();
+    for _ in 0..256 {
+        idle.push(
+            tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+                .await
+                .unwrap(),
+        );
+    }
+    // Let the tunnel take them all, so the next one is refused.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+        .await
+        .unwrap();
+    let mut request = vec![5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1];
+    request.extend(echo.to_be_bytes());
+    s.write_all(&request).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut answer))
+        .await
+        .expect("answered in time")
+        .unwrap();
+    assert_eq!(
+        answer,
+        [5, 0, 5, 1, 0, 1, 0, 0, 0, 0, 0, 0],
+        "general failure"
+    );
+
+    let mut refused = Vec::new();
+    for _ in 0..300 {
+        refused.push(
+            tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+                .await
+                .unwrap(),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    f.env.engine.stop_tunnel(id).unwrap();
+    while !matches!(tunnel_event(&mut f.env, id).await, TunnelEvent::Stopped) {}
+    let logs = session_messages(&f);
+    let refusals: Vec<&String> = logs
+        .iter()
+        .filter(|m| m.contains("too many connections"))
+        .collect();
+    assert!(!refusals.is_empty() && refusals.len() < 5, "{refusals:#?}");
+    // The rest of the burst is counted, and reported when the tunnel stops.
+    assert!(
+        refusals
+            .iter()
+            .any(|m| m.ends_with("connections refused (-D): too many connections")),
+        "{refusals:#?}"
+    );
+    drop((idle, refused));
 }

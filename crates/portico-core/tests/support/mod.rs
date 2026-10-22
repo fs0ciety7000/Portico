@@ -93,6 +93,10 @@ pub struct Behaviour {
     pub rogue_accepted: AtomicUsize,
     /// `host:port` of every `direct-tcpip` asked for, as the client sent it.
     pub direct_targets: std::sync::Mutex<Vec<String>>,
+    /// Answer `direct-tcpip` opens only after this long (late confirmations).
+    pub delay_direct_tcpip: Option<Duration>,
+    /// `direct-tcpip` channels confirmed to the client.
+    pub direct_accepted: AtomicUsize,
 }
 
 pub struct TestServer {
@@ -464,13 +468,18 @@ impl russh::server::Handler for ServerHandler {
         }
         let target = format!("{host}:{port}");
         self.b.direct_targets.lock().unwrap().push(target.clone());
+        let b = Arc::clone(&self.b);
         tokio::spawn(async move {
+            if let Some(delay) = b.delay_direct_tcpip {
+                tokio::time::sleep(delay).await;
+            }
             let Ok(tcp) = tokio::net::TcpStream::connect(target).await else {
                 // Like sshd: the destination refused or is unreachable.
                 reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
                 return;
             };
             reply.accept().await;
+            b.direct_accepted.fetch_add(1, Ordering::SeqCst);
             serve_direct_tcpip(channel, tcp).await;
         });
         Ok(())
