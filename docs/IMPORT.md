@@ -54,7 +54,7 @@ voit les mêmes hôtes.
 
 | Donnée | Devient |
 |---|---|
-| Label | **Alias** : minuscules, accents translittérés, espaces et séparateurs en `-`, seulement `[a-z0-9_.-]` (64 caractères au plus). Deux labels identiques donnent `web-eu-1`, `web-eu-1-2`… Si l'alias diffère du label, les notes de l'hôte gardent `Termius: <label>`. |
+| Label | **Alias** : minuscules, accents translittérés, espaces et séparateurs en `-`, seulement `[a-z0-9_.-]` (64 caractères au plus). Deux labels identiques donnent `web-eu-1`, `web-eu-1-2`… Un alias qui ressemble à un nom d'hôte (il contient `.` ou `:`) mais ne correspond pas au `HostName` prend le préfixe `termius-`, avec un avertissement : le label `github.com` vers `203.0.113.66` devient `termius-github.com`, sinon `ssh github.com` partirait vers cette adresse. Si l'alias diffère du label, les notes de l'hôte gardent `Termius: <label>`. |
 | Hostname/IP | `HostName` (obligatoire). IPv6 accepté, crochets retirés. |
 | Username | `User` |
 | Port | `Port`, omis s'il vaut 22 ; un port hors 1–65535 est omis avec un avertissement. |
@@ -65,12 +65,17 @@ voit les mêmes hôtes.
 
 Le fichier `imports/termius.conf` (dossier de configuration de Portico, `0600`, dossier `0700`) ne contient que des
 directives `Host`, `HostName`, `User` et `Port`. Il est **remplacé en entier** à chaque import et n'est réécrit que si
-un hôte change : réimporter le même export ne modifie rien. Pour garder un hôte en dehors des imports, copiez-le dans
-`~/.ssh/config`.
+un hôte change : réimporter le même export ne modifie rien.
+
+**Modifier un hôte importé** : copiez son bloc dans `~/.ssh/config`, puis **réimportez**. Tant que vous ne réimportez
+pas, la copie placée après la ligne `Include` est masquée (OpenSSH garde la première valeur trouvée, celle de
+`termius.conf`). Au réimport, Portico voit votre copie et retire cet hôte de `termius.conf`.
 
 **Sécurité** : chaque valeur est vérifiée avant d'être écrite (`HostName` : lettres, chiffres, `.`, `-`, `_`, `:` ;
 `User` : lettres, chiffres, `.`, `-`, `_`, `@`, `+` ; ni espace, ni saut de ligne, ni `#`, ni guillemet, ni `%`). Un
-enregistrement refusé est **ignoré en entier**, jamais importé à moitié : un export piégé ne peut pas injecter
+enregistrement refusé est **ignoré en entier**, jamais importé à moitié. Une ligne CSV qui n'a pas le même nombre de
+cellules que l'en-tête est ignorée dès qu'une colonne contient un secret (une ligne décalée pourrait placer un mot de
+passe dans `User`) ; sans colonne secrète, seules les cellules manquantes en fin de ligne sont tolérées : un export piégé ne peut pas injecter
 `ProxyCommand` ou une autre directive. Portico n'écrit jamais `ProxyCommand`, `StrictHostKeyChecking` ni
 `IdentityFile`.
 
@@ -79,4 +84,4 @@ avec un avertissement, pour ne pas masquer votre propre entrée. L'option `--pre
 termius- » dans la GUI) préfixe tous les alias importés et garde les deux.
 
 Limites connues : ni `ProxyJump`, ni clés, ni snippets, ni identités partagées Termius (formats non confirmés) ;
-5000 hôtes et 4 Mio par fichier au plus.
+5000 hôtes et 4 Mio par fichier au plus ; 500 avertissements listés au plus (les suivants sont comptés).

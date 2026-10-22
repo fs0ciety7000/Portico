@@ -52,6 +52,9 @@ pub const MAX_IMPORT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_ALIAS_CHARS: usize = 64;
 /// Prefix given to every alias by [`ImportOptions::prefix`].
 pub const IMPORT_PREFIX: &str = "termius-";
+/// Most warnings listed in a plan or report; the rest are counted in one
+/// [`NoticeCode::NoticesTruncated`] notice.
+pub const MAX_NOTICES: usize = 500;
 /// Largest generated config file, in bytes.
 const MAX_IMPORT_CONF_BYTES: u64 = 4 * 1024 * 1024;
 /// The header line holding the import date: the only line allowed to
@@ -124,6 +127,15 @@ pub enum NoticeCode {
     UnknownColumn,
     /// The alias already had 16 tags: some imported tags were left out.
     TagsTruncated,
+    /// A CSV row has more cells than the header, or fewer while the header
+    /// has a secret column (a shifted row could move a password into
+    /// another field): skipped.
+    ColumnCountMismatch,
+    /// The alias looks like another host's name (`github.com` pointing
+    /// elsewhere): it was given the `termius-` prefix.
+    AliasLooksLikeHost,
+    /// Too many notices: the rest are counted, not listed.
+    NoticesTruncated,
 }
 
 impl NoticeCode {
@@ -145,6 +157,9 @@ impl NoticeCode {
             Self::IgnoredDirective => "ignored_directive",
             Self::UnknownColumn => "unknown_column",
             Self::TagsTruncated => "tags_truncated",
+            Self::ColumnCountMismatch => "column_count_mismatch",
+            Self::AliasLooksLikeHost => "alias_looks_like_host",
+            Self::NoticesTruncated => "notices_truncated",
         }
     }
 }
@@ -160,6 +175,63 @@ pub struct ImportNotice {
     pub record: Option<usize>,
     pub label: Option<String>,
     pub message: String,
+}
+
+/// A list of notices bounded to [`MAX_NOTICES`]: notices past the bound
+/// are only counted, then summed up in one last
+/// [`NoticeCode::NoticesTruncated`] notice by [`Self::into_vec`].
+#[derive(Debug, Default)]
+pub(crate) struct BoundedNotices {
+    kept: Vec<ImportNotice>,
+    hidden: usize,
+}
+
+impl BoundedNotices {
+    /// Takes over `notices` (from a plan: possibly already summed up, or
+    /// tampered with and longer than the bound).
+    pub(crate) fn from_vec(notices: Vec<ImportNotice>) -> Self {
+        let mut bounded = Self::default();
+        for notice in notices {
+            if notice.code == NoticeCode::NoticesTruncated {
+                bounded.hidden = bounded.hidden.saturating_add(hidden_count(&notice));
+            } else {
+                bounded.push(notice);
+            }
+        }
+        bounded
+    }
+
+    pub(crate) fn push(&mut self, notice: ImportNotice) {
+        if self.kept.len() < MAX_NOTICES {
+            self.kept.push(notice);
+        } else {
+            self.hidden = self.hidden.saturating_add(1);
+        }
+    }
+
+    /// The kept notices, then the summary when some were dropped.
+    pub(crate) fn into_vec(self) -> Vec<ImportNotice> {
+        let mut out = self.kept;
+        if self.hidden > 0 {
+            out.push(ImportNotice {
+                code: NoticeCode::NoticesTruncated,
+                record: None,
+                label: None,
+                message: format!("{} more warnings not listed", self.hidden),
+            });
+        }
+        out
+    }
+}
+
+/// The count held by a summary notice (its leading number).
+fn hidden_count(notice: &ImportNotice) -> usize {
+    let digits: String = notice
+        .message
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().unwrap_or(1)
 }
 
 /// Secrets found in the export and **not** imported.
@@ -266,6 +338,18 @@ pub enum ImportError {
     },
     #[error("{} has more than {max} records", path.display())]
     TooManyRecords { path: PathBuf, max: usize },
+    /// `hosts.toml` was updated, then the config file could not be written.
+    #[error(
+        "{} was not written ({reason}); {} already holds the tags and groups of {meta_updated} imported hosts",
+        target.display(),
+        meta.display()
+    )]
+    ConfNotWritten {
+        target: PathBuf,
+        meta: PathBuf,
+        meta_updated: usize,
+        reason: String,
+    },
 }
 
 impl ImportError {
@@ -302,6 +386,12 @@ impl ImportError {
             Self::TooManyRecords { .. } => (
                 "import_too_many",
                 Some("Portico imports at most 5000 hosts from one export."),
+            ),
+            Self::ConfNotWritten { .. } => (
+                "import_conf_not_written",
+                Some(
+                    "Fix the reported problem and import again: the metadata already written is merged, never duplicated.",
+                ),
             ),
         }
     }
@@ -415,6 +505,16 @@ pub(crate) fn clean_user(raw: &str) -> Option<String> {
     ok.then(|| value.to_owned())
 }
 
+/// `true` when `alias` reads like a host name (`github.com`, `10.0.0.1`)
+/// other than `hostname`: `ssh <alias>` would then reach `hostname` for
+/// every tool reading the config. Aliases already under
+/// [`IMPORT_PREFIX`] are left alone.
+pub(crate) fn looks_like_other_host(alias: &str, hostname: &str) -> bool {
+    alias.contains(['.', ':'])
+        && !alias.eq_ignore_ascii_case(hostname)
+        && !alias.starts_with(IMPORT_PREFIX)
+}
+
 /// `true` when a cell holds private key material.
 pub(crate) fn looks_like_secret(value: &str) -> bool {
     value.contains("-----BEGIN") || value.contains("PRIVATE KEY")
@@ -442,13 +542,15 @@ pub fn include_line(paths: &Paths, target: &Path) -> String {
     }
 }
 
-/// Lowercased aliases of the user's ssh config, except those declared in
-/// `exclude` (the import file itself: re-importing never collides with the
-/// previous import).
+/// Lowercased aliases of the user's ssh config, except the occurrences
+/// declared in `exclude` (the import file itself: re-importing never
+/// collides with the previous import). Every occurrence counts, not only
+/// the first: a host the user copied into their own config *after* the
+/// `Include` is still seen, so the next import leaves it out of the file.
 pub(crate) fn existing_aliases(paths: &Paths, exclude: &Path) -> Result<HashSet<String>> {
     let config = SshConfig::load(&paths.ssh_config(), &paths.ssh_dir)?;
     Ok(config
-        .host_aliases()
+        .all_concrete_aliases()
         .into_iter()
         .filter(|a| !same_file(&a.source.file, exclude))
         .map(|a| a.name.to_lowercase())
@@ -466,8 +568,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// The config file text for `hosts` (only `Host`, `HostName`, `User`,
-/// `Port`; values already checked).
-fn render(plan: &ImportPlan, hosts: &[&PlannedHost], now: OffsetDateTime) -> String {
+/// `Port`; values already checked). The `Include` line shown in the header
+/// is computed again from `paths`, never taken from the plan.
+fn render(paths: &Paths, plan: &ImportPlan, hosts: &[PlannedHost], now: OffsetDateTime) -> String {
     use std::fmt::Write as _;
 
     let date = now
@@ -487,13 +590,17 @@ fn render(plan: &ImportPlan, hosts: &[&PlannedHost], now: OffsetDateTime) -> Str
     let _ = writeln!(text, "{DATE_LINE_PREFIX}{date}.");
     let _ = writeln!(
         text,
-        "# Replaced in full on each import: copy a host to ~/.ssh/config to edit it."
+        "# Replaced in full on each import. To edit a host, copy it to ~/.ssh/config,"
+    );
+    let _ = writeln!(
+        text,
+        "# then import again: a host defined there is left out of this file."
     );
     let _ = writeln!(
         text,
         "# Portico never edits ~/.ssh/config: add this line at its top yourself:"
     );
-    let _ = writeln!(text, "#   {}", plan.include_line);
+    let _ = writeln!(text, "#   {}", include_line(paths, &termius_target(paths)));
     for host in hosts {
         let _ = writeln!(text, "\nHost {}", host.alias);
         let _ = writeln!(text, "    HostName {}", host.hostname);
@@ -515,27 +622,36 @@ fn without_date(text: &str) -> String {
         .join("\n")
 }
 
-/// Writes `plan` (blocking): the config file, then the metadata. Values
-/// are checked again (a plan is plain data) and aliases defined in the
-/// user's config since the plan was made are skipped.
-pub(crate) fn apply(
-    paths: &Paths,
+/// The hosts of `plan` that can be written, checked again: a value
+/// Portico does not write, a duplicate or an alias now defined in the
+/// user's config is skipped; an alias that looks like another host gets
+/// the prefix.
+fn checked_hosts(
     plan: &ImportPlan,
-    now: OffsetDateTime,
-) -> Result<(ImportReport, Vec<(String, HostMeta)>)> {
-    let target = termius_target(paths);
-    let existing = existing_aliases(paths, &target)?;
-    let mut skipped = plan.skipped.clone();
-    let mut warnings = plan.warnings.clone();
+    existing: &HashSet<String>,
+    skipped: &mut Vec<ImportNotice>,
+    warnings: &mut BoundedNotices,
+) -> Vec<PlannedHost> {
     let mut seen: HashSet<String> = HashSet::new();
-    let mut hosts: Vec<&PlannedHost> = Vec::new();
-    for host in &plan.hosts {
+    let mut hosts: Vec<PlannedHost> = Vec::new();
+    for planned in &plan.hosts {
         let notice = |code, message: &str| ImportNotice {
             code,
-            record: Some(host.record),
-            label: Some(host.label.clone()),
+            record: Some(planned.record),
+            label: Some(planned.label.clone()),
             message: message.to_owned(),
         };
+        let mut host = planned.clone();
+        if looks_like_other_host(&host.alias, &host.hostname) {
+            host.alias = slug(&format!("{IMPORT_PREFIX}{}", host.alias), MAX_ALIAS_CHARS);
+            if host.notes.is_none() {
+                host.notes = Some(format!("Termius: {}", host.label));
+            }
+            warnings.push(notice(
+                NoticeCode::AliasLooksLikeHost,
+                "this alias looks like another host's name: imported with the termius- prefix",
+            ));
+        }
         let valid = is_valid_alias(&host.alias)
             && seen.insert(host.alias.to_lowercase())
             && clean_hostname(&host.hostname).as_deref() == Some(host.hostname.as_str())
@@ -547,25 +663,50 @@ pub(crate) fn apply(
         if !valid {
             skipped.push(notice(
                 NoticeCode::InvalidHostname,
-                "this host has a value Portico does not write: skipped",
+                "this host has a value Portico does not write",
             ));
         } else if existing.contains(&host.alias.to_lowercase()) {
             skipped.push(notice(
                 NoticeCode::AliasCollision,
-                "this alias is now defined in your ssh config: skipped (import with the termius- prefix to keep both)",
+                "this alias is now defined in your ssh config (import with the termius- prefix to keep both)",
             ));
         } else {
             hosts.push(host);
         }
     }
+    hosts
+}
 
-    let text = render(plan, &hosts, now);
+/// Writes `plan` (blocking). Values are checked again (a plan is plain
+/// data), aliases defined in the user's config since the plan was made are
+/// skipped, and an alias that looks like another host gets the prefix.
+///
+/// All or nothing as far as Portico can tell: the existing config file is
+/// read and the new text built first, then the metadata is merged (size
+/// checked before anything is written), and the config file is written
+/// last. Should that last write fail, the error says `hosts.toml` was
+/// already updated ([`ImportError::ConfNotWritten`]).
+pub(crate) fn apply(
+    paths: &Paths,
+    plan: &ImportPlan,
+    now: OffsetDateTime,
+) -> Result<(ImportReport, Vec<(String, HostMeta)>)> {
+    let target = termius_target(paths);
+    let existing = existing_aliases(paths, &target)?;
+    let mut skipped = plan.skipped.clone();
+    let mut warnings = BoundedNotices::from_vec(plan.warnings.clone());
+    let hosts = checked_hosts(plan, &existing, &mut skipped, &mut warnings);
+
+    let text = render(paths, plan, &hosts, now);
     let previous = store::read_capped(&target, MAX_IMPORT_CONF_BYTES)?;
     let unchanged = previous
         .as_deref()
         .is_some_and(|p| without_date(p) == without_date(&text));
-    if !unchanged {
-        store::write_atomic_capped(&target, text.as_bytes(), MAX_IMPORT_CONF_BYTES)?;
+    if !unchanged && u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_IMPORT_CONF_BYTES {
+        return Err(crate::Error::WriteTooLarge {
+            path: target,
+            max: MAX_IMPORT_CONF_BYTES,
+        });
     }
 
     let entries: Vec<ImportedMeta> = hosts
@@ -578,6 +719,16 @@ pub(crate) fn apply(
         })
         .collect();
     let merged = merge_imported_meta(&paths.hosts_meta(), &entries)?;
+    if !unchanged {
+        store::write_atomic_capped(&target, text.as_bytes(), MAX_IMPORT_CONF_BYTES).map_err(
+            |e| ImportError::ConfNotWritten {
+                target: target.clone(),
+                meta: paths.hosts_meta(),
+                meta_updated: merged.changed.len(),
+                reason: e.to_string(),
+            },
+        )?;
+    }
     for alias in &merged.tags_truncated {
         warnings.push(ImportNotice {
             code: NoticeCode::TagsTruncated,
@@ -598,7 +749,7 @@ pub(crate) fn apply(
         unchanged,
         imported: hosts.iter().map(|h| h.alias.clone()).collect(),
         skipped,
-        warnings,
+        warnings: warnings.into_vec(),
         secrets: plan.secrets,
         identity_files: plan.identity_files.clone(),
         meta_updated: merged.changed.len(),

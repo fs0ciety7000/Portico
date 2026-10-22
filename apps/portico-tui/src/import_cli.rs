@@ -277,7 +277,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("line 3: switch: protocol `telnet` is not SSH: skipped"),
+            text.contains("line 3: switch: the protocol is not SSH\n"),
             "{text}"
         );
         assert!(text.contains("1 password and 0 keys ignored"), "{text}");

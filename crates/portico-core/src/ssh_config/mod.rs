@@ -225,8 +225,19 @@ impl SshConfig {
 
     /// Concrete host aliases in declaration order, de-duplicated.
     pub fn host_aliases(&self) -> Vec<HostAlias> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        self.all_concrete_aliases()
+            .into_iter()
+            .filter(|a| seen.insert(a.name.clone()))
+            .collect()
+    }
+
+    /// Every occurrence of a concrete host alias, in declaration order, with
+    /// the file and line of its block: an alias declared twice (in the
+    /// import file and again in the user's own config) appears twice,
+    /// unlike [`Self::host_aliases`] (first wins).
+    pub fn all_concrete_aliases(&self) -> Vec<HostAlias> {
         let mut out: Vec<HostAlias> = Vec::new();
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for block in &self.blocks {
             // Only the block's own (last) condition declares names.
             let Some(Condition::Host(patterns)) = block.conditions.last() else {
@@ -240,12 +251,10 @@ impl SshConfig {
                 |d| d.source.clone(),
             );
             for p in patterns.iter().filter(|p| p.is_concrete()) {
-                if seen.insert(p.glob.as_str()) {
-                    out.push(HostAlias {
-                        name: p.glob.clone(),
-                        source: source.clone(),
-                    });
-                }
+                out.push(HostAlias {
+                    name: p.glob.clone(),
+                    source: source.clone(),
+                });
             }
         }
         out
