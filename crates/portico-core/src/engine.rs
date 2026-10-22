@@ -1156,39 +1156,80 @@ impl Drop for WithdrawPrompt<'_> {
 // ════ Phase 5: imports (additive block) ═══════════════════════════════════
 
 impl Engine {
-    /// Reads a Termius export and returns what importing it would do.
-    /// Nothing is written (see [`crate::import`]).
+    /// Reads an export (Termius CSV, `hosts.json`, `credentials.csv`,
+    /// `termius export-ssh-config`, or Termix JSON: detected from the
+    /// content) and returns what importing it would do. Nothing is written
+    /// (see [`crate::import`]). Only [`crate::import::ImportOptions::prefix`]
+    /// is read.
+    pub async fn plan_import(
+        &self,
+        path: impl Into<PathBuf>,
+        options: crate::import::ImportOptions,
+    ) -> Result<crate::import::ImportPlan> {
+        self.plan_import_from(path.into(), options, None).await
+    }
+
+    /// [`Self::plan_import`], kept under its first name: every format is
+    /// detected (a Termix export too).
     pub async fn plan_termius_import(
         &self,
         path: impl Into<PathBuf>,
         options: crate::import::ImportOptions,
     ) -> Result<crate::import::ImportPlan> {
-        let paths = self.inner.config.paths.clone();
-        let path = path.into();
-        tokio::task::spawn_blocking(move || crate::import::termius::plan(&paths, &path, options))
+        self.plan_import_from(path.into(), options, None).await
+    }
+
+    /// [`Self::plan_import`] for a Termix export only: any other file is
+    /// refused with `import_unknown_format`.
+    pub async fn plan_termix_import(
+        &self,
+        path: impl Into<PathBuf>,
+        options: crate::import::ImportOptions,
+    ) -> Result<crate::import::ImportPlan> {
+        self.plan_import_from(
+            path.into(),
+            options,
+            Some(crate::import::ImportSource::Termix),
+        )
+        .await
+    }
+
+    async fn plan_import_from(
+        &self,
+        path: PathBuf,
+        options: crate::import::ImportOptions,
+        only: Option<crate::import::ImportSource>,
+    ) -> Result<crate::import::ImportPlan> {
+        let config = self.inner.config.clone();
+        tokio::task::spawn_blocking(move || crate::import::plan(&config, &path, &options, only))
             .await
             .map_err(|_| Error::EngineClosed)?
     }
 
-    /// Writes `plan`: `<config_dir>/imports/termius.conf` (replaced in
-    /// full) and the metadata in `hosts.toml` (merged). Emits
-    /// [`EngineEvent::HostMeta`] for each alias whose metadata changed;
-    /// UIs reload the inventory afterwards (new aliases appear once
-    /// `~/.ssh/config` includes the file, see [`crate::import::ImportReport`]).
+    /// Writes `plan` as Portico hosts in `hosts.conf` (created, or updated
+    /// when an earlier import of the same source created them and nobody
+    /// edited them since), merges the metadata in `hosts.toml`, and writes
+    /// the private keys selected in `options` to `~/.ssh/portico/` (or
+    /// reuses a local key with the same fingerprint). Emits
+    /// [`EngineEvent::HostsChanged`] when `hosts.conf` changed, then
+    /// [`EngineEvent::HostMeta`] for each alias whose metadata changed.
     pub async fn apply_import(
         &self,
         plan: crate::import::ImportPlan,
+        options: crate::import::ImportOptions,
     ) -> Result<crate::import::ImportReport> {
-        let paths = self.inner.config.paths.clone();
-        let now = time::OffsetDateTime::now_utc();
-        let (report, changed) =
-            tokio::task::spawn_blocking(move || crate::import::apply(&paths, &plan, now))
+        let config = self.inner.config.clone();
+        let applied =
+            tokio::task::spawn_blocking(move || crate::import::apply(&config, &plan, &options))
                 .await
                 .map_err(|_| Error::EngineClosed)??;
-        for (alias, meta) in changed {
+        if applied.hosts_changed {
+            self.emit(EngineEvent::HostsChanged);
+        }
+        for (alias, meta) in applied.meta {
             self.emit(EngineEvent::HostMeta { alias, meta });
         }
-        Ok(report)
+        Ok(applied.report)
     }
 }
 

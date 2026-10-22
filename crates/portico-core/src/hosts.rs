@@ -522,6 +522,100 @@ pub(crate) fn remove_meta(path: &Path, alias: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Where an imported host comes from, kept in `hosts.toml` as an `import`
+/// table under its alias (`[hosts.<alias>.import]`): the source (`termius`,
+/// `termix`), a stable id of the record in the export, and a hash of the
+/// values Portico wrote to `hosts.conf` (see
+/// `crate::managed_hosts::values_hash`). A re-import only updates a host
+/// whose provenance names the same source **and** whose current values
+/// still hash to `values`: anything else was created or edited by hand.
+/// Not part of [`HostMeta`] (the UIs never see it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportProvenance {
+    pub(crate) source: String,
+    pub(crate) id: String,
+    pub(crate) values: String,
+}
+
+/// Longest provenance value read back (longer ones are ignored).
+const MAX_PROVENANCE_CHARS: usize = 256;
+
+impl ImportProvenance {
+    fn from_item(item: &toml_edit::Item) -> Option<Self> {
+        let table = item.as_table_like()?;
+        let text = |key: &str| {
+            table
+                .get(key)
+                .and_then(toml_edit::Item::as_str)
+                .filter(|v| !v.is_empty() && v.chars().count() <= MAX_PROVENANCE_CHARS)
+                .map(str::to_owned)
+        };
+        Some(Self {
+            source: text("source")?,
+            id: text("id")?,
+            values: text("values")?,
+        })
+    }
+
+    fn to_table(&self) -> toml_edit::Table {
+        let mut table = toml_edit::Table::new();
+        table.insert("source", toml_edit::value(self.source.as_str()));
+        table.insert("id", toml_edit::value(self.id.as_str()));
+        table.insert("values", toml_edit::value(self.values.as_str()));
+        table
+    }
+}
+
+/// The provenance of every imported alias of `hosts.toml` (exact alias
+/// spelling). A malformed `import` table is ignored: the host then counts
+/// as created by hand, never overwritten. Blocking.
+pub(crate) fn load_provenance(
+    path: &Path,
+) -> Result<std::collections::HashMap<String, ImportProvenance>> {
+    let mut out = std::collections::HashMap::new();
+    let Some(text) = store::read_capped(path, MAX_HOSTS_FILE_BYTES)? else {
+        return Ok(out);
+    };
+    let doc = store::parse_document(path, &text)?;
+    let Some(hosts) = doc.get("hosts").and_then(toml_edit::Item::as_table_like) else {
+        return Ok(out);
+    };
+    for (alias, entry) in hosts.iter() {
+        let provenance = entry
+            .as_table_like()
+            .and_then(|t| t.get("import"))
+            .and_then(ImportProvenance::from_item);
+        if let Some(provenance) = provenance {
+            out.insert(alias.to_owned(), provenance);
+        }
+    }
+    Ok(out)
+}
+
+/// Forgets the import provenance of `alias` (a host created by hand under
+/// an alias an import once used is never taken for an imported one).
+/// Nothing is written when there is none. Blocking.
+pub(crate) fn remove_provenance(path: &Path, alias: &str) -> Result<()> {
+    check_alias(alias)?;
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let Some(text) = store::read_capped(path, MAX_HOSTS_FILE_BYTES)? else {
+        return Ok(());
+    };
+    let mut doc = store::parse_document(path, &text)?;
+    let removed = doc
+        .as_table_mut()
+        .get_mut("hosts")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .and_then(|hosts| hosts.get_mut(alias))
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .and_then(|entry| entry.remove("import"))
+        .is_some();
+    if removed {
+        store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)?;
+    }
+    Ok(())
+}
+
 /// Metadata brought by an import (see [`crate::import`]), merged into
 /// what `hosts.toml` already holds for `alias`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,6 +624,11 @@ pub(crate) struct ImportedMeta {
     pub(crate) tags: Vec<String>,
     pub(crate) group: Option<String>,
     pub(crate) notes: Option<String>,
+    /// Mark the host as a favorite (set, never cleared: the caller passes
+    /// it for the hosts an import creates only).
+    pub(crate) favorite: bool,
+    /// Replaces the alias' `import` table when given.
+    pub(crate) provenance: Option<ImportProvenance>,
 }
 
 /// What [`merge_imported_meta`] changed.
@@ -542,23 +641,65 @@ pub(crate) struct MergeOutcome {
     pub(crate) tags_truncated: Vec<String>,
 }
 
+/// A merge computed under the `hosts.toml` lock, not written yet: the
+/// caller writes its other files, then [`Self::commit`]s (the lock is held
+/// until then).
+#[derive(Debug)]
+pub(crate) struct PreparedMerge {
+    _lock: std::fs::File,
+    path: std::path::PathBuf,
+    /// The new file text; `None` when nothing changes.
+    text: Option<String>,
+    pub(crate) outcome: MergeOutcome,
+}
+
+impl PreparedMerge {
+    /// Writes the merged file (nothing when unchanged).
+    pub(crate) fn commit(self) -> Result<MergeOutcome> {
+        if let Some(text) = &self.text {
+            store::write_atomic_capped(&self.path, text.as_bytes(), MAX_HOSTS_FILE_BYTES)?;
+        }
+        Ok(self.outcome)
+    }
+}
+
 /// Merges imported metadata in one read-modify-write cycle (same lock,
 /// document editing and atomic write as [`update_meta`]): tags are the
 /// union of the existing and the imported ones (existing first, at most
 /// [`MAX_TAGS`]); a group or notes are only set when the alias has none,
-/// so nothing the user wrote is overwritten. Running it twice with the
-/// same input changes nothing the second time (and writes nothing).
-/// Blocking.
+/// a favorite only set (never cleared), so nothing the user wrote is
+/// overwritten; the provenance is replaced. Running it twice with the same
+/// input changes nothing the second time (and writes nothing). Blocking.
+#[cfg(test)]
 pub(crate) fn merge_imported_meta(path: &Path, entries: &[ImportedMeta]) -> Result<MergeOutcome> {
-    let mut outcome = MergeOutcome::default();
+    prepare_imported_meta(path, entries)?.commit()
+}
+
+/// The merge of [`merge_imported_meta`] without the write: the lock is
+/// taken, the new text built and its size checked
+/// ([`crate::Error::WriteTooLarge`]), so a later [`PreparedMerge::commit`]
+/// only fails on an I/O error.
+#[allow(clippy::too_many_lines)] // one linear merge per field; splitting hides the lock scope
+pub(crate) fn prepare_imported_meta(
+    path: &Path,
+    entries: &[ImportedMeta],
+) -> Result<PreparedMerge> {
+    let lock = store::lock_exclusive(&store::lock_path(path))?;
+    let mut prepared = PreparedMerge {
+        _lock: lock,
+        path: path.to_path_buf(),
+        text: None,
+        outcome: MergeOutcome::default(),
+    };
     if entries.is_empty() {
-        return Ok(outcome);
+        return Ok(prepared);
     }
-    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let outcome = &mut prepared.outcome;
     let text = store::read_capped(path, MAX_HOSTS_FILE_BYTES)?.unwrap_or_default();
     let mut current: HostMetaFile = store::parse_toml(path, &text)?;
     let _ = sanitize_meta(path, &text, &mut current);
     let mut doc = store::parse_document(path, &text)?;
+    let mut written = false;
 
     for entry in entries {
         check_alias(&entry.alias)?;
@@ -600,7 +741,21 @@ pub(crate) fn merge_imported_meta(path: &Path, entries: &[ImportedMeta]) -> Resu
                 changes.push(MetaChange::Notes(notes));
             }
         }
-        if changes.is_empty() {
+        if entry.favorite && !meta.favorite {
+            changes.push(MetaChange::Favorite(true));
+        }
+        let stored = doc
+            .get("hosts")
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|h| h.get(&entry.alias))
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|t| t.get("import"))
+            .and_then(ImportProvenance::from_item);
+        let provenance = entry
+            .provenance
+            .as_ref()
+            .filter(|wanted| stored.as_ref() != Some(*wanted));
+        if changes.is_empty() && provenance.is_none() {
             continue;
         }
         let hosts = store::child_table(doc.as_table_mut(), "hosts", path)?;
@@ -618,17 +773,34 @@ pub(crate) fn merge_imported_meta(path: &Path, entries: &[ImportedMeta]) -> Resu
                 MetaChange::Notes(Some(notes)) => {
                     table.insert("notes", toml_edit::value(notes.as_str()));
                 }
-                MetaChange::Group(None) | MetaChange::Notes(None) | MetaChange::Favorite(_) => {}
+                MetaChange::Favorite(true) => {
+                    table.insert("favorite", toml_edit::value(true));
+                }
+                MetaChange::Group(None) | MetaChange::Notes(None) | MetaChange::Favorite(false) => {
+                }
             }
             change.apply(&mut meta);
         }
-        current.hosts.insert(entry.alias.clone(), meta.clone());
-        outcome.changed.push((entry.alias.clone(), meta));
+        if let Some(provenance) = provenance {
+            table.insert("import", toml_edit::Item::Table(provenance.to_table()));
+        }
+        written = true;
+        if !changes.is_empty() {
+            current.hosts.insert(entry.alias.clone(), meta.clone());
+            outcome.changed.push((entry.alias.clone(), meta));
+        }
     }
-    if !outcome.changed.is_empty() {
-        store::write_atomic_capped(path, doc.to_string().as_bytes(), MAX_HOSTS_FILE_BYTES)?;
+    if written {
+        let text = doc.to_string();
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_HOSTS_FILE_BYTES {
+            return Err(crate::Error::WriteTooLarge {
+                path: path.to_path_buf(),
+                max: MAX_HOSTS_FILE_BYTES,
+            });
+        }
+        prepared.text = Some(text);
     }
-    Ok(outcome)
+    Ok(prepared)
 }
 
 /// The valid tags of `tags`, normalized one by one (invalid ones skipped).
@@ -669,6 +841,8 @@ mod tests {
             tags: tags.iter().map(|t| (*t).to_owned()).collect(),
             group: Some("Prod/EU".to_owned()),
             notes: Some("Termius: x".to_owned()),
+            favorite: false,
+            provenance: None,
         };
         let entries = [
             entry("full", &["T1", "new"]),
