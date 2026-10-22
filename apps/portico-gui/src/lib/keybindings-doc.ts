@@ -102,7 +102,7 @@ export const GUI_FIXED: DocTable[] = [
   {
     title: "Tunnels (GUI)",
     rows: [
-      ["Ajouter", "saisir `-L 8080:db:5432` ou `-R 9000:localhost:3000`, puis `↵`"],
+      ["Ajouter", "saisir `-L 8080:db:5432`, `-R 9000:localhost:3000` ou `-D 1080` (proxy SOCKS5), puis `↵`"],
       ["Choisir un tunnel ou un forward proposé", "`↑` / `↓`"],
       ["Démarrer le forward proposé choisi / arrêter le tunnel choisi", "`↵` / `Suppr` (ou boutons `Start` / `Stop`)"],
       ["Écoute exposée (hors loopback)", "bloc d'avertissement, focus sur `Cancel` ; `Expose tunnel` actif après 400 ms sans frappe ni clic · `Esc` annule"],

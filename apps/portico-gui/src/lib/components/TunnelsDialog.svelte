@@ -1,6 +1,6 @@
 <script lang="ts">
   // Tunnels of every session, forwards suggested by ssh_config for the
-  // current host (never started on their own), and the -L / -R form. A bind
+  // current host (never started on their own), and the -L / -R / -D form. A bind
   // beyond loopback needs an explicit, armed confirmation.
   // Keyboard: ↑↓ select a tunnel or a suggestion · ↵ start the suggestion
   // (or what was typed) · Del stop the selected tunnel · Esc close.
@@ -65,7 +65,11 @@
   const suggestions = $derived(
     session === null || !host
       ? []
-      : [...host.localForwards.map((f) => `-L ${f}`), ...host.remoteForwards.map((f) => `-R ${f}`)],
+      : [
+          ...host.localForwards.map((f) => `-L ${f}`),
+          ...host.remoteForwards.map((f) => `-R ${f}`),
+          ...host.dynamicForwards.map((f) => `-D ${f}`),
+        ],
   );
 
   /** Suggestions in their canonical form (same text as running tunnels). */
@@ -187,7 +191,7 @@
   {:else}
     <div class="empty">
       <strong>No tunnels yet</strong>
-      <span>Forward a local port to a service the server can reach, or the other way round.</span>
+      <span>Forward a local port to a service the server can reach, the other way round, or open a SOCKS proxy through the server.</span>
     </div>
   {/if}
 
@@ -211,7 +215,7 @@
       />
       <span class="help">
         {#if error}<span class="err">{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}
-        {:else if rows}<span class="mono">↑↓</span> choose a row · <span class="mono">-L</span> local port → host:port via the server · <span class="mono">-R</span> server port → here{/if}
+        {:else if rows}<span class="mono">↑↓</span> choose a row · <span class="mono">-L</span> port → remote service · <span class="mono">-R</span> server port → here · <span class="mono">-D</span> SOCKS proxy{/if}
       </span>
     </div>
   {:else}

@@ -443,7 +443,10 @@ fn parse_forward(spec: &str) -> Result<ForwardSpec, ErrorSummary> {
     ForwardSpec::parse_cli(spec).map_err(|e| ErrorSummary {
         code: "invalid_forward".into(),
         message: e.to_string(),
-        hint: Some("For example -L 8080:db.internal:5432 or -R 9000:localhost:3000.".into()),
+        hint: Some(
+            "For example -L 8080:db.internal:5432, -R 9000:localhost:3000 or -D 1080 (SOCKS)."
+                .into(),
+        ),
     })
 }
 

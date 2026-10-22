@@ -18,6 +18,8 @@ pub(crate) struct HostDto {
     pub identity_files: Vec<String>,
     pub local_forwards: Vec<String>,
     pub remote_forwards: Vec<String>,
+    /// `DynamicForward` values (`-D` SOCKS proxies), offered in Tunnels.
+    pub dynamic_forwards: Vec<String>,
     pub tags: Vec<String>,
     pub group: Option<String>,
     pub favorite: bool,
@@ -40,6 +42,7 @@ impl From<&HostEntry> for HostDto {
             identity_files: r.identity_files.iter().map(|p| display_path(p)).collect(),
             local_forwards: r.local_forwards.clone(),
             remote_forwards: r.remote_forwards.clone(),
+            dynamic_forwards: r.dynamic_forwards.clone(),
             tags: h.meta.tags.clone(),
             group: h.meta.group.clone(),
             favorite: h.meta.favorite,

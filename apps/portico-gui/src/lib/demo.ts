@@ -10,7 +10,7 @@ import type { Backend } from "./backend";
 import { demoKeys } from "./demo-keys";
 import { demoMeta } from "./demo-meta";
 
-const base = { identityFiles: [], localForwards: [], remoteForwards: [], warnings: [], group: null as string | null, notes: null as string | null };
+const base = { identityFiles: [], localForwards: [], remoteForwards: [], dynamicForwards: [] as string[], warnings: [], group: null as string | null, notes: null as string | null };
 
 // `?groups=none`: no group (with `?recent=none`, the flat list of earlier phases).
 const grouped = new URLSearchParams(location.search).get("groups") !== "none";
@@ -30,7 +30,7 @@ export const demoHosts: Host[] = [
     notes: "Primary PostgreSQL 16. Maintenance window: Sunday 02:00–04:00 UTC.\nPage the DBA on call before any restart.",
     source: "~/.ssh/config:12",
   },
-  { ...base, alias: "bastion", hostname: "bastion.example.com", user: "ops", port: 2222, proxyJump: [], tags: ["infra"], favorite: false, group: group("Infrastructure"), source: "~/.ssh/config:1" },
+  { ...base, alias: "bastion", hostname: "bastion.example.com", user: "ops", port: 2222, proxyJump: [], tags: ["infra"], favorite: false, group: group("Infrastructure"), source: "~/.ssh/config:1", dynamicForwards: ["1080"] },
   { ...base, alias: "web-01", hostname: "web-01.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, group: group("Production"), source: "~/.ssh/config:5", localForwards: ["8080 localhost:80"] },
   { ...base, alias: "web-02", hostname: "web-02.internal", user: "deploy", port: 22, proxyJump: ["bastion"], tags: ["prod", "web"], favorite: false, group: group("Production"), source: "~/.ssh/config:8" },
   { ...base, alias: "grafana", hostname: "grafana.internal", user: "ops", port: 22, proxyJump: ["bastion"], tags: ["monitoring"], favorite: true, group: group("Infrastructure"), source: "~/.ssh/config:20" },
@@ -503,8 +503,14 @@ export const demoBackend: Backend = {
     return downloadDir;
   },
   async checkForward(spec) {
+    // -D [bind:]port: a SOCKS5 proxy (same exposure rule as -L).
+    const d = /^\s*-?D\s+(?:([^\s:]*):)?(\d+)\s*$/i.exec(spec);
+    if (d) {
+      const bind = d[1] === undefined ? "localhost" : d[1] === "" || d[1] === "*" ? "0.0.0.0" : d[1];
+      return { display: `SOCKS · ${bind}:${d[2]}`, exposed: !["localhost", "127.0.0.1", "::1"].includes(bind) };
+    }
     const m = /^\s*-?([LR])\s+(?:([^\s:]+):)?(\d+)[:\s]([^\s:]+):(\d+)\s*$/i.exec(spec);
-    if (!m) throw { code: "invalid_forward", message: "expected [bind:]port:host:hostport", hint: "For example -L 8080:db.internal:5432 or -R 9000:localhost:3000." } satisfies ErrorSummary;
+    if (!m) throw { code: "invalid_forward", message: "expected [bind:]port:host:hostport", hint: "For example -L 8080:db.internal:5432, -R 9000:localhost:3000 or -D 1080 (SOCKS)." } satisfies ErrorSummary;
     const bind = m[2] ?? "localhost";
     return {
       display: `-${(m[1] ?? "L").toUpperCase()} ${bind}:${m[3]} → ${m[4]}:${m[5]}`,
@@ -523,7 +529,7 @@ export const demoBackend: Backend = {
         tunnels.delete(id);
         return emit({ type: "tunnel", id, session, event: { kind: "failed", error: { code: "port_in_use", message: "127.0.0.1:5433 is already in use", hint: "Pick another local port." } } });
       }
-      const bind = check.display.split(" ")[1]?.replace("localhost", "127.0.0.1") ?? "";
+      const bind = (check.display.startsWith("SOCKS · ") ? check.display.slice(8) : check.display.split(" ")[1] ?? "").replace("localhost", "127.0.0.1");
       emit({ type: "tunnel", id, session, event: { kind: "listening", bind } });
       await sleep(900);
       emit({ type: "tunnel", id, session, event: { kind: "connection_opened", peer: "127.0.0.1:53412" } });

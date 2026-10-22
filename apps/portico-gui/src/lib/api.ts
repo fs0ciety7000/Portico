@@ -11,6 +11,8 @@ export interface Host {
   identityFiles: string[];
   localForwards: string[];
   remoteForwards: string[];
+  /** `DynamicForward` values (`-D`, SOCKS5). */
+  dynamicForwards: string[];
   tags: string[];
   group: string | null;
   favorite: boolean;
