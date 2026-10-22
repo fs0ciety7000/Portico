@@ -156,9 +156,7 @@ pub enum Error {
 #[non_exhaustive]
 pub enum HostKeyError {
     #[error(
-        "host key for {host} has CHANGED (now {actual}, expected {expected} per {}:{line}): possible man-in-the-middle attack",
-        file.display()
-    )]
+        "host key for {} has CHANGED (now {actual}, expected {expected} per {}:{line}): possible man-in-the-middle attack", crate::error::prose_host(host), file.display())]
     Changed {
         host: String,
         actual: String,
@@ -167,20 +165,27 @@ pub enum HostKeyError {
         line: usize,
     },
     #[error(
-        "{host} presented a new key type while known_hosts has {known}: refused under StrictHostKeyChecking accept-new/no"
+        "{} presented a new key type while known_hosts has {known}: refused under StrictHostKeyChecking accept-new/no",
+        crate::error::prose_host(host)
     )]
     NewAlgorithm { host: String, known: String },
-    #[error("host key for {host} was not trusted")]
+    #[error("host key for {} was not trusted", crate::error::prose_host(host))]
     Rejected { host: String },
-    #[error("host key for {host} is unknown and StrictHostKeyChecking is enabled")]
+    #[error(
+        "host key for {} is unknown and StrictHostKeyChecking is enabled",
+        crate::error::prose_host(host)
+    )]
     UnknownStrict { host: String },
-    #[error("host key for {host} is revoked ({}:{line})", file.display())]
+    #[error("host key for {} is revoked ({}:{line})", crate::error::prose_host(host), file.display())]
     Revoked {
         host: String,
         file: PathBuf,
         line: usize,
     },
-    #[error("invalid host certificate for {host}: {reason}")]
+    #[error(
+        "invalid host certificate for {}: {reason}",
+        crate::error::prose_host(host)
+    )]
     InvalidCertificate { host: String, reason: String },
 }
 
@@ -381,5 +386,34 @@ mod tests {
         );
         assert_eq!(without_os_codes("a (os error x) b"), "a (os error x) b");
         assert_eq!(without_os_codes("plain"), "plain");
+    }
+}
+
+/// `[host]:port` (the `known_hosts` form) written for prose: `host:port`.
+/// IPv6 addresses keep their brackets (`[::1]:2222`), and other names are
+/// returned as they are.
+pub(crate) fn prose_host(name: &str) -> String {
+    name.strip_prefix('[')
+        .and_then(|rest| rest.split_once("]:"))
+        .filter(|(host, _)| !host.contains(':'))
+        .map_or_else(|| name.to_owned(), |(host, port)| format!("{host}:{port}"))
+}
+
+#[cfg(test)]
+mod prose_host_tests {
+    use super::*;
+
+    #[test]
+    fn host_key_messages_write_host_and_port_in_prose() {
+        assert_eq!(prose_host("[127.0.0.1]:41985"), "127.0.0.1:41985");
+        assert_eq!(prose_host("[::1]:2222"), "[::1]:2222");
+        assert_eq!(prose_host("web.example"), "web.example");
+        let error = HostKeyError::Rejected {
+            host: "[127.0.0.1]:41985".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "host key for 127.0.0.1:41985 was not trusted"
+        );
     }
 }
