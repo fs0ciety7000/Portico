@@ -118,9 +118,58 @@ fn the_question_at_80x24() {
         "Esc  later",
         "n  not now",
         "y  check daily",
+        "Change it later: U on the host list.",
     ] {
         assert!(text.contains(needle), "{needle:?} missing:\n{text}");
     }
+    // Compact (56 columns) and quiet (no accent border), a blank line
+    // before the muted note.
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines.iter().find(|l| l.contains("╭ Updates ")).unwrap();
+    let start = top.find('╭').unwrap();
+    let end = top.find('╮').unwrap();
+    assert_eq!(
+        top[start..end + '╮'.len_utf8()].chars().count(),
+        56,
+        "{top:?}"
+    );
+    let note = lines
+        .iter()
+        .position(|l| l.contains("Change it later"))
+        .unwrap();
+    assert!(
+        lines[note - 1]
+            .trim_matches(|c| c == '│' || c == ' ')
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_question_border_is_subtle_and_its_note_muted() {
+    let mut app = test_app();
+    app.update(Action::UpdateLoaded(Ok(status(None, false))));
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let s = app.styles();
+    let corner = buffer
+        .content()
+        .iter()
+        .find(|c| c.symbol() == "╭" && c.bg == s.overlay().bg.unwrap())
+        .unwrap();
+    assert_eq!(corner.fg, s.border().fg.unwrap());
+    let row = (0..24)
+        .find(|y| {
+            (0..80)
+                .map(|x| buffer[(x, *y)].symbol())
+                .collect::<String>()
+                .contains("Change it later")
+        })
+        .unwrap();
+    let line: String = (0..80).map(|x| buffer[(x, row)].symbol()).collect();
+    let x = u16::try_from(line.find("Change").unwrap()).unwrap();
+    assert_eq!(buffer[(x, row)].fg, s.muted().fg.unwrap());
 }
 
 #[test]
@@ -164,6 +213,7 @@ fn the_update_view_gives_the_page_and_the_command() {
         "brew upgrade fs0ciety7000/portico/portico",
         "Esc  close",
         "y  copy command",
+        "Portico never downloads or installs anything itself.",
     ] {
         assert!(text.contains(needle), "{needle:?} missing:\n{text}");
     }
@@ -224,6 +274,35 @@ fn update_keys_are_bound_on_the_host_list() {
         assert_eq!(binding.context, Context::Hosts);
         assert_eq!(binding.keys, keys);
     }
+}
+
+#[test]
+fn shift_u_opens_the_setting_and_never_turns_it_on_by_itself() {
+    // Off, with a release still known from an earlier check: `U` shows
+    // the setting (not the release), and nothing is saved until `y`.
+    let mut app = test_app();
+    app.update(Action::UpdateLoaded(Ok(status(Some(false), true))));
+    app.update(Action::ShowUpdateSettings);
+    let dialog = front_confirm(&mut app);
+    assert_eq!(dialog.action, ConfirmAction::SetUpdateCheck(true));
+    assert_eq!(dialog.title, "Updates");
+    assert_eq!(
+        app.update.status.as_ref().and_then(|s| s.check),
+        Some(false)
+    );
+    let text = screen(&mut app);
+    assert!(text.contains("Daily update check: off."), "{text}");
+    assert!(text.contains("y  turn on"), "{text}");
+    // Esc closes it, the setting untouched.
+    app.update(Action::DialogKey(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.dialogs.is_empty());
+    assert_eq!(
+        app.update.status.as_ref().and_then(|s| s.check),
+        Some(false)
+    );
 }
 
 #[test]
@@ -334,8 +413,13 @@ async fn later_asks_again_and_check_daily_turns_it_on() {
     }
     assert_eq!(fetcher.0.load(Ordering::SeqCst), 1);
 
-    // `U` turns it off again.
-    app.update(Action::ToggleUpdateCheck);
+    // `U` opens the setting, `y` there turns it off again.
+    app.update(Action::ShowUpdateSettings);
+    assert_eq!(
+        front_confirm(&mut app).action,
+        ConfirmAction::SetUpdateCheck(false)
+    );
+    app.update(Action::DialogKey(key('y')));
     app.pump_until(&mut events, |a| {
         a.update
             .status

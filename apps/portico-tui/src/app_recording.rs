@@ -295,6 +295,7 @@ impl App {
             action: ConfirmAction::StartRecording(terminal),
             armed: Some(Instant::now()),
             answers: crate::dialog::Answers::YesNo,
+            note: None,
         }));
     }
 

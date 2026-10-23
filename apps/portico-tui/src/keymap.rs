@@ -304,9 +304,9 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "hosts.update_check",
         Hosts,
         ["U"],
-        "update check",
-        "« Toggle update check » : vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`)",
-        Action::ToggleUpdateCheck
+        "update settings",
+        "« Updates » : état de la vérification quotidienne des nouvelles versions, `y` l'active ou la désactive (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`)",
+        Action::ShowUpdateSettings
     ),
     bind!(
         "hosts.help",

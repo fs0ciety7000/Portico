@@ -246,7 +246,8 @@ pub(crate) enum Action {
     },
     /// "Update": the update view (the release, or the setting).
     ShowUpdate,
-    /// "Toggle update check": the daily check on / off.
-    ToggleUpdateCheck,
+    /// "Update settings": the state of the daily check (`y` there turns it
+    /// on or off; never in one key).
+    ShowUpdateSettings,
     UpdateCheckSaved(Result<portico_core::update::UpdateStatus, ErrorSummary>),
 }

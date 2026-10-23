@@ -100,7 +100,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     }
     // `0.3.1 available` before the status, when it fits beside the mode
     // and `quit` (hints give way to it, the status never does).
-    let badge = badge_spans(app);
+    let badge = badge_spans(app, !right.is_empty());
     if !badge.is_empty()
         && lead + pinned.as_ref().map_or(0, need) + width_of(&badge) + width_of(&right) <= width
     {
@@ -165,11 +165,17 @@ fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>>
 }
 
 /// `0.3.1 available ` in the accent (a notice, not a status colour), when
-/// the update check knows a newer release.
-fn badge_spans(app: &App) -> Vec<Span<'static>> {
+/// the update check knows a newer release; `0.3.1 available · ` (muted
+/// separator) when the session status or `● REC` follows.
+fn badge_spans(app: &App, followed: bool) -> Vec<Span<'static>> {
     let s = app.styles();
     app.update.badge().map_or_else(Vec::new, |badge| {
-        vec![Span::styled(badge, s.accent()), Span::raw(" ")]
+        let gap = if followed {
+            Span::styled(" · ", s.muted())
+        } else {
+            Span::raw(" ")
+        };
+        vec![Span::styled(badge, s.accent()), gap]
     })
 }
 
@@ -578,4 +584,33 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         ),
     };
     (mode, owned(hints.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_badge_is_separated_from_what_follows_it() {
+        let mut app = crate::app::test_app();
+        assert!(badge_spans(&app, true).is_empty());
+        app.update.status = Some(portico_core::update::UpdateStatus {
+            check: Some(true),
+            current: "0.3.0".into(),
+            available: Some(portico_core::update::AvailableUpdate {
+                version: "0.3.1".into(),
+                url: "https://github.com/fs0ciety7000/Portico/releases/tag/v0.3.1".into(),
+            }),
+            checked_at: None,
+        });
+        assert_eq!(text(&badge_spans(&app, false)), "0.3.1 available ");
+        let followed = badge_spans(&app, true);
+        assert_eq!(text(&followed), "0.3.1 available · ");
+        let s = app.styles();
+        assert_eq!(followed.last().map(|sp| sp.style), Some(s.muted()));
+    }
 }

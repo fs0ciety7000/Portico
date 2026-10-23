@@ -286,6 +286,8 @@ pub(crate) struct ConfirmDialog {
     /// is ignored (it is not an answer).
     pub(crate) armed: Option<Instant>,
     pub(crate) answers: Answers,
+    /// A secondary sentence, muted, after a blank line below the body.
+    pub(crate) note: Option<String>,
 }
 
 /// What a key does to a [`ConfirmDialog`].

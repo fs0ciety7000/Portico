@@ -48,8 +48,10 @@ fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
     let width = match c.answers {
         // A release page link fits on one line.
         Answers::Close => INFO_CONFIRM_WIDTH,
-        _ if c.armed.is_some() => ARMED_CONFIRM_WIDTH,
-        _ => CONFIRM_WIDTH,
+        Answers::YesNo if c.armed.is_some() => ARMED_CONFIRM_WIDTH,
+        // A question that can wait (the update check) stays compact even
+        // though it is armed.
+        Answers::YesNo | Answers::YesNoLater { .. } => CONFIRM_WIDTH,
     }
     .min(frame.area().width);
     // Wrapped here, word by word, so the height is exact.
@@ -68,6 +70,14 @@ fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
             .flat_map(|paragraph| crate::ui::fmt::wrap(paragraph, inner))
             .map(|l| Line::from(Span::styled(l, s.secondary()))),
     );
+    if let Some(note) = &c.note {
+        lines.push(Line::from(""));
+        lines.extend(
+            crate::ui::fmt::wrap(note, inner)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, s.muted()))),
+        );
+    }
     lines.push(Line::from(""));
     // An armed question: `y` stays muted until it is taken (the app wakes
     // at that instant to redraw it in the accent; no ticking meanwhile).
@@ -90,7 +100,13 @@ fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
-                .border_style(s.border_focus())
+                // Accent for what needs an answer now; a question that can
+                // be put off stays on the subtle border.
+                .border_style(if matches!(c.answers, Answers::YesNoLater { .. }) {
+                    s.border()
+                } else {
+                    s.border_focus()
+                })
                 .title(Line::from(Span::styled(
                     format!(" {} ", c.title),
                     s.title(),

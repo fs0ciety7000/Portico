@@ -435,6 +435,7 @@ impl App {
             action: ConfirmAction::DeleteHost(alias),
             armed: Some(std::time::Instant::now()),
             answers: crate::dialog::Answers::YesNo,
+            note: None,
         }));
     }
 

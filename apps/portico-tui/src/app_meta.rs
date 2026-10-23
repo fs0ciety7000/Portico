@@ -110,6 +110,7 @@ impl App {
                         action: ConfirmAction::ClearRecent,
                         armed: None,
                         answers: crate::dialog::Answers::YesNo,
+                        note: None,
                     }));
                 }
             }

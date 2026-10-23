@@ -91,7 +91,7 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Recharger `~/.ssh/config` | `r` | `hosts.reload` |
 | Changer de thème (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
 | « Update » : la version disponible (notes de version, commande de mise à jour copiable en OSC 52), ou l'état de la vérification quotidienne | `u` | `hosts.update` |
-| « Toggle update check » : vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`) | `U` | `hosts.update_check` |
+| « Updates » : état de la vérification quotidienne des nouvelles versions, `y` l'active ou la désactive (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`) | `U` | `hosts.update_check` |
 | Aide | `?` | `hosts.help` |
 | Quitter (aussi `Ctrl-C`) | `q` | `hosts.quit` |
 | Aller à l'onglet n | `1`-`9` | (fixe) |
@@ -333,7 +333,7 @@ Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête
 
 ### TUI : vérification des mises à jour (opt-in)
 
-Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, une question s'ouvre une fois sur la liste des hôtes : « Check for new versions once a day? Portico would contact github.com and send nothing else. » (dialogue plutôt que bandeau : `y` et `n` servent déjà sur la liste). Elle est armée : les touches des premières 400 ms sont ignorées. Sans accord, Portico ne fait aucune requête réseau.
+Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, une question s'ouvre une fois sur la liste des hôtes : « Check for new versions once a day? Portico would contact github.com and send nothing else. » (dialogue plutôt que bandeau : `y` et `n` servent déjà sur la liste ; bordure discrète, « Change it later: U on the host list. » en retrait). Elle est armée : les touches des premières 400 ms sont ignorées. Sans accord, Portico ne fait aucune requête réseau.
 
 | Action | Touches |
 |---|---|
@@ -341,10 +341,10 @@ Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, 
 | « Not now » (`check = false` : plus jamais demandé) | `n` |
 | Plus tard (rien n'est écrit, redemandé au prochain lancement) | `Esc` |
 | Vue « Portico X is available » (`u`) : copier la commande de mise à jour de cette installation (Homebrew), sinon le lien de la page de version (OSC 52) | `y` |
-| Vue « Updates » (`u`, aucune version plus récente connue) : activer / désactiver la vérification quotidienne | `y` |
+| Vue « Updates » (`U`, ou `u` quand aucune version plus récente n'est connue) : activer / désactiver la vérification quotidienne (jamais en une seule touche) | `y` |
 | Fermer la vue | `Esc`, `n` |
 
-Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version). Portico ne télécharge ni n'installe rien.
+Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version) puis « Portico never downloads or installs anything itself. »
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique

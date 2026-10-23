@@ -10,7 +10,9 @@
 //!   needed `y` and `n`, which the host list already uses (copy the
 //!   `Include` line, add a host).
 //! - `u` opens the update view (the release, or the setting and its
-//!   state), `U` turns the daily check on or off; both from the host list.
+//!   state), `U` the setting itself (even when a release is known); both
+//!   from the host list. Turning the check on always takes `y` in that
+//!   view: no single key reaches the network.
 //! - Portico never downloads nor runs anything: the view shows the release
 //!   page and the command for this install, copied with OSC 52.
 
@@ -25,6 +27,12 @@ use crate::dialog::{Answers, ConfirmAction, ConfirmDialog, Dialog};
 /// The question, word for word as in the GUI.
 pub(crate) const QUESTION: &str =
     "Check for new versions once a day? Portico would contact github.com and send nothing else.";
+
+/// Under the question, muted.
+pub(crate) const NOTE: &str = "Change it later: U on the host list.";
+
+/// The closing line of the update view, word for word as in the GUI.
+pub(crate) const NEVER_INSTALLS: &str = "Portico never downloads or installs anything itself.";
 
 /// What the TUI knows of the update check.
 #[derive(Debug, Clone, Default)]
@@ -43,10 +51,6 @@ impl UpdateState {
     pub(crate) fn badge(&self) -> Option<String> {
         let available = self.status.as_ref()?.available.as_ref()?;
         Some(format!("{} available", available.version))
-    }
-
-    fn check_on(&self) -> bool {
-        self.status.as_ref().and_then(|s| s.check) == Some(true)
     }
 }
 
@@ -81,14 +85,37 @@ pub(crate) fn question_dialog() -> ConfirmDialog {
     ConfirmDialog {
         title: "Updates".into(),
         subject: None,
-        body: format!(
-            "{QUESTION}\nChange it later with U on the host list (settings.toml, [updates] check)."
-        ),
+        body: QUESTION.into(),
         confirm: "check daily",
         action: ConfirmAction::UpdateQuestion,
         // Keys typed just before it showed (for the host list) never answer it.
         armed: Some(std::time::Instant::now()),
         answers: Answers::YesNoLater { no: "not now" },
+        note: Some(NOTE.into()),
+    }
+}
+
+/// The setting view (`U`, or `u` without a newer release): the state of
+/// the daily check, `y` turns it on or off.
+pub(crate) fn settings_dialog(status: &UpdateStatus, now: OffsetDateTime) -> ConfirmDialog {
+    let on = status.check == Some(true);
+    let state_line = if on {
+        match status.checked_at {
+            Some(at) => format!("Daily update check: on (last checked {}).", ago(at, now)),
+            None => "Daily update check: on.".into(),
+        }
+    } else {
+        "Daily update check: off. When on, Portico contacts github.com once a day and sends nothing else.".into()
+    };
+    ConfirmDialog {
+        title: "Updates".into(),
+        subject: None,
+        body: format!("You have Portico {}.\n{state_line}", status.current),
+        confirm: if on { "turn off" } else { "turn on" },
+        action: ConfirmAction::SetUpdateCheck(!on),
+        armed: None,
+        answers: Answers::Close,
+        note: None,
     }
 }
 
@@ -118,7 +145,8 @@ pub(crate) fn update_dialog(state: &UpdateState, now: OffsetDateTime) -> Option<
             body.push('\n');
             body.push_str(command);
         }
-        body.push_str("\n\nPortico never downloads nor installs anything itself.");
+        body.push_str("\n\n");
+        body.push_str(NEVER_INSTALLS);
         let (confirm, copied) = match instruction.command {
             Some(command) => ("copy command", command),
             None => ("copy link", available.url.clone()),
@@ -131,26 +159,10 @@ pub(crate) fn update_dialog(state: &UpdateState, now: OffsetDateTime) -> Option<
             action: ConfirmAction::CopyUpdate(copied),
             armed: None,
             answers: Answers::Close,
+            note: None,
         }
     } else {
-        let on = status.check == Some(true);
-        let state_line = if on {
-            match status.checked_at {
-                Some(at) => format!("Daily update check: on (last checked {}).", ago(at, now)),
-                None => "Daily update check: on.".into(),
-            }
-        } else {
-            "Daily update check: off. When on, Portico contacts github.com once a day and sends nothing else.".into()
-        };
-        ConfirmDialog {
-            title: "Updates".into(),
-            subject: None,
-            body: format!("You have Portico {}.\n{state_line}", status.current),
-            confirm: if on { "turn off" } else { "turn on" },
-            action: ConfirmAction::SetUpdateCheck(!on),
-            armed: None,
-            answers: Answers::Close,
-        }
+        settings_dialog(status, now)
     };
     Some(dialog)
 }
@@ -169,9 +181,10 @@ impl App {
                     self.dialogs.push_back(Dialog::Confirm(dialog));
                 }
             }
-            Action::ToggleUpdateCheck => {
-                if self.update.status.is_some() {
-                    self.save_update_check(!self.update.check_on());
+            Action::ShowUpdateSettings => {
+                if let Some(status) = &self.update.status {
+                    let dialog = settings_dialog(status, OffsetDateTime::now_utc());
+                    self.dialogs.push_back(Dialog::Confirm(dialog));
                 }
             }
             Action::UpdateCheckSaved(result) => self.update_check_saved(result),

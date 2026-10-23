@@ -323,7 +323,7 @@ const RECORDINGS: Panel = Panel {
 
 const UPDATES: Panel = Panel {
     title: "TUI : vérification des mises à jour (opt-in)",
-    intro: "Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, une question s'ouvre une fois sur la liste des hôtes : « Check for new versions once a day? Portico would contact github.com and send nothing else. » (dialogue plutôt que bandeau : `y` et `n` servent déjà sur la liste). Elle est armée : les touches des premières 400 ms sont ignorées. Sans accord, Portico ne fait aucune requête réseau.",
+    intro: "Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, une question s'ouvre une fois sur la liste des hôtes : « Check for new versions once a day? Portico would contact github.com and send nothing else. » (dialogue plutôt que bandeau : `y` et `n` servent déjà sur la liste ; bordure discrète, « Change it later: U on the host list. » en retrait). Elle est armée : les touches des premières 400 ms sont ignorées. Sans accord, Portico ne fait aucune requête réseau.",
     rows: &[
         ("« Check daily » (`check = true`)", "`y`"),
         ("« Not now » (`check = false` : plus jamais demandé)", "`n`"),
@@ -336,12 +336,12 @@ const UPDATES: Panel = Panel {
             "`y`",
         ),
         (
-            "Vue « Updates » (`u`, aucune version plus récente connue) : activer / désactiver la vérification quotidienne",
+            "Vue « Updates » (`U`, ou `u` quand aucune version plus récente n'est connue) : activer / désactiver la vérification quotidienne (jamais en une seule touche)",
             "`y`",
         ),
         ("Fermer la vue", "`Esc`, `n`"),
     ],
-    outro: "Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version). Portico ne télécharge ni n'installe rien.",
+    outro: "Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version) puis « Portico never downloads or installs anything itself. »",
 };
 
 /// Fixed keys of the configurable contexts (not rebindable).
