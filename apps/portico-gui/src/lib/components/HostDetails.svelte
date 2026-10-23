@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
-  import { dur } from "../motion";
+  import { COPIED_FEEDBACK_MS, dur } from "../motion";
   import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
   import Mark from "./Mark.svelte";
@@ -44,7 +44,6 @@
 
   let copied = $state(false);
   let includeEl: HTMLInputElement | undefined = $state();
-  const COPIED_FEEDBACK_MS = 1600;
 
   async function copyInclude(line: string) {
     try {
@@ -305,7 +304,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-4);
     border: 0;
     border-radius: var(--radius-md);
@@ -322,7 +321,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-4);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);

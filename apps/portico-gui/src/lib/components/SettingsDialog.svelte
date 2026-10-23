@@ -55,7 +55,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-3);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);

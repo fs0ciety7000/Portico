@@ -112,7 +112,7 @@
     position: absolute;
     z-index: 5;
     display: grid;
-    min-width: calc(28 * var(--space-2));
+    min-width: var(--size-menu);
     padding: var(--space-1);
     background: var(--bg-overlay);
     border: 1px solid var(--border-strong);
@@ -144,7 +144,6 @@
   button:disabled { color: var(--text-muted); }
   .label { flex: 1; }
   kbd { color: var(--text-muted); }
-  button:disabled kbd { opacity: 0.6; }
   .rule {
     height: 1px;
     margin: var(--space-1) var(--space-2);

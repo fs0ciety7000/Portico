@@ -28,7 +28,7 @@
   import { hardwareWebgl } from "../webgl";
   import { keymap } from "../state/keymap.svelte";
   import { logs } from "../state/logs.svelte";
-  import { dur } from "../motion";
+  import { COPIED_FEEDBACK_MS, dur } from "../motion";
   import { isLive, paneStatus, workspace, type Pane } from "../state/workspace.svelte";
   import StatusBadge from "./StatusBadge.svelte";
   import RecBadge from "./RecBadge.svelte";
@@ -787,8 +787,6 @@
   // ── Copy, "Copy on select", the right-click menu ──
   let copied = $state(false);
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
-  /** How long the quiet "Copied" notice stays. */
-  const COPIED_MS = 1200;
 
   /** The selection, without ESC and C1 controls (like pasted text). */
   export function copySelection(): string {
@@ -803,7 +801,7 @@
       if (quiet) {
         copied = true;
         clearTimeout(copiedTimer);
-        copiedTimer = setTimeout(() => (copied = false), COPIED_MS);
+        copiedTimer = setTimeout(() => (copied = false), COPIED_FEEDBACK_MS);
       }
     } catch (e) {
       workspace.notify(e);
@@ -1373,7 +1371,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-4);
     border-radius: var(--radius-md);
     font: inherit;
