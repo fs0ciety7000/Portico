@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   countMatches,
   counter,
+  decorationColors,
   isCaseSensitive,
   LineTexts,
   MATCH_CAP,
@@ -44,6 +45,12 @@ test("search: token colours become opaque #rrggbb", () => {
   assert.equal(opaqueHex("rgb(255 255 255 / 25%)", "#000000"), "#404040");
   assert.equal(opaqueHex("color-mix(in srgb, red 20%, transparent)", "#000"), null);
   assert.equal(opaqueHex("#c8a96b", ""), null);
+});
+
+test("search: the current match is dark text on the accent, others primary text", () => {
+  const colors = { match: "#3a3d42", current: "#c8a96b", text: "#ece9e2", onAccent: "#14110b" };
+  assert.deepEqual(decorationColors(true, colors), { backgroundColor: "#c8a96b", foregroundColor: "#14110b" });
+  assert.deepEqual(decorationColors(false, colors), { backgroundColor: "#3a3d42", foregroundColor: "#ece9e2" });
 });
 
 test("links: http(s) only, no credentials, length capped", () => {

@@ -20,6 +20,14 @@ export const MATCH_CAP = 1000;
 /** Wording of the bar (same as the TUI). */
 export const SEARCH_LABEL = "Search";
 export const NO_MATCH = "No match";
+/** Keys of the bar, in the status bar while it is open (as in the TUI). */
+export const SEARCH_HINT_KEYS: readonly (readonly [string, string])[] = [
+  ["↵", "older"],
+  ["⇧↵", "newer"],
+  ["Esc", "close"],
+];
+/** The same keys as one line: the placeholder while the query is empty. */
+export const SEARCH_HINTS = SEARCH_HINT_KEYS.map(([key, label]) => `${key} ${label}`).join(" · ");
 
 /** Smart case: an uppercase letter anywhere makes the search case-sensitive. */
 export function isCaseSensitive(query: string): boolean {
@@ -85,6 +93,29 @@ export function opaqueHex(color: string, base: string): string | null {
   const [r, g, b, a] = top;
   const mix = (t: number, u: number) => t * a + u * (1 - a);
   return `#${hex2(mix(r, under[0]))}${hex2(mix(g, under[1]))}${hex2(mix(b, under[2]))}`;
+}
+
+/** Highlight colours read from the theme tokens, as opaque `#rrggbb`. */
+export interface SearchColors {
+  /** `--search-match`: every match in view. */
+  match: string;
+  /** `--search-current`: the current match (the accent). */
+  current: string;
+  /** `--text-primary`: text on a match. */
+  text: string;
+  /** `--text-on-accent`: text on the current match. */
+  onAccent: string;
+}
+
+/**
+ * Colours of one match's decoration. The foreground is forced too: the
+ * remote's own colour could be unreadable on the tint, and light text on
+ * the accent would be (as in the TUI).
+ */
+export function decorationColors(isCurrent: boolean, colors: SearchColors): { backgroundColor: string; foregroundColor: string } {
+  return isCurrent
+    ? { backgroundColor: colors.current, foregroundColor: colors.onAccent }
+    : { backgroundColor: colors.match, foregroundColor: colors.text };
 }
 
 // ── The buffer, as xterm's public API shows it ────────────────────────────

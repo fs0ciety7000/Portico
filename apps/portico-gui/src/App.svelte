@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { fly } from "svelte/transition";
+  import { SvelteSet } from "svelte/reactivity";
   import { describe, formatRtt, isTauri, sentence, setHome, type Host } from "./lib/api";
   import { backend } from "./lib/backend";
   import { isMac } from "./lib/keys";
   import { dur } from "./lib/motion";
+  import { SEARCH_HINT_KEYS } from "./lib/termsearch";
   import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
   import { isLive, paneStatus, workspace, type Tab } from "./lib/state/workspace.svelte";
   import { layout, minPanePx, MAX_PANES, panesOf, type Direction, type Layout } from "./lib/panes";
@@ -481,7 +483,7 @@
           ...(paneCount > 1 ? [] : [{ id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() }]),
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
-          { id: "terminal.search", title: "Search in terminal", hint: pane.alias, shortcut: k("terminal.search"), run: () => views[pane.key]?.openSearch() },
+          { id: "terminal.search", title: "Search scrollback", hint: pane.alias, shortcut: k("terminal.search"), run: () => views[pane.key]?.openSearch() },
           ...(recordings.recordable(pane)
             ? [
                 recordings.isRecording(pane.terminal)
@@ -854,6 +856,9 @@
   // Status-bar hints, most useful first: when the bar runs out of room
   // they give way from the end of each list (the palette hint stays last).
   // A split tab speaks of its panes first.
+  /** Panes whose search bar is open. */
+  const searchPanes = new SvelteSet<number>();
+  const searchHere = $derived(!!pane && searchPanes.has(pane.key));
   const tabHints: [string | undefined, string][] = $derived(
     paneCount > 1
       ? [
@@ -953,6 +958,10 @@
             themeId={settings.themeId}
             autofocus={!showFiles}
             onfocusin={() => workspace.focusPane(p.key)}
+            onsearch={(open) => {
+              if (open) searchPanes.add(p.key);
+              else searchPanes.delete(p.key);
+            }}
           />
         </div>
       {/each}
@@ -993,12 +1002,20 @@
         <RecBadge role="status" title={recHere ? "This pane's output is being recorded" : `${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
       {/if}
       <span class="hints">
+        {#if searchHere}
+          <!-- The search bar has the keys: its own hints (as in the TUI). -->
+          <span class="search-hints" data-testid="search-hints">
+            <span class="mode">Search</span>
+            {#each SEARCH_HINT_KEYS as [key, label] (label)}<span><kbd>{key}</kbd> {label}</span>{/each}
+          </span>
+        {:else}
         <!-- First: the hints give way from the end. -->
         {#if recHere && k("session.record")}<span><kbd>{k("session.record")}</kbd> stop</span>{/if}
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
         {#each tabHints as [key, label] (label)}
           {#if key}<span><kbd>{key}</kbd> {label}</span>{/if}
         {/each}
+        {/if}
       </span>
     {:else}
       <span class="counts">{hosts.all.length} hosts · {workspace.tabs.length} open</span>
@@ -1268,6 +1285,10 @@
     overflow: hidden;
   }
   .hints > span { display: flex; align-items: center; gap: var(--space-1); height: 100%; }
+  /* One item, read left to right: the bar's keys while it is open. */
+  .hints > .search-hints { gap: var(--space-4); }
+  .search-hints > span { display: flex; align-items: center; gap: var(--space-1); }
+  .search-hints .mode { color: var(--text-secondary); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
   .counts { flex: 0 0 auto; }
   .theme-name { flex: 0 0 auto; padding-left: var(--space-3); border-left: 1px solid var(--border-subtle); }
   .version { flex: 0 0 auto; }

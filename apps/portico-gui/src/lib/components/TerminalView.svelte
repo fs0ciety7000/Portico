@@ -20,7 +20,7 @@
   import { asError, formatRtt, sentence } from "../api";
   import { backend } from "../backend";
   import { chunks, isMac, sanitizePaste, sanitizeTitle } from "../keys";
-  import { countMatches, counter, LineTexts, matchAbove, matchBelow, opaqueHex, SEARCH_LABEL, visibleSpans, type Pos } from "../termsearch";
+  import { countMatches, counter, decorationColors, LineTexts, matchAbove, matchBelow, opaqueHex, SEARCH_HINTS, SEARCH_LABEL, visibleSpans, type Pos, type SearchColors } from "../termsearch";
   import { isOpenGesture, openHint } from "../links";
   import { links } from "../state/links.svelte";
   import { settings } from "../state/settings.svelte";
@@ -44,6 +44,7 @@
     themeId,
     autofocus = true,
     onfocusin,
+    onsearch,
   }: {
     pane: Pane;
     /** On screen: its tab is active and no other pane is zoomed. */
@@ -62,6 +63,8 @@
     autofocus?: boolean;
     /** The keyboard (or a click) entered this pane. */
     onfocusin?: () => void;
+    /** The search bar opened (true) or closed (false): the status bar's hints. */
+    onsearch?: (open: boolean) => void;
   } = $props();
   /** Visible and focused: takes the keyboard. */
   const active = $derived(visible && focused);
@@ -309,6 +312,7 @@
     observer.observe(host);
     return () => {
       destroyed = true;
+      if (searchOpen) onsearch?.(false);
       observer.disconnect();
       clearTimeout(resizeTimer);
       clearTimeout(blinkTimer);
@@ -486,7 +490,7 @@
   let pin: IMarker | undefined;
   /** Highlights of the matches in view. */
   let painted: IDisposable[] = [];
-  let colors = { match: "", current: "" };
+  let colors: SearchColors = { match: "", current: "", text: "", onAccent: "" };
   const count = $derived(counter(query, result.rank, result.total));
 
   /** Highlight colours from the theme tokens (decorations want `#rrggbb`). */
@@ -495,7 +499,12 @@
     const v = (name: string) => css.getPropertyValue(name).trim();
     const base = v("--bg-base");
     const match = opaqueHex(v("--search-match"), base) ?? opaqueHex(v("--bg-selected"), base) ?? base;
-    colors = { match, current: opaqueHex(v("--search-current"), base) ?? opaqueHex(v("--accent-selection"), base) ?? match };
+    colors = {
+      match,
+      current: opaqueHex(v("--search-current"), base) ?? opaqueHex(v("--accent-selection"), base) ?? match,
+      text: opaqueHex(v("--text-primary"), base) ?? "",
+      onAccent: opaqueHex(v("--text-on-accent"), base) ?? opaqueHex(v("--bg-base"), base) ?? "",
+    };
   }
 
   const currentPos = (): Pos | null => (current && !current.marker.isDisposed ? { row: current.marker.line, col: current.col } : null);
@@ -538,7 +547,7 @@
         marker,
         x: span.col,
         width: span.width,
-        backgroundColor: isCurrent ? colors.current : colors.match,
+        ...decorationColors(isCurrent, colors),
         layer: "bottom",
       });
       painted.push(marker);
@@ -636,6 +645,7 @@
     if (!term) return;
     if (!searchOpen) {
       searchOpen = true;
+      onsearch?.(true);
       closeMenu();
       tip = null;
       readColors();
@@ -651,6 +661,7 @@
   function closeSearch() {
     if (!searchOpen) return;
     searchOpen = false;
+    onsearch?.(false);
     query = "";
     clearTimeout(recountTimer);
     clearTimeout(warmTimer);
@@ -673,6 +684,10 @@
     if (e.key === "Enter") {
       e.preventDefault();
       find(e.shiftKey ? "newer" : "older");
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      // Up is back in time (older), down towards the live output.
+      e.preventDefault();
+      find(e.key === "ArrowUp" ? "older" : "newer");
     } else if (e.key === "Escape") {
       e.preventDefault();
       closeSearch();
@@ -940,7 +955,8 @@
         spellcheck="false"
         autocomplete="off"
         aria-describedby={`search-count-${pane.key}`}
-        title="↵ older · ⇧↵ newer · Esc close"
+        placeholder={SEARCH_HINTS}
+        title={SEARCH_HINTS}
       />
       <span id={`search-count-${pane.key}`} class="search-count" class:none={count.none} aria-live="polite" data-testid="search-count">{count.text}</span>
     </div>
@@ -1258,9 +1274,10 @@
     font-family: var(--font-mono);
     font-size: var(--text-sm);
     outline: none;
-    transition: border-color var(--motion-fast) var(--ease-standard);
+    transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
   }
-  .search-input:focus { border-color: var(--accent); }
+  .search-input::placeholder { color: var(--text-muted); font-family: var(--font-ui); font-size: var(--text-xs); }
+  .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .search-count {
     flex: none;
     min-width: 8ch;

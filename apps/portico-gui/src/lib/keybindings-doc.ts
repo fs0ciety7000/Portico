@@ -33,12 +33,13 @@ export const GUI_FIXED: DocTable[] = [
   {
     title: "Terminal (GUI) : recherche, liens, menu",
     intro:
-      "Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search in terminal » dans la palette) : texte littéral, " +
+      "Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search scrollback » dans la palette) : texte littéral, " +
       "casse ignorée sauf si la requête contient une majuscule. Le compteur numérote depuis le bas (`3 of 17`, `No match`, `999+`). " +
-      "Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue.",
+      "Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue. " +
+      "Les touches de la barre s'affichent dans le champ tant qu'il est vide, et dans la barre d'état tant qu'elle est ouverte (`SEARCH ↵ older · ⇧↵ newer · Esc close`).",
     rows: [
       ["Recherche : taper (va au plus proche en remontant depuis le bas de la vue)", "texte"],
-      ["Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage", "`↵` / `Shift-↵`"],
+      ["Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage", "`↵` / `Shift-↵`, ou `↑` / `↓`"],
       ["Recherche : fermer, effacer les surlignages, revenir en bas (sortie en direct)", "`Esc`"],
       ["Ouvrir un lien `http(s)` (URL affichée ou lien OSC 8), après confirmation « Open this link? »", "`⌘`-clic (macOS), `Ctrl`-clic (Linux)"],
       ["Confirmation de lien : ouvrir / annuler", "`↵` / `Esc`"],
