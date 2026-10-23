@@ -247,6 +247,26 @@ pub(crate) enum ConfirmAction {
     StartRecording(portico_core::ids::TerminalId),
     /// "Delete host": remove this Portico host from `hosts.conf`.
     DeleteHost(String),
+    /// The one-time question: check for updates daily (`y`), not now
+    /// (`n`, never asked again), or later (`Esc`, asked at next launch).
+    UpdateQuestion,
+    /// The update view: `y` copies this (the update command, or the
+    /// release page when there is no command).
+    CopyUpdate(String),
+    /// The update view without a release: `y` turns the daily check on or
+    /// off (to this value).
+    SetUpdateCheck(bool),
+}
+
+/// Which answers a [`ConfirmDialog`] takes besides `y`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answers {
+    /// `n` or `Esc` keep things as they are.
+    YesNo,
+    /// `n` is an answer of its own (labelled), `Esc` puts the question off.
+    YesNoLater { no: &'static str },
+    /// Information with an action: `n` or `Esc` close it.
+    Close,
 }
 
 /// A yes / no question: `y` confirms, `n` or `Esc` keeps things as they are.
@@ -265,6 +285,7 @@ pub(crate) struct ConfirmDialog {
     /// only a plain `y` confirms, `n` and `Esc` cancel, and any other key
     /// is ignored (it is not an answer).
     pub(crate) armed: Option<Instant>,
+    pub(crate) answers: Answers,
 }
 
 /// What a key does to a [`ConfirmDialog`].
@@ -274,6 +295,8 @@ pub(crate) enum ConfirmOutcome {
     None,
     Confirm,
     Cancel,
+    /// `n` with [`Answers::YesNoLater`].
+    Decline,
 }
 
 impl ConfirmDialog {
@@ -284,6 +307,18 @@ impl ConfirmDialog {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let outcome = self.answer(key, plain);
+        match (outcome, self.answers) {
+            (ConfirmOutcome::Cancel, Answers::YesNoLater { .. })
+                if matches!(key.code, KeyCode::Char('n' | 'N')) =>
+            {
+                ConfirmOutcome::Decline
+            }
+            _ => outcome,
+        }
+    }
+
+    fn answer(&self, key: KeyEvent, plain: bool) -> ConfirmOutcome {
         match self.armed {
             Some(opened) if opened.elapsed() < ARM_DELAY => ConfirmOutcome::None,
             Some(_) => match key.code {
@@ -313,10 +348,19 @@ impl ConfirmDialog {
 
     /// The footer's cancel key and label.
     pub(crate) fn cancel_hint(&self) -> (&'static str, &'static str) {
-        if self.armed.is_some() {
-            ("n / Esc", "cancel")
-        } else {
-            ("n / Esc", "keep")
+        match self.answers {
+            Answers::YesNoLater { .. } => ("Esc", "later"),
+            Answers::Close => ("Esc", "close"),
+            Answers::YesNo if self.armed.is_some() => ("n / Esc", "cancel"),
+            Answers::YesNo => ("n / Esc", "keep"),
+        }
+    }
+
+    /// The footer's keys before `y`, in order.
+    pub(crate) fn other_hints(&self) -> Vec<(&'static str, &'static str)> {
+        match self.answers {
+            Answers::YesNoLater { no } => vec![self.cancel_hint(), ("n", no)],
+            _ => vec![self.cancel_hint()],
         }
     }
 }

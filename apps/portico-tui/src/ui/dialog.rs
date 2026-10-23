@@ -12,7 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
 use crate::dialog::{
-    ChangedKeyAlert, ConfirmDialog, Dialog, Field, PromptDialog, SecretDialog, SecretPurpose,
+    Answers, ChangedKeyAlert, ConfirmDialog, Dialog, Field, PromptDialog, SecretDialog,
+    SecretPurpose,
 };
 use crate::theme::Styles;
 use crate::ui::fmt::display_path;
@@ -40,11 +41,15 @@ const CONFIRM_WIDTH: u16 = 56;
 /// Width of an armed confirmation (a longer explanation).
 const ARMED_CONFIRM_WIDTH: u16 = 66;
 
+/// Width of an information dialog with an action (the update view).
+const INFO_CONFIRM_WIDTH: u16 = 74;
+
 fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
-    let width = if c.armed.is_some() {
-        ARMED_CONFIRM_WIDTH
-    } else {
-        CONFIRM_WIDTH
+    let width = match c.answers {
+        // A release page link fits on one line.
+        Answers::Close => INFO_CONFIRM_WIDTH,
+        _ if c.armed.is_some() => ARMED_CONFIRM_WIDTH,
+        _ => CONFIRM_WIDTH,
     }
     .min(frame.area().width);
     // Wrapped here, word by word, so the height is exact.
@@ -66,19 +71,19 @@ fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
     lines.push(Line::from(""));
     // An armed question: `y` stays muted until it is taken (the app wakes
     // at that instant to redraw it in the accent; no ticking meanwhile).
+    let mut keys = c.other_hints();
     if c.ready(std::time::Instant::now()) {
-        lines.push(footer(s, &[c.cancel_hint(), ("y", c.confirm)]));
+        keys.push(("y", c.confirm));
+        lines.push(footer(s, &keys));
     } else {
-        let (key, label) = c.cancel_hint();
-        lines.push(
-            Line::from(vec![
-                Span::styled(format!(" {key} "), s.key_hint()),
-                Span::styled(format!(" {label}   "), s.muted()),
-                Span::styled(" y ", s.key_hint()),
-                Span::styled(format!(" {}", c.confirm), s.muted()),
-            ])
-            .right_aligned(),
-        );
+        let mut spans = Vec::new();
+        for (key, label) in keys {
+            spans.push(Span::styled(format!(" {key} "), s.key_hint()));
+            spans.push(Span::styled(format!(" {label}   "), s.muted()));
+        }
+        spans.push(Span::styled(" y ", s.key_hint()));
+        spans.push(Span::styled(format!(" {}", c.confirm), s.muted()));
+        lines.push(Line::from(spans).right_aligned());
     }
     let area = modal(frame, width, wrapped_height(&lines, width));
     frame.render_widget(

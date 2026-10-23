@@ -98,6 +98,14 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         // Not even the status fits next to the mode: REC alone.
         right.clone_from(&rec);
     }
+    // `0.3.1 available` before the status, when it fits beside the mode
+    // and `quit` (hints give way to it, the status never does).
+    let badge = badge_spans(app);
+    if !badge.is_empty()
+        && lead + pinned.as_ref().map_or(0, need) + width_of(&badge) + width_of(&right) <= width
+    {
+        right = badge.into_iter().chain(right).collect();
+    }
     let mut used = lead + pinned.as_ref().map_or(0, need) + width_of(&right);
     let mut shown: Vec<&(String, &str)> = Vec::new();
     for hint in &hints {
@@ -154,6 +162,15 @@ fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>>
     }
     right.push(Span::raw(" "));
     right
+}
+
+/// `0.3.1 available ` in the accent (a notice, not a status colour), when
+/// the update check knows a newer release.
+fn badge_spans(app: &App) -> Vec<Span<'static>> {
+    let s = app.styles();
+    app.update.badge().map_or_else(Vec::new, |badge| {
+        vec![Span::styled(badge, s.accent()), Span::raw(" ")]
+    })
 }
 
 /// `● REC` (`● REC 2` for two recorded terminals) in the error colour,
@@ -241,11 +258,15 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         }
         // The same words as the dialog's own footer (`n / Esc keep`, `y clear`).
         _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => {
-            let (cancel, confirm) = match app.dialogs.front() {
-                Some(Dialog::Confirm(c)) => (c.cancel_hint(), c.confirm),
-                _ => (("n / Esc", "keep"), "confirm"),
+            let keys = match app.dialogs.front() {
+                Some(Dialog::Confirm(c)) => {
+                    let mut keys = c.other_hints();
+                    keys.push(("y", c.confirm));
+                    keys
+                }
+                _ => vec![("n / Esc", "keep"), ("y", "confirm")],
             };
-            return (" CONFIRM ", owned(vec![cancel, ("y", confirm)]));
+            return (" CONFIRM ", owned(keys));
         }
         // The vault a host's password waits for: Esc goes back to the form.
         _ if matches!(app.dialogs.front(), Some(Dialog::Secret(d)) if d.host_save) => {

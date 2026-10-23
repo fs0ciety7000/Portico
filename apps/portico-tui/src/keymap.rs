@@ -293,6 +293,22 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::CycleTheme
     ),
     bind!(
+        "hosts.update",
+        Hosts,
+        ["u"],
+        "update",
+        "« Update » : la version disponible (notes de version, commande de mise à jour copiable en OSC 52), ou l'état de la vérification quotidienne",
+        Action::ShowUpdate
+    ),
+    bind!(
+        "hosts.update_check",
+        Hosts,
+        ["U"],
+        "update check",
+        "« Toggle update check » : vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`)",
+        Action::ToggleUpdateCheck
+    ),
+    bind!(
         "hosts.help",
         Hosts,
         ["?"],
@@ -1161,6 +1177,14 @@ const HELP: &[(&str, usize, HelpRows)] = &[
             (&[Fixed("--apply")], "Write (preview 1st)"),
             (&[Fixed("docs")], "IMPORT.md"),
         ],
+    ),
+    (
+        "Updates (host list)",
+        1,
+        &[(
+            &[Id("hosts.update", 1), Id("hosts.update_check", 1)],
+            "View · daily check",
+        )],
     ),
 ];
 

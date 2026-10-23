@@ -109,6 +109,7 @@ impl App {
                         confirm: "clear",
                         action: ConfirmAction::ClearRecent,
                         armed: None,
+                        answers: crate::dialog::Answers::YesNo,
                     }));
                 }
             }
@@ -309,6 +310,15 @@ impl App {
                     }
                     ConfirmAction::StartRecording(terminal) => self.start_recording(terminal),
                     ConfirmAction::DeleteHost(alias) => self.delete_host(alias),
+                    ConfirmAction::UpdateQuestion => self.save_update_check(true),
+                    ConfirmAction::SetUpdateCheck(on) => self.save_update_check(on),
+                    ConfirmAction::CopyUpdate(text) => self.copy_update(&text),
+                }
+            }
+            ConfirmOutcome::Decline => {
+                self.dialogs.pop_front();
+                if action == ConfirmAction::UpdateQuestion {
+                    self.save_update_check(false);
                 }
             }
             ConfirmOutcome::Cancel => {

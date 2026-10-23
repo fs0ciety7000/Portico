@@ -20,6 +20,7 @@ mod app_meta;
 mod app_panels;
 mod app_panes;
 mod app_recording;
+mod app_update;
 mod copy_job;
 mod debug;
 mod dialog;

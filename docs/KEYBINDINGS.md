@@ -90,6 +90,8 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Onglet précédent | `[`, `Shift-Tab` | `hosts.prev_tab` |
 | Recharger `~/.ssh/config` | `r` | `hosts.reload` |
 | Changer de thème (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
+| « Update » : la version disponible (notes de version, commande de mise à jour copiable en OSC 52), ou l'état de la vérification quotidienne | `u` | `hosts.update` |
+| « Toggle update check » : vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`) | `U` | `hosts.update_check` |
 | Aide | `?` | `hosts.help` |
 | Quitter (aussi `Ctrl-C`) | `q` | `hosts.quit` |
 | Aller à l'onglet n | `1`-`9` | (fixe) |
@@ -328,6 +330,21 @@ Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, ap
 | Lecture : revenir à la liste | `q`, `Esc` (`Ctrl-C` ferme tout) |
 
 Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre ; puis l'état et la vitesse), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total » (jauge en accent) et la taille, ou ce qui ne tient pas (« 2 rows hidden »). Sur un écran de 24 lignes, la ligne de titre disparaît : nom du fichier, état et vitesse passent sur la ligne de progression, et la grille gagne une ligne. `←` et `Home` rouvrent le fichier et rejouent instantanément jusqu'au point visé (l'émulateur repart de zéro). Les silences de plus de 2 s sont raccourcis. Une erreur de lecture s'affiche à la place de la jauge (message · conseil). Le statut de la session (`● alias · latence`) et `● REC` restent visibles dans la barre de statut. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.
+
+### TUI : vérification des mises à jour (opt-in)
+
+Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, une question s'ouvre une fois sur la liste des hôtes : « Check for new versions once a day? Portico would contact github.com and send nothing else. » (dialogue plutôt que bandeau : `y` et `n` servent déjà sur la liste). Elle est armée : les touches des premières 400 ms sont ignorées. Sans accord, Portico ne fait aucune requête réseau.
+
+| Action | Touches |
+|---|---|
+| « Check daily » (`check = true`) | `y` |
+| « Not now » (`check = false` : plus jamais demandé) | `n` |
+| Plus tard (rien n'est écrit, redemandé au prochain lancement) | `Esc` |
+| Vue « Portico X is available » (`u`) : copier la commande de mise à jour de cette installation (Homebrew), sinon le lien de la page de version (OSC 52) | `y` |
+| Vue « Updates » (`u`, aucune version plus récente connue) : activer / désactiver la vérification quotidienne | `y` |
+| Fermer la vue | `Esc`, `n` |
+
+Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version). Portico ne télécharge ni n'installe rien.
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique

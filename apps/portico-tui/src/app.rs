@@ -216,6 +216,8 @@ pub(crate) struct App {
     pub(crate) host_form: Option<crate::host_form::HostForm>,
     /// The `Include` banner of Portico's `hosts.conf`.
     pub(crate) include: crate::app_hosts::IncludeBanner,
+    /// The opt-in update check: status, question, badge.
+    pub(crate) update: crate::app_update::UpdateState,
     /// Host to select once the inventory is reloaded (created, edited,
     /// or the neighbour of a deleted one).
     pub(crate) pending_select: Option<String>,
@@ -312,6 +314,7 @@ impl App {
             player: None,
             host_form: None,
             include: crate::app_hosts::IncludeBanner::default(),
+            update: crate::app_update::UpdateState::default(),
             pending_select: None,
             search: HostSearch::default(),
             tx,
@@ -350,6 +353,8 @@ impl App {
         self.update(Action::SettingsLoaded(settings));
         self.spawn_load_hosts();
         self.spawn_load_recent();
+        // No request unless the user turned the check on (the engine decides).
+        self.start_update_checks();
         self.refresh_vault(true);
         self.spawn_machine_name();
 
@@ -1153,6 +1158,7 @@ impl App {
                     self.rebuild_tunnels_panel();
                 }
             }
+            EngineEvent::Update { status } => self.update_status_changed(status),
             other => self.on_meta_event(other),
         }
     }

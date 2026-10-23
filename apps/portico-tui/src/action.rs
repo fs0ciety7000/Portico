@@ -236,4 +236,17 @@ pub(crate) enum Action {
     CopyInclude,
     /// Hides the `Include` banner until Portico restarts.
     HideInclude,
+    // Opt-in update check (0.3.0)
+    /// The status at launch (`start_update_checks`) or after a lagged bus.
+    UpdateLoaded(Result<portico_core::update::UpdateStatus, ErrorSummary>),
+    /// How to update this install, for `version`.
+    UpdateInstruction {
+        version: String,
+        instruction: portico_core::update::UpdateInstruction,
+    },
+    /// "Update": the update view (the release, or the setting).
+    ShowUpdate,
+    /// "Toggle update check": the daily check on / off.
+    ToggleUpdateCheck,
+    UpdateCheckSaved(Result<portico_core::update::UpdateStatus, ErrorSummary>),
 }

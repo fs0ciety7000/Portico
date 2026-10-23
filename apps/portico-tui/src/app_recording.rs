@@ -111,6 +111,7 @@ impl App {
                 self.resync_recordings();
                 // A `HostsChanged` may have been dropped with the rest.
                 self.on_hosts_changed();
+                self.resync_update();
             }
             Action::ToggleRecording => self.toggle_recording(),
             // Success says nothing (falls through): the badge waits for
@@ -293,6 +294,7 @@ impl App {
             confirm: "record",
             action: ConfirmAction::StartRecording(terminal),
             armed: Some(Instant::now()),
+            answers: crate::dialog::Answers::YesNo,
         }));
     }
 
