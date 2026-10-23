@@ -139,23 +139,54 @@ test("startup: hosts from ~/.ssh/config, no vault yet", async () => {
   assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault before it is created");
 });
 
-test("update check: asked once, Not now is written, no request ever made", async () => {
+/**
+ * The fake proxy of e2e/run.sh: records each request line and refuses it,
+ * so a check that was turned on fails here, on 127.0.0.1, never at GitHub.
+ */
+const proxied: string[] = [];
+const proxy = createServer((socket) => {
+  socket.once("data", (chunk) => {
+    proxied.push(chunk.toString("latin1").split("\r\n")[0] ?? "");
+    socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+  });
+  socket.on("error", () => {});
+});
+
+test("update check: asked once, Enter on Check daily answers it (no connect), the request stays local", async () => {
+  await new Promise<void>((resolve) => proxy.listen(Number(env("E2E_PROXY_PORT")), "127.0.0.1", resolve));
+  const updateCache = join(dataDir, "state", "update.toml");
+  const settingsPath = join(configDir, "settings.toml");
   // `[updates] check` absent: the question shows, nothing was fetched.
   await waitFor("update question", () => s.find("[data-testid=update-question]"));
-  assert.ok(!existsSync(join(dataDir, "state", "update.toml")), "no check before an answer");
+  assert.ok(!existsSync(updateCache), "no check before an answer");
+  assert.deepEqual(proxied, [], "no request before an answer");
   await capture("update-question");
-  const notNow = await s.find("[data-testid=update-not-now]");
-  assert.ok(notNow);
-  await s.click(notNow);
-  await waitFor("check = false saved", () => {
-    const path = join(configDir, "settings.toml");
-    return existsSync(path) && /\[updates\]\s*check = false/.test(readFileSync(path, "utf8"));
-  });
+  // A host is selected: Enter on the list would connect it. On a focused
+  // button, Enter is the button's (D1): it answers, no tab opens.
+  const tabs = () => s.exec<number>("return document.querySelectorAll('[role=tab]').length");
+  const before = await tabs();
+  await s.exec("document.querySelector('[data-testid=update-check-daily]').focus()");
+  await press(Key.Enter);
+  await waitFor("check = true saved", () => existsSync(settingsPath) && /\[updates\]\s*check = true/.test(readFileSync(settingsPath, "utf8")));
   await waitFor("question gone", async () => !(await s.find("[data-testid=update-question]")));
-  assert.equal(await s.find("[data-testid=update-badge]"), null);
-  // Declined: the engine never checks (no cache written, never github.com).
   await sleep(500);
-  assert.ok(!existsSync(join(dataDir, "state", "update.toml")), "no check after Not now");
+  assert.equal(await tabs(), before, "Enter on the button opened no session");
+  // The one request went to the local proxy, for GitHub's API, and failed
+  // there (silently: no badge, the failure is recorded for a retry in 1 h).
+  await waitFor("request at the local proxy", () => proxied.length > 0);
+  assert.deepEqual(proxied, ["CONNECT api.github.com:443 HTTP/1.1"]);
+  await waitFor("failure recorded", () => existsSync(updateCache) && /failed_at/.test(readFileSync(updateCache, "utf8")));
+  assert.equal(await s.find("[data-testid=update-badge]"), null);
+  // Turned off again from the palette: written false, no further request.
+  await hostsView();
+  await palette("Turn off the daily update check");
+  await waitFor("check = false saved", () => /\[updates\]\s*check = false/.test(readFileSync(settingsPath, "utf8")));
+  await sleep(500);
+  assert.equal(proxied.length, 1, "nothing after off");
+});
+
+after(() => {
+  proxy.close();
 });
 
 /** Opens "Add host", fills alias, HostName and a password (nothing saved yet). */
