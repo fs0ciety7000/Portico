@@ -31,14 +31,31 @@ fn refused(message: &str, hint: Option<&str>) -> ErrorSummary {
     }
 }
 
+/// Bidi controls, zero-width characters and other invisible formatting.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 /// The link as it will be opened, or why it is refused.
 pub(crate) fn checked_link(raw: &str) -> Result<url::Url, ErrorSummary> {
     if raw.chars().count() > MAX_LINK_CHARS {
         return Err(refused("link too long to open", None));
     }
     // The WHATWG parser silently drops tabs and line breaks: refuse them
-    // instead, the user must open exactly what the dialog showed.
-    if raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    // instead, the user must open exactly what the dialog showed. Invisible
+    // format characters (bidi, zero width) are refused too, like the view.
+    if raw
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || is_invisible_format(c))
+    {
         return Err(refused(
             "this link contains spaces or control characters",
             None,
@@ -182,5 +199,11 @@ mod tests {
         let err = checked_link("https://user:secret@example.com/?token=abc").unwrap_err();
         assert!(!err.message.contains("secret") && !err.message.contains("token"));
         assert!(err.hint.is_some_and(|h| !h.contains("secret")));
+    }
+
+    #[test]
+    fn format_characters_are_refused() {
+        assert_eq!(code("https://example.com/\u{202E}x"), REFUSED);
+        assert_eq!(code("https://exa\u{200B}mple.com/"), REFUSED);
     }
 }
