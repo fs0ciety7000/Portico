@@ -291,6 +291,9 @@ test("terminal search: ⌘F on macOS, Ctrl-Alt-F on Linux, only in a terminal", 
   for (const t of [mac, linux]) assert.ok(![...t.hosts.values()].includes("terminal.search"));
   assert.equal(formatCombo(parseCombo("Ctrl+Alt+F")!, "linux", "terminal"), "Ctrl-Alt-F");
   assert.equal(formatCombo(parseCombo("Mod+F")!, "mac", "terminal"), "⌘F");
-  // Settings: ⌘, on macOS.
+  // Settings: ⌘, on macOS, Ctrl-Alt-, on Linux, in a terminal too.
   assert.equal(mac.hosts.get(ev(",", "Comma", { metaKey: true })), "app.settings");
+  assert.equal(linux.hosts.get(ev(",", "Comma", { ctrlKey: true, altKey: true })), "app.settings");
+  assert.equal(linux.terminal.get(ev(",", "Comma", { ctrlKey: true, altKey: true })), "app.settings");
+  assert.equal(formatCombo(parseCombo("Ctrl+Alt+,")!, "linux", "terminal"), "Ctrl-Alt-,");
 });

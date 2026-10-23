@@ -549,7 +549,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
 | Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
 | Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette | `recordings.open` | — | — |
-| Réglages : thème, « Copy on select » (enregistrés dans `settings.toml`) | `app.settings` | `⌘,` | — |
+| Réglages : thème, « Copy on select » (enregistrés dans `settings.toml`) | `app.settings` | `⌘,` | `Ctrl-Alt-,` |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
@@ -573,7 +573,7 @@ pas par `Ctrl-Alt` + flèches, que GNOME, Cinnamon et Xfce gardent pour les espa
 | Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau | `pane.divider` | `⌥⌘R` | `Ctrl-Alt-Shift-R` |
 | Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
 | Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
-| Rechercher dans le scrollback du panneau actif (texte littéral, casse ignorée sauf majuscule ; `↵` plus ancien, `Shift-↵` plus récent, `Esc` ferme et revient en bas ; touches : tableau « Terminal (GUI) : recherche, liens, menu ») | `terminal.search` | `⌘F` | `Ctrl-Alt-F` |
+| Rechercher dans le scrollback du panneau actif (texte littéral, casse ignorée sauf majuscule ; `↵` ou `↑` plus ancien, `Shift-↵` ou `↓` plus récent, `Esc` ferme et revient en bas ; touches : tableau « Terminal (GUI) : recherche, liens, menu ») | `terminal.search` | `⌘F` | `Ctrl-Alt-F` |
 | Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif | `pane.close` | — | — |
 | Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état | `session.record` | `⌘⇧R` | `Ctrl-Shift-R` |
 
@@ -625,12 +625,12 @@ Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le te
 
 ## Terminal (GUI) : recherche, liens, menu
 
-Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search in terminal » dans la palette) : texte littéral, casse ignorée sauf si la requête contient une majuscule. Le compteur numérote depuis le bas (`3 of 17`, `No match`, `999+`). Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue.
+Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search scrollback » dans la palette) : texte littéral, casse ignorée sauf si la requête contient une majuscule. Le compteur numérote depuis le bas (`3 of 17`, `No match`, `999+`). Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue. Les touches de la barre s'affichent dans le champ tant qu'il est vide, et dans la barre d'état tant qu'elle est ouverte (`SEARCH ↵ older · ⇧↵ newer · Esc close`).
 
 | Action | Touches |
 |---|---|
 | Recherche : taper (va au plus proche en remontant depuis le bas de la vue) | texte |
-| Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage | `↵` / `Shift-↵` |
+| Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage | `↵` / `Shift-↵`, ou `↑` / `↓` |
 | Recherche : fermer, effacer les surlignages, revenir en bas (sortie en direct) | `Esc` |
 | Ouvrir un lien `http(s)` (URL affichée ou lien OSC 8), après confirmation « Open this link? » | `⌘`-clic (macOS), `Ctrl`-clic (Linux) |
 | Confirmation de lien : ouvrir / annuler | `↵` / `Esc` |

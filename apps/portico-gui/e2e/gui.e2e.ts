@@ -225,6 +225,12 @@ test("terminal search: literal, Enter / Shift-Enter, keys never reach the shell,
   await waitFor("2 of 100", async () => (await searchCount()) === "2 of 100");
   await press(Key.Shift, Key.Enter);
   await waitFor("back to 1 of 100", async () => (await searchCount()) === "1 of 100");
+  // ↑ older, ↓ newer, as in a history; the status bar shows the bar's keys.
+  await press(Key.Up);
+  await waitFor("↑: 2 of 100", async () => (await searchCount()) === "2 of 100");
+  await press(Key.Down);
+  await waitFor("↓: 1 of 100", async () => (await searchCount()) === "1 of 100");
+  assert.match(await text("[data-testid=search-hints]"), /Search\s*↵\s*older\s*⇧↵\s*newer\s*Esc\s*close/i);
   await press(Key.Escape);
   await waitFor("search closed", async () => !(await s.find("[data-testid=terminal-search]")));
   // Back in the shell: what was typed in the bar never reached it (a
@@ -250,6 +256,8 @@ test("links: Ctrl-click asks first, Esc cancels (nothing is opened)", async () =
   // The visible text is not the link's host: a caution says where it goes.
   assert.match(shown, /The text shown was “docs-e2e” but the link goes to example\.com\./);
   await capture("link-confirm");
+  // A caution: Cancel has the focus (and Enter) once the dialog is armed.
+  await waitFor("Cancel focused", async () => (await s.exec<string>("return document.activeElement?.textContent ?? ''")).trim().startsWith("Cancel"));
   await press(Key.Escape);
   await noDialog();
   await shellReady();
