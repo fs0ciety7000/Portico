@@ -55,9 +55,9 @@ pub struct Palette {
     pub accent: Rgb,
     pub accent_strong: Rgb,
     pub text_on_accent: Rgb,
-    /// Terminal scrollback search: background of every visible match
-    /// (the selection surface tinted 20 % towards the accent, so terminal
-    /// text keeps its AAA contrast).
+    /// Terminal scrollback search: background of every visible match (a
+    /// quiet mineral tint, kept apart from the accent-tinted selection so
+    /// a match never reads as selected text; terminal text stays AAA).
     pub search_match: Rgb,
     /// Terminal scrollback search: background of the current match (the
     /// accent; its text is `text_on_accent`).
@@ -150,11 +150,13 @@ pub const TYPE_SCALE: [(&str, u16); 8] = [
 /// - `bar`: the accent bar of a selected row (and the focus ring width);
 /// - `line-gap`: between the two lines of a list row (title, then details);
 /// - `row`: a list row, a form control (input, select) or a checkbox line;
+/// - `control`: a button or a toggle of a dialog;
 /// - `control-sm`: a compact control (a small button, an inline input);
 /// - `badge`: a badge or pill (origin, count);
 /// - `badge-sm`: a compact badge, a small icon box;
-/// - `icon-xs`: the smallest inline icons (lock of an origin badge).
-pub const SIZES: [(&str, &str); 11] = [
+/// - `icon-xs`: the smallest inline icons (lock of an origin badge);
+/// - `menu`: the minimum width of a context menu.
+pub const SIZES: [(&str, &str); 13] = [
     ("dot", "6px"),
     ("dot-ring", "1.5px"),
     ("icon-sm", "12px"),
@@ -162,10 +164,12 @@ pub const SIZES: [(&str, &str); 11] = [
     ("bar", "2px"),
     ("line-gap", "2px"),
     ("row", "34px"),
+    ("control", "32px"),
     ("control-sm", "30px"),
     ("badge", "20px"),
     ("badge-sm", "16px"),
     ("icon-xs", "11px"),
+    ("menu", "224px"),
 ];
 
 /// Alpha of the terminal selection (`--accent-selection`): the theme's
@@ -194,7 +198,7 @@ pub const OBSIDIAN: Theme = Theme {
         accent: Rgb::hex(0xc8_a9_6b),
         accent_strong: Rgb::hex(0xdd_c0_85),
         text_on_accent: Rgb::hex(0x14_11_0b),
-        search_match: Rgb::hex(0x43_3f_38),
+        search_match: Rgb::hex(0x3a_3d_42),
         search_current: Rgb::hex(0xc8_a9_6b),
     },
     status: StatusPalette {
@@ -244,7 +248,7 @@ pub const BASALT: Theme = Theme {
         accent: Rgb::hex(0xb4_bc_c6),
         accent_strong: Rgb::hex(0xcc_d3_db),
         text_on_accent: Rgb::hex(0x0b_12_1a),
-        search_match: Rgb::hex(0x40_47_51),
+        search_match: Rgb::hex(0x30_40_5a),
         search_current: Rgb::hex(0xb4_bc_c6),
     },
     status: StatusPalette {
@@ -294,7 +298,7 @@ pub const TRAVERTINE: Theme = Theme {
         accent: Rgb::hex(0xc9_9a_74),
         accent_strong: Rgb::hex(0xdc_b0_8e),
         text_on_accent: Rgb::hex(0x1a_0f_09),
-        search_match: Rgb::hex(0x4b_3d_31),
+        search_match: Rgb::hex(0x3e_41_3a),
         search_current: Rgb::hex(0xc9_9a_74),
     },
     status: StatusPalette {
@@ -540,6 +544,24 @@ mod tests {
         ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
     }
 
+    /// `fg` at `alpha` over an opaque `bg` (how `--accent-selection` paints).
+    fn blend(fg: Rgb, bg: Rgb, alpha: u8) -> Rgb {
+        let mix = |f: u8, b: u8| {
+            let (a, f, b) = (u32::from(alpha), u32::from(f), u32::from(b));
+            u8::try_from((f * a + b * (255 - a) + 127) / 255).unwrap_or(u8::MAX)
+        };
+        Rgb(mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
+    }
+
+    #[test]
+    fn blend_matches_the_alpha_formula() {
+        let white = Rgb::hex(0xff_ff_ff);
+        let black = Rgb::hex(0x00_00_00);
+        assert_eq!(blend(white, black, 0xff), white);
+        assert_eq!(blend(white, black, 0x00), black);
+        assert_eq!(blend(white, black, 0x55), Rgb::hex(0x55_55_55));
+    }
+
     /// Colour = meaning: the accent must never be mistaken for a status.
     #[test]
     fn accent_is_distinct_from_statuses() {
@@ -569,10 +591,15 @@ mod tests {
         for t in THEMES {
             let p = t.palette;
             assert_eq!(p.search_current, p.accent, "{}", t.id);
-            for (name, bg) in [("bg-base", p.bg_base), ("bg-selected", p.bg_selected)] {
+            let selection = blend(p.accent, p.bg_base, ACCENT_SELECTION_ALPHA);
+            for (name, bg) in [
+                ("bg-base", p.bg_base),
+                ("bg-selected", p.bg_selected),
+                ("selection", selection),
+            ] {
                 let d = delta_e(p.search_match, bg);
                 assert!(
-                    d >= 8.0,
+                    d >= 10.0,
                     "{}: search match too close to {name} (ΔE {d:.1})",
                     t.id
                 );
@@ -607,7 +634,9 @@ mod tests {
         assert!(css.contains("--size-line-gap: 2px;"));
         for line in [
             "--size-row: 34px;",
+            "--size-control: 32px;",
             "--size-control-sm: 30px;",
+            "--size-menu: 224px;",
             "--size-badge: 20px;",
             "--size-badge-sm: 16px;",
             "--size-icon-xs: 11px;",
