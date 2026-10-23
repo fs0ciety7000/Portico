@@ -18,6 +18,7 @@ mod recordings;
 mod settings;
 mod snippets;
 mod terminals;
+mod updates;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -236,6 +237,10 @@ fn run_app() {
             settings::save_theme,
             settings::save_copy_on_select,
             links::open_url,
+            updates::start_update_checks,
+            updates::update_status,
+            updates::set_update_check,
+            updates::update_instruction,
             import::import_pick,
             import::import_replan,
             import::import_apply,

@@ -1,8 +1,9 @@
 <script lang="ts">
-  // Settings (phase 9): the theme and "Copy on select", both written to
-  // settings.toml by the core (only their own keys change). Each change
-  // applies at once; Esc or Done closes.
+  // Settings (phase 9): the theme, "Copy on select" and (0.3.0) the daily
+  // update check, all written to settings.toml by the core (only their own
+  // keys change). Each change applies at once; Esc or Done closes.
   import { settings } from "../state/settings.svelte";
+  import { ago, updates } from "../state/updates.svelte";
   import { keymap } from "../state/keymap.svelte";
   import Modal from "./Modal.svelte";
 
@@ -58,6 +59,21 @@
       </label>
       <p class="note">A finished mouse selection goes to the clipboard, as a copy would.</p>
     </div>
+    {#if updates.status}
+      {@const checked = updates.on ? ago(updates.status.checked_at) : null}
+      <div class="field">
+        <span>Updates</span>
+        <label class="check">
+          <input type="checkbox" checked={updates.on} disabled={updates.saving} onchange={(e) => void updates.setCheck(e.currentTarget.checked)} data-testid="update-check" />
+          Check for updates daily
+        </label>
+        <p class="note">
+          Portico contacts github.com once a day and sends nothing else; it only tells you, never downloads.{checked
+            ? ` Last checked ${checked}.`
+            : ""}
+        </p>
+      </div>
+    {/if}
   </div>
   {#snippet footer()}
     <span class="footer-note">Saved in settings.toml</span>

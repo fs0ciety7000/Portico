@@ -23,6 +23,8 @@ import {
   type LogLine,
   type EffectiveConfig,
   type Settings,
+  type UpdateInstruction,
+  type UpdateStatus,
   isTauri,
   type EngineEvent,
   type ForwardCheck,
@@ -114,8 +116,12 @@ export interface Backend {
   getSettings(): Promise<Settings>;
   saveTheme(theme: string): Promise<void>;
   saveCopyOnSelect(on: boolean): Promise<void>;
-  /** A confirmed terminal link (the view asked first). */
+  /** A confirmed terminal link (the view asked first), or a validated release page. */
   openUrl(url: string): Promise<void>;
+  startUpdateChecks(): Promise<UpdateStatus>;
+  updateStatus(): Promise<UpdateStatus>;
+  setUpdateCheck(on: boolean): Promise<UpdateStatus>;
+  updateInstruction(): Promise<UpdateInstruction | null>;
   /** Native picker in Rust, then the plan; `null` when cancelled. */
   importPick(prefix: boolean): Promise<ImportPreview | null>;
   importReplan(token: number, prefix: boolean): Promise<ImportPreview>;

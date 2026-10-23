@@ -139,6 +139,25 @@ test("startup: hosts from ~/.ssh/config, no vault yet", async () => {
   assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault before it is created");
 });
 
+test("update check: asked once, Not now is written, no request ever made", async () => {
+  // `[updates] check` absent: the question shows, nothing was fetched.
+  await waitFor("update question", () => s.find("[data-testid=update-question]"));
+  assert.ok(!existsSync(join(dataDir, "state", "update.toml")), "no check before an answer");
+  await capture("update-question");
+  const notNow = await s.find("[data-testid=update-not-now]");
+  assert.ok(notNow);
+  await s.click(notNow);
+  await waitFor("check = false saved", () => {
+    const path = join(configDir, "settings.toml");
+    return existsSync(path) && /\[updates\]\s*check = false/.test(readFileSync(path, "utf8"));
+  });
+  await waitFor("question gone", async () => !(await s.find("[data-testid=update-question]")));
+  assert.equal(await s.find("[data-testid=update-badge]"), null);
+  // Declined: the engine never checks (no cache written, never github.com).
+  await sleep(500);
+  assert.ok(!existsSync(join(dataDir, "state", "update.toml")), "no check after Not now");
+});
+
 /** Opens "Add host", fills alias, HostName and a password (nothing saved yet). */
 async function addHostWithPassword(alias: string, password: string): Promise<void> {
   await hostsView();
@@ -551,6 +570,7 @@ test("restart: theme kept, vault unlocked at startup, key login without prompt",
   s = await Session.create(env("E2E_DRIVER"), env("E2E_APP"));
   await dialog("Unlock the vault");
   assert.equal((await text(".theme-name")).trim(), "Basalt");
+  assert.equal(await s.find("[data-testid=update-question]"), null, "Not now is never asked again");
   await type(VAULT_PASS);
   await press(Key.Enter);
   await noDialog();

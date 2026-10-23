@@ -8,6 +8,8 @@
   import { hosts } from "../state/hosts.svelte";
   import OriginBadge from "./OriginBadge.svelte";
   import { INCLUDE_MESSAGE, READ_ONLY_IMPORTED } from "../hostform";
+  import { updates } from "../state/updates.svelte";
+  import UpdateBanner from "./UpdateBanner.svelte";
 
   let {
     host,
@@ -59,6 +61,9 @@
 </script>
 
 <section class="details">
+  {#if updates.ask}
+    <UpdateBanner />
+  {/if}
   {#if hosts.showBanner && hosts.include}
     {@const line = hosts.include.line}
     <div class="banner" role="note" aria-label="Include line for Portico hosts" transition:fly={{ y: -6, duration: dur("base") }}>

@@ -39,6 +39,8 @@
   import RecordConfirm from "./lib/components/RecordConfirm.svelte";
   import LinkConfirm from "./lib/components/LinkConfirm.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
+  import UpdateDialog from "./lib/components/UpdateDialog.svelte";
+  import { updates } from "./lib/state/updates.svelte";
   import { links } from "./lib/state/links.svelte";
   import RecBadge from "./lib/components/RecBadge.svelte";
   import { recordings } from "./lib/state/recordings.svelte";
@@ -100,7 +102,8 @@
       !!recordings.confirm ||
       recordings.open ||
       !!links.pending ||
-      settings.open,
+      settings.open ||
+      updates.open,
   );
   /** Terminals being recorded (any tab): REC in the status bar. */
   const recCount = $derived(Object.keys(recordings.active).length);
@@ -630,7 +633,21 @@
       : []),
     { id: "app.reload", title: "Reload ~/.ssh/config", shortcut: k("app.reload"), run: load },
     { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: settings.theme?.name, run: () => settings.cycle() },
-    { id: "app.settings", title: "Settings…", hint: "theme, copy on select", shortcut: k("app.settings"), run: () => (settings.open = true) },
+    { id: "app.settings", title: "Settings…", hint: "theme, copy on select, updates", shortcut: k("app.settings"), run: () => (settings.open = true) },
+    ...(updates.available
+      ? [{ id: "app.update", title: `Portico ${updates.available.version} is available…`, hint: "release notes, update command", shortcut: k("app.update"), run: () => updates.show() }]
+      : []),
+    ...(updates.status
+      ? [
+          {
+            id: "app.update-check",
+            title: updates.on ? "Turn off the daily update check" : "Check for updates daily",
+            hint: updates.on ? "on · contacts github.com once a day" : "off · Portico never contacts github.com",
+            shortcut: k("app.update-check"),
+            run: () => void updates.setCheck(!updates.on),
+          },
+        ]
+      : []),
     ...settings.themes.map((t) => ({ id: `theme-${t.id}`, title: `Theme: ${t.name}`, hint: t.description, run: () => settings.select(t.id) })),
   ]);
 
@@ -819,12 +836,15 @@
     load();
     void files.init();
     void vault.init();
+    // No request unless the user turned the check on (the core decides).
+    void updates.init();
     const unlisten = [
       backend.onEngineEvent((ev) => {
         workspace.onEvent(ev);
         recordings.onEvent(ev);
         hosts.onEvent(ev);
         logs.onEvent(ev);
+        updates.onEvent(ev);
         if (ev.type === "sftp") files.onEvent(ev.session, ev.event);
         else if (ev.type === "tunnel") tunnels.onEvent(ev.id, ev.session, ev.event);
         else if (ev.type === "session" && ev.event.kind === "phase" && ["closed", "failed"].includes(ev.event.phase)) {
@@ -836,6 +856,7 @@
         void recordings.resync();
         // A `hosts_changed` may be among the lost events.
         void load();
+        void updates.resync();
       }),
       backend.onDragging((d) => (files.dragging = d)),
       backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
@@ -1029,6 +1050,9 @@
         {/each}
       </span>
     {/if}
+    {#if updates.available}
+      <button class="update-badge" onclick={() => updates.show()} title="See how to update" data-testid="update-badge">{updates.available.version} available</button>
+    {/if}
     <span class="theme-name">
       {#if !isTauri()}<span class="demo" title="Browser preview with a simulated engine">Demo</span>{/if}
       {settings.theme?.name ?? ""}
@@ -1162,6 +1186,8 @@
   {/key}
 {:else if settings.open}
   <SettingsDialog />
+{:else if updates.open}
+  <UpdateDialog />
 {/if}
 
 {#if workspace.toast && !toastOnStage}
@@ -1292,6 +1318,19 @@
   .counts { flex: 0 0 auto; }
   .theme-name { flex: 0 0 auto; padding-left: var(--space-3); border-left: 1px solid var(--border-subtle); }
   .version { flex: 0 0 auto; }
+  /* A notice, not a status: the accent, never a status colour. */
+  .update-badge {
+    flex: 0 0 auto;
+    height: calc(var(--statusbar-h) - var(--space-2));
+    padding: 0 var(--space-2);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+  }
+  .update-badge:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent-strong); }
   .session {
     --c: var(--status-idle);
     display: flex;

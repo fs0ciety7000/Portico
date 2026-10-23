@@ -237,4 +237,19 @@ export const GUI_FIXED: DocTable[] = [
       ["Fermer la lecture (retour à la liste) / fermer la liste", "`q` ou `Esc` / `Esc`"],
     ],
   },
+  {
+    title: "Mises à jour (GUI, opt-in)",
+    intro:
+      "Tant que `[updates] check` est absent de `settings.toml`, un bandeau discret au-dessus des détails d'hôte demande une fois : " +
+      "« Check for new versions once a day? Portico would contact github.com and send nothing else. » Sans accord, Portico ne fait aucune requête.",
+    rows: [
+      ["Bandeau : « Check daily » (`check = true`) / « Not now » (`check = false`, plus jamais demandé)", "boutons (`Tab` puis `↵` ou `Espace`)"],
+      ["Changer d'avis plus tard", "réglages (`app.settings`), « Check for updates daily » ; ou la palette, `app.update-check`"],
+      ["Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available »", "clic sur le badge de la barre d'état, ou la palette (`app.update`)"],
+      ["Fenêtre : notes de version (navigateur) / copier la commande de mise à jour / fermer", "« Release notes » / « Copy » / `Esc`"],
+    ],
+    outro:
+      "Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; " +
+      "aucune fenêtre ne s'ouvre d'elle-même. Portico ne télécharge ni n'installe rien.",
+  },
 ];

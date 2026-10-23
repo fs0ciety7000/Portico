@@ -3,7 +3,10 @@
 //
 // URL switches: `?keymap=custom` loads a keymap with two invalid entries
 // (notice), `?theme=<id>` starts with a saved theme (an unknown one shows
-// the fallback notice), `?recent=none` starts without recent hosts.
+// the fallback notice), `?recent=none` starts without recent hosts,
+// `?updates=ask` starts with the update question (`[updates] check` absent),
+// `?updates=off` with the check off; by default the check is on and the
+// simulated GitHub answer is a newer release, 0.3.1 (no request is made).
 import type {
   EffectiveConfig,
   EngineEvent,
@@ -15,6 +18,8 @@ import type {
   RecentHost,
   SessionLogInfo,
   Settings,
+  UpdateInstruction,
+  UpdateStatus,
 } from "./api";
 
 export interface MetaHooks {
@@ -62,6 +67,16 @@ export function demoMeta(hooks: MetaHooks) {
   const logSessions: DemoLogSession[] = [];
   let theme: string | null = params.get("theme");
   let copyOnSelect = params.get("copy") === "on";
+  const updatesParam = params.get("updates");
+  let updateCheck: boolean | null = updatesParam === "ask" ? null : updatesParam !== "off";
+  const DEMO_RELEASE = { version: "0.3.1", url: "https://github.com/fs0ciety7000/Portico/releases/tag/v0.3.1" };
+  const updateStatus = (): UpdateStatus => ({
+    check: updateCheck,
+    current: __APP_VERSION__,
+    // Simulated: what a check would have found (only once it is on).
+    available: updateCheck ? DEMO_RELEASE : null,
+    checked_at: updateCheck ? new Date(NOW - 3 * 60 * MINUTE).toISOString() : null,
+  });
   const keymap: Record<string, string> =
     params.get("keymap") === "custom" ? { "app.files": "Mod+Shift+O", "tab.new": "Mod+W", "app.zoom": "Mod+=" } : {};
 
@@ -224,6 +239,21 @@ export function demoMeta(hooks: MetaHooks) {
       },
       async saveCopyOnSelect(on: boolean) {
         copyOnSelect = on;
+      },
+      async startUpdateChecks() {
+        return updateStatus();
+      },
+      async updateStatus() {
+        return updateStatus();
+      },
+      async setUpdateCheck(on: boolean) {
+        updateCheck = on;
+        const status = updateStatus();
+        emit({ type: "update", status });
+        return status;
+      },
+      async updateInstruction(): Promise<UpdateInstruction | null> {
+        return updateCheck ? { method: "homebrew", text: "Update with Homebrew:", command: "brew upgrade --cask fs0ciety7000/portico/portico" } : null;
       },
       // The demo never opens anything: the dialog closes, a notice says so.
       async openUrl(_url: string) {
