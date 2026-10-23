@@ -230,6 +230,20 @@ function exec(id: number, t: DemoTerminal, cmd: string) {
       for (let i = 0; i < 40; i++) out(`\x1b[2m${String(i).padStart(4, "0")}\x1b[0m GET /api/orders?page=${i} 200 ${12 + (i % 7)} ms\r\n`);
       rec.flood(id);
       break;
+    case "links":
+      // Phase 9: a plain URL, an OSC 8 link whose text names another host, a file: link (never activatable).
+      out("Docs: https://portico.example/docs/terminal?tab=links#search\r\n");
+      out("Sign in at \x1b]8;;https://login.evil.example/session\x07bank.example/login\x1b]8;;\x07 to continue\r\n");
+      out("Report: \x1b]8;;file:///etc/passwd\x07/etc/passwd\x1b]8;;\x07 (file: links stay inert)\r\n");
+      break;
+    case "seq": {
+      // A full scrollback for the search (default: 10 000 lines).
+      const n = Math.min(Math.max(Number(cmd.trim().split(/\s+/)[1]) || 10_000, 1), 20_000);
+      const lines: string[] = [];
+      for (let i = 1; i <= n; i++) lines.push(`${String(i).padStart(5, "0")} GET /api/orders?page=${i} ${i % 97 === 0 ? "500 Error" : "200 OK"} ${12 + (i % 7)} ms`);
+      out(`${lines.join("\r\n")}\r\n`);
+      break;
+    }
     case "exit":
       out("logout\r\n");
       terminals.delete(id);

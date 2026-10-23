@@ -278,3 +278,19 @@ test("Import hosts… has a free default shortcut, everywhere (phase 6b fixes)",
   // Plain Ctrl-M (Enter in a shell) stays the terminal's.
   assert.equal(linux.terminal.get(ev("m", "KeyM", { ctrlKey: true })), undefined);
 });
+
+test("terminal search: ⌘F on macOS, Ctrl-Alt-F on Linux, only in a terminal", () => {
+  const mac = matchTables(defaultBindings("mac"), "mac");
+  const linux = matchTables(defaultBindings("linux"), "linux");
+  const ev = (k: string, code: string, mods: Partial<KeyLike>) => eventSignature(key(k, code, mods))!;
+  assert.equal(mac.terminal.get(ev("f", "KeyF", { metaKey: true })), "terminal.search");
+  assert.equal(mac.terminal.get(ev("F", "KeyF", { metaKey: true, shiftKey: true })), "app.files");
+  assert.equal(linux.terminal.get(ev("f", "KeyF", { ctrlKey: true, altKey: true })), "terminal.search");
+  // Ctrl-Shift-F stays the files panel on Linux (Mod+Shift+F).
+  assert.equal(linux.terminal.get(ev("F", "KeyF", { ctrlKey: true, shiftKey: true })), "app.files");
+  for (const t of [mac, linux]) assert.ok(![...t.hosts.values()].includes("terminal.search"));
+  assert.equal(formatCombo(parseCombo("Ctrl+Alt+F")!, "linux", "terminal"), "Ctrl-Alt-F");
+  assert.equal(formatCombo(parseCombo("Mod+F")!, "mac", "terminal"), "⌘F");
+  // Settings: ⌘, on macOS.
+  assert.equal(mac.hosts.get(ev(",", "Comma", { metaKey: true })), "app.settings");
+});

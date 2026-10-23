@@ -533,6 +533,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
 | Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
 | Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette | `recordings.open` | — | — |
+| Réglages : thème, « Copy on select » (enregistrés dans `settings.toml`) | `app.settings` | `⌘,` | — |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
@@ -556,6 +557,7 @@ pas par `Ctrl-Alt` + flèches, que GNOME, Cinnamon et Xfce gardent pour les espa
 | Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau | `pane.divider` | `⌥⌘R` | `Ctrl-Alt-Shift-R` |
 | Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
 | Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
+| Rechercher dans le scrollback du panneau actif (texte littéral, casse ignorée sauf majuscule ; `↵` plus ancien, `Shift-↵` plus récent, `Esc` ferme et revient en bas ; touches : tableau « Terminal (GUI) : recherche, liens, menu ») | `terminal.search` | `⌘F` | `Ctrl-Alt-F` |
 | Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif | `pane.close` | — | — |
 | Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état | `session.record` | `⌘⇧R` | `Ctrl-Shift-R` |
 
@@ -604,6 +606,22 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (t
 | Séparation entre panneaux (focus clavier, par `pane.divider` ou `Tab`) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
+
+## Terminal (GUI) : recherche, liens, menu
+
+Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search in terminal » dans la palette) : texte littéral, casse ignorée sauf si la requête contient une majuscule. Le compteur numérote depuis le bas (`3 of 17`, `No match`, `999+`). Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue.
+
+| Action | Touches |
+|---|---|
+| Recherche : taper (va au plus proche en remontant depuis le bas de la vue) | texte |
+| Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage | `↵` / `Shift-↵` |
+| Recherche : fermer, effacer les surlignages, revenir en bas (sortie en direct) | `Esc` |
+| Ouvrir un lien `http(s)` (URL affichée ou lien OSC 8), après confirmation « Open this link? » | `⌘`-clic (macOS), `Ctrl`-clic (Linux) |
+| Confirmation de lien : ouvrir / annuler | `↵` / `Esc` |
+| Menu contextuel du terminal (Copy, Paste, Select all, Search…, Clear scrollback) | clic droit ; `Shift`-clic droit si l'application distante capture la souris |
+| Menu contextuel : se déplacer, premier / dernier, choisir, fermer | `↑` `↓`, `Home` / `End`, `↵`, `Esc` |
+
+Un clic simple sélectionne toujours du texte. Les autres schémas (`file:`, `ssh:`, `javascript:`…) ne sont jamais activables ; une URL de plus de 2 048 caractères ou avec identifiants (`user:pass@`) est refusée. « Copy on select » (réglages, `app.settings`) copie la sélection à la souris dès qu'elle est terminée.
 
 ## Liste des hôtes (GUI) : sections
 

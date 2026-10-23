@@ -12,6 +12,7 @@ mod files;
 mod hosts;
 mod import;
 mod keys;
+mod links;
 mod meta;
 mod recordings;
 mod settings;
@@ -233,6 +234,8 @@ fn run_app() {
             debug::effective_config,
             settings::get_settings,
             settings::save_theme,
+            settings::save_copy_on_select,
+            links::open_url,
             import::import_pick,
             import::import_replan,
             import::import_apply,

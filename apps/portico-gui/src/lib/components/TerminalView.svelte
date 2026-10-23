@@ -5,15 +5,26 @@
   // xterm.js has parsed it (flow control, see src-tauri/src/terminals.rs).
   // Input goes through a single send loop (order is preserved, one IPC call
   // in flight), pasted text is sanitized.
+  //
+  // Terminal comfort (phase 9): scrollback search (a floating bar; nothing
+  // reaches the remote while it is open), links (⌘-click / Ctrl-click,
+  // always confirmed, see src/lib/links.ts), a right-click menu, and
+  // "Copy on select".
   import { onMount, untrack } from "svelte";
-  import { fade } from "svelte/transition";
-  import { Terminal, type ITheme } from "@xterm/xterm";
+  import { fade, fly } from "svelte/transition";
+  import { Terminal, type IBufferRange, type IDisposable, type ILink, type ILinkProvider, type IMarker, type ITheme } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
+  import { WebLinksAddon } from "@xterm/addon-web-links";
   import { WebglAddon } from "@xterm/addon-webgl";
   import "@xterm/xterm/css/xterm.css";
   import { asError, formatRtt, sentence } from "../api";
   import { backend } from "../backend";
-  import { chunks, sanitizePaste, sanitizeTitle } from "../keys";
+  import { chunks, isMac, sanitizePaste, sanitizeTitle } from "../keys";
+  import { countMatches, counter, LineTexts, matchAbove, matchBelow, opaqueHex, SEARCH_LABEL, visibleSpans, type Pos } from "../termsearch";
+  import { isOpenGesture, openHint } from "../links";
+  import { links } from "../state/links.svelte";
+  import { settings } from "../state/settings.svelte";
+  import TerminalMenu, { type MenuItem } from "./TerminalMenu.svelte";
   import { hardwareWebgl } from "../webgl";
   import { keymap } from "../state/keymap.svelte";
   import { logs } from "../state/logs.svelte";
@@ -109,10 +120,15 @@
   let flushScheduled = false;
   let sending = false;
 
+  /** Mouse reports (X10, SGR): user input, held back while searching. */
+  const MOUSE_REPORT = /^\x1b\[(?:M|<)/;
+
   function send(data: string, binary: boolean) {
     // Before the id is known only automatic replies (DA, DSR…) get here:
     // keep them, the shell may wait for them.
     if (pane.end) return;
+    // The search bar has the keyboard: no click reaches the remote either.
+    if (searchOpen && (binary || MOUSE_REPORT.test(data))) return;
     const last = queue[queue.length - 1];
     if (last && last.binary === binary) last.data += data;
     else queue.push({ data, binary });
@@ -159,6 +175,8 @@
   }
 
   function paste(text: string) {
+    // Nothing reaches the remote while the search bar is open.
+    if (searchOpen) return;
     term?.paste(sanitizePaste(text));
   }
 
@@ -197,6 +215,8 @@
     if (!term || flow.generation !== pane.generation) return;
     wake();
     term.write(bytes, () => {
+      // Reading search results: new output never moves the view.
+      if (searchOpen) holdView();
       if (flow.generation !== pane.generation) return;
       flow.parsed += bytes.length;
       ack(flow, false);
@@ -292,6 +312,12 @@
       observer.disconnect();
       clearTimeout(resizeTimer);
       clearTimeout(blinkTimer);
+      clearTimeout(copiedTimer);
+      clearTimeout(recountTimer);
+      clearTimeout(warmTimer);
+      cancelAnimationFrame(paintFrame);
+      pin?.dispose();
+      webLinks?.dispose();
       term?.dispose();
       term = undefined;
     };
@@ -307,16 +333,36 @@
       // Only the focused pane of a split tab shows a cursor (see the effect below).
       cursorInactiveStyle: split && !focused ? "none" : "outline",
       scrollback: 10000,
-      allowProposedApi: false,
+      // Search highlights use `registerDecoration`, still a "proposed" API
+      // in xterm 6 (ADR "Recherche dans le scrollback"): the flag gates
+      // unstable API, not capabilities; versions are pinned (`~`).
+      allowProposedApi: true,
       // Option types | [ ] { } ~ on non-US Mac layouts: keep it a normal key.
       macOptionIsMeta: false,
-      // OSC 8 links stay inert until clickable links get their own,
-      // confirmed, http(s)-only handler (post-MVP).
-      linkHandler: { activate: () => {}, allowNonHttpProtocols: false },
+      // OSC 8 hyperlinks: http(s) only (xterm drops the others), opened on
+      // ⌘-click / Ctrl-click after "Open this link?".
+      linkHandler: {
+        allowNonHttpProtocols: false,
+        activate: (e, uri, range) => activateLink(e, uri, visibleText(range)),
+        hover: (e) => showTip(e),
+        leave: () => (tip = null),
+      },
       theme: readTheme(covered),
     });
     fit = new FitAddon();
     term.loadAddon(fit);
+    const t = term;
+    texts = new LineTexts(() => t.buffer.active);
+    t.onResize(() => {
+      texts?.clear();
+      recountSoon();
+    });
+    t.onWriteParsed(() => {
+      texts?.clear();
+      recountSoon();
+    });
+    t.onScroll(() => paintSoon());
+    loadWebLinks(term);
     term.open(host);
     // On a CPU rasterizer the DOM renderer is faster (src/lib/webgl.ts).
     if (hardwareWebgl()) {
@@ -331,6 +377,12 @@
     }
 
     term.attachCustomKeyEventHandler((e) => {
+      // The search bar is open: keys go to it, never to the remote.
+      if (searchOpen) {
+        e.preventDefault();
+        if (e.type === "keydown") searchInput?.focus();
+        return false;
+      }
       if (e.type === "keydown" && keymap.match(e, "terminal")) return false; // handled by the app (bubbles to window)
       // A hidden view never takes input (focus may linger after switching).
       if (!active) {
@@ -369,6 +421,11 @@
       if (text) paste(text);
     };
     host.addEventListener("paste", onPaste, true);
+    host.addEventListener("mouseup", onMouseUp);
+    // Scrolled by hand while searching: that is the view to keep.
+    const repin = () => searchOpen && requestAnimationFrame(pinView);
+    host.addEventListener("wheel", repin, { passive: true });
+    host.addEventListener("mouseup", repin);
 
     void open();
     wake();
@@ -388,6 +445,12 @@
     void themeId;
     const hide = covered;
     if (term) term.options.theme = readTheme(hide);
+    // Highlights follow the theme.
+    untrack(() => {
+      if (!searchOpen) return;
+      readColors();
+      paint();
+    });
   });
 
   // Inactive panes of a split tab: no cursor at all (the accent one is the
@@ -403,16 +466,408 @@
 
   $effect(() => {
     if (active && term) {
-      const focus = autofocus;
+      const want = autofocus;
       requestAnimationFrame(() => {
-        if (focus) term?.focus();
+        if (want) focus();
       });
     }
   });
 
-  export function copySelection(): string {
-    return term?.getSelection() ?? "";
+  // ── Scrollback search (src/lib/termsearch.ts) ──
+  let searchOpen = $state(false);
+  let query = $state("");
+  let result = $state({ rank: 0, total: 0 });
+  let searchInput: HTMLInputElement | undefined = $state();
+  /** Text of the scrollback's lines, dropped on any output or resize. */
+  let texts: LineTexts | undefined;
+  /** Start of the current match (a marker follows trimmed scrollback). */
+  let current: { marker: IMarker; col: number } | null = null;
+  /** Top line of the view being read. */
+  let pin: IMarker | undefined;
+  /** Highlights of the matches in view. */
+  let painted: IDisposable[] = [];
+  let colors = { match: "", current: "" };
+  const count = $derived(counter(query, result.rank, result.total));
+
+  /** Highlight colours from the theme tokens (decorations want `#rrggbb`). */
+  function readColors() {
+    const css = getComputedStyle(document.documentElement);
+    const v = (name: string) => css.getPropertyValue(name).trim();
+    const base = v("--bg-base");
+    const match = opaqueHex(v("--search-match"), base) ?? opaqueHex(v("--bg-selected"), base) ?? base;
+    colors = { match, current: opaqueHex(v("--search-current"), base) ?? opaqueHex(v("--accent-selection"), base) ?? match };
   }
+
+  const currentPos = (): Pos | null => (current && !current.marker.isDisposed ? { row: current.marker.line, col: current.col } : null);
+  /** A marker on buffer row `row` (markers are relative to the cursor). */
+  function markerAt(row: number): IMarker | undefined {
+    if (!term) return undefined;
+    const b = term.buffer.active;
+    return term.registerMarker(row - (b.baseY + b.cursorY));
+  }
+
+  /** Remembers the top line of the view (after each move). */
+  function pinView() {
+    if (!term) return;
+    pin?.dispose();
+    pin = markerAt(term.buffer.active.viewportY);
+  }
+
+  /** Output arrived while searching: back to the pinned line. */
+  function holdView() {
+    if (!term || !pin || pin.isDisposed) return;
+    if (term.buffer.active.viewportY !== pin.line) term.scrollToLine(pin.line);
+  }
+
+  function unpaint() {
+    for (const d of painted) d.dispose();
+    painted = [];
+  }
+
+  /** Highlights the matches in view: a subtle background, the current one in the accent. */
+  function paint() {
+    unpaint();
+    if (!term || !texts || !searchOpen || !query || !result.total) return;
+    const b = term.buffer.active;
+    const now = currentPos();
+    for (const span of visibleSpans(texts, query, b.viewportY, b.viewportY + term.rows - 1)) {
+      const marker = markerAt(span.row);
+      if (!marker) continue;
+      const isCurrent = !!now && span.start.row === now.row && span.start.col === now.col;
+      const deco = term.registerDecoration({
+        marker,
+        x: span.col,
+        width: span.width,
+        backgroundColor: isCurrent ? colors.current : colors.match,
+        layer: "bottom",
+      });
+      painted.push(marker);
+      if (deco) painted.push(deco);
+    }
+  }
+
+  let paintFrame = 0;
+  function paintSoon() {
+    if (paintFrame || !searchOpen) return;
+    paintFrame = requestAnimationFrame(() => {
+      paintFrame = 0;
+      paint();
+    });
+  }
+
+  /** New output: count again (the current match keeps its place). */
+  let recountTimer: ReturnType<typeof setTimeout> | undefined;
+  const RECOUNT_MS = 150;
+  function recountSoon() {
+    if (!searchOpen || !query) return;
+    clearTimeout(recountTimer);
+    recountTimer = setTimeout(() => {
+      if (!texts || !searchOpen) return;
+      if (current?.marker.isDisposed) current = null;
+      result = countMatches(texts, query, currentPos());
+      paint();
+    }, RECOUNT_MS);
+  }
+
+  /**
+   * Makes `at` the current match: in view, counted, highlighted in the
+   * accent. Not selected: with the focus in the bar, xterm would paint a
+   * selection in its grey "inactive" colour over the accent.
+   */
+  function show(at: Pos | null) {
+    if (!term || !texts) return;
+    current?.marker.dispose();
+    current = null;
+    term.clearSelection();
+    if (at) {
+      const marker = markerAt(at.row);
+      if (marker) current = { marker, col: at.col };
+      const b = term.buffer.active;
+      if (at.row < b.viewportY || at.row >= b.viewportY + term.rows) {
+        term.scrollToLine(Math.max(0, at.row - Math.floor(term.rows / 2)));
+      }
+    }
+    result = at ? countMatches(texts, query, at) : { rank: 0, total: 0 };
+    pinView();
+    paint();
+  }
+
+  /**
+   * One step: `older` goes up (typing too: from the current match, kept while
+   * it still matches, else from the bottom of the view), `newer` goes down;
+   * both wrap. Timed as `portico:search` performance entries (docs/PERF.md).
+   */
+  function find(direction: "older" | "newer" | "typed") {
+    if (!term || !texts) return;
+    const start = performance.now();
+    if (!query) show(null);
+    else {
+      const b = term.buffer.active;
+      const now = currentPos();
+      const bottom = { row: (pin && !pin.isDisposed ? pin.line : b.viewportY) + term.rows - 1, col: Number.MAX_SAFE_INTEGER };
+      if (direction === "newer") show(matchBelow(texts, query, now ?? { row: b.viewportY, col: -1 }));
+      else show(matchAbove(texts, query, now ?? bottom, direction === "typed" || !now));
+    }
+    try {
+      performance.measure("portico:search", { start, end: performance.now(), detail: { lines: term.buffer.active.length } });
+    } catch {
+      // No User Timing level 3: nothing measured.
+    }
+  }
+
+  /** Lines read per slice of the warm-up (about a millisecond each). */
+  const WARM_SLICE = 1000;
+  let warmTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Reads the scrollback's text in slices, from the bottom, while the user starts typing. */
+  function warmUp(row = Number.MAX_SAFE_INTEGER) {
+    clearTimeout(warmTimer);
+    if (!texts || !searchOpen) return;
+    const start = performance.now();
+    const next = texts.warm(row, WARM_SLICE);
+    try {
+      performance.measure("portico:search-warm", { start, end: performance.now() });
+    } catch {
+      // No User Timing level 3: nothing measured.
+    }
+    if (next >= 0) warmTimer = setTimeout(() => warmUp(next), 0);
+  }
+
+  export function openSearch() {
+    if (!term) return;
+    if (!searchOpen) {
+      searchOpen = true;
+      closeMenu();
+      tip = null;
+      readColors();
+      pinView();
+      warmUp();
+    }
+    queueMicrotask(() => {
+      searchInput?.focus();
+      searchInput?.select();
+    });
+  }
+
+  function closeSearch() {
+    if (!searchOpen) return;
+    searchOpen = false;
+    query = "";
+    clearTimeout(recountTimer);
+    clearTimeout(warmTimer);
+    unpaint();
+    current?.marker.dispose();
+    current = null;
+    result = { rank: 0, total: 0 };
+    term?.clearSelection();
+    texts?.clear();
+    pin?.dispose();
+    pin = undefined;
+    // Back to the live output.
+    term?.scrollToBottom();
+    term?.focus();
+  }
+
+  function onSearchKey(e: KeyboardEvent) {
+    // Every key belongs to the bar: no app shortcut, nothing to the remote.
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      find(e.shiftKey ? "newer" : "older");
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeSearch();
+    } else if (keymap.match(e, "terminal") === "terminal.search") {
+      e.preventDefault();
+      searchInput?.select();
+    }
+  }
+
+  // ── Links: ⌘-click / Ctrl-click, always confirmed ──
+  let webLinks: WebLinksAddon | undefined;
+  /** The activation modifier is held (underline and pointer show only then). */
+  let modHeld = $state(false);
+  let hovered: ILink | null = null;
+  let tip = $state<{ x: number; y: number } | null>(null);
+  let section: HTMLElement;
+
+  function setModifier(on: boolean) {
+    if (modHeld === on) return;
+    modHeld = on;
+    // xterm watches these two (Linkifier): the hovered link updates at once.
+    if (hovered?.decorations) {
+      hovered.decorations.underline = on;
+      hovered.decorations.pointerCursor = on;
+    }
+  }
+
+  function showTip(e: MouseEvent) {
+    if (searchOpen) return;
+    const box = section.getBoundingClientRect();
+    tip = { x: e.clientX - box.left, y: e.clientY - box.top };
+    setModifier(isMac ? e.metaKey : e.ctrlKey);
+  }
+
+  /** Web links take their decorations from the modifier, and a tooltip. */
+  function modifierLinks(inner: ILinkProvider): ILinkProvider {
+    return {
+      provideLinks(y, callback) {
+        inner.provideLinks(y, (found) =>
+          callback(
+            found?.map((link) => {
+              const { hover, leave } = link;
+              link.decorations = { underline: modHeld, pointerCursor: modHeld };
+              link.hover = (e, text) => {
+                hovered = link;
+                showTip(e);
+                hover?.call(link, e, text);
+              };
+              link.leave = (e, text) => {
+                if (hovered === link) hovered = null;
+                tip = null;
+                leave?.call(link, e, text);
+              };
+              return link;
+            }),
+          ),
+        );
+      },
+    };
+  }
+
+  /** The web-links addon, its provider wrapped by `modifierLinks` (public API only). */
+  function loadWebLinks(t: Terminal) {
+    webLinks = new WebLinksAddon((e, uri) => activateLink(e, uri, null));
+    const shim = new Proxy(t, {
+      get(target, prop) {
+        if (prop === "registerLinkProvider") return (p: ILinkProvider) => target.registerLinkProvider(modifierLinks(p));
+        const value: unknown = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    webLinks.activate(shim);
+  }
+
+  /** The cells an OSC 8 link covers (1-based, end inclusive). */
+  function visibleText(range: IBufferRange): string {
+    const b = term?.buffer.active;
+    if (!b) return "";
+    let text = "";
+    for (let y = range.start.y; y <= range.end.y; y++) {
+      const line = b.getLine(y - 1);
+      const from = y === range.start.y ? range.start.x - 1 : 0;
+      const to = y === range.end.y ? range.end.x : undefined;
+      text += line?.translateToString(true, from, to) ?? "";
+    }
+    return text;
+  }
+
+  function activateLink(e: MouseEvent, uri: string, text: string | null) {
+    // A plain click selects text, as always.
+    if (!isOpenGesture(e, isMac) || searchOpen) return;
+    e.preventDefault();
+    tip = null;
+    links.request(uri, text);
+  }
+
+  $effect(() => {
+    const mod = isMac ? "Meta" : "Control";
+    const down = (e: KeyboardEvent) => e.key === mod && setModifier(true);
+    const up = (e: KeyboardEvent) => e.key === mod && setModifier(false);
+    const off = () => setModifier(false);
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    window.addEventListener("blur", off);
+    return () => {
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
+      window.removeEventListener("blur", off);
+    };
+  });
+
+  // ── Copy, "Copy on select", the right-click menu ──
+  let copied = $state(false);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  /** How long the quiet "Copied" notice stays. */
+  const COPIED_MS = 1200;
+
+  /** The selection, without ESC and C1 controls (like pasted text). */
+  export function copySelection(): string {
+    return sanitizePaste(term?.getSelection() ?? "");
+  }
+
+  async function copyToClipboard(quiet: boolean) {
+    const text = copySelection();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      if (quiet) {
+        copied = true;
+        clearTimeout(copiedTimer);
+        copiedTimer = setTimeout(() => (copied = false), COPIED_MS);
+      }
+    } catch (e) {
+      workspace.notify(e);
+    }
+  }
+
+  async function pasteClipboard() {
+    try {
+      paste(await navigator.clipboard.readText());
+    } catch {
+      workspace.notify({
+        code: "clipboard",
+        message: "The clipboard is not available here",
+        hint: isMac ? "Paste with ⌘V." : "Paste with Shift-Insert or the middle mouse button.",
+      });
+    }
+  }
+
+  /** A finished mouse selection (drag, double or triple click). */
+  function onMouseUp(e: MouseEvent) {
+    if (e.button !== 0 || !settings.copyOnSelect) return;
+    // xterm settles the selection on the same mouseup.
+    setTimeout(() => {
+      if (!searchOpen && term?.hasSelection()) void copyToClipboard(true);
+    }, 0);
+  }
+
+  let menu = $state<{ x: number; y: number; selection: boolean } | null>(null);
+  const canPaste = $derived(pane.terminal !== null && !pane.end);
+  const menuItems: MenuItem[] = $derived([
+    { id: "copy", label: "Copy", shortcut: isMac ? "⌘C" : keymap.label("tab.copy"), disabled: !menu?.selection },
+    { id: "paste", label: "Paste", shortcut: isMac ? "⌘V" : keymap.label("tab.paste"), disabled: !canPaste },
+    { id: "select-all", label: "Select all" },
+    { id: "search", label: "Search…", shortcut: keymap.label("terminal.search") },
+    { id: "separator" },
+    { id: "clear", label: "Clear scrollback" },
+  ]);
+
+  function onContextMenu(e: MouseEvent) {
+    // A remote app that takes the mouse keeps the right button (Shift-right-click for the menu).
+    if (term && term.modes.mouseTrackingMode !== "none" && !e.shiftKey) return;
+    e.preventDefault();
+    if (searchOpen) return;
+    const box = section.getBoundingClientRect();
+    tip = null;
+    menu = { x: e.clientX - box.left, y: e.clientY - box.top, selection: !!term?.hasSelection() };
+    onfocusin?.();
+  }
+
+  function closeMenu(refocus = false) {
+    if (!menu) return;
+    menu = null;
+    if (refocus) focus();
+  }
+
+  function runMenu(id: string) {
+    closeMenu(id !== "search");
+    if (id === "copy") void copyToClipboard(false);
+    else if (id === "paste") void pasteClipboard();
+    else if (id === "select-all") term?.selectAll();
+    else if (id === "search") openSearch();
+    else if (id === "clear") term?.clear();
+  }
+
   export function pasteText(text: string) {
     paste(text);
   }
@@ -421,7 +876,8 @@
     return term?.modes.bracketedPasteMode ?? false;
   }
   export function focus() {
-    term?.focus();
+    if (searchOpen) searchInput?.focus();
+    else term?.focus();
   }
 
   const endLabel = $derived.by(() => {
@@ -445,6 +901,7 @@
   aria-label={split ? `${pane.alias}, pane${focused ? ' (focused)' : ''}` : undefined}
   data-pane={pane.key}
   {onfocusin}
+  bind:this={section}
 >
   {#if split}
     <!-- Per-pane status: the status bar only speaks for the focused one.
@@ -461,7 +918,47 @@
       {#if zoomed}<span class="zoom" title={zoomKey ? `Zoom (${zoomKey})` : 'Zoom'}>Zoom</span>{/if}
     </header>
   {/if}
-  <div class="xterm-host" class:dimmed={!!pane.end || !!failed} class:idle={split && !focused} bind:this={host}></div>
+  <div
+    class="xterm-host"
+    class:dimmed={!!pane.end || !!failed}
+    class:idle={split && !focused}
+    class:mod={modHeld}
+    bind:this={host}
+    oncontextmenu={onContextMenu}
+    onmousemove={(e) => tip && setModifier(isMac ? e.metaKey : e.ctrlKey)}
+    role="presentation"
+  ></div>
+
+  {#if searchOpen}
+    <div class="search" role="search" data-testid="terminal-search" transition:fly={{ y: -6, duration: dur("base") }}>
+      <label class="search-label" for={`search-${pane.key}`}>{SEARCH_LABEL}</label>
+      <input
+        id={`search-${pane.key}`}
+        class="search-input"
+        bind:this={searchInput}
+        bind:value={query}
+        oninput={() => find("typed")}
+        onkeydown={onSearchKey}
+        spellcheck="false"
+        autocomplete="off"
+        aria-describedby={`search-count-${pane.key}`}
+        title="↵ older · ⇧↵ newer · Esc close"
+      />
+      <span id={`search-count-${pane.key}`} class="search-count" class:none={count.none} aria-live="polite" data-testid="search-count">{count.text}</span>
+    </div>
+  {/if}
+
+  {#if tip && !menu}
+    <div class="link-tip" style:left={`${tip.x}px`} style:top={`${tip.y}px`} role="tooltip">{openHint(isMac)}</div>
+  {/if}
+
+  {#if copied}
+    <div class="copied" role="status" transition:fade={{ duration: dur("fast") }}>Copied</div>
+  {/if}
+
+  {#if menu}
+    <TerminalMenu x={menu.x} y={menu.y} items={menuItems} onpick={runMenu} onclose={() => closeMenu(true)} />
+  {/if}
 
   {#if waiting || cancelled}
     <div class="overlay" transition:fade={{ duration: dur("fast") }}>
@@ -723,6 +1220,90 @@
   .compact-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   .compact .link { height: var(--space-5); padding: 0 var(--space-1); gap: var(--space-1); }
   .xterm-host :global(.xterm) { height: 100%; }
+  /* Links: the pointer only while ⌘ / Ctrl is held (OSC 8 links included). */
+  .xterm-host:not(.mod) :global(.xterm-cursor-pointer) { cursor: text; }
+
+  /* ── Search bar: floating at the top right of the pane ── */
+  .search {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-5);
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: var(--size-control-sm);
+    max-width: calc(100% - 2 * var(--space-5));
+    padding: 0 var(--space-1) 0 var(--space-3);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-raised);
+  }
+  .terminal.split .search { top: calc(var(--pane-head) + var(--space-2)); right: var(--space-4); }
+  .search-label {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+  }
+  .search-input {
+    flex: 1 1 auto;
+    width: calc(26 * var(--space-2));
+    min-width: 0;
+    height: calc(var(--size-control-sm) - 2 * var(--space-1));
+    padding: 0 var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    outline: none;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .search-count {
+    flex: none;
+    min-width: 8ch;
+    padding-right: var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .search-count.none { color: var(--status-warning); }
+  .search-count:empty { display: none; }
+
+  .link-tip {
+    position: absolute;
+    z-index: 4;
+    transform: translate(var(--space-3), var(--space-4));
+    padding: var(--space-1) var(--space-2);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-raised);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .copied {
+    position: absolute;
+    right: var(--space-5);
+    bottom: var(--space-4);
+    z-index: 3;
+    padding: var(--space-1) var(--space-3);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-pill);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    pointer-events: none;
+  }
+
   .xterm-host :global(.xterm-viewport) { background: transparent !important; }
 
   .overlay {
