@@ -67,6 +67,7 @@ impl Lab {
             agent_socket: None,
             connect_timeout: Duration::from_secs(10),
             keepalive: Duration::from_millis(200),
+            update_fetcher: portico_core::update::no_network(),
         });
         let events = engine.subscribe();
         Self::from_env(Env {

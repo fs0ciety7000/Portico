@@ -31,6 +31,7 @@ impl Fixture {
             agent_socket: None,
             connect_timeout: crate::engine::DEFAULT_CONNECT_TIMEOUT,
             keepalive: crate::engine::DEFAULT_KEEPALIVE,
+            update_fetcher: crate::update::no_network(),
         };
         Self {
             dir,

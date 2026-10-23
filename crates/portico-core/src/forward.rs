@@ -1438,6 +1438,7 @@ mod tests {
             agent_socket: None,
             connect_timeout: crate::engine::DEFAULT_CONNECT_TIMEOUT,
             keepalive: crate::engine::DEFAULT_KEEPALIVE,
+            update_fetcher: crate::update::no_network(),
         });
         let ring = Arc::new(Mutex::new(crate::logs::LogRing::new(16)));
         let ctx = SessionCtx::new(

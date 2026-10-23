@@ -635,6 +635,7 @@ impl Env {
             agent_socket,
             connect_timeout,
             keepalive: Duration::from_millis(200),
+            update_fetcher: portico_core::update::no_network(),
         });
         let events = engine.subscribe();
         Self {

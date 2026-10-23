@@ -11,6 +11,9 @@
 //!
 //! [gui]
 //! copy_on_select = true
+//!
+//! [updates]
+//! check = true
 //! ```
 //!
 //! The core only stores settings: key syntax and theme ids are each UI's
@@ -20,7 +23,7 @@
 //!
 //! [`save`] is a read-modify-write of the TOML *document* under an
 //! exclusive inter-process lock (`settings.toml.lock`): the known keys
-//! (`theme`, `keymap.tui`, `keymap.gui`, `gui.copy_on_select`) are replaced, every other key,
+//! (`theme`, `keymap.tui`, `keymap.gui`, `gui.copy_on_select`, `updates.check`) are replaced, every other key,
 //! comment and layout is kept. The write is atomic (`0600`).
 
 use std::collections::BTreeMap;
@@ -48,6 +51,17 @@ pub struct Settings {
     pub keymap: Keymaps,
     /// Preferences of the desktop app only (phase 9).
     pub gui: GuiSettings,
+    /// The opt-in update check ([`crate::update`]).
+    pub updates: UpdateSettings,
+}
+
+/// `[updates]`: the opt-in update check.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// `true`: check GitHub for a newer release once a day; `false`: never;
+    /// absent (`None`): not asked yet (no check either, the UIs ask once).
+    pub check: Option<bool>,
 }
 
 /// `[gui]`: desktop app preferences. Absent keys take their default.
@@ -178,6 +192,26 @@ pub(crate) fn set_copy_on_select(path: &Path, on: bool) -> Result<Settings> {
     save_locked(path, &settings)
 }
 
+/// Changes only `updates.check`, under one lock like [`set_theme`].
+/// Blocking.
+pub(crate) fn set_update_check(path: &Path, on: bool) -> Result<Settings> {
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let mut settings = load(path)?;
+    settings.updates.check = Some(on);
+    save_locked(path, &settings)
+}
+
+/// Sets `key` to a boolean, keeping the decoration of an existing entry.
+fn set_bool(table: &mut toml_edit::Table, key: &str, on: bool) {
+    if let Some(value) = table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(on);
+        *value.decor_mut() = decor;
+        return;
+    }
+    table.insert(key, toml_edit::value(on));
+}
+
 fn save_locked(path: &Path, settings: &Settings) -> Result<Settings> {
     let text = store::read_capped(path, MAX_SETTINGS_FILE_BYTES)?.unwrap_or_default();
     let mut doc = store::parse_document(path, &text)?;
@@ -211,21 +245,24 @@ fn save_locked(path: &Path, settings: &Settings) -> Result<Settings> {
     // `[gui]`: only the known key; a default value is not written.
     let gui = store::child_table(root, "gui", path)?;
     if settings.gui.copy_on_select {
-        if let Some(value) = gui
-            .get_mut("copy_on_select")
-            .and_then(toml_edit::Item::as_value_mut)
-        {
-            let decor = value.decor().clone();
-            *value = toml_edit::Value::from(true);
-            *value.decor_mut() = decor;
-        } else {
-            gui.insert("copy_on_select", toml_edit::value(true));
-        }
+        set_bool(gui, "copy_on_select", true);
     } else {
         gui.remove("copy_on_select");
     }
     if gui.is_empty() {
         root.remove("gui");
+    }
+    // `[updates]`: `check` is written once answered (`false` included: the
+    // question is never asked again); absent means "not asked yet".
+    let updates = store::child_table(root, "updates", path)?;
+    match settings.updates.check {
+        Some(on) => set_bool(updates, "check", on),
+        None => {
+            updates.remove("check");
+        }
+    }
+    if updates.is_empty() {
+        root.remove("updates");
     }
     let written = doc.to_string();
     // Same parse as `load`: never report settings the next read would not see.
@@ -318,6 +355,51 @@ mod tests {
         set_copy_on_select(&bare, false).expect("off");
         let text = std::fs::read_to_string(&bare).expect("read");
         assert!(!text.contains("gui"), "{text}");
+    }
+
+    #[test]
+    fn update_check_is_absent_until_answered_then_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            "theme = \"basalt\"\n\n[updates]\n# mine\nchannel = \"x\"\n",
+        )
+        .expect("write");
+        assert_eq!(load(&path).expect("load").updates.check, None);
+        // An unrelated save never answers the question for the user.
+        set_theme(&path, Some("obsidian")).expect("theme");
+        assert_eq!(load(&path).expect("load").updates.check, None);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("check")
+        );
+
+        let off = set_update_check(&path, false).expect("off");
+        assert_eq!(off.updates.check, Some(false));
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("check = false"), "{text}");
+        assert!(text.contains("# mine\nchannel = \"x\""), "{text}");
+        assert_eq!(load(&path).expect("load").updates.check, Some(false));
+        // `false` survives a save of the other keys.
+        set_copy_on_select(&path, true).expect("copy");
+        assert_eq!(load(&path).expect("load").updates.check, Some(false));
+
+        let on = set_update_check(&path, true).expect("on");
+        assert_eq!(on.updates.check, Some(true));
+        assert_eq!(on.theme.as_deref(), Some("obsidian"));
+        assert!(on.gui.copy_on_select);
+
+        // Back to "not asked": the key goes, and the table with it when empty.
+        let bare = dir.path().join("bare.toml");
+        set_update_check(&bare, true).expect("on");
+        save(&bare, &Settings::default()).expect("save");
+        let text = std::fs::read_to_string(&bare).expect("read");
+        assert!(!text.contains("updates"), "{text}");
+
+        std::fs::write(&bare, "[updates]\ncheck = \"daily\"\n").expect("write");
+        assert!(load(&bare).is_err());
     }
 
     #[test]

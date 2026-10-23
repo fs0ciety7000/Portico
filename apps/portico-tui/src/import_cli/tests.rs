@@ -49,6 +49,7 @@ fn engine(root: &Path) -> Engine {
         agent_socket: None,
         connect_timeout: portico_core::engine::DEFAULT_CONNECT_TIMEOUT,
         keepalive: portico_core::engine::DEFAULT_KEEPALIVE,
+        update_fetcher: portico_core::update::no_network(),
     })
 }
 

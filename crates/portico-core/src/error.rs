@@ -148,6 +148,10 @@ pub enum Error {
     // ── Phase 6b: hosts created in Portico ──────────────────────────────
     #[error(transparent)]
     ManagedHost(#[from] crate::managed_hosts::ManagedHostError),
+
+    // ── 0.3.0: update check ─────────────────────────────────────────────
+    #[error(transparent)]
+    Update(#[from] crate::update::UpdateError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -334,6 +338,9 @@ impl Error {
 
             // ── Phase 6b ──
             Self::ManagedHost(e) => e.code_and_hint(),
+
+            // ── 0.3.0 ──
+            Self::Update(e) => e.code_and_hint(),
         };
         ErrorSummary {
             code: code.to_owned(),
