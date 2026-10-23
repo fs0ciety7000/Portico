@@ -172,7 +172,7 @@ Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` 
 | Fermer : efface les surlignages et revient en bas (sortie en direct) | `Esc`, `Ctrl-C` |
 | Commandes Portico (changer de panneau…) ; `Ctrl-Space` deux fois ne part pas vers l'hôte tant que la barre est ouverte | `Ctrl-Space`, puis la touche |
 
-Quand la correspondance courante est sur la dernière ligne de la vue en direct, la barre passe sur la première ligne du panneau pour ne pas la masquer. Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.
+La barre reste toujours sur la dernière ligne du panneau : quand la correspondance courante est sur la dernière ligne de la vue en direct, la vue remonte d'une ligne pour l'afficher juste au-dessus de la barre (comme `less`). Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.
 
 ### TUI : panneaux
 

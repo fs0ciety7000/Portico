@@ -266,7 +266,7 @@ const SCROLLBACK: Panel = Panel {
             "`Ctrl-Space`, puis la touche",
         ),
     ],
-    outro: "Quand la correspondance courante est sur la dernière ligne de la vue en direct, la barre passe sur la première ligne du panneau pour ne pas la masquer. Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.",
+    outro: "La barre reste toujours sur la dernière ligne du panneau : quand la correspondance courante est sur la dernière ligne de la vue en direct, la vue remonte d'une ligne pour l'afficher juste au-dessus de la barre (comme `less`). Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.",
 };
 
 const PANES: Panel = Panel {
