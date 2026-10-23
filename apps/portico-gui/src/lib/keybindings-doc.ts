@@ -31,6 +31,27 @@ export const GUI_FIXED: DocTable[] = [
     outro: "Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.",
   },
   {
+    title: "Terminal (GUI) : recherche, liens, menu",
+    intro:
+      "Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search scrollback » dans la palette) : texte littéral, " +
+      "casse ignorée sauf si la requête contient une majuscule. Le compteur numérote depuis le bas (`3 of 17`, `No match`, `999+`). " +
+      "Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue. " +
+      "Les touches de la barre s'affichent dans le champ tant qu'il est vide, et dans la barre d'état tant qu'elle est ouverte (`SEARCH ↵ older · ⇧↵ newer · Esc close`).",
+    rows: [
+      ["Recherche : taper (va au plus proche en remontant depuis le bas de la vue)", "texte"],
+      ["Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage", "`↵` / `Shift-↵`, ou `↑` / `↓`"],
+      ["Recherche : fermer, effacer les surlignages, revenir en bas (sortie en direct)", "`Esc`"],
+      ["Ouvrir un lien `http(s)` (URL affichée ou lien OSC 8), après confirmation « Open this link? »", "`⌘`-clic (macOS), `Ctrl`-clic (Linux)"],
+      ["Confirmation de lien : ouvrir / annuler", "`↵` / `Esc`"],
+      ["Menu contextuel du terminal (Copy, Paste, Select all, Search…, Clear scrollback)", "clic droit ; `Shift`-clic droit si l'application distante capture la souris"],
+      ["Menu contextuel : se déplacer, premier / dernier, choisir, fermer", "`↑` `↓`, `Home` / `End`, `↵`, `Esc`"],
+    ],
+    outro:
+      "Un clic simple sélectionne toujours du texte. Les autres schémas (`file:`, `ssh:`, `javascript:`…) ne sont jamais activables ; " +
+      "une URL de plus de 2 048 caractères ou avec identifiants (`user:pass@`) est refusée. « Copy on select » (réglages, `app.settings`) " +
+      "copie la sélection à la souris dès qu'elle est terminée.",
+  },
+  {
     title: "Liste des hôtes (GUI) : sections",
     intro:
       "Sans recherche, la liste montre « Recent » (les 5 derniers hôtes encore présents dans la config), puis un titre par groupe " +
@@ -215,5 +236,21 @@ export const GUI_FIXED: DocTable[] = [
       ["Lecture : aller à un instant", "clic sur la barre de progression"],
       ["Fermer la lecture (retour à la liste) / fermer la liste", "`q` ou `Esc` / `Esc`"],
     ],
+  },
+  {
+    title: "Mises à jour (GUI, opt-in)",
+    intro:
+      "Tant que `[updates] check` est absent de `settings.toml`, un bandeau discret au-dessus des détails d'hôte demande une fois : " +
+      "« Check for new versions once a day? Portico would contact github.com and send nothing else. » Sans accord, Portico ne fait aucune requête.",
+    rows: [
+      ["Bandeau : « Check daily » (`check = true`) / « Not now » (`check = false`, plus jamais demandé)", "boutons (`Tab` puis `↵` ou `Espace`)"],
+      ["Changer d'avis plus tard", "réglages (`app.settings`), « Check for updates daily » ; ou la palette, `app.update-check`"],
+      ["Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available »", "clic sur le badge de la barre d'état, ou la palette (« Update available: Portico 0.3.1… », `app.update`)"],
+      ["Fenêtre : copier la commande de mise à jour (action principale) / notes de version (navigateur) / fermer (focus initial)", "« Copy » / « Release notes » / « Close » ou `Esc`"],
+      ["Fenêtre sans commande (AppImage, .deb, autre) : ouvrir la page de version (action principale)", "« Release page »"],
+    ],
+    outro:
+      "Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; " +
+      "aucune fenêtre ne s'ouvre d'elle-même. « Portico never downloads or installs anything itself. »",
   },
 ];

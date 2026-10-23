@@ -115,7 +115,8 @@
     }
     if (e.key !== "Tab") return;
     const items = [...dialog.querySelectorAll<HTMLElement>("input, textarea, select, button, [tabindex='0']")].filter(
-      (el) => !el.hasAttribute("disabled"),
+      // A roving tabindex (a radio group) leaves one tab stop.
+      (el) => !el.hasAttribute("disabled") && el.tabIndex >= 0,
     );
     const first = items[0];
     const last = items[items.length - 1];
@@ -226,7 +227,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-4);
     border-radius: var(--radius-md);
     font: inherit;

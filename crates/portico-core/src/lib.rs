@@ -44,6 +44,7 @@ pub mod snippets;
 mod socks;
 pub mod ssh_config;
 pub mod store;
+pub mod update;
 pub mod vault;
 
 pub use agent::{AgentCertificate, AgentKey};

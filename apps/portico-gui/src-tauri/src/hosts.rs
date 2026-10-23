@@ -442,6 +442,7 @@ mod tests {
             agent_socket: None,
             connect_timeout: portico_core::engine::DEFAULT_CONNECT_TIMEOUT,
             keepalive: portico_core::engine::DEFAULT_KEEPALIVE,
+            update_fetcher: portico_core::update::no_network(),
         })
     }
 
@@ -584,6 +585,7 @@ mod tests {
             agent_socket: None,
             connect_timeout: portico_core::engine::DEFAULT_CONNECT_TIMEOUT,
             keepalive: portico_core::engine::DEFAULT_KEEPALIVE,
+            update_fetcher: portico_core::update::no_network(),
         });
         let with_password = || {
             let mut json = base();

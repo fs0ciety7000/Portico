@@ -67,6 +67,12 @@ pub enum EngineEvent {
         session: SessionId,
         state: RecordingState,
     },
+    /// The update status changed (0.3.0): a check found a newer release,
+    /// or the setting was changed. UIs show the badge from it; after a
+    /// lagged bus they call [`crate::Engine::update_status`].
+    Update {
+        status: crate::update::UpdateStatus,
+    },
 }
 
 /// Lifecycle of a terminal recording ([`crate::recording`]). Every

@@ -90,6 +90,8 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Onglet précédent | `[`, `Shift-Tab` | `hosts.prev_tab` |
 | Recharger `~/.ssh/config` | `r` | `hosts.reload` |
 | Changer de thème (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
+| « Update » : la version disponible (notes de version, commande de mise à jour copiable en OSC 52), ou l'état de la vérification quotidienne | `u` | `hosts.update` |
+| « Updates » : état de la vérification quotidienne des nouvelles versions, `y` l'active ou la désactive (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`) | `U` | `hosts.update_check` |
 | Aide | `?` | `hosts.help` |
 | Quitter (aussi `Ctrl-C`) | `q` | `hosts.quit` |
 | Aller à l'onglet n | `1`-`9` | (fixe) |
@@ -142,7 +144,7 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Panneau debug (présélectionne la session de l'onglet) | `l` | `prefix.debug` |
 | « Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation | `R` | `prefix.record` |
 | « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `prefix.recordings` |
-| Rechercher un hôte | `/` | `prefix.search` |
+| Rechercher un hôte (dans un panneau terminal, la même touche cherche dans son historique : `terminal.search`) | `/` | `prefix.search` |
 | Aide | `?` | `prefix.help` |
 | Onglet n | `1`-`9` | (fixe) |
 | Envoyer `Ctrl-Space` au programme distant | `Ctrl-Space` deux fois | (fixe) |
@@ -150,13 +152,29 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 
 ### TUI : terminal
 
-Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.
+Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant. Les commandes de panneau (`terminal.search`) suivent le préfixe `Ctrl-Space` et, dans un panneau terminal, priment sur la commande du préfixe de même touche (`/` cherche alors dans l'historique, plus dans la liste des hôtes).
 
 | Action | Touches | Identifiant |
 |---|---|---|
 | Remonter dans l'historique | `Shift-PgUp` | `terminal.scroll_up` |
 | Redescendre dans l'historique (toute frappe revient en bas) | `Shift-PgDn` | `terminal.scroll_down` |
+| Rechercher dans l'historique du panneau (après `Ctrl-Space` ; texte littéral, casse intelligente) | `Ctrl-Space /` | `terminal.search` |
 | Coller | collage du terminal hôte (bracketed paste si le programme distant l'active) | (fixe) |
+
+### TUI : recherche dans l'historique
+
+`Ctrl-Space /` dans un panneau terminal (`terminal.search`) ouvre une barre d'une ligne en bas du panneau (au-dessus de la barre de statut pour un onglet non divisé) : « Search », la requête et un compteur « 3 of 17 », numéroté depuis le bas comme dans la GUI (la correspondance la plus récente est 1 ; « N matches » si la courante a disparu sous la sortie ; « No match » en couleur d'avertissement, « 999+ » au-delà de 999, rien tant que la requête est vide). Texte littéral (`.*[` ne sont pas des métacaractères), casse intelligente : insensible à la casse sauf si la requête contient une majuscule. La recherche porte sur l'écran et tout l'historique du panneau (10 000 lignes). Toutes les correspondances visibles sont surlignées discrètement, la courante en couleur d'accent. Tant que la barre est ouverte, **aucune touche ni aucun collage n'atteint l'hôte distant**, et la sortie qui arrive ne déplace pas la vue (le compteur suit).
+
+| Action | Touches |
+|---|---|
+| Taper la requête (saut incrémental à la correspondance la plus proche en remontant depuis le bas de la vue) | saisie, collage (première ligne) |
+| Effacer un caractère / toute la requête | `Backspace` / `Ctrl-U` |
+| Correspondance plus ancienne (vers le haut, boucle) | `↵`, `↑`, `Ctrl-P` |
+| Correspondance plus récente (vers le bas, boucle) | `Ctrl-N`, `↓` (`Shift-↵` seulement si le terminal hôte le distingue de `↵`, ce que la plupart ne font pas) |
+| Fermer : efface les surlignages et revient en bas (sortie en direct) | `Esc`, `Ctrl-C` |
+| Commandes Portico (changer de panneau…) ; `Ctrl-Space` deux fois ne part pas vers l'hôte tant que la barre est ouverte | `Ctrl-Space`, puis la touche |
+
+La barre reste toujours sur la dernière ligne du panneau : quand la correspondance courante est sur la dernière ligne de la vue en direct, la vue remonte d'une ligne pour l'afficher juste au-dessus de la barre (comme `less`). Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.
 
 ### TUI : panneaux
 
@@ -312,6 +330,21 @@ Formulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, ap
 | Lecture : revenir à la liste | `q`, `Esc` (`Ctrl-C` ferme tout) |
 
 Le lecteur occupe le corps de l'écran : une ligne de titre (titre de l'en-tête, toujours suivi du nom du fichier, car un fichier tiers peut porter n'importe quel titre ; puis l'état et la vitesse), la grille enregistrée dans un émulateur dédié, puis la progression « temps / total » (jauge en accent) et la taille, ou ce qui ne tient pas (« 2 rows hidden »). Sur un écran de 24 lignes, la ligne de titre disparaît : nom du fichier, état et vitesse passent sur la ligne de progression, et la grille gagne une ligne. `←` et `Home` rouvrent le fichier et rejouent instantanément jusqu'au point visé (l'émulateur repart de zéro). Les silences de plus de 2 s sont raccourcis. Une erreur de lecture s'affiche à la place de la jauge (message · conseil). Le statut de la session (`● alias · latence`) et `● REC` restent visibles dans la barre de statut. Aucune touche ni aucun collage ne part vers un terminal pendant la lecture.
+
+### TUI : vérification des mises à jour (opt-in)
+
+Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, une question s'ouvre une fois sur la liste des hôtes : « Check for new versions once a day? Portico would contact github.com and send nothing else. » (dialogue plutôt que bandeau : `y` et `n` servent déjà sur la liste ; bordure discrète, « Change it later: U on the host list. » en retrait). Elle est armée : les touches des premières 400 ms sont ignorées. Sans accord, Portico ne fait aucune requête réseau.
+
+| Action | Touches |
+|---|---|
+| « Check daily » (`check = true`) | `y` |
+| « Not now » (`check = false` : plus jamais demandé) | `n` |
+| Plus tard (rien n'est écrit, redemandé au prochain lancement) | `Esc` |
+| Vue « Portico X is available » (`u`) : copier la commande de mise à jour de cette installation (Homebrew), sinon le lien de la page de version (OSC 52) | `y` |
+| Vue « Updates » (`U`, ou `u` quand aucune version plus récente n'est connue) : activer / désactiver la vérification quotidienne (jamais en une seule touche) | `y` |
+| Fermer la vue | `Esc`, `n` |
+
+Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version) puis « Portico never downloads or installs anything itself. »
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique
@@ -533,6 +566,9 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
 | Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
 | Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette | `recordings.open` | — | — |
+| Réglages : thème, « Copy on select », vérification quotidienne des mises à jour (enregistrés dans `settings.toml`) | `app.settings` | `⌘,` | `Ctrl-Alt-,` |
+| Version disponible : notes de version (navigateur), commande de mise à jour de cette installation (copiable) ; aussi le badge « 0.3.1 available » de la barre d'état | `app.update` | — | — |
+| Vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; aussi dans les réglages) | `app.update-check` | — | — |
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
@@ -556,6 +592,7 @@ pas par `Ctrl-Alt` + flèches, que GNOME, Cinnamon et Xfce gardent pour les espa
 | Prendre la séparation la plus proche du panneau actif : flèches pour la déplacer, `Home`/`End` jusqu'aux limites, `↵` ou `Esc` pour rendre le clavier au panneau | `pane.divider` | `⌥⌘R` | `Ctrl-Alt-Shift-R` |
 | Panneau suivant (ordre de lecture) | `pane.next` | `⌥⌘N` | `Ctrl-Alt-N` |
 | Zoom on/off : le panneau actif occupe tout l'onglet | `pane.zoom` | `⌘⇧↵` | `Ctrl-Shift-↵` |
+| Rechercher dans le scrollback du panneau actif (texte littéral, casse ignorée sauf majuscule ; `↵` ou `↑` plus ancien, `Shift-↵` ou `↓` plus récent, `Esc` ferme et revient en bas ; touches : tableau « Terminal (GUI) : recherche, liens, menu ») | `terminal.search` | `⌘F` | `Ctrl-Alt-F` |
 | Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif | `pane.close` | — | — |
 | Enregistrer le panneau actif (asciicast v2, confirmation : ce qui s'affiche est enregistré, jamais ce qui est tapé) ; arrêter s'il l'est déjà (sans confirmation). `REC` sur le panneau, l'onglet et la barre d'état | `session.record` | `⌘⇧R` | `Ctrl-Shift-R` |
 
@@ -604,6 +641,22 @@ Toutes les touches partent vers l'hôte distant, sauf les raccourcis de l'app (t
 | Séparation entre panneaux (focus clavier, par `pane.divider` ou `Tab`) : déplacer, aller aux limites, rendre le clavier au panneau | `←` `→` (ou `↑` `↓`), `Home` / `End`, `↵` / `Esc` |
 
 Tout collage est assaini (ESC et contrôles C1 retirés) avant d'atteindre le terminal.
+
+## Terminal (GUI) : recherche, liens, menu
+
+Recherche dans le scrollback du panneau actif (`terminal.search`, ou « Search scrollback » dans la palette) : texte littéral, casse ignorée sauf si la requête contient une majuscule. Le compteur numérote depuis le bas (`3 of 17`, `No match`, `999+`). Tant que la barre est ouverte, aucune touche ni aucun clic n'atteint l'hôte distant, et la sortie qui arrive ne déplace pas la vue. Les touches de la barre s'affichent dans le champ tant qu'il est vide, et dans la barre d'état tant qu'elle est ouverte (`SEARCH ↵ older · ⇧↵ newer · Esc close`).
+
+| Action | Touches |
+|---|---|
+| Recherche : taper (va au plus proche en remontant depuis le bas de la vue) | texte |
+| Recherche : correspondance plus ancienne (vers le haut) / plus récente (vers le bas), avec bouclage | `↵` / `Shift-↵`, ou `↑` / `↓` |
+| Recherche : fermer, effacer les surlignages, revenir en bas (sortie en direct) | `Esc` |
+| Ouvrir un lien `http(s)` (URL affichée ou lien OSC 8), après confirmation « Open this link? » | `⌘`-clic (macOS), `Ctrl`-clic (Linux) |
+| Confirmation de lien : ouvrir / annuler | `↵` / `Esc` |
+| Menu contextuel du terminal (Copy, Paste, Select all, Search…, Clear scrollback) | clic droit ; `Shift`-clic droit si l'application distante capture la souris |
+| Menu contextuel : se déplacer, premier / dernier, choisir, fermer | `↑` `↓`, `Home` / `End`, `↵`, `Esc` |
+
+Un clic simple sélectionne toujours du texte. Les autres schémas (`file:`, `ssh:`, `javascript:`…) ne sont jamais activables ; une URL de plus de 2 048 caractères ou avec identifiants (`user:pass@`) est refusée. « Copy on select » (réglages, `app.settings`) copie la sélection à la souris dès qu'elle est terminée.
 
 ## Liste des hôtes (GUI) : sections
 
@@ -758,4 +811,18 @@ Sans terminal ouvert, la liste reste éditable et l'exécution est désactivée 
 | Lecture : sauter le silence en cours / reculer de 5 s / revenir au début (aussi les boutons « ↺ 5 s » et « Restart ») | `→` / `←` / `Home` |
 | Lecture : aller à un instant | clic sur la barre de progression |
 | Fermer la lecture (retour à la liste) / fermer la liste | `q` ou `Esc` / `Esc` |
+
+## Mises à jour (GUI, opt-in)
+
+Tant que `[updates] check` est absent de `settings.toml`, un bandeau discret au-dessus des détails d'hôte demande une fois : « Check for new versions once a day? Portico would contact github.com and send nothing else. » Sans accord, Portico ne fait aucune requête.
+
+| Action | Touches |
+|---|---|
+| Bandeau : « Check daily » (`check = true`) / « Not now » (`check = false`, plus jamais demandé) | boutons (`Tab` puis `↵` ou `Espace`) |
+| Changer d'avis plus tard | réglages (`app.settings`), « Check for updates daily » ; ou la palette, `app.update-check` |
+| Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available » | clic sur le badge de la barre d'état, ou la palette (« Update available: Portico 0.3.1… », `app.update`) |
+| Fenêtre : copier la commande de mise à jour (action principale) / notes de version (navigateur) / fermer (focus initial) | « Copy » / « Release notes » / « Close » ou `Esc` |
+| Fenêtre sans commande (AppImage, .deb, autre) : ouvrir la page de version (action principale) | « Release page » |
+
+Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; aucune fenêtre ne s'ouvre d'elle-même. « Portico never downloads or installs anything itself. »
 <!-- END GENERATED: gui -->

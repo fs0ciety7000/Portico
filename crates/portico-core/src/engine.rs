@@ -72,6 +72,10 @@ pub struct EngineConfig {
     pub agent_socket: Option<PathBuf>,
     pub connect_timeout: Duration,
     pub keepalive: Duration,
+    /// Fetches the latest release for the opt-in update check (only ever
+    /// called once the user turned it on; see [`crate::update`]). Tests
+    /// pass [`crate::update::no_network`] or a fake.
+    pub update_fetcher: Arc<dyn crate::update::ReleaseFetcher>,
 }
 
 impl EngineConfig {
@@ -87,6 +91,7 @@ impl EngineConfig {
             agent_socket: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             keepalive: DEFAULT_KEEPALIVE,
+            update_fetcher: crate::update::github(),
         })
     }
 
@@ -259,6 +264,9 @@ struct Inner {
     /// Names of the recordings whose file is still open for writing (they
     /// cannot be deleted).
     recordings_active: Arc<Mutex<std::collections::HashSet<String>>>,
+    // ── 0.3.0: opt-in update check ──
+    /// The periodic check, while `[updates] check = true`.
+    update_task: Mutex<Option<CancellationToken>>,
 }
 
 #[derive(Debug)]
@@ -294,6 +302,7 @@ impl Engine {
                 tasks: TaskTracker::new(),
                 terminals: Mutex::default(),
                 recordings_active: Arc::default(),
+                update_task: Mutex::default(),
             }),
         }
     }
@@ -1124,9 +1133,191 @@ impl Engine {
             .await
             .map_err(|_| Error::EngineClosed)?
     }
+
+    /// Remembers the GUI's "Copy on select" preference, alone, like
+    /// [`Engine::set_theme`] (phase 9).
+    pub async fn set_copy_on_select(&self, on: bool) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::set_copy_on_select(&path, on))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
 }
 
 // ════ end Phase 4 ════════════════════════════════════════════════════════
+
+// ════ 0.3.0: opt-in update check (additive block) ════════════════════════
+//
+// No request is ever made unless `[updates] check = true` (see
+// `crate::update`): the task below starts only then, and stops when the
+// user turns the check off.
+
+impl Engine {
+    /// The update setting and the newer release known from the last check
+    /// (reads `settings.toml` and `state/update.toml`; no network).
+    pub async fn update_status(&self) -> Result<crate::update::UpdateStatus> {
+        let settings = self.settings().await?;
+        let path = self.inner.config.paths.update_cache();
+        let cache = tokio::task::spawn_blocking(move || crate::update::load_cache(&path))
+            .await
+            .map_err(|_| Error::EngineClosed)?;
+        Ok(crate::update::status(
+            settings.updates.check,
+            &cache,
+            &crate::update::current_version(),
+        ))
+    }
+
+    /// Called once by each UI at startup: starts the periodic check when
+    /// the user turned it on (and only then), and returns the status.
+    pub async fn start_update_checks(&self) -> Result<crate::update::UpdateStatus> {
+        let status = self.update_status().await?;
+        if status.check == Some(true) {
+            self.spawn_update_task();
+        }
+        Ok(status)
+    }
+
+    /// Answers the UIs' question, or changes the setting later: writes
+    /// `[updates] check` (only that key), starts or stops the periodic
+    /// check, and announces the new status ([`EngineEvent::Update`]).
+    pub async fn set_update_check(&self, on: bool) -> Result<crate::update::UpdateStatus> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::set_update_check(&path, on))
+            .await
+            .map_err(|_| Error::EngineClosed)??;
+        if on {
+            self.spawn_update_task();
+        } else {
+            self.stop_update_task();
+        }
+        let status = self.update_status().await?;
+        self.emit(EngineEvent::Update {
+            status: status.clone(),
+        });
+        Ok(status)
+    }
+
+    /// Starts the check task unless it runs already (or the engine is
+    /// shutting down).
+    fn spawn_update_task(&self) {
+        let token = {
+            let mut task = self
+                .inner
+                .update_task
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if task.as_ref().is_some_and(|t| !t.is_cancelled())
+                || self.inner.shutdown.is_cancelled()
+            {
+                return;
+            }
+            let token = self.inner.shutdown.child_token();
+            *task = Some(token.clone());
+            token
+        };
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let path = engine.inner.config.paths.update_cache();
+            let Ok(cache) =
+                tokio::task::spawn_blocking(move || crate::update::load_cache(&path)).await
+            else {
+                return;
+            };
+            crate::update::check_loop(
+                EngineCheckHost {
+                    engine: engine.clone(),
+                },
+                cache,
+                crate::update::current_version(),
+                token.clone(),
+            )
+            .await;
+            // The loop ended (cancelled, or the setting was turned off
+            // elsewhere): forget its handle so `update_checks_running` is
+            // truthful, unless a newer task replaced it meanwhile.
+            token.cancel();
+            let mut task = engine
+                .inner
+                .update_task
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if task.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                *task = None;
+            }
+        });
+    }
+
+    fn stop_update_task(&self) {
+        if let Some(token) = self
+            .inner
+            .update_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            token.cancel();
+        }
+    }
+
+    /// The periodic check is running.
+    pub fn update_checks_running(&self) -> bool {
+        self.inner
+            .update_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|t| !t.is_cancelled())
+    }
+}
+
+/// The engine side of [`crate::update::check_loop`]: the request on
+/// `spawn_blocking`, the cache written there too, the event on a change.
+#[derive(Debug)]
+struct EngineCheckHost {
+    engine: Engine,
+}
+
+impl crate::update::CheckHost for EngineCheckHost {
+    fn now(&self) -> time::OffsetDateTime {
+        time::OffsetDateTime::now_utc()
+    }
+
+    async fn enabled(&self) -> bool {
+        self.engine
+            .settings()
+            .await
+            .is_ok_and(|s| s.updates.check == Some(true))
+    }
+
+    async fn fetch(&self) -> std::result::Result<Vec<u8>, crate::update::UpdateError> {
+        let fetcher = Arc::clone(&self.engine.inner.config.update_fetcher);
+        tokio::task::spawn_blocking(move || fetcher.fetch_latest())
+            .await
+            .unwrap_or_else(|_| {
+                Err(crate::update::UpdateError::Fetch {
+                    reason: "the check was interrupted".into(),
+                })
+            })
+    }
+
+    async fn checked(&self, cache: &crate::update::UpdateCache, changed: bool) {
+        let path = self.engine.inner.config.paths.update_cache();
+        let stored = cache.clone();
+        let saved =
+            tokio::task::spawn_blocking(move || crate::update::save_cache(&path, &stored)).await;
+        if let Ok(Err(e)) = saved {
+            tracing::debug!(error = %e, "cannot save the update check");
+        }
+        if changed {
+            self.engine.emit(EngineEvent::Update {
+                status: crate::update::status(Some(true), cache, &crate::update::current_version()),
+            });
+        }
+    }
+}
+
+// ════ end 0.3.0 update check ═════════════════════════════════════════════
 
 /// Removes a pending prompt and tells the UIs, when the asking side stops
 /// waiting for any reason.
@@ -1793,6 +1984,7 @@ mod tests {
             agent_socket: None,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             keepalive: DEFAULT_KEEPALIVE,
+            update_fetcher: crate::update::no_network(),
         })
     }
 

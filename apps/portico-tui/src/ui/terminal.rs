@@ -1,4 +1,8 @@
-//! Renders an `alacritty_terminal` grid into the ratatui buffer.
+//! Renders an `alacritty_terminal` grid into the ratatui buffer, with the
+//! scrollback search bar and its highlights when the pane has one open:
+//! every visible match on `search_match` with `text_primary`, the current
+//! one on `search_current` (the accent) with `text_on_accent`. The bar
+//! always takes the pane's bottom row.
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
@@ -11,10 +15,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 
+use crate::term_search::{ScrollSearch, counter_text};
 use crate::terminal::TerminalView;
 use crate::theme::{Styles, c};
+use crate::ui::fmt;
 
 /// Draws the terminal. `focused` controls the cursor; `banner` the
 /// one-line notice once the shell ended (`close`: the close-pane key).
@@ -31,27 +37,49 @@ pub(crate) fn render(
         .term
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let search = view.search.as_ref();
+    // The bar keeps the bottom row: a current match on the grid's last
+    // line is lifted one row above it (like `less`).
+    let lift = search.map_or(0, |search| search.lift(&term));
     frame.render_widget(
         TermWidget {
             term: &term,
             theme: s.theme,
             focused,
-            skip_rows: 0,
+            skip_rows: i32::from(lift),
+            search,
         },
         area,
     );
     let offset = term.grid().display_offset();
     drop(term);
 
+    if let Some(search) = search {
+        render_search_bar(
+            search,
+            focused,
+            s,
+            frame,
+            Rect {
+                y: area.bottom().saturating_sub(1),
+                height: 1,
+                ..area
+            },
+        );
+    }
     if offset > 0 {
-        let badge = Line::from(vec![
-            Span::styled(format!(" ↑ {offset} lines  "), s.muted().patch(s.chrome())),
-            Span::styled(" Shift-PgDn ", s.key_hint()),
-        ])
-        .right_aligned();
+        let mut spans = vec![Span::styled(
+            format!(" ↑ {offset} lines  "),
+            s.muted().patch(s.chrome()),
+        )];
+        // While searching, the keys belong to the bar (Esc goes back down).
+        if search.is_none() {
+            spans.push(Span::styled(" Shift-PgDn ", s.key_hint()));
+        }
+        let badge = Line::from(spans).right_aligned();
         frame.render_widget(Paragraph::new(badge), Rect { height: 1, ..area });
     }
-    if let Some(ended) = view.ended.as_ref().filter(|_| banner) {
+    if let Some(ended) = view.ended.as_ref().filter(|_| banner && search.is_none()) {
         let text = match ended {
             crate::terminal::Ended::Exited(code) => {
                 format!(" shell exited ({code}) · Ctrl-Space {close} to close ")
@@ -98,9 +126,69 @@ pub(crate) fn render_grid<T: EventListener>(
             theme: s.theme,
             focused: cursor,
             skip_rows: i32::from(skip_rows),
+            search: None,
         },
         area,
     );
+}
+
+/// `▍Search  query▏                 3 of 17 ` on the chrome surface. The
+/// query keeps its end when it does not fit; the counter is secondary, or in
+/// the warning colour for `No match`, absent while the query is empty.
+fn render_search_bar(
+    search: &ScrollSearch,
+    focused: bool,
+    s: Styles,
+    frame: &mut Frame<'_>,
+    area: Rect,
+) {
+    let width = usize::from(area.width);
+    let counter = counter_text(search.count).map(|(text, warn)| {
+        let style = if warn {
+            s.status(s.theme.status.warning)
+        } else {
+            s.secondary()
+        };
+        (format!("{text} "), style)
+    });
+    let counter_width = counter.as_ref().map_or(0, |(t, _)| t.chars().count());
+    // `▍` + ` Search  ` + cursor + one space before the counter.
+    let fixed = 1 + 9 + 1 + 1;
+    let room = width.saturating_sub(fixed + counter_width).max(1);
+    let query = if search.query.chars().count() > room {
+        let tail: String = {
+            let chars: Vec<char> = search.query.chars().collect();
+            let skip = chars.len().saturating_sub(room.saturating_sub(1));
+            chars.get(skip..).unwrap_or_default().iter().collect()
+        };
+        format!("…{tail}")
+    } else {
+        search.query.clone()
+    };
+    let mut spans = vec![
+        Span::styled("▍", s.accent()),
+        Span::styled(" Search  ", s.secondary()),
+        Span::styled(query, s.primary()),
+    ];
+    if focused {
+        spans.push(Span::styled(" ", s.key_primary()));
+    }
+    let used: usize = spans.iter().map(Span::width).sum();
+    if let Some((text, style)) = counter
+        && used + counter_width < width
+    {
+        spans.push(Span::raw(" ".repeat(width - used - counter_width)));
+        spans.push(Span::styled(text, style));
+    }
+    let line = Line::from(spans);
+    let line = if width < 12 {
+        Line::from(Span::styled(fmt::truncate("Search", width), s.secondary()))
+    } else {
+        line
+    };
+    // The whole row is the bar's: no grid cell shows through past the text.
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(line).style(s.chrome()), area);
 }
 
 struct TermWidget<'a, T> {
@@ -109,6 +197,8 @@ struct TermWidget<'a, T> {
     focused: bool,
     /// Grid rows above the drawn area.
     skip_rows: i32,
+    /// The pane's open search: highlights (live terminals only).
+    search: Option<&'a ScrollSearch>,
 }
 
 impl<T: EventListener> Widget for TermWidget<'_, T> {
@@ -160,6 +250,17 @@ impl<T: EventListener> Widget for TermWidget<'_, T> {
             if cell.flags.contains(Flags::HIDDEN) {
                 fg = bg;
             }
+            if let Some(search) = self.search {
+                let point = indexed.point;
+                if search.current.as_ref().is_some_and(|m| m.contains(&point)) {
+                    bg = c(p.search_current);
+                    fg = c(p.text_on_accent);
+                } else if search.visible.iter().any(|m| m.contains(&point)) {
+                    // The remote's colour could be unreadable on the tint.
+                    bg = c(p.search_match);
+                    fg = c(p.text_primary);
+                }
+            }
             let Some(target) = buf.cell_mut((area.x + x, area.y + y)) else {
                 continue;
             };
@@ -175,7 +276,9 @@ impl<T: EventListener> Widget for TermWidget<'_, T> {
 
         // Cursor: only in the live view, when the program shows it.
         let cursor = content.cursor;
+        // While searching, the bar has the only cursor.
         if self.focused
+            && self.search.is_none()
             && content.display_offset == 0
             && content.mode.contains(TermMode::SHOW_CURSOR)
             && cursor.shape != CursorShape::Hidden

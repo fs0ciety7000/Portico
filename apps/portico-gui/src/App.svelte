@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { fly } from "svelte/transition";
+  import { SvelteSet } from "svelte/reactivity";
   import { describe, formatRtt, isTauri, sentence, setHome, type Host } from "./lib/api";
   import { backend } from "./lib/backend";
   import { isMac } from "./lib/keys";
   import { dur } from "./lib/motion";
+  import { SEARCH_HINT_KEYS } from "./lib/termsearch";
   import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
   import { isLive, paneStatus, workspace, type Tab } from "./lib/state/workspace.svelte";
   import { layout, minPanePx, MAX_PANES, panesOf, type Direction, type Layout } from "./lib/panes";
@@ -35,6 +37,11 @@
   import ImportDialog from "./lib/components/ImportDialog.svelte";
   import RecordingsDialog from "./lib/components/RecordingsDialog.svelte";
   import RecordConfirm from "./lib/components/RecordConfirm.svelte";
+  import LinkConfirm from "./lib/components/LinkConfirm.svelte";
+  import SettingsDialog from "./lib/components/SettingsDialog.svelte";
+  import UpdateDialog from "./lib/components/UpdateDialog.svelte";
+  import { updates } from "./lib/state/updates.svelte";
+  import { links } from "./lib/state/links.svelte";
   import RecBadge from "./lib/components/RecBadge.svelte";
   import { recordings } from "./lib/state/recordings.svelte";
   import Modal from "./lib/components/Modal.svelte";
@@ -93,7 +100,10 @@
       logs.open ||
       importer.open ||
       !!recordings.confirm ||
-      recordings.open,
+      recordings.open ||
+      !!links.pending ||
+      settings.open ||
+      updates.open,
   );
   /** Terminals being recorded (any tab): REC in the status bar. */
   const recCount = $derived(Object.keys(recordings.active).length);
@@ -476,6 +486,7 @@
           ...(paneCount > 1 ? [] : [{ id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() }]),
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
+          { id: "terminal.search", title: "Search scrollback", hint: pane.alias, shortcut: k("terminal.search"), run: () => views[pane.key]?.openSearch() },
           ...(recordings.recordable(pane)
             ? [
                 recordings.isRecording(pane.terminal)
@@ -622,6 +633,21 @@
       : []),
     { id: "app.reload", title: "Reload ~/.ssh/config", shortcut: k("app.reload"), run: load },
     { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: settings.theme?.name, run: () => settings.cycle() },
+    { id: "app.settings", title: "Settings…", hint: "theme, copy on select, updates", shortcut: k("app.settings"), run: () => (settings.open = true) },
+    ...(updates.available
+      ? [{ id: "app.update", title: `Update available: Portico ${updates.available.version}…`, hint: "release notes, update command", shortcut: k("app.update"), run: () => updates.show() }]
+      : []),
+    ...(updates.status
+      ? [
+          {
+            id: "app.update-check",
+            title: updates.on ? "Turn off the daily update check" : "Check for updates daily",
+            hint: updates.on ? "on · contacts github.com once a day" : "off · Portico never contacts github.com",
+            shortcut: k("app.update-check"),
+            run: () => void updates.setCheck(!updates.on),
+          },
+        ]
+      : []),
     ...settings.themes.map((t) => ({ id: `theme-${t.id}`, title: `Theme: ${t.name}`, hint: t.description, run: () => settings.select(t.id) })),
   ]);
 
@@ -673,6 +699,12 @@
         return void load();
       case "app.theme":
         return settings.cycle();
+      case "app.settings":
+        settings.open = true;
+        return;
+      case "terminal.search":
+        if (pane) views[pane.key]?.openSearch();
+        return;
       case "app.favorite":
       case "hosts.favorite":
         if (targetAlias) void hosts.toggleFavorite(targetAlias);
@@ -743,8 +775,15 @@
     t instanceof HTMLSelectElement ||
     (t instanceof HTMLElement && t.isContentEditable);
 
+  /** A control that answers Enter / Space itself (a banner button, a link). */
+  const isControl = (t: EventTarget | null) =>
+    t instanceof Element && !!t.closest("button, a, [role=button], summary");
+
   function onkeydown(e: KeyboardEvent) {
     if (modalOpen) return;
+    // Enter or Space on a focused button activates that button (Check
+    // daily, Copy…), never the host list's action behind it (connect).
+    if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return;
     // In a field (search, xterm's textarea) or the palette, plain keys type.
     const id = keymap.match(e, pane ? "terminal" : "hosts", paletteOpen || pickerOpen || isField(e.target));
     if (!id) return;
@@ -804,12 +843,15 @@
     load();
     void files.init();
     void vault.init();
+    // No request unless the user turned the check on (the core decides).
+    void updates.init();
     const unlisten = [
       backend.onEngineEvent((ev) => {
         workspace.onEvent(ev);
         recordings.onEvent(ev);
         hosts.onEvent(ev);
         logs.onEvent(ev);
+        updates.onEvent(ev);
         if (ev.type === "sftp") files.onEvent(ev.session, ev.event);
         else if (ev.type === "tunnel") tunnels.onEvent(ev.id, ev.session, ev.event);
         else if (ev.type === "session" && ev.event.kind === "phase" && ["closed", "failed"].includes(ev.event.phase)) {
@@ -821,6 +863,7 @@
         void recordings.resync();
         // A `hosts_changed` may be among the lost events.
         void load();
+        void updates.resync();
       }),
       backend.onDragging((d) => (files.dragging = d)),
       backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
@@ -841,6 +884,9 @@
   // Status-bar hints, most useful first: when the bar runs out of room
   // they give way from the end of each list (the palette hint stays last).
   // A split tab speaks of its panes first.
+  /** Panes whose search bar is open. */
+  const searchPanes = new SvelteSet<number>();
+  const searchHere = $derived(!!pane && searchPanes.has(pane.key));
   const tabHints: [string | undefined, string][] = $derived(
     paneCount > 1
       ? [
@@ -940,6 +986,10 @@
             themeId={settings.themeId}
             autofocus={!showFiles}
             onfocusin={() => workspace.focusPane(p.key)}
+            onsearch={(open) => {
+              if (open) searchPanes.add(p.key);
+              else searchPanes.delete(p.key);
+            }}
           />
         </div>
       {/each}
@@ -980,12 +1030,20 @@
         <RecBadge role="status" title={recHere ? "This pane's output is being recorded" : `${recCount} ${recCount === 1 ? "terminal is" : "terminals are"} being recorded`} />
       {/if}
       <span class="hints">
+        {#if searchHere}
+          <!-- The search bar has the keys: its own hints (as in the TUI). -->
+          <span class="search-hints" data-testid="search-hints">
+            <span class="mode">Search</span>
+            {#each SEARCH_HINT_KEYS as [key, label] (label)}<span><kbd>{key}</kbd> {label}</span>{/each}
+          </span>
+        {:else}
         <!-- First: the hints give way from the end. -->
         {#if recHere && k("session.record")}<span><kbd>{k("session.record")}</kbd> stop</span>{/if}
         {#if k("app.palette")}<span><kbd>{k("app.palette")}</kbd> commands</span>{/if}
         {#each tabHints as [key, label] (label)}
           {#if key}<span><kbd>{key}</kbd> {label}</span>{/if}
         {/each}
+        {/if}
       </span>
     {:else}
       <span class="counts">{hosts.all.length} hosts · {workspace.tabs.length} open</span>
@@ -998,6 +1056,9 @@
           {#if k(id)}<span><kbd>{k(id)}</kbd> {label}</span>{/if}
         {/each}
       </span>
+    {/if}
+    {#if updates.available}
+      <button class="update-badge" onclick={() => updates.show()} title="See how to update" data-testid="update-badge">{updates.available.version} available</button>
     {/if}
     <span class="theme-name">
       {#if !isTauri()}<span class="demo" title="Browser preview with a simulated engine">Demo</span>{/if}
@@ -1126,6 +1187,14 @@
   {/key}
 {:else if recordings.open}
   <RecordingsDialog themeId={settings.themeId} />
+{:else if links.pending}
+  {#key links.pending}
+    <LinkConfirm link={links.pending} />
+  {/key}
+{:else if settings.open}
+  <SettingsDialog />
+{:else if updates.open}
+  <UpdateDialog />
 {/if}
 
 {#if workspace.toast && !toastOnStage}
@@ -1249,9 +1318,26 @@
     overflow: hidden;
   }
   .hints > span { display: flex; align-items: center; gap: var(--space-1); height: 100%; }
+  /* One item, read left to right: the bar's keys while it is open. */
+  .hints > .search-hints { gap: var(--space-4); }
+  .search-hints > span { display: flex; align-items: center; gap: var(--space-1); }
+  .search-hints .mode { color: var(--text-secondary); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
   .counts { flex: 0 0 auto; }
   .theme-name { flex: 0 0 auto; padding-left: var(--space-3); border-left: 1px solid var(--border-subtle); }
   .version { flex: 0 0 auto; }
+  /* A notice, not a status: the accent, never a status colour. */
+  .update-badge {
+    flex: 0 0 auto;
+    height: calc(var(--statusbar-h) - var(--space-2));
+    padding: 0 var(--space-2);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+  }
+  .update-badge:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent-strong); }
   .session {
     --c: var(--status-idle);
     display: flex;

@@ -12,7 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
 use crate::dialog::{
-    ChangedKeyAlert, ConfirmDialog, Dialog, Field, PromptDialog, SecretDialog, SecretPurpose,
+    Answers, ChangedKeyAlert, ConfirmDialog, Dialog, Field, PromptDialog, SecretDialog,
+    SecretPurpose,
 };
 use crate::theme::Styles;
 use crate::ui::fmt::display_path;
@@ -40,11 +41,17 @@ const CONFIRM_WIDTH: u16 = 56;
 /// Width of an armed confirmation (a longer explanation).
 const ARMED_CONFIRM_WIDTH: u16 = 66;
 
+/// Width of an information dialog with an action (the update view).
+const INFO_CONFIRM_WIDTH: u16 = 74;
+
 fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
-    let width = if c.armed.is_some() {
-        ARMED_CONFIRM_WIDTH
-    } else {
-        CONFIRM_WIDTH
+    let width = match c.answers {
+        // A release page link fits on one line.
+        Answers::Close => INFO_CONFIRM_WIDTH,
+        Answers::YesNo if c.armed.is_some() => ARMED_CONFIRM_WIDTH,
+        // A question that can wait (the update check) stays compact even
+        // though it is armed.
+        Answers::YesNo | Answers::YesNoLater { .. } => CONFIRM_WIDTH,
     }
     .min(frame.area().width);
     // Wrapped here, word by word, so the height is exact.
@@ -63,29 +70,43 @@ fn render_confirm(c: &ConfirmDialog, s: Styles, frame: &mut Frame<'_>) {
             .flat_map(|paragraph| crate::ui::fmt::wrap(paragraph, inner))
             .map(|l| Line::from(Span::styled(l, s.secondary()))),
     );
+    if let Some(note) = &c.note {
+        lines.push(Line::from(""));
+        lines.extend(
+            crate::ui::fmt::wrap(note, inner)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, s.muted()))),
+        );
+    }
     lines.push(Line::from(""));
     // An armed question: `y` stays muted until it is taken (the app wakes
     // at that instant to redraw it in the accent; no ticking meanwhile).
+    let mut keys = c.other_hints();
     if c.ready(std::time::Instant::now()) {
-        lines.push(footer(s, &[c.cancel_hint(), ("y", c.confirm)]));
+        keys.push(("y", c.confirm));
+        lines.push(footer(s, &keys));
     } else {
-        let (key, label) = c.cancel_hint();
-        lines.push(
-            Line::from(vec![
-                Span::styled(format!(" {key} "), s.key_hint()),
-                Span::styled(format!(" {label}   "), s.muted()),
-                Span::styled(" y ", s.key_hint()),
-                Span::styled(format!(" {}", c.confirm), s.muted()),
-            ])
-            .right_aligned(),
-        );
+        let mut spans = Vec::new();
+        for (key, label) in keys {
+            spans.push(Span::styled(format!(" {key} "), s.key_hint()));
+            spans.push(Span::styled(format!(" {label}   "), s.muted()));
+        }
+        spans.push(Span::styled(" y ", s.key_hint()));
+        spans.push(Span::styled(format!(" {}", c.confirm), s.muted()));
+        lines.push(Line::from(spans).right_aligned());
     }
     let area = modal(frame, width, wrapped_height(&lines, width));
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
-                .border_style(s.border_focus())
+                // Accent for what needs an answer now; a question that can
+                // be put off stays on the subtle border.
+                .border_style(if matches!(c.answers, Answers::YesNoLater { .. }) {
+                    s.border()
+                } else {
+                    s.border_focus()
+                })
                 .title(Line::from(Span::styled(
                     format!(" {} ", c.title),
                     s.title(),

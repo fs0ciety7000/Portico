@@ -3,7 +3,10 @@
 //
 // URL switches: `?keymap=custom` loads a keymap with two invalid entries
 // (notice), `?theme=<id>` starts with a saved theme (an unknown one shows
-// the fallback notice), `?recent=none` starts without recent hosts.
+// the fallback notice), `?recent=none` starts without recent hosts,
+// `?updates=ask` starts with the update question (`[updates] check` absent),
+// `?updates=off` with the check off; by default the check is on and the
+// simulated GitHub answer is a newer release, 0.3.1 (no request is made).
 import type {
   EffectiveConfig,
   EngineEvent,
@@ -15,6 +18,8 @@ import type {
   RecentHost,
   SessionLogInfo,
   Settings,
+  UpdateInstruction,
+  UpdateStatus,
 } from "./api";
 
 export interface MetaHooks {
@@ -61,6 +66,19 @@ export function demoMeta(hooks: MetaHooks) {
         ];
   const logSessions: DemoLogSession[] = [];
   let theme: string | null = params.get("theme");
+  let copyOnSelect = params.get("copy") === "on";
+  const updatesParam = params.get("updates");
+  let updateCheck: boolean | null = updatesParam === "ask" ? null : updatesParam !== "off";
+  const DEMO_RELEASE = { version: "0.3.1", url: "https://github.com/fs0ciety7000/Portico/releases/tag/v0.3.1" };
+  // Simulated: what a check found, once it was on. Like the core, turning
+  // it off keeps the known release shown (no new check is made).
+  let known = updateCheck === true;
+  const updateStatus = (): UpdateStatus => ({
+    check: updateCheck,
+    current: __APP_VERSION__,
+    available: known ? DEMO_RELEASE : null,
+    checked_at: known ? new Date(NOW - 3 * 60 * MINUTE).toISOString() : null,
+  });
   const keymap: Record<string, string> =
     params.get("keymap") === "custom" ? { "app.files": "Mod+Shift+O", "tab.new": "Mod+W", "app.zoom": "Mod+=" } : {};
 
@@ -216,10 +234,33 @@ export function demoMeta(hooks: MetaHooks) {
         };
       },
       async getSettings(): Promise<Settings> {
-        return { theme, keymap, error: null };
+        return { theme, keymap, copyOnSelect, error: null };
       },
       async saveTheme(id: string) {
         theme = id;
+      },
+      async saveCopyOnSelect(on: boolean) {
+        copyOnSelect = on;
+      },
+      async startUpdateChecks() {
+        return updateStatus();
+      },
+      async updateStatus() {
+        return updateStatus();
+      },
+      async setUpdateCheck(on: boolean) {
+        updateCheck = on;
+        known ||= on;
+        const status = updateStatus();
+        emit({ type: "update", status });
+        return status;
+      },
+      async updateInstruction(): Promise<UpdateInstruction | null> {
+        return known ? { method: "homebrew", text: "Update with Homebrew:", command: "brew upgrade --cask fs0ciety7000/portico/portico" } : null;
+      },
+      // The demo never opens anything: the dialog closes, a notice says so.
+      async openUrl(_url: string) {
+        throw { code: "demo_link", message: "links are not opened in the demo", hint: "In the desktop app the system browser opens it." };
       },
     },
   };

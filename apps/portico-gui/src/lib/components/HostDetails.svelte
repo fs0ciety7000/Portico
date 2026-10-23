@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
-  import { dur } from "../motion";
+  import { COPIED_FEEDBACK_MS, dur } from "../motion";
   import { describe, type Host, type SessionView } from "../api";
   import StatusBadge from "./StatusBadge.svelte";
   import Mark from "./Mark.svelte";
@@ -8,6 +8,8 @@
   import { hosts } from "../state/hosts.svelte";
   import OriginBadge from "./OriginBadge.svelte";
   import { INCLUDE_MESSAGE, READ_ONLY_IMPORTED } from "../hostform";
+  import { updates } from "../state/updates.svelte";
+  import UpdateBanner from "./UpdateBanner.svelte";
 
   let {
     host,
@@ -44,7 +46,6 @@
 
   let copied = $state(false);
   let includeEl: HTMLInputElement | undefined = $state();
-  const COPIED_FEEDBACK_MS = 1600;
 
   async function copyInclude(line: string) {
     try {
@@ -60,6 +61,9 @@
 </script>
 
 <section class="details">
+  {#if updates.ask}
+    <UpdateBanner />
+  {/if}
   {#if hosts.showBanner && hosts.include}
     {@const line = hosts.include.line}
     <div class="banner" role="note" aria-label="Include line for Portico hosts" transition:fly={{ y: -6, duration: dur("base") }}>
@@ -240,7 +244,7 @@
     outline: none;
   }
   .include input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  button.secondary.small { height: var(--size-control-sm); padding: 0 var(--space-3); font-size: var(--text-sm); }
+  .details :global(button.secondary.small) { height: var(--size-control-sm); padding: 0 var(--space-3); font-size: var(--text-sm); }
   .small { font-size: var(--text-xs); }
   /* Narrow window (880): one line. The message (whole in its tooltip) and
      Copy; the Include line itself is in Copy's tooltip and the palette. */
@@ -305,7 +309,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-4);
     border: 0;
     border-radius: var(--radius-md);
@@ -318,11 +322,12 @@
   }
   button.primary:hover { background: var(--accent-strong); }
   button.primary:active { transform: scale(0.97); }
-  button.secondary {
+  /* Shared with the banners above the details (UpdateBanner). */
+  .details :global(button.secondary) {
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    height: 32px;
+    height: var(--size-control);
     padding: 0 var(--space-4);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
@@ -331,7 +336,8 @@
     font: inherit;
     transition: background var(--motion-fast) var(--ease-standard);
   }
-  button.secondary:hover { background: var(--bg-elevated); }
+  .details :global(button.secondary:hover:not(:disabled)) { background: var(--bg-elevated); }
+  .details :global(button.secondary:disabled) { opacity: 0.5; }
   .hint {
     margin-top: var(--space-5);
     padding: var(--space-3) var(--space-4);

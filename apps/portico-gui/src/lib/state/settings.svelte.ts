@@ -1,4 +1,5 @@
-// Theme and keymap from settings.toml (read and written by the core).
+// Theme, keymap and "Copy on select" from settings.toml (read and written
+// by the core).
 //
 // Theme without a flash: the last applied theme is cached in browser
 // storage and set by `applyCachedTheme()` in main.ts, before the first
@@ -45,6 +46,10 @@ class SettingsState {
   themes: ThemeInfo[] = $state([]);
   themeId: string = $state(document.documentElement.dataset.theme ?? DEFAULT_THEME);
   theme: ThemeInfo | undefined = $derived(this.themes.find((t) => t.id === this.themeId));
+  /** A finished mouse selection in a terminal is copied (`[gui] copy_on_select`). */
+  copyOnSelect: boolean = $state(false);
+  /** The settings dialog is open. */
+  open: boolean = $state(false);
 
   /** Reads settings.toml: theme, keymap; one notice for what was ignored. */
   async init(themes: ThemeInfo[]) {
@@ -63,6 +68,7 @@ class SettingsState {
       workspace.notify(settings.error, "error", LIST_TOAST_MS);
       return;
     }
+    this.copyOnSelect = settings.copyOnSelect;
     const problems: string[] = [];
     const wanted = settings.theme;
     if (wanted && themes.some((t) => t.id === wanted)) this.#apply(wanted);
@@ -93,6 +99,16 @@ class SettingsState {
     if (id === this.themeId || !this.themes.some((t) => t.id === id)) return;
     this.#apply(id);
     backend.saveTheme(id).catch((e) => workspace.notify(e));
+  }
+
+  /** Applies and remembers "Copy on select"; back to the old value if it cannot be saved. */
+  setCopyOnSelect(on: boolean) {
+    if (on === this.copyOnSelect) return;
+    this.copyOnSelect = on;
+    backend.saveCopyOnSelect(on).catch((e) => {
+      this.copyOnSelect = !on;
+      workspace.notify(e);
+    });
   }
 
   cycle() {

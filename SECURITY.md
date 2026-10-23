@@ -9,7 +9,8 @@ publions un correctif puis un avis (GitHub Security Advisory) une fois les utili
 
 ## Ce que Portico garantit
 
-- **Local-first** : aucun compte, aucun service distant, aucune télémétrie.
+- **Local-first** : aucun compte, aucun service distant, aucune télémétrie. Seule exception, **opt-in** :
+  la vérification quotidienne des mises à jour, demandée une fois et désactivable (voir le risque 16).
 - **`~/.ssh/config` n'est jamais écrit.** Les seules écritures dans `~/.ssh` sont l'ajout dans
   `known_hosts` après accord explicite et la génération de clés que vous demandez (jamais d'écrasement).
 - **Clés d'hôte** : une clé inconnue demande une confirmation armée ; une clé **modifiée** est toujours un
@@ -67,3 +68,11 @@ publions un correctif puis un avis (GitHub Security Advisory) une fois les utili
     jamais rapprochée d'une clé locale et l'aperçu la marque non vérifiée. Les secrets de l'export sont lus
     sans tampon intermédiaire de `serde_json` ; le texte complet de l'export reste en mémoire (`Zeroizing`)
     le temps de l'aperçu.
+16. **Vérification des mises à jour (opt-in)** : une fois activée (« Check daily », ou
+    `[updates] check = true`), Portico interroge `api.github.com` au plus une fois par jour (une heure
+    après un échec). GitHub voit alors l'adresse IP et, par l'en-tête `User-Agent: Portico/<version>`
+    (exigé par son API), la version utilisée ; rien d'autre n'est envoyé (ni cookie, ni identifiant).
+    Un proxy (`HTTPS_PROXY`, `HTTP_PROXY` ou `ALL_PROXY`) voit le nom d'hôte, le TLS restant de bout
+    en bout. La réponse n'est que lue : version (`vX.Y.Z`) et lien, qui doit être une page de release
+    de `github.com/fs0ciety7000/Portico` ; rien n'est téléchargé ni exécuté, la commande de mise à
+    jour s'affiche et se copie. Absent ou `false` : aucune requête.

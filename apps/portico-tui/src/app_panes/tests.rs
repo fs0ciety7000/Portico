@@ -936,3 +936,255 @@ async fn a_late_terminal_never_steals_the_focus() {
         "nothing went to beta"
     );
 }
+
+// ── scrollback search (phase 9) ────────────────────────────────────────────
+
+/// Presses `key` the way the event loop does (keymap, then update).
+fn press_key(app: &mut App, key: KeyEvent) {
+    press(app, key.code, key.modifiers);
+}
+
+fn press_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        press_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+}
+
+/// The focused pane's whole grid (scrollback and screen) as text.
+fn grid_text(app: &App) -> String {
+    use alacritty_terminal::grid::Dimensions as _;
+    use alacritty_terminal::index::{Column, Point};
+    app.active_terminal().map_or_else(String::new, |view| {
+        let term = view.term.lock().unwrap();
+        term.bounds_to_string(
+            Point::new(term.topmost_line(), Column(0)),
+            Point::new(term.bottommost_line(), term.last_column()),
+        )
+    })
+}
+
+fn display_offset(app: &App) -> usize {
+    app.active_terminal()
+        .map_or(0, |v| v.term.lock().unwrap().grid().display_offset())
+}
+
+/// `alpha` connected, with a scrollback: `needle one`, 40 lines, then
+/// `Needle two`. The lines are parsed into the pane's grid as remote output
+/// would be (the echo server only echoes keys, one packet per key).
+async fn searchable_lab() -> Lab {
+    use std::fmt::Write as _;
+    let mut lab = lab().await;
+    lab.select("alpha");
+    lab.app.update(Action::Connect);
+    lab.until(|app| app.tabs.len() == 1 && all_live(app)).await;
+    // `welcome` first: the output after it must not interleave with it.
+    lab.until(|app| grid_text(app).contains("welcome")).await;
+    let mut output = String::from("needle one\r\n");
+    for i in 0..40 {
+        let _ = write!(output, "output line {i}\r\n");
+    }
+    output.push_str("Needle two\r\n$ ");
+    if let Some(view) = lab.app.active_terminal() {
+        let mut term = view.term.lock().unwrap();
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *term, output.as_bytes());
+    }
+    lab
+}
+
+/// Opens the bar (`Ctrl-Space /`), types `needle`, then `↵` (older).
+fn search_needle(app: &mut App) {
+    press_key(
+        app,
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+    );
+    press_key(app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(app.searching());
+    press_text(app, "needle");
+    press_key(app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+}
+
+/// Lays the tab out for a `cols`×`rows` screen and draws it.
+fn screen_at(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
+    app.term_size = GridSize {
+        cols,
+        rows: rows - 2,
+    };
+    app.sync_terminal_sizes();
+    screen(app, cols, rows)
+}
+
+#[tokio::test]
+async fn scrollback_search_finds_scrolls_and_keeps_keys_from_the_remote() {
+    let mut lab = Box::pin(searchable_lab()).await;
+    lab.alpha.behaviour.received.lock().unwrap().clear();
+
+    search_needle(&mut lab.app);
+    let count = |app: &App| app.active_terminal().and_then(|v| v.search.as_ref()?.count);
+    // Smart case: `needle` finds both; ↵ went from the newest to the older.
+    assert_eq!(
+        count(&lab.app),
+        Some(crate::term_search::Count::Exact {
+            index: Some(2),
+            total: 2
+        })
+    );
+    assert!(
+        display_offset(&lab.app) > 0,
+        "scrolled back to `needle one`"
+    );
+    // Every other key stays in the bar: Ctrl-D, Ctrl-Space twice, a paste.
+    press_key(
+        &mut lab.app,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+    );
+    for _ in 0..2 {
+        press_key(
+            &mut lab.app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        );
+    }
+    lab.app.update(Action::Paste("zz\nrm -rf /\n".into()));
+    let query = |app: &App| {
+        app.active_terminal()
+            .and_then(|v| Some(v.search.as_ref()?.query.clone()))
+    };
+    assert_eq!(query(&lab.app).as_deref(), Some("needlezz"));
+    for _ in 0..2 {
+        press_key(
+            &mut lab.app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+    }
+
+    // Editing the query searches again from the bottom: the newest.
+    assert_eq!(
+        count(&lab.app),
+        Some(crate::term_search::Count::Exact {
+            index: Some(1),
+            total: 2
+        })
+    );
+    press_key(
+        &mut lab.app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    // Drawn at 80 columns (a resize: the same match stays current and
+    // shown): the bar on the pane's last row, above the status bar.
+    let lines = screen_at(&mut lab.app, 80, 24);
+    let all = text(&lines);
+    let bar = lines.get(22).cloned().unwrap_or_default();
+    assert!(bar.starts_with("▍ Search  needle"), "{all}");
+    assert!(bar.trim_end().ends_with("2 of 2"), "{all}");
+    assert!(lines.get(23).is_some_and(|l| l.contains("SEARCH")), "{all}");
+    assert!(all.contains("needle one"), "{all}");
+    // No match: the warning text; the view stays where it was.
+    let offset = display_offset(&lab.app);
+    press_text(&mut lab.app, "xyz");
+    let lines = screen_at(&mut lab.app, 80, 24);
+    assert!(
+        lines.get(22).is_some_and(|l| l.contains("No match")),
+        "{}",
+        text(&lines)
+    );
+    assert_eq!(display_offset(&lab.app), offset);
+
+    // Esc: back to the live view; keys reach the remote again.
+    press_key(
+        &mut lab.app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    );
+    assert!(!lab.app.searching());
+    assert_eq!(display_offset(&lab.app), 0);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        received(&lab.alpha),
+        "",
+        "nothing sent while the bar was open"
+    );
+    lab.typed("ok");
+    let alpha = &lab.alpha;
+    eventually(|| received(alpha) == "ok").await;
+}
+
+/// Feeds `output` into the focused pane as remote output would be.
+fn feed_pane(app: &App, output: &str) {
+    if let Some(view) = app.active_terminal() {
+        let mut term = view.term.lock().unwrap();
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *term, output.as_bytes());
+    }
+}
+
+fn open_bar(app: &mut App) {
+    press_key(
+        app,
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+    );
+    press_key(app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(app.searching());
+}
+
+/// The bar owns its whole row: with an empty query, nothing of the grid
+/// line under it shows through.
+#[tokio::test]
+async fn the_empty_search_bar_hides_the_line_under_it() {
+    let mut lab = Box::pin(searchable_lab()).await;
+    feed_pane(&lab.app, &"x".repeat(70));
+    open_bar(&mut lab.app);
+    let lines = screen_at(&mut lab.app, 80, 24);
+    let bar = lines.get(22).cloned().unwrap_or_default();
+    let rest = bar.strip_prefix("▍ Search").unwrap_or("x");
+    assert!(
+        rest.chars().all(|c| c == ' ') && bar.chars().count() == 80,
+        "{}",
+        text(&lines)
+    );
+}
+
+/// A current match on the live view's bottom line is drawn just above the
+/// bar, which stays at the bottom.
+#[tokio::test]
+async fn a_match_under_the_bar_is_drawn_above_it() {
+    let mut lab = Box::pin(searchable_lab()).await;
+    feed_pane(&lab.app, "pinpoint");
+    open_bar(&mut lab.app);
+    press_text(&mut lab.app, "pinpoint");
+    let lines = screen_at(&mut lab.app, 80, 24);
+    let all = text(&lines);
+    assert!(
+        lines.get(21).is_some_and(|l| l.contains("$ pinpoint")),
+        "{all}"
+    );
+    assert!(
+        lines
+            .get(22)
+            .is_some_and(|l| l.starts_with("▍ Search  pinpoint")),
+        "{all}"
+    );
+}
+
+/// Text captures of the bar for the report and the design review:
+/// `cargo test -p portico-tui search_bar_captures -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "prints captures"]
+#[allow(clippy::print_stdout)] // the captures are the point of this test
+async fn search_bar_captures() {
+    let mut lab = Box::pin(searchable_lab()).await;
+    search_needle(&mut lab.app);
+    let mut empty = Box::pin(searchable_lab()).await;
+    open_bar(&mut empty.app);
+    println!("── 80×24, empty query ──");
+    for line in screen_at(&mut empty.app, 80, 24) {
+        println!("{line}|");
+    }
+    for (cols, rows) in [(80, 24), (120, 40)] {
+        println!("── {cols}×{rows} ──");
+        for line in screen_at(&mut lab.app, cols, rows) {
+            println!("{}", line.trim_end());
+        }
+    }
+}

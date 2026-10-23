@@ -16,7 +16,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -73,6 +73,14 @@ chacha20poly1305 = "0.11"
 # Process hardening (safe wrappers: setrlimit, prctl).
 rustix = { version = "1.1", features = ["fs", "process"] }
 
+# Opt-in update check (ADR "Vérification des mises à jour"): a blocking
+# HTTPS client, rustls on the aws-lc-rs provider russh already uses, system
+# roots through the platform verifier; no gzip, no cookies, no JSON layer.
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
+# Version comparison of releases (already in the lock as a build dependency).
+semver = "1"
+
 # Search
 nucleo-matcher = "0.3"
 
@@ -85,6 +93,9 @@ alacritty_terminal = "0.26"
 tauri = { version = "2.11", features = [] }
 tauri-build = { version = "2.6", features = [] }
 tauri-plugin-dialog = "=2.8.1"
+# Re-validation of terminal links before opening (already in the lock through
+# Tauri; ADR "Liens du terminal").
+url = "2.5"
 
 # Dev
 tempfile = "3"

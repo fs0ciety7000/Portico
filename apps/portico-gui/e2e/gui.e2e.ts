@@ -139,6 +139,56 @@ test("startup: hosts from ~/.ssh/config, no vault yet", async () => {
   assert.ok(!existsSync(join(dataDir, "vault.toml")), "no vault before it is created");
 });
 
+/**
+ * The fake proxy of e2e/run.sh: records each request line and refuses it,
+ * so a check that was turned on fails here, on 127.0.0.1, never at GitHub.
+ */
+const proxied: string[] = [];
+const proxy = createServer((socket) => {
+  socket.once("data", (chunk) => {
+    proxied.push(chunk.toString("latin1").split("\r\n")[0] ?? "");
+    socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+  });
+  socket.on("error", () => {});
+});
+
+test("update check: asked once, Enter on Check daily answers it (no connect), the request stays local", async () => {
+  await new Promise<void>((resolve) => proxy.listen(Number(env("E2E_PROXY_PORT")), "127.0.0.1", resolve));
+  const updateCache = join(dataDir, "state", "update.toml");
+  const settingsPath = join(configDir, "settings.toml");
+  // `[updates] check` absent: the question shows, nothing was fetched.
+  await waitFor("update question", () => s.find("[data-testid=update-question]"));
+  assert.ok(!existsSync(updateCache), "no check before an answer");
+  assert.deepEqual(proxied, [], "no request before an answer");
+  await capture("update-question");
+  // A host is selected: Enter on the list would connect it. On a focused
+  // button, Enter is the button's (D1): it answers, no tab opens.
+  const tabs = () => s.exec<number>("return document.querySelectorAll('[role=tab]').length");
+  const before = await tabs();
+  await s.exec("document.querySelector('[data-testid=update-check-daily]').focus()");
+  await press(Key.Enter);
+  await waitFor("check = true saved", () => existsSync(settingsPath) && /\[updates\]\s*check = true/.test(readFileSync(settingsPath, "utf8")));
+  await waitFor("question gone", async () => !(await s.find("[data-testid=update-question]")));
+  await sleep(500);
+  assert.equal(await tabs(), before, "Enter on the button opened no session");
+  // The one request went to the local proxy, for GitHub's API, and failed
+  // there (silently: no badge, the failure is recorded for a retry in 1 h).
+  await waitFor("request at the local proxy", () => proxied.length > 0);
+  assert.deepEqual(proxied, ["CONNECT api.github.com:443 HTTP/1.1"]);
+  await waitFor("failure recorded", () => existsSync(updateCache) && /failed_at/.test(readFileSync(updateCache, "utf8")));
+  assert.equal(await s.find("[data-testid=update-badge]"), null);
+  // Turned off again from the palette: written false, no further request.
+  await hostsView();
+  await palette("Turn off the daily update check");
+  await waitFor("check = false saved", () => /\[updates\]\s*check = false/.test(readFileSync(settingsPath, "utf8")));
+  await sleep(500);
+  assert.equal(proxied.length, 1, "nothing after off");
+});
+
+after(() => {
+  proxy.close();
+});
+
 /** Opens "Add host", fills alias, HostName and a password (nothing saved yet). */
 async function addHostWithPassword(alias: string, password: string): Promise<void> {
   await hostsView();
@@ -195,6 +245,72 @@ test("connect: new host key, terminal command, status and latency", async () => 
   await waitFor("title from the shell", async () => (await title()) === "e2e-42");
   assert.ok(await s.find(".statusbar .rtt"), "latency shown");
   await capture("terminal");
+});
+
+// xterm.js may draw with WebGL here (no row text in the DOM): commands end
+// with a window title (OSC 0) that the status bar shows, as above.
+const searchCount = () => text("[data-testid=search-count]");
+/** Runs `command` in the shell, then waits for it to set the title `done`. */
+async function run(command: string, done: string): Promise<void> {
+  await type(`${command}; printf '\\033]0;%s\\007' ${done}`);
+  await press(Key.Enter);
+  await waitFor(`title ${done}`, async () => (await title()) === done);
+}
+
+test("terminal search: literal, Enter / Shift-Enter, keys never reach the shell, Esc back to the bottom", async () => {
+  await shellReady();
+  await run("printf 'row %03d\\n' $(seq 1 300)", "rows-done");
+  await press(Key.Control, Key.Alt, "f"); // terminal.search on Linux
+  await waitFor("search bar", () => s.find("[data-testid=terminal-search] input:focus"));
+  // Literal: `.*` is no regex, nothing matches.
+  await type(".*");
+  await waitFor("no match", async () => (await searchCount()) === "No match");
+  await press(Key.Backspace);
+  await press(Key.Backspace);
+  // `row 2` matches rows 200 to 299; the nearest going up from the bottom is 1.
+  await type("row 2");
+  await waitFor("1 of 100", async () => (await searchCount()) === "1 of 100");
+  await capture("search");
+  await press(Key.Enter);
+  await waitFor("2 of 100", async () => (await searchCount()) === "2 of 100");
+  await press(Key.Shift, Key.Enter);
+  await waitFor("back to 1 of 100", async () => (await searchCount()) === "1 of 100");
+  // ↑ older, ↓ newer, as in a history; the status bar shows the bar's keys.
+  await press(Key.Up);
+  await waitFor("↑: 2 of 100", async () => (await searchCount()) === "2 of 100");
+  await press(Key.Down);
+  await waitFor("↓: 1 of 100", async () => (await searchCount()) === "1 of 100");
+  assert.match(await text("[data-testid=search-hints]"), /Search\s*↵\s*older\s*⇧↵\s*newer\s*Esc\s*close/i);
+  await press(Key.Escape);
+  await waitFor("search closed", async () => !(await s.find("[data-testid=terminal-search]")));
+  // Back in the shell: what was typed in the bar never reached it (a
+  // leftover "row 2" would break this command, and its title).
+  await shellReady();
+  await run("echo ok", "after-search");
+});
+
+test("links: Ctrl-click asks first, Esc cancels (nothing is opened)", async () => {
+  // On a cleared screen the link is the first row, from the first cell.
+  await run("clear; printf '\\033]8;;https://example.com/e2e?x=1\\033\\\\docs-e2e\\033]8;;\\033\\\\\\n'", "link-shown");
+  // xterm sizes its input field to one cell.
+  const at = await s.exec<{ x: number; y: number }>(`
+    const view = document.querySelector('section.terminal:not(.hidden)');
+    const screen = view.querySelector('.xterm-screen').getBoundingClientRect();
+    const field = view.querySelector('.xterm-helper-textarea');
+    const w = parseFloat(field.style.width), h = parseFloat(field.style.height);
+    return { x: screen.left + 2.5 * w, y: screen.top + 0.5 * h };`);
+  await s.modifierClick(at.x, at.y, Key.Control);
+  await dialog("Open this link?");
+  const shown = await modal();
+  assert.match(shown, /https:\/\/example\.com\/e2e\?x=1/);
+  // The visible text is not the link's host: a caution says where it goes.
+  assert.match(shown, /The text shown was “docs-e2e” but the link goes to example\.com\./);
+  await capture("link-confirm");
+  // A caution: Cancel has the focus (and Enter) once the dialog is armed.
+  await waitFor("Cancel focused", async () => (await s.exec<string>("return document.activeElement?.textContent ?? ''")).trim().startsWith("Cancel"));
+  await press(Key.Escape);
+  await noDialog();
+  await shellReady();
 });
 
 test("recording: confirm, REC from the engine event, stop, list, play", async () => {
@@ -485,6 +601,7 @@ test("restart: theme kept, vault unlocked at startup, key login without prompt",
   s = await Session.create(env("E2E_DRIVER"), env("E2E_APP"));
   await dialog("Unlock the vault");
   assert.equal((await text(".theme-name")).trim(), "Basalt");
+  assert.equal(await s.find("[data-testid=update-question]"), null, "Not now is never asked again");
   await type(VAULT_PASS);
   await press(Key.Enter);
   await noDialog();

@@ -210,7 +210,29 @@ export type EngineEvent =
   /** The recent-sessions list changed: fetch it again if shown. */
   | { type: "recent_changed" }
   /** A terminal recording started or stopped: `REC` shows between the two. */
-  | { type: "recording"; terminal: number; session: number; state: RecordingState };
+  | { type: "recording"; terminal: number; session: number; state: RecordingState }
+  /** The update status changed (setting changed, or a newer release found). */
+  | { type: "update"; status: UpdateStatus };
+
+/** Mirrors `portico_core::update::UpdateStatus` (commands and the `update` event). */
+export interface UpdateStatus {
+  /** `[updates] check`: `null` = not asked yet (ask once). */
+  check: boolean | null;
+  /** The running version. */
+  current: string;
+  /** A newer release (its page is validated by the core: a Portico release on github.com). */
+  available: { version: string; url: string } | null;
+  /** Last successful check, RFC 3339. */
+  checked_at: string | null;
+}
+
+/** Mirrors `portico_core::update::UpdateInstruction`: how to update this install. */
+export interface UpdateInstruction {
+  method: "homebrew" | "app_image" | "pacman" | "deb" | "mac_app" | "other";
+  text: string;
+  /** A command to copy (Homebrew), else `null`. */
+  command: string | null;
+}
 
 /** Mirrors `portico_core::recording::RecordingStopReason`. */
 export type RecordingStopReason = "requested" | "terminal_closed" | "queue_full" | "write_failed" | "size_limit";
@@ -281,6 +303,8 @@ export interface EffectiveConfig {
 export interface Settings {
   theme: string | null;
   keymap: Record<string, string>;
+  /** `[gui] copy_on_select` (phase 9). */
+  copyOnSelect: boolean;
   error: ErrorSummary | null;
 }
 
@@ -705,6 +729,15 @@ export const api = {
   effectiveConfig: (alias: string) => invoke<EffectiveConfig>("effective_config", { alias }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
+  saveCopyOnSelect: (on: boolean) => invoke<void>("save_copy_on_select", { on }),
+  /** Re-validated in Rust (http/https only, no credentials), then the system browser. */
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+  /** Starts the daily check only if the user turned it on; never a request otherwise. */
+  startUpdateChecks: () => invoke<UpdateStatus>("start_update_checks"),
+  updateStatus: () => invoke<UpdateStatus>("update_status"),
+  setUpdateCheck: (on: boolean) => invoke<UpdateStatus>("set_update_check", { on }),
+  /** For the known newer release (the version comes from the core). */
+  updateInstruction: () => invoke<UpdateInstruction | null>("update_instruction"),
   /** Native file picker (Rust side), then the plan; `null` when cancelled. */
   importPick: (prefix: boolean) => invoke<ImportPreview | null>("import_pick", { prefix }),
   importReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_replan", { token, prefix }),

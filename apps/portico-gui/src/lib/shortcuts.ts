@@ -86,6 +86,9 @@ const panes: ActionDef[] = [
   },
   { id: "pane.next", title: "Next pane", doc: "Panneau suivant (ordre de lecture)", scope: "terminal", defaults: per(["Mod+Alt+N"], ["Ctrl+Alt+N"]) },
   { id: "pane.zoom", title: "Zoom pane", doc: "Zoom on/off : le panneau actif occupe tout l'onglet", scope: "terminal", defaults: both("Mod+Shift+Enter") },
+  // Phase 9. Linux: Mod+F would be Ctrl-Shift-F in a terminal, which is
+  // `app.files` (Mod+Shift+F) there; Ctrl-Alt-F is free (like `pane.next`).
+  { id: "terminal.search", title: "Search scrollback", doc: "Rechercher dans le scrollback du panneau actif (texte littéral, casse ignorée sauf majuscule ; `↵` ou `↑` plus ancien, `Shift-↵` ou `↓` plus récent, `Esc` ferme et revient en bas ; touches : tableau « Terminal (GUI) : recherche, liens, menu »)", scope: "terminal", defaults: per(["Mod+F"], ["Ctrl+Alt+F"]) },
   { id: "pane.close", title: "Close pane", doc: "Fermer le panneau actif et son canal PTY (le dernier panneau d'une session la déconnecte). Sans raccourci par défaut : dans un onglet divisé, `tab.close` ferme le panneau actif", scope: "terminal", defaults: both() },
 ];
 
@@ -146,6 +149,12 @@ export const ACTIONS: ActionDef[] = [
   { id: "recordings.open", title: "Recordings…", doc: "Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette", scope: "global", defaults: both() },
   // Same id and key as the TUI's host list.
   { id: "hosts.recordings", title: "Recordings…", doc: "Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes)", scope: "hosts", defaults: both("V") },
+  // ⌘, as on macOS. Linux: Ctrl-Alt-, (Ctrl-Shift-, types `<` in a
+  // terminal; Ctrl-Alt is free there, like `terminal.search`).
+  { id: "app.settings", title: "Settings…", doc: "Réglages : thème, « Copy on select », vérification quotidienne des mises à jour (enregistrés dans `settings.toml`)", scope: "global", defaults: per(["Mod+,"], ["Ctrl+Alt+,"]) },
+  // Opt-in update check (0.3.0): palette entries, no default key.
+  { id: "app.update", title: "Update available…", doc: "Version disponible : notes de version (navigateur), commande de mise à jour de cette installation (copiable) ; aussi le badge « 0.3.1 available » de la barre d'état", scope: "global", defaults: both() },
+  { id: "app.update-check", title: "Toggle update check", doc: "Vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; aussi dans les réglages)", scope: "global", defaults: both() },
   { id: "keys.new", title: "New key", doc: "Nouvelle clé", scope: "global", defaults: both() },
   { id: "snippets.new", title: "New snippet", doc: "Nouveau snippet", scope: "global", defaults: both() },
   { id: "files.download-dir", title: "Change download folder", doc: "Changer de dossier de téléchargement", scope: "global", defaults: both() },

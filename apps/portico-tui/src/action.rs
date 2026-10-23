@@ -66,6 +66,10 @@ pub(crate) enum Action {
     Paste(String),
     ScrollUp,
     ScrollDown,
+    /// `Ctrl-Space /`: opens the focused pane's scrollback search.
+    ScrollbackSearch,
+    /// A key for the focused pane's open search bar (never the remote).
+    ScrollbackKey(KeyEvent),
     TerminalDirty(TerminalId),
     TerminalOpened {
         alias: String,
@@ -232,4 +236,18 @@ pub(crate) enum Action {
     CopyInclude,
     /// Hides the `Include` banner until Portico restarts.
     HideInclude,
+    // Opt-in update check (0.3.0)
+    /// The status at launch (`start_update_checks`) or after a lagged bus.
+    UpdateLoaded(Result<portico_core::update::UpdateStatus, ErrorSummary>),
+    /// How to update this install, for `version`.
+    UpdateInstruction {
+        version: String,
+        instruction: portico_core::update::UpdateInstruction,
+    },
+    /// "Update": the update view (the release, or the setting).
+    ShowUpdate,
+    /// "Update settings": the state of the daily check (`y` there turns it
+    /// on or off; never in one key).
+    ShowUpdateSettings,
+    UpdateCheckSaved(Result<portico_core::update::UpdateStatus, ErrorSummary>),
 }

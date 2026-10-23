@@ -98,6 +98,14 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         // Not even the status fits next to the mode: REC alone.
         right.clone_from(&rec);
     }
+    // `0.3.1 available` before the status, when it fits beside the mode
+    // and `quit` (hints give way to it, the status never does).
+    let badge = badge_spans(app, !right.is_empty());
+    if !badge.is_empty()
+        && lead + pinned.as_ref().map_or(0, need) + width_of(&badge) + width_of(&right) <= width
+    {
+        right = badge.into_iter().chain(right).collect();
+    }
     let mut used = lead + pinned.as_ref().map_or(0, need) + width_of(&right);
     let mut shown: Vec<&(String, &str)> = Vec::new();
     for hint in &hints {
@@ -154,6 +162,21 @@ fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>>
     }
     right.push(Span::raw(" "));
     right
+}
+
+/// `0.3.1 available ` in the accent (a notice, not a status colour), when
+/// the update check knows a newer release; `0.3.1 available · ` (muted
+/// separator) when the session status or `● REC` follows.
+fn badge_spans(app: &App, followed: bool) -> Vec<Span<'static>> {
+    let s = app.styles();
+    app.update.badge().map_or_else(Vec::new, |badge| {
+        let gap = if followed {
+            Span::styled(" · ", s.muted())
+        } else {
+            Span::raw(" ")
+        };
+        vec![Span::styled(badge, s.accent()), gap]
+    })
 }
 
 /// `● REC` (`● REC 2` for two recorded terminals) in the error colour,
@@ -241,11 +264,15 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         }
         // The same words as the dialog's own footer (`n / Esc keep`, `y clear`).
         _ if matches!(app.dialogs.front(), Some(Dialog::Confirm(_))) => {
-            let (cancel, confirm) = match app.dialogs.front() {
-                Some(Dialog::Confirm(c)) => (c.cancel_hint(), c.confirm),
-                _ => (("n / Esc", "keep"), "confirm"),
+            let keys = match app.dialogs.front() {
+                Some(Dialog::Confirm(c)) => {
+                    let mut keys = c.other_hints();
+                    keys.push(("y", c.confirm));
+                    keys
+                }
+                _ => vec![("n / Esc", "keep"), ("y", "confirm")],
             };
-            return (" CONFIRM ", owned(vec![cancel, ("y", confirm)]));
+            return (" CONFIRM ", owned(keys));
         }
         // The vault a host's password waits for: Esc goes back to the form.
         _ if matches!(app.dialogs.front(), Some(Dialog::Secret(d)) if d.host_save) => {
@@ -487,6 +514,12 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 ("Esc", "back"),
             ],
         ),
+        // The search bar has the keys: its own hints (Shift-↵ is not told
+        // apart from ↵ by most terminals, Ctrl-N is).
+        Focus::Terminal if app.searching() => (
+            " SEARCH ",
+            &[("↵", "older"), ("Ctrl-N", "newer"), ("Esc", "close")],
+        ),
         Focus::Terminal => {
             let mut hints = Vec::new();
             if app
@@ -505,6 +538,9 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             }
             hints.push(("Ctrl-Space".to_owned(), "commands"));
             hints.extend(keyed(app, &["terminal.scroll_up"]));
+            if let Some((key, label)) = app.keymap.hint("terminal.search") {
+                hints.push((format!("Ctrl-Space {key}"), label));
+            }
             return (" TERMINAL ", hints);
         }
         // `Ctrl-Space S`: choosing the host of a new pane.
@@ -548,4 +584,33 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
         ),
     };
     (mode, owned(hints.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_badge_is_separated_from_what_follows_it() {
+        let mut app = crate::app::test_app();
+        assert!(badge_spans(&app, true).is_empty());
+        app.update.status = Some(portico_core::update::UpdateStatus {
+            check: Some(true),
+            current: "0.3.0".into(),
+            available: Some(portico_core::update::AvailableUpdate {
+                version: "0.3.1".into(),
+                url: "https://github.com/fs0ciety7000/Portico/releases/tag/v0.3.1".into(),
+            }),
+            checked_at: None,
+        });
+        assert_eq!(text(&badge_spans(&app, false)), "0.3.1 available ");
+        let followed = badge_spans(&app, true);
+        assert_eq!(text(&followed), "0.3.1 available · ");
+        let s = app.styles();
+        assert_eq!(followed.last().map(|sp| sp.style), Some(s.muted()));
+    }
 }

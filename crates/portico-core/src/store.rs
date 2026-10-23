@@ -9,6 +9,7 @@
 //! | `snippets.toml`   | command snippets                          |
 //! | `settings.toml`   | theme, keymap overrides, preferences      |
 //! | `state/recent.toml` | recent sessions (data dir)              |
+//! | `state/update.toml` | last opt-in update check (data dir)     |
 //! | `vault.toml`      | encrypted secrets fallback (data dir)     |
 //! | `recordings/*.cast` | opt-in terminal recordings (data dir)   |
 //!
@@ -103,6 +104,12 @@ impl Paths {
     /// `state/recent.toml` (data dir), see [`crate::recent`].
     pub fn recent(&self) -> PathBuf {
         self.data_dir.join("state").join("recent.toml")
+    }
+
+    /// `state/update.toml` (data dir): the last update check, see
+    /// [`crate::update`].
+    pub fn update_cache(&self) -> PathBuf {
+        self.data_dir.join("state").join("update.toml")
     }
 
     /// `recordings/` (data dir): asciicast files, see [`crate::recording`].

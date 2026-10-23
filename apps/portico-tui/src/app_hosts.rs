@@ -79,7 +79,8 @@ where
 }
 
 impl App {
-    /// Phase 6b actions (the last link of the `update` chain).
+    /// Phase 6b actions (then `update_updates`, the last link of the
+    /// `update` chain).
     pub(crate) fn update_hosts(&mut self, action: Action) {
         match action {
             Action::AddHost => self.open_host_form(None),
@@ -123,7 +124,7 @@ impl App {
                 self.include.hidden = true;
                 self.notify("Hidden until Portico restarts · the line stays in hosts.conf".into());
             }
-            _ => {}
+            other => self.update_updates(other),
         }
     }
 
@@ -433,6 +434,8 @@ impl App {
             confirm: "delete",
             action: ConfirmAction::DeleteHost(alias),
             armed: Some(std::time::Instant::now()),
+            answers: crate::dialog::Answers::YesNo,
+            note: None,
         }));
     }
 

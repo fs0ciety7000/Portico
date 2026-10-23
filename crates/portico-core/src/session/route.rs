@@ -159,6 +159,7 @@ mod tests {
             agent_socket: None,
             connect_timeout: Duration::from_secs(1),
             keepalive: Duration::from_secs(1),
+            update_fetcher: crate::update::no_network(),
         }
     }
 

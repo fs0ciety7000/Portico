@@ -216,6 +216,8 @@ pub(crate) struct App {
     pub(crate) host_form: Option<crate::host_form::HostForm>,
     /// The `Include` banner of Portico's `hosts.conf`.
     pub(crate) include: crate::app_hosts::IncludeBanner,
+    /// The opt-in update check: status, question, badge.
+    pub(crate) update: crate::app_update::UpdateState,
     /// Host to select once the inventory is reloaded (created, edited,
     /// or the neighbour of a deleted one).
     pub(crate) pending_select: Option<String>,
@@ -312,6 +314,7 @@ impl App {
             player: None,
             host_form: None,
             include: crate::app_hosts::IncludeBanner::default(),
+            update: crate::app_update::UpdateState::default(),
             pending_select: None,
             search: HostSearch::default(),
             tx,
@@ -350,6 +353,8 @@ impl App {
         self.update(Action::SettingsLoaded(settings));
         self.spawn_load_hosts();
         self.spawn_load_recent();
+        // No request unless the user turned the check on (the engine decides).
+        self.start_update_checks();
         self.refresh_vault(true);
         self.spawn_machine_name();
 
@@ -406,6 +411,7 @@ impl App {
                             prefix: self.prefix,
                             pane_repeat: self.pane_repeat_active(now),
                             picking: self.pane_pick.is_some(),
+                            searching: self.searching(),
                             keymap: &self.keymap,
                         },
                     )
@@ -581,9 +587,22 @@ impl App {
             }
             Action::ScrollUp => self.scroll(Scroll::PageUp),
             Action::ScrollDown => self.scroll(Scroll::PageDown),
+            Action::ScrollbackSearch => {
+                self.prefix = false;
+                match self.active_terminal_mut() {
+                    Some(view) => view.open_search(),
+                    None => self.notify("Nothing to search in this pane".into()),
+                }
+            }
+            Action::ScrollbackKey(key) => {
+                if let Some(view) = self.active_terminal_mut() {
+                    view.search_key(key);
+                }
+            }
             Action::TerminalDirty(id) => {
-                if let Some(view) = self.views().find(|t| t.id == id) {
+                if let Some(view) = self.views_mut().find(|t| t.id == id) {
                     view.dirty.store(false, Ordering::Release);
+                    view.refresh_search();
                 }
             }
             Action::SplitPane(split) => self.split_pane(split),
@@ -733,6 +752,7 @@ impl App {
     /// A paste goes to the open dialog if any (it may be a password from a
     /// password manager), never past it to a shell or the search field.
     fn paste(&mut self, text: &str) {
+        let searching = self.searching();
         match self.dialogs.front_mut() {
             Some(Dialog::Prompt(prompt)) => prompt.paste(text),
             Some(Dialog::Secret(secret)) => secret.paste(text),
@@ -761,6 +781,12 @@ impl App {
             // Other panels, the recordings list and the player included,
             // take no paste: nothing reaches a terminal through them.
             None if self.overlay.is_some() => {}
+            // The search bar takes the paste: nothing reaches the remote.
+            None if searching => {
+                if let Some(view) = self.active_terminal_mut() {
+                    view.search_paste(text);
+                }
+            }
             None => match (self.focus, self.active_terminal()) {
                 (Focus::Terminal, Some(view)) => view.paste(text),
                 (Focus::Search, _) => {
@@ -786,6 +812,8 @@ impl App {
             return;
         };
         match slot.view() {
+            // Belt and braces: the keymap already routes these to the bar.
+            Some(view) if view.search.is_some() => {}
             Some(view) if slot.live() => {
                 if let Some(bytes) = encode_key(key, view.mode()) {
                     view.send(bytes);
@@ -1130,6 +1158,7 @@ impl App {
                     self.rebuild_tunnels_panel();
                 }
             }
+            EngineEvent::Update { status } => self.update_status_changed(status),
             other => self.on_meta_event(other),
         }
     }
@@ -1488,6 +1517,7 @@ pub(crate) fn test_app() -> App {
         agent_socket: None,
         connect_timeout: Duration::from_secs(1),
         keepalive: Duration::from_secs(1),
+        update_fetcher: portico_core::update::no_network(),
     });
     let mut app = App::new(engine);
     app.clipboard = false;

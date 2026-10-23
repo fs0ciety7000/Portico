@@ -86,6 +86,16 @@ if [ "$mode" = serve ] && [ "$driver_port" = 4444 ] && [ "${E2E_I_KNOW:-}" != 1 
   echo "refusing --serve on the well-known port 4444 (set E2E_I_KNOW=1 to override)" >&2
   exit 2
 fi
+# The update check is turned on during the test: its one request must never
+# leave this machine. Every proxy variable ureq reads points at a local port
+# where the test listens (it records the CONNECT and refuses it); nothing is
+# exempt but the loopback. Set before tauri-driver, so the app inherits it.
+proxy_port=${E2E_PROXY_PORT:-$(free_port)}
+export E2E_PROXY_PORT=$proxy_port
+for var in ALL_PROXY all_proxy HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+  export "$var=http://127.0.0.1:$proxy_port"
+done
+export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 tauri-driver --port "$driver_port" --native-port "$native_port" >"$root/driver.log" 2>&1 &
 echo $! >>"$root/pids"
 for _ in $(seq 100); do

@@ -247,6 +247,7 @@ fn keys_open_the_panel_and_toggle_recording() {
         prefix,
         pane_repeat: false,
         picking: false,
+        searching: false,
         keymap: &keymap,
     };
     let shift = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
@@ -1029,6 +1030,8 @@ fn the_record_key_turns_accent_once_armed_with_one_wake_up() {
         confirm: "record",
         action: ConfirmAction::StartRecording(TerminalId::next()),
         armed: Some(opened),
+        answers: crate::dialog::Answers::YesNo,
+        note: None,
     }));
     // One wake-up, at the instant `y` starts to count (no ticking).
     assert_eq!(app.next_deadline(), Some(opened + ARM_DELAY));
