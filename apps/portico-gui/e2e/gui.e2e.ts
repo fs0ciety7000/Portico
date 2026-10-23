@@ -197,6 +197,64 @@ test("connect: new host key, terminal command, status and latency", async () => 
   await capture("terminal");
 });
 
+// xterm.js may draw with WebGL here (no row text in the DOM): commands end
+// with a window title (OSC 0) that the status bar shows, as above.
+const searchCount = () => text("[data-testid=search-count]");
+/** Runs `command` in the shell, then waits for it to set the title `done`. */
+async function run(command: string, done: string): Promise<void> {
+  await type(`${command}; printf '\\033]0;%s\\007' ${done}`);
+  await press(Key.Enter);
+  await waitFor(`title ${done}`, async () => (await title()) === done);
+}
+
+test("terminal search: literal, Enter / Shift-Enter, keys never reach the shell, Esc back to the bottom", async () => {
+  await shellReady();
+  await run("printf 'row %03d\\n' $(seq 1 300)", "rows-done");
+  await press(Key.Control, Key.Alt, "f"); // terminal.search on Linux
+  await waitFor("search bar", () => s.find("[data-testid=terminal-search] input:focus"));
+  // Literal: `.*` is no regex, nothing matches.
+  await type(".*");
+  await waitFor("no match", async () => (await searchCount()) === "No match");
+  await press(Key.Backspace);
+  await press(Key.Backspace);
+  // `row 2` matches rows 200 to 299; the nearest going up from the bottom is 1.
+  await type("row 2");
+  await waitFor("1 of 100", async () => (await searchCount()) === "1 of 100");
+  await capture("search");
+  await press(Key.Enter);
+  await waitFor("2 of 100", async () => (await searchCount()) === "2 of 100");
+  await press(Key.Shift, Key.Enter);
+  await waitFor("back to 1 of 100", async () => (await searchCount()) === "1 of 100");
+  await press(Key.Escape);
+  await waitFor("search closed", async () => !(await s.find("[data-testid=terminal-search]")));
+  // Back in the shell: what was typed in the bar never reached it (a
+  // leftover "row 2" would break this command, and its title).
+  await shellReady();
+  await run("echo ok", "after-search");
+});
+
+test("links: Ctrl-click asks first, Esc cancels (nothing is opened)", async () => {
+  // On a cleared screen the link is the first row, from the first cell.
+  await run("clear; printf '\\033]8;;https://example.com/e2e?x=1\\033\\\\docs-e2e\\033]8;;\\033\\\\\\n'", "link-shown");
+  // xterm sizes its input field to one cell.
+  const at = await s.exec<{ x: number; y: number }>(`
+    const view = document.querySelector('section.terminal:not(.hidden)');
+    const screen = view.querySelector('.xterm-screen').getBoundingClientRect();
+    const field = view.querySelector('.xterm-helper-textarea');
+    const w = parseFloat(field.style.width), h = parseFloat(field.style.height);
+    return { x: screen.left + 2.5 * w, y: screen.top + 0.5 * h };`);
+  await s.modifierClick(at.x, at.y, Key.Control);
+  await dialog("Open this link?");
+  const shown = await modal();
+  assert.match(shown, /https:\/\/example\.com\/e2e\?x=1/);
+  // The visible text is not the link's host: a caution says where it goes.
+  assert.match(shown, /The text shown was “docs-e2e” but the link goes to example\.com\./);
+  await capture("link-confirm");
+  await press(Key.Escape);
+  await noDialog();
+  await shellReady();
+});
+
 test("recording: confirm, REC from the engine event, stop, list, play", async () => {
   const recDir = join(dataDir, "recordings");
   // Ctrl-Shift-R in the terminal: the armed confirmation, with the folder.

@@ -1,4 +1,5 @@
-//! User settings (phase 4): theme and GUI keymap from `settings.toml`.
+//! User settings (phase 4): theme and GUI keymap from `settings.toml`;
+//! "Copy on select" (`[gui] copy_on_select`, phase 9).
 //!
 //! The core reads and writes the file (bounded, validated, other keys and
 //! comments kept); the webview never sees its path. Key syntax is the GUI's
@@ -23,6 +24,7 @@ pub(crate) struct SettingsDto {
     /// unknown id, and says so).
     pub theme: Option<String>,
     pub keymap: BTreeMap<String, String>,
+    pub copy_on_select: bool,
     pub error: Option<ErrorSummary>,
 }
 
@@ -32,6 +34,7 @@ pub(crate) async fn get_settings(engine: State<'_, Engine>) -> Result<SettingsDt
         Ok(settings) => SettingsDto {
             theme: settings.theme,
             keymap: settings.keymap.gui,
+            copy_on_select: settings.gui.copy_on_select,
             error: None,
         },
         Err(e) => SettingsDto {
@@ -54,6 +57,19 @@ pub(crate) async fn save_theme(
     // meanwhile (TUI, another window) is kept.
     engine
         .set_theme(Some(theme))
+        .await
+        .map(|_| ())
+        .map_err(|e| e.summary())
+}
+
+/// Remembers "Copy on select" (only that key of `settings.toml` changes).
+#[tauri::command]
+pub(crate) async fn save_copy_on_select(
+    engine: State<'_, Engine>,
+    on: bool,
+) -> Result<(), ErrorSummary> {
+    engine
+        .set_copy_on_select(on)
         .await
         .map(|_| ())
         .map_err(|e| e.summary())

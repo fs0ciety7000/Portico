@@ -88,6 +88,22 @@ export class Session {
     await this.req("POST", "/actions", { actions: [{ type: "key", id: "kbd", actions }] });
   }
 
+  /** Moves the mouse to viewport point (x, y), then clicks there with `modifier` held. */
+  async modifierClick(x: number, y: number, modifier: string): Promise<void> {
+    const at = { type: "pointerMove", x: Math.round(x), y: Math.round(y), origin: "viewport", duration: 0 };
+    const mouse = { type: "pointer", id: "mouse", parameters: { pointerType: "mouse" } };
+    // Hover first: xterm.js finds the link under the pointer on mouse moves.
+    await this.req("POST", "/actions", { actions: [{ ...mouse, actions: [at, { ...at, x: at.x + 1 }] }] });
+    await new Promise((r) => setTimeout(r, 300));
+    await this.req("POST", "/actions", {
+      actions: [
+        { type: "key", id: "kbd", actions: [{ type: "keyDown", value: modifier }, { type: "pause" }, { type: "pause" }, { type: "pause" }, { type: "keyUp", value: modifier }] },
+        { ...mouse, actions: [{ type: "pause" }, at, { type: "pointerDown", button: 0 }, { type: "pointerUp", button: 0 }, { type: "pause" }] },
+      ],
+    });
+    await this.req("DELETE", "/actions");
+  }
+
   async screenshot(): Promise<Buffer> {
     return Buffer.from(String(await this.req("GET", "/screenshot")), "base64");
   }

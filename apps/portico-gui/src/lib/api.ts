@@ -281,6 +281,8 @@ export interface EffectiveConfig {
 export interface Settings {
   theme: string | null;
   keymap: Record<string, string>;
+  /** `[gui] copy_on_select` (phase 9). */
+  copyOnSelect: boolean;
   error: ErrorSummary | null;
 }
 
@@ -705,6 +707,9 @@ export const api = {
   effectiveConfig: (alias: string) => invoke<EffectiveConfig>("effective_config", { alias }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
+  saveCopyOnSelect: (on: boolean) => invoke<void>("save_copy_on_select", { on }),
+  /** Re-validated in Rust (http/https only, no credentials), then the system browser. */
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
   /** Native file picker (Rust side), then the plan; `null` when cancelled. */
   importPick: (prefix: boolean) => invoke<ImportPreview | null>("import_pick", { prefix }),
   importReplan: (token: number, prefix: boolean) => invoke<ImportPreview>("import_replan", { token, prefix }),

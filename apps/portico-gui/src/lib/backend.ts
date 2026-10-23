@@ -113,6 +113,9 @@ export interface Backend {
   effectiveConfig(alias: string): Promise<EffectiveConfig>;
   getSettings(): Promise<Settings>;
   saveTheme(theme: string): Promise<void>;
+  saveCopyOnSelect(on: boolean): Promise<void>;
+  /** A confirmed terminal link (the view asked first). */
+  openUrl(url: string): Promise<void>;
   /** Native picker in Rust, then the plan; `null` when cancelled. */
   importPick(prefix: boolean): Promise<ImportPreview | null>;
   importReplan(token: number, prefix: boolean): Promise<ImportPreview>;

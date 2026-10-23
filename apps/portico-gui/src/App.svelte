@@ -35,6 +35,9 @@
   import ImportDialog from "./lib/components/ImportDialog.svelte";
   import RecordingsDialog from "./lib/components/RecordingsDialog.svelte";
   import RecordConfirm from "./lib/components/RecordConfirm.svelte";
+  import LinkConfirm from "./lib/components/LinkConfirm.svelte";
+  import SettingsDialog from "./lib/components/SettingsDialog.svelte";
+  import { links } from "./lib/state/links.svelte";
   import RecBadge from "./lib/components/RecBadge.svelte";
   import { recordings } from "./lib/state/recordings.svelte";
   import Modal from "./lib/components/Modal.svelte";
@@ -93,7 +96,9 @@
       logs.open ||
       importer.open ||
       !!recordings.confirm ||
-      recordings.open,
+      recordings.open ||
+      !!links.pending ||
+      settings.open,
   );
   /** Terminals being recorded (any tab): REC in the status bar. */
   const recCount = $derived(Object.keys(recordings.active).length);
@@ -476,6 +481,7 @@
           ...(paneCount > 1 ? [] : [{ id: "tab.close", title: "Close tab", shortcut: k("tab.close"), run: () => void workspace.close() }]),
           { id: "tab.copy", title: "Copy selection", shortcut: isMac ? "⌘C" : k("tab.copy"), run: copy },
           { id: "tab.paste", title: "Paste", shortcut: isMac ? "⌘V" : k("tab.paste"), run: () => void paste() },
+          { id: "terminal.search", title: "Search in terminal", hint: pane.alias, shortcut: k("terminal.search"), run: () => views[pane.key]?.openSearch() },
           ...(recordings.recordable(pane)
             ? [
                 recordings.isRecording(pane.terminal)
@@ -622,6 +628,7 @@
       : []),
     { id: "app.reload", title: "Reload ~/.ssh/config", shortcut: k("app.reload"), run: load },
     { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: settings.theme?.name, run: () => settings.cycle() },
+    { id: "app.settings", title: "Settings…", hint: "theme, copy on select", shortcut: k("app.settings"), run: () => (settings.open = true) },
     ...settings.themes.map((t) => ({ id: `theme-${t.id}`, title: `Theme: ${t.name}`, hint: t.description, run: () => settings.select(t.id) })),
   ]);
 
@@ -673,6 +680,12 @@
         return void load();
       case "app.theme":
         return settings.cycle();
+      case "app.settings":
+        settings.open = true;
+        return;
+      case "terminal.search":
+        if (pane) views[pane.key]?.openSearch();
+        return;
       case "app.favorite":
       case "hosts.favorite":
         if (targetAlias) void hosts.toggleFavorite(targetAlias);
@@ -1126,6 +1139,12 @@
   {/key}
 {:else if recordings.open}
   <RecordingsDialog themeId={settings.themeId} />
+{:else if links.pending}
+  {#key links.pending}
+    <LinkConfirm link={links.pending} />
+  {/key}
+{:else if settings.open}
+  <SettingsDialog />
 {/if}
 
 {#if workspace.toast && !toastOnStage}

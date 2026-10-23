@@ -85,6 +85,9 @@ alacritty_terminal = "0.26"
 tauri = { version = "2.11", features = [] }
 tauri-build = { version = "2.6", features = [] }
 tauri-plugin-dialog = "=2.8.1"
+# Re-validation of terminal links before opening (already in the lock through
+# Tauri; ADR "Liens du terminal").
+url = "2.5"
 
 # Dev
 tempfile = "3"

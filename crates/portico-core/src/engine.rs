@@ -1124,6 +1124,15 @@ impl Engine {
             .await
             .map_err(|_| Error::EngineClosed)?
     }
+
+    /// Remembers the GUI's "Copy on select" preference, alone, like
+    /// [`Engine::set_theme`] (phase 9).
+    pub async fn set_copy_on_select(&self, on: bool) -> Result<crate::settings::Settings> {
+        let path = self.inner.config.paths.settings();
+        tokio::task::spawn_blocking(move || crate::settings::set_copy_on_select(&path, on))
+            .await
+            .map_err(|_| Error::EngineClosed)?
+    }
 }
 
 // ════ end Phase 4 ════════════════════════════════════════════════════════

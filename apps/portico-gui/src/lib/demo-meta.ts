@@ -61,6 +61,7 @@ export function demoMeta(hooks: MetaHooks) {
         ];
   const logSessions: DemoLogSession[] = [];
   let theme: string | null = params.get("theme");
+  let copyOnSelect = params.get("copy") === "on";
   const keymap: Record<string, string> =
     params.get("keymap") === "custom" ? { "app.files": "Mod+Shift+O", "tab.new": "Mod+W", "app.zoom": "Mod+=" } : {};
 
@@ -216,10 +217,17 @@ export function demoMeta(hooks: MetaHooks) {
         };
       },
       async getSettings(): Promise<Settings> {
-        return { theme, keymap, error: null };
+        return { theme, keymap, copyOnSelect, error: null };
       },
       async saveTheme(id: string) {
         theme = id;
+      },
+      async saveCopyOnSelect(on: boolean) {
+        copyOnSelect = on;
+      },
+      // The demo never opens anything: the dialog closes, a notice says so.
+      async openUrl(_url: string) {
+        throw { code: "demo_link", message: "links are not opened in the demo", hint: "In the desktop app the system browser opens it." };
       },
     },
   };
