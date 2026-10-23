@@ -68,7 +68,7 @@
           Check for updates daily
         </label>
         <p class="note">
-          Portico contacts github.com once a day and sends nothing else; it only tells you, never downloads.{checked
+          Portico contacts github.com once a day and sends nothing else. Portico never downloads or installs anything itself.{checked
             ? ` Last checked ${checked}.`
             : ""}
         </p>

@@ -245,11 +245,12 @@ export const GUI_FIXED: DocTable[] = [
     rows: [
       ["Bandeau : « Check daily » (`check = true`) / « Not now » (`check = false`, plus jamais demandé)", "boutons (`Tab` puis `↵` ou `Espace`)"],
       ["Changer d'avis plus tard", "réglages (`app.settings`), « Check for updates daily » ; ou la palette, `app.update-check`"],
-      ["Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available »", "clic sur le badge de la barre d'état, ou la palette (`app.update`)"],
-      ["Fenêtre : notes de version (navigateur) / copier la commande de mise à jour / fermer", "« Release notes » / « Copy » / `Esc`"],
+      ["Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available »", "clic sur le badge de la barre d'état, ou la palette (« Update available: Portico 0.3.1… », `app.update`)"],
+      ["Fenêtre : copier la commande de mise à jour (action principale) / notes de version (navigateur) / fermer (focus initial)", "« Copy » / « Release notes » / « Close » ou `Esc`"],
+      ["Fenêtre sans commande (AppImage, .deb, autre) : ouvrir la page de version (action principale)", "« Release page »"],
     ],
     outro:
       "Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; " +
-      "aucune fenêtre ne s'ouvre d'elle-même. Portico ne télécharge ni n'installe rien.",
+      "aucune fenêtre ne s'ouvre d'elle-même. « Portico never downloads or installs anything itself. »",
   },
 ];

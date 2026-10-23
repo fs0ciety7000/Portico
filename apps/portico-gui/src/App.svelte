@@ -635,7 +635,7 @@
     { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: settings.theme?.name, run: () => settings.cycle() },
     { id: "app.settings", title: "Settings…", hint: "theme, copy on select, updates", shortcut: k("app.settings"), run: () => (settings.open = true) },
     ...(updates.available
-      ? [{ id: "app.update", title: `Portico ${updates.available.version} is available…`, hint: "release notes, update command", shortcut: k("app.update"), run: () => updates.show() }]
+      ? [{ id: "app.update", title: `Update available: Portico ${updates.available.version}…`, hint: "release notes, update command", shortcut: k("app.update"), run: () => updates.show() }]
       : []),
     ...(updates.status
       ? [
@@ -775,8 +775,15 @@
     t instanceof HTMLSelectElement ||
     (t instanceof HTMLElement && t.isContentEditable);
 
+  /** A control that answers Enter / Space itself (a banner button, a link). */
+  const isControl = (t: EventTarget | null) =>
+    t instanceof Element && !!t.closest("button, a, [role=button], summary");
+
   function onkeydown(e: KeyboardEvent) {
     if (modalOpen) return;
+    // Enter or Space on a focused button activates that button (Check
+    // daily, Copy…), never the host list's action behind it (connect).
+    if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return;
     // In a field (search, xterm's textarea) or the palette, plain keys type.
     const id = keymap.match(e, pane ? "terminal" : "hosts", paletteOpen || pickerOpen || isField(e.target));
     if (!id) return;

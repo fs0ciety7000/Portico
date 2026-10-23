@@ -36,17 +36,21 @@
       <p>You have {updates.status?.current}.</p>
       <p class="how">{instruction?.text ?? "Download it from the release page."}</p>
       {#if instruction?.command}
-        {@const command = instruction.command}
-        <div class="command">
-          <code class="mono" bind:this={commandEl}>{command}</code>
-          <button class="secondary" onclick={() => void copy(command)} data-testid="update-copy">{copied ? "Copied" : "Copy"}</button>
-        </div>
+        <code class="command mono" bind:this={commandEl}>{instruction.command}</code>
       {/if}
       <p class="note">Portico never downloads or installs anything itself.</p>
     </div>
     {#snippet footer()}
-      <button class="secondary" onclick={() => void updates.openNotes()} title={available.url} data-testid="update-notes">Release notes</button>
-      <button class="primary" data-autofocus onclick={() => updates.close()}>Close <kbd>Esc</kbd></button>
+      <!-- Close is the least risky answer: it takes the focus. The primary
+           action is what the user came for: the command, or the page. -->
+      <button class="secondary" data-autofocus onclick={() => updates.close()} data-testid="update-close">Close <kbd>Esc</kbd></button>
+      {#if instruction?.command}
+        {@const command = instruction.command}
+        <button class="secondary" onclick={() => void updates.openNotes()} title={available.url} data-testid="update-notes">Release notes</button>
+        <button class="primary" onclick={() => void copy(command)} data-testid="update-copy">{copied ? "Copied" : "Copy"}</button>
+      {:else}
+        <button class="primary" onclick={() => void updates.openNotes()} title={available.url} data-testid="update-notes">Release page</button>
+      {/if}
     {/snippet}
   </Modal>
 {/if}
@@ -55,10 +59,8 @@
   .body { display: grid; gap: var(--space-3); }
   .body p { margin: 0; }
   .how { color: var(--text-secondary); }
-  .command { display: flex; align-items: center; gap: var(--space-2); }
-  .command code {
-    flex: 1;
-    min-width: 0;
+  .command {
+    display: block;
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);

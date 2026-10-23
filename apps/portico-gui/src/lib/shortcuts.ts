@@ -151,7 +151,7 @@ export const ACTIONS: ActionDef[] = [
   { id: "hosts.recordings", title: "Recordings…", doc: "Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes)", scope: "hosts", defaults: both("V") },
   // ⌘, as on macOS. Linux: Ctrl-Alt-, (Ctrl-Shift-, types `<` in a
   // terminal; Ctrl-Alt is free there, like `terminal.search`).
-  { id: "app.settings", title: "Settings…", doc: "Réglages : thème, « Copy on select » (enregistrés dans `settings.toml`)", scope: "global", defaults: per(["Mod+,"], ["Ctrl+Alt+,"]) },
+  { id: "app.settings", title: "Settings…", doc: "Réglages : thème, « Copy on select », vérification quotidienne des mises à jour (enregistrés dans `settings.toml`)", scope: "global", defaults: per(["Mod+,"], ["Ctrl+Alt+,"]) },
   // Opt-in update check (0.3.0): palette entries, no default key.
   { id: "app.update", title: "Update available…", doc: "Version disponible : notes de version (navigateur), commande de mise à jour de cette installation (copiable) ; aussi le badge « 0.3.1 available » de la barre d'état", scope: "global", defaults: both() },
   { id: "app.update-check", title: "Toggle update check", doc: "Vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; aussi dans les réglages)", scope: "global", defaults: both() },

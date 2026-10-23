@@ -566,7 +566,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Déconnecter l'hôte de l'onglet | `tab.disconnect` | — | — |
 | Ajouter un hôte (dans `hosts.conf` de Portico, jamais `~/.ssh/config`) ; aussi le bouton « + » de la liste | `host.add` | `⌘⇧N` | `Ctrl-Shift-N` |
 | Enregistrements : liste, lecture et suppression (touches : tableau « Enregistrements (GUI) »). Sans raccourci par défaut dans un terminal : palette | `recordings.open` | — | — |
-| Réglages : thème, « Copy on select » (enregistrés dans `settings.toml`) | `app.settings` | `⌘,` | `Ctrl-Alt-,` |
+| Réglages : thème, « Copy on select », vérification quotidienne des mises à jour (enregistrés dans `settings.toml`) | `app.settings` | `⌘,` | `Ctrl-Alt-,` |
 | Version disponible : notes de version (navigateur), commande de mise à jour de cette installation (copiable) ; aussi le badge « 0.3.1 available » de la barre d'état | `app.update` | — | — |
 | Vérification quotidienne des nouvelles versions on/off (contacte github.com seulement si activée ; aussi dans les réglages) | `app.update-check` | — | — |
 | Nouvelle clé | `keys.new` | — | — |
@@ -820,8 +820,9 @@ Tant que `[updates] check` est absent de `settings.toml`, un bandeau discret au-
 |---|---|
 | Bandeau : « Check daily » (`check = true`) / « Not now » (`check = false`, plus jamais demandé) | boutons (`Tab` puis `↵` ou `Espace`) |
 | Changer d'avis plus tard | réglages (`app.settings`), « Check for updates daily » ; ou la palette, `app.update-check` |
-| Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available » | clic sur le badge de la barre d'état, ou la palette (`app.update`) |
-| Fenêtre : notes de version (navigateur) / copier la commande de mise à jour / fermer | « Release notes » / « Copy » / `Esc` |
+| Version disponible : ouvrir la fenêtre « Portico 0.3.1 is available » | clic sur le badge de la barre d'état, ou la palette (« Update available: Portico 0.3.1… », `app.update`) |
+| Fenêtre : copier la commande de mise à jour (action principale) / notes de version (navigateur) / fermer (focus initial) | « Copy » / « Release notes » / « Close » ou `Esc` |
+| Fenêtre sans commande (AppImage, .deb, autre) : ouvrir la page de version (action principale) | « Release page » |
 
-Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; aucune fenêtre ne s'ouvre d'elle-même. Portico ne télécharge ni n'installe rien.
+Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; aucune fenêtre ne s'ouvre d'elle-même. « Portico never downloads or installs anything itself. »
 <!-- END GENERATED: gui -->

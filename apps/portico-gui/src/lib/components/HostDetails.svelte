@@ -244,7 +244,7 @@
     outline: none;
   }
   .include input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  button.secondary.small { height: var(--size-control-sm); padding: 0 var(--space-3); font-size: var(--text-sm); }
+  .details :global(button.secondary.small) { height: var(--size-control-sm); padding: 0 var(--space-3); font-size: var(--text-sm); }
   .small { font-size: var(--text-xs); }
   /* Narrow window (880): one line. The message (whole in its tooltip) and
      Copy; the Include line itself is in Copy's tooltip and the palette. */
@@ -322,7 +322,8 @@
   }
   button.primary:hover { background: var(--accent-strong); }
   button.primary:active { transform: scale(0.97); }
-  button.secondary {
+  /* Shared with the banners above the details (UpdateBanner). */
+  .details :global(button.secondary) {
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
@@ -335,7 +336,8 @@
     font: inherit;
     transition: background var(--motion-fast) var(--ease-standard);
   }
-  button.secondary:hover { background: var(--bg-elevated); }
+  .details :global(button.secondary:hover:not(:disabled)) { background: var(--bg-elevated); }
+  .details :global(button.secondary:disabled) { opacity: 0.5; }
   .hint {
     margin-top: var(--space-5);
     padding: var(--space-3) var(--space-4);
