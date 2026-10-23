@@ -206,6 +206,18 @@ Portico modifiables (ADR « Import Termix et imports vers les hôtes Portico »)
 `ssh -G` d'OpenSSH résout le même `HostName`/`User`/`Port` que Portico ; import Termix avec une clé cochée puis connexion
 avec cette clé (E2E bureau).
 
+### Phase 9 : confort du terminal ✅ *(ordre validé le 2026-10-22 : phase 9, puis thème clair, puis Windows)*
+- **Recherche dans l'historique**, TUI (`Ctrl-Space /`) et GUI (`⌘F` / `Ctrl-Alt-F`) : texte littéral, casse intelligente,
+  compteur « 3 of 17 » numéroté depuis la correspondance la plus récente, « No match », « 999+ » ; rien n'atteint le
+  serveur tant que la barre est ouverte ; la vue ne bouge pas quand la sortie continue. 2 à 7 ms (TUI) et 1 à 6 ms
+  (GUI) par frappe sur 10 000 lignes
+- **Liens** (GUI) : http(s) seulement, `⌘`/`Ctrl`-clic, toujours confirmés (« Open this link? », hôte mis en évidence,
+  avertissement quand le texte OSC 8 nomme un autre hôte, Cancel par défaut dans ce cas), ouverture par `open_url`
+  côté Rust (revalidation, aucun shell). Dans la TUI, le terminal hôte gère déjà les URL visibles
+- **Menu contextuel** du terminal (GUI) et option **Copy on select** (désactivée par défaut), nouvelle fenêtre Settings
+
+**Sortie** : vérifiée (E2E bureau 21/21, captures TUI 80×24 et GUI 3 thèmes).
+
 ### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
 - Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
 - **Modèle de sécurité des fichiers refait avec des ACL** (équivalents de `0600`/`0700`, refus des liens), durcissement du
@@ -248,6 +260,16 @@ avec cette clé (E2E bureau).
 | 6b Hôtes Portico, import Termix | ✅ | 611 + 61 GUI + interop (13 scénarios) + E2E bureau 19/19 | ✅ (2 revues, voir ci-dessous) | ✅ (captures 3 thèmes, 80×24 / 880–1200 px, CLI) |
 | 7 Sync locale | ❌ abandonnée | | | |
 | 8 Windows | ⏳ | | | |
+| 9 Confort du terminal | ✅ | 699 + 89 GUI + interop (13 scénarios) + E2E bureau 21/21 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
+
+## Revues de la phase 9 (2026-10-23)
+
+Aucun constat CRITIQUE, ÉLEVÉ ni MOYEN ; tous les constats ont été traités.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` liens, recherche, menu, copy on select | 1 FAIBLE | `open_url` refuse aussi les caractères de format invisibles (bidi, largeur nulle), comme la vue ; vérifié : aucune injection d'option ou de schéma, seul l'hôte est journalisé, capabilities et CSP inchangées, `allowProposedApi` sans surface distante |
+| `agent-design-review` clôture 9 | 2 BLOQUANT, 6 IMPORTANT, 5 MINEUR | Correspondance courante en `text-on-accent` (7,5 à 9,8:1) ; barre TUI qui possède sa ligne et reste en bas ; `search-match` distinct de la sélection (ΔE ≥ 10, testé) et texte forcé en `text-primary` ; ↑/↓ et aides visibles dans la GUI ; Cancel par défaut pour un lien trompeur ; groupe radio des thèmes ; `Ctrl-Alt-,` pour Settings sous Linux ; un seul nom « Search scrollback » ; tokens `size-control`, `size-menu` |
 
 ## Revues de la phase 6b (2026-10-22)
 
