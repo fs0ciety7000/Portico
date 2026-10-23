@@ -118,9 +118,13 @@ jobs:
           bin="target/$TARGET/release/portico"
           file "$bin"
           mkdir -p "$RUNNER_TEMP/home"
-          (sleep 2; printf q) | HOME="$RUNNER_TEMP/home" TERM=xterm-256color \
+          # A fresh home shows the one-time update question first: Esc
+          # answers "later" (nothing written, no request), then q quits.
+          (sleep 2; printf '\033'; sleep 1; printf q) | HOME="$RUNNER_TEMP/home" TERM=xterm-256color \
             timeout 20 script -qfec "stty cols 120 rows 36; $bin" /dev/null > "$RUNNER_TEMP/tui.out"
           grep -q PORTICO "$RUNNER_TEMP/tui.out"
+          grep -q "Check for new versions" "$RUNNER_TEMP/tui.out"
+          test ! -e "$RUNNER_TEMP/home/.config/portico/settings.toml" || ! grep -q "^check" "$RUNNER_TEMP/home/.config/portico/settings.toml"
       - name: Package
         shell: bash
         run: |
