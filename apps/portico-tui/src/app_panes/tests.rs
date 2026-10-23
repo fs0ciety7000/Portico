@@ -1109,6 +1109,64 @@ async fn scrollback_search_finds_scrolls_and_keeps_keys_from_the_remote() {
     eventually(|| received(alpha) == "ok").await;
 }
 
+/// Feeds `output` into the focused pane as remote output would be.
+fn feed_pane(app: &App, output: &str) {
+    if let Some(view) = app.active_terminal() {
+        let mut term = view.term.lock().unwrap();
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *term, output.as_bytes());
+    }
+}
+
+fn open_bar(app: &mut App) {
+    press_key(
+        app,
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+    );
+    press_key(app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(app.searching());
+}
+
+/// The bar owns its whole row: with an empty query, nothing of the grid
+/// line under it shows through.
+#[tokio::test]
+async fn the_empty_search_bar_hides_the_line_under_it() {
+    let mut lab = Box::pin(searchable_lab()).await;
+    feed_pane(&lab.app, &"x".repeat(70));
+    open_bar(&mut lab.app);
+    let lines = screen_at(&mut lab.app, 80, 24);
+    let bar = lines.get(22).cloned().unwrap_or_default();
+    let rest = bar.strip_prefix("▍ Search").unwrap_or("x");
+    assert!(
+        rest.chars().all(|c| c == ' ') && bar.chars().count() == 80,
+        "{}",
+        text(&lines)
+    );
+}
+
+/// A current match on the live view's bottom line is drawn just above the
+/// bar, which stays at the bottom.
+#[tokio::test]
+async fn a_match_under_the_bar_is_drawn_above_it() {
+    let mut lab = Box::pin(searchable_lab()).await;
+    feed_pane(&lab.app, "pinpoint");
+    open_bar(&mut lab.app);
+    press_text(&mut lab.app, "pinpoint");
+    let lines = screen_at(&mut lab.app, 80, 24);
+    let all = text(&lines);
+    assert!(
+        lines.get(21).is_some_and(|l| l.contains("$ pinpoint")),
+        "{all}"
+    );
+    assert!(
+        lines
+            .get(22)
+            .is_some_and(|l| l.starts_with("▍ Search  pinpoint")),
+        "{all}"
+    );
+}
+
 /// Text captures of the bar for the report and the design review:
 /// `cargo test -p portico-tui search_bar_captures -- --ignored --nocapture`.
 #[tokio::test]
@@ -1117,6 +1175,12 @@ async fn scrollback_search_finds_scrolls_and_keeps_keys_from_the_remote() {
 async fn search_bar_captures() {
     let mut lab = Box::pin(searchable_lab()).await;
     search_needle(&mut lab.app);
+    let mut empty = Box::pin(searchable_lab()).await;
+    open_bar(&mut empty.app);
+    println!("── 80×24, empty query ──");
+    for line in screen_at(&mut empty.app, 80, 24) {
+        println!("{line}|");
+    }
     for (cols, rows) in [(80, 24), (120, 40)] {
         println!("── {cols}×{rows} ──");
         for line in screen_at(&mut lab.app, cols, rows) {

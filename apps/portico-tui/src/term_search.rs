@@ -13,8 +13,9 @@
 //!   grows by exactly the lines that scrolled in, and [`ScrollSearch`]
 //!   shifts its points by that much on the next refresh;
 //! - the last row of the pane belongs to the search bar: a match is only
-//!   "shown" above it (the bar moves to the top row when the current match
-//!   can only be on the bottom line, see [`ScrollSearch::bar_on_top`]).
+//!   "shown" above it (when the current match can only be on the grid's
+//!   bottom line, the view is drawn one row higher, see
+//!   [`ScrollSearch::lift`]).
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -211,14 +212,17 @@ impl ScrollSearch {
         }
     }
 
-    /// The current match can only be shown on the pane's last row (the
-    /// live view's bottom line): the bar takes the top row instead.
-    pub(crate) fn bar_on_top<T>(&self, term: &Term<T>) -> bool {
+    /// Rows to draw the view higher by: 1 when the current match can only
+    /// be on the pane's last row (the live view's bottom line, under the
+    /// bar), so it shows just above the bar and the top row goes; else 0.
+    pub(crate) fn lift<T>(&self, term: &Term<T>) -> u16 {
         let offset = i32::try_from(term.grid().display_offset()).unwrap_or(i32::MAX);
         let last = i32::try_from(term.screen_lines()).unwrap_or(1) - 1;
-        self.current
+        let under_bar = self
+            .current
             .as_ref()
-            .is_some_and(|m| m.end().line.0.saturating_add(offset) >= last && last > 0)
+            .is_some_and(|m| m.end().line.0.saturating_add(offset) >= last && last > 0);
+        u16::from(under_bar)
     }
 
     fn jump<T: EventListener>(&mut self, term: &mut Term<T>, origin: Point, direction: Direction) {
@@ -632,6 +636,29 @@ mod tests {
                 total: 1
             })
         );
+    }
+
+    /// A match on the live view's bottom line (under the bar) cannot be
+    /// scrolled into view: the view is drawn one row higher instead.
+    #[test]
+    fn a_match_under_the_bar_lifts_the_view() {
+        let mut t = term(30, 6, 1000);
+        feed(&mut t, "a\nb\nc\nd\ne\n$ find me");
+        let mut s = ScrollSearch::open(&t);
+        query(&mut s, &mut t, "find");
+        let current = s.current.clone().unwrap();
+        assert_eq!(current.start().line.0, 5, "on the bottom line");
+        assert_eq!(t.grid().display_offset(), 0);
+        assert_eq!(s.lift(&t), 1);
+        // Shown above the bar: no lift.
+        let mut above = term(30, 6, 1000);
+        feed(&mut above, "a\nb\nfind me\n$ ");
+        let mut on_screen = ScrollSearch::open(&above);
+        query(&mut on_screen, &mut above, "find");
+        assert!(on_screen.current.is_some());
+        assert_eq!(on_screen.lift(&above), 0);
+        query(&mut s, &mut t, "zzz");
+        assert_eq!(s.lift(&t), 0, "no current match");
     }
 
     #[test]

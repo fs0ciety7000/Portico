@@ -1,7 +1,8 @@
 //! Renders an `alacritty_terminal` grid into the ratatui buffer, with the
 //! scrollback search bar and its highlights when the pane has one open:
-//! every visible match on `search_match`, the current one on
-//! `search_current` (the accent) with `text_on_accent`.
+//! every visible match on `search_match` with `text_primary`, the current
+//! one on `search_current` (the accent) with `text_on_accent`. The bar
+//! always takes the pane's bottom row.
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
@@ -14,7 +15,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 
 use crate::term_search::{ScrollSearch, counter_text};
 use crate::terminal::TerminalView;
@@ -37,41 +38,34 @@ pub(crate) fn render(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let search = view.search.as_ref();
+    // The bar keeps the bottom row: a current match on the grid's last
+    // line is lifted one row above it (like `less`).
+    let lift = search.map_or(0, |search| search.lift(&term));
     frame.render_widget(
         TermWidget {
             term: &term,
             theme: s.theme,
             focused,
-            skip_rows: 0,
+            skip_rows: i32::from(lift),
             search,
         },
         area,
     );
     let offset = term.grid().display_offset();
-    let bar_on_top = search.is_some_and(|search| search.bar_on_top(&term));
     drop(term);
 
     if let Some(search) = search {
-        let y = if bar_on_top {
-            area.y
-        } else {
-            area.bottom().saturating_sub(1)
-        };
         render_search_bar(
             search,
             focused,
             s,
             frame,
             Rect {
-                y,
+                y: area.bottom().saturating_sub(1),
                 height: 1,
                 ..area
             },
         );
-        // The bar replaces the banner and, on top, the scroll badge.
-        if bar_on_top {
-            return;
-        }
     }
     if offset > 0 {
         let mut spans = vec![Span::styled(
@@ -139,7 +133,7 @@ pub(crate) fn render_grid<T: EventListener>(
 }
 
 /// `▍Search  query▏                 3 of 17 ` on the chrome surface. The
-/// query keeps its end when it does not fit; the counter is muted, or in
+/// query keeps its end when it does not fit; the counter is secondary, or in
 /// the warning colour for `No match`, absent while the query is empty.
 fn render_search_bar(
     search: &ScrollSearch,
@@ -153,7 +147,7 @@ fn render_search_bar(
         let style = if warn {
             s.status(s.theme.status.warning)
         } else {
-            s.muted()
+            s.secondary()
         };
         (format!("{text} "), style)
     });
@@ -192,6 +186,8 @@ fn render_search_bar(
     } else {
         line
     };
+    // The whole row is the bar's: no grid cell shows through past the text.
+    frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(line).style(s.chrome()), area);
 }
 
@@ -260,7 +256,9 @@ impl<T: EventListener> Widget for TermWidget<'_, T> {
                     bg = c(p.search_current);
                     fg = c(p.text_on_accent);
                 } else if search.visible.iter().any(|m| m.contains(&point)) {
+                    // The remote's colour could be unreadable on the tint.
                     bg = c(p.search_match);
+                    fg = c(p.text_primary);
                 }
             }
             let Some(target) = buf.cell_mut((area.x + x, area.y + y)) else {
