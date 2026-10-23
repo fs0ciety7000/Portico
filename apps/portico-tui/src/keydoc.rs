@@ -237,6 +237,38 @@ const SNIPPETS: Panel = Panel {
     outro: "Sans terminal ouvert, le panneau l'indique (« No open terminal on <hôte> ») avec l'étape suivante : `Esc`, puis `↵` pour se connecter.\n\nFormulaire des placeholders : un champ par `{{nom}}`, `Tab` entre les champs, aperçu de ce qui sera tapé, `↵` exécute ou colle (erreurs en ligne), `Esc` revient. Éditeur : `Tab` entre les champs, `↵` dans la commande insère une ligne, `←` `→` change la portée, `Espace` bascule « Run » (« yes — Enter is sent » / « no — typed only »), `Ctrl-S` (ou `↵` hors commande) enregistre, `Esc` annule. Un snippet multi-ligne « paste only » refusé (le programme distant n'accepte pas le collage groupé) demande confirmation : seul `r` l'exécute quand même (touches ignorées pendant 400 ms, `↵` ne fait rien), `Esc` annule.",
 };
 
+const SCROLLBACK: Panel = Panel {
+    title: "TUI : recherche dans l'historique",
+    intro: "`Ctrl-Space /` dans un panneau terminal (`terminal.search`) ouvre une barre d'une ligne en bas du panneau (au-dessus de la barre de statut pour un onglet non divisé) : « Search », la requête et un compteur « 3 of 17 », numéroté depuis le bas comme dans la GUI (la correspondance la plus récente est 1 ; « N matches » si la courante a disparu sous la sortie ; « No match » en couleur d'avertissement, « 999+ » au-delà de 999, rien tant que la requête est vide). Texte littéral (`.*[` ne sont pas des métacaractères), casse intelligente : insensible à la casse sauf si la requête contient une majuscule. La recherche porte sur l'écran et tout l'historique du panneau (10 000 lignes). Toutes les correspondances visibles sont surlignées discrètement, la courante en couleur d'accent. Tant que la barre est ouverte, **aucune touche ni aucun collage n'atteint l'hôte distant**, et la sortie qui arrive ne déplace pas la vue (le compteur suit).",
+    rows: &[
+        (
+            "Taper la requête (saut incrémental à la correspondance la plus proche en remontant depuis le bas de la vue)",
+            "saisie, collage (première ligne)",
+        ),
+        (
+            "Effacer un caractère / toute la requête",
+            "`Backspace` / `Ctrl-U`",
+        ),
+        (
+            "Correspondance plus ancienne (vers le haut, boucle)",
+            "`↵`, `↑`, `Ctrl-P`",
+        ),
+        (
+            "Correspondance plus récente (vers le bas, boucle)",
+            "`Ctrl-N`, `↓` (`Shift-↵` seulement si le terminal hôte le distingue de `↵`, ce que la plupart ne font pas)",
+        ),
+        (
+            "Fermer : efface les surlignages et revient en bas (sortie en direct)",
+            "`Esc`, `Ctrl-C`",
+        ),
+        (
+            "Commandes Portico (changer de panneau…) ; `Ctrl-Space` deux fois ne part pas vers l'hôte tant que la barre est ouverte",
+            "`Ctrl-Space`, puis la touche",
+        ),
+    ],
+    outro: "Quand la correspondance courante est sur la dernière ligne de la vue en direct, la barre passe sur la première ligne du panneau pour ne pas la masquer. Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.",
+};
+
 const PANES: Panel = Panel {
     title: "TUI : panneaux",
     intro: "Un onglet terminal se divise en panneaux : 8 au plus, chacun d'au moins 20×5 cellules. Les commandes sont dans la table du préfixe (`prefix.split_*`, `prefix.pane_*`, `prefix.next_pane`, `prefix.resize_*`, `prefix.close_pane`, `prefix.zoom_pane`). Seul le panneau actif reçoit les frappes, le collage et le défilement (aucune diffusion).",
@@ -322,22 +354,28 @@ const FIXED: &[(Context, &str, &str)] = &[
     ),
 ];
 
-fn context_section(out: &mut String, context: Context, title: &str, intro: &str) {
+fn context_section(out: &mut String, contexts: &[Context], title: &str, intro: &str) {
     let defaults = Keymap::defaults();
     let _ = writeln!(out, "### {title}\n");
     if !intro.is_empty() {
         let _ = writeln!(out, "{intro}\n");
     }
     out.push_str("| Action | Touches | Identifiant |\n|---|---|---|\n");
-    for b in BINDINGS.iter().filter(|b| b.context == context) {
+    for b in BINDINGS.iter().filter(|b| contexts.contains(&b.context)) {
+        // A pane command follows the prefix.
+        let lead = if b.context == Context::TerminalPrefix {
+            "Ctrl-Space "
+        } else {
+            ""
+        };
         let keys: Vec<String> = defaults
             .keys(b.id)
             .iter()
-            .map(|k| format!("`{}`", k.display().replace('|', "\\|")))
+            .map(|k| format!("`{lead}{}`", k.display().replace('|', "\\|")))
             .collect();
         let _ = writeln!(out, "| {} | {} | `{}` |", b.doc, keys.join(", "), b.id);
     }
-    for (_, action, keys) in FIXED.iter().filter(|(c, ..)| *c == context) {
+    for (_, action, keys) in FIXED.iter().filter(|(c, ..)| contexts.contains(c)) {
         let _ = writeln!(out, "| {action} | {keys} | (fixe) |");
     }
     out.push('\n');
@@ -365,24 +403,25 @@ pub(crate) fn block() -> String {
     );
     context_section(
         &mut out,
-        Context::Hosts,
+        &[Context::Hosts],
         "TUI : liste des hôtes",
         "Sans recherche, la liste est organisée en sections : « Recent » (5 derniers hôtes encore présents dans la config), puis les groupes (ordre alphabétique), puis « Other » ; sans groupe ni récent, elle reste plate. Les touches de cette table sont configurables (voir « Configurer les raccourcis »).",
     );
     panel_section(&mut out, &SEARCH);
     context_section(
         &mut out,
-        Context::Prefix,
+        &[Context::Prefix],
         "TUI : préfixe `Ctrl-Space`",
         "Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ctrl-C`. Les commandes Portico passent par le préfixe **`Ctrl-Space`** (la barre de statut affiche `PREFIX`). Le préfixe fonctionne aussi depuis la liste des hôtes et les panneaux, avec la même table. Il s'applique à une seule touche.",
     );
     context_section(
         &mut out,
-        Context::Terminal,
+        &[Context::Terminal, Context::TerminalPrefix],
         "TUI : terminal",
-        "Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.",
+        "Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant. Les commandes de panneau (`terminal.search`) suivent le préfixe `Ctrl-Space` et, dans un panneau terminal, priment sur la commande du préfixe de même touche (`/` cherche alors dans l'historique, plus dans la liste des hôtes).",
     );
     for panel in [
+        &SCROLLBACK,
         &PANES,
         &HOST_FORM,
         &EDIT,

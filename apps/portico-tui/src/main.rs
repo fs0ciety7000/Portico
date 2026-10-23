@@ -36,6 +36,7 @@ mod panes;
 mod player;
 mod recordings;
 mod snippets;
+mod term_search;
 mod terminal;
 mod theme;
 mod tunnels;

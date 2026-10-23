@@ -833,6 +833,11 @@ impl App {
         match snippet_bytes(rendered, run, bracketed) {
             Ok(bytes) => {
                 view.send(bytes);
+                let id = view.id;
+                // Typing into the pane returns it to the live view.
+                if let Some(view) = self.views_mut().find(|v| v.id == id) {
+                    view.close_search();
+                }
                 self.overlay = None;
                 self.snippets_panel = None;
                 // The pane typed into is shown and focused.

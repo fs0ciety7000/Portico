@@ -30,6 +30,9 @@ pub(crate) enum Context {
     Prefix,
     /// A terminal tab (every other key goes to the remote program).
     Terminal,
+    /// The key after `Ctrl-Space` in a terminal pane: these win over
+    /// [`Context::Prefix`] there (see [`clash`]).
+    TerminalPrefix,
 }
 
 #[cfg(test)]
@@ -38,7 +41,7 @@ impl Context {
         match self {
             Self::Hosts => "hosts",
             Self::Prefix => "prefix",
-            Self::Terminal => "terminal",
+            Self::Terminal | Self::TerminalPrefix => "terminal",
         }
     }
 }
@@ -526,7 +529,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Prefix,
         ["/"],
         "search",
-        "Rechercher un hôte",
+        "Rechercher un hôte (dans un panneau terminal, la même touche cherche dans son historique : `terminal.search`)",
         Action::FocusSearch
     ),
     bind!(
@@ -553,7 +556,35 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "Redescendre dans l'historique (toute frappe revient en bas)",
         Action::ScrollDown
     ),
+    bind!(
+        "terminal.search",
+        TerminalPrefix,
+        ["/"],
+        "search",
+        "Rechercher dans l'historique du panneau (après `Ctrl-Space` ; texte littéral, casse intelligente)",
+        Action::ScrollbackSearch
+    ),
 ];
+
+/// The prefix command that a pane's own command of the same key replaces
+/// there, by design: `/` searches what is in front of you (the host list,
+/// or the pane's scrollback).
+const SHADOWED_IN_PANES: &str = "prefix.search";
+
+/// Two bindings may not share a key: same context, or a pane command and a
+/// prefix command (both follow `Ctrl-Space` in a terminal), except the
+/// one the pane's search shadows on purpose.
+fn clash(a: &Binding, b: &Binding) -> bool {
+    use Context::{Prefix, TerminalPrefix};
+    if a.context == b.context {
+        return true;
+    }
+    matches!(
+        (a.context, b.context),
+        (Prefix, TerminalPrefix) | (TerminalPrefix, Prefix)
+    ) && a.id != SHADOWED_IN_PANES
+        && b.id != SHADOWED_IN_PANES
+}
 
 // ── key syntax ──────────────────────────────────────────────────────────
 
@@ -793,7 +824,7 @@ impl Keymap {
                 };
                 let mine = map.keys.get(index).cloned().unwrap_or_default();
                 for (other, b) in BINDINGS.iter().enumerate() {
-                    if other == index || b.context != binding.context {
+                    if other == index || !clash(binding, b) {
                         continue;
                     }
                     let theirs = map.keys.get(other).map(Vec::as_slice).unwrap_or_default();
@@ -1118,6 +1149,7 @@ const HELP: &[(&str, usize, HelpRows)] = &[
             ),
             (&[Id("prefix.close_pane", 1)], "Close pane"),
             (&[Id("prefix.zoom_pane", 1)], "Zoom pane"),
+            (&[Id("terminal.search", 1)], "Search scrollback"),
         ],
     ),
     (
@@ -1182,6 +1214,8 @@ pub(crate) struct KeyContext<'a> {
     pub(crate) pane_repeat: bool,
     /// The host list picks the host of a new pane (`Ctrl-Space S`).
     pub(crate) picking: bool,
+    /// The focused pane's search bar is open: it takes the keys.
+    pub(crate) searching: bool,
     pub(crate) keymap: &'a Keymap,
 }
 
@@ -1227,6 +1261,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         dialog_open,
         prefix,
         picking,
+        searching,
         keymap,
         ..
     } = cx;
@@ -1259,7 +1294,7 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
     }
     // The prefix works from every view, so tab commands are the same everywhere.
     if prefix {
-        return Some(prefix_command(key, is_prefix_key, focus, keymap));
+        return Some(prefix_command(key, is_prefix_key, focus, searching, keymap));
     }
     if let Some(action) = pane_repeat_key(key, cx) {
         return Some(action);
@@ -1276,17 +1311,13 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
         });
     }
     if focus == Focus::Terminal {
-        if overlay_open {
-            return Some(Action::CloseOverlay);
-        }
-        if is_prefix_key {
-            return Some(Action::Prefix);
-        }
-        return Some(
-            keymap
-                .lookup(Context::Terminal, &key)
-                .unwrap_or(Action::TerminalKey(key)),
-        );
+        return Some(terminal_key(
+            key,
+            overlay_open,
+            is_prefix_key,
+            searching,
+            keymap,
+        ));
     }
     if ctrl && key.code == KeyCode::Char('c') {
         // Picking a pane's host: Ctrl-C cancels the pick, not Portico.
@@ -1326,6 +1357,29 @@ pub(crate) fn map_key(key: KeyEvent, cx: KeyContext<'_>) -> Option<Action> {
             }
             _ => keymap.lookup(Context::Hosts, &key),
         },
+    }
+}
+
+/// A terminal pane: the prefix, then its search bar if open, then its
+/// configurable keys; everything else goes to the remote program.
+fn terminal_key(
+    key: KeyEvent,
+    overlay_open: bool,
+    is_prefix_key: bool,
+    searching: bool,
+    keymap: &Keymap,
+) -> Action {
+    if overlay_open {
+        Action::CloseOverlay
+    } else if is_prefix_key {
+        Action::Prefix
+    } else if searching {
+        // The search bar takes every other key: nothing reaches the remote.
+        Action::ScrollbackKey(key)
+    } else {
+        keymap
+            .lookup(Context::Terminal, &key)
+            .unwrap_or(Action::TerminalKey(key))
     }
 }
 
@@ -1383,10 +1437,17 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
     Some(wrap(key))
 }
 
-fn prefix_command(key: KeyEvent, is_prefix_key: bool, focus: Focus, keymap: &Keymap) -> Action {
+fn prefix_command(
+    key: KeyEvent,
+    is_prefix_key: bool,
+    focus: Focus,
+    searching: bool,
+    keymap: &Keymap,
+) -> Action {
     if is_prefix_key {
-        // Ctrl-Space twice: deliver it to the remote program, if any.
-        return if focus == Focus::Terminal {
+        // Ctrl-Space twice: deliver it to the remote program, if any (not
+        // while the search bar is open: it keeps the remote out).
+        return if focus == Focus::Terminal && !searching {
             Action::TerminalKey(key)
         } else {
             Action::CancelPrefix
@@ -1397,8 +1458,11 @@ fn prefix_command(key: KeyEvent, is_prefix_key: bool, focus: Focus, keymap: &Key
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match key.code {
         KeyCode::Char(c @ '1'..='9') if plain => Action::GoTab(usize::from(c as u8 - b'1')),
-        _ => keymap
-            .lookup(Context::Prefix, &key)
+        // In a pane, its own commands first.
+        _ => (focus == Focus::Terminal)
+            .then(|| keymap.lookup(Context::TerminalPrefix, &key))
+            .flatten()
+            .or_else(|| keymap.lookup(Context::Prefix, &key))
             .unwrap_or(Action::CancelPrefix),
     }
 }
@@ -1425,6 +1489,7 @@ mod tests {
             prefix,
             pane_repeat: false,
             picking: false,
+            searching: false,
             keymap,
         }
     }
@@ -1459,7 +1524,7 @@ mod tests {
         let map = Keymap::defaults();
         for (i, a) in BINDINGS.iter().enumerate() {
             for (j, b) in BINDINGS.iter().enumerate().skip(i + 1) {
-                if a.context == b.context {
+                if clash(a, b) {
                     let ka = map.keys.get(i).cloned().unwrap_or_default();
                     let kb = map.keys.get(j).cloned().unwrap_or_default();
                     assert!(!ka.iter().any(|k| kb.contains(k)), "{} / {}", a.id, b.id);
@@ -1785,6 +1850,83 @@ mod tests {
                 true
             ),
             Some(Action::OpenFiles)
+        ));
+    }
+
+    #[test]
+    fn slash_after_the_prefix_searches_what_is_in_front() {
+        let keymap = Keymap::defaults();
+        let slash = key(KeyCode::Char('/'), KeyModifiers::NONE);
+        // In a pane: its scrollback. Elsewhere: the host list.
+        assert!(matches!(
+            map_key(slash, cx(Focus::Terminal, None, false, true, &keymap)),
+            Some(Action::ScrollbackSearch)
+        ));
+        assert!(matches!(
+            map_key(slash, cx(Focus::Hosts, None, false, true, &keymap)),
+            Some(Action::FocusSearch)
+        ));
+        assert!(matches!(
+            map_key(slash, cx(Focus::Files, None, false, true, &keymap)),
+            Some(Action::FocusSearch)
+        ));
+        // The other prefix commands still work in a pane.
+        assert!(matches!(
+            map(
+                KeyCode::Char('f'),
+                KeyModifiers::NONE,
+                Focus::Terminal,
+                true
+            ),
+            Some(Action::OpenFiles)
+        ));
+        // A pane command may not take a prefix command's key...
+        let (map, ignored) = overrides(&[("terminal.search", "f")]);
+        assert_eq!(
+            ignored,
+            vec!["terminal.search = f (conflicts with prefix.files)".to_owned()]
+        );
+        assert_eq!(map.shown("terminal.search", 1), "/");
+        // ...but a plain key is fine after the prefix.
+        let (map, ignored) = overrides(&[("terminal.search", "F")]);
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert_eq!(map.shown("terminal.search", 1), "F");
+    }
+
+    #[test]
+    fn the_search_bar_keeps_every_key_from_the_remote() {
+        let keymap = Keymap::defaults();
+        let searching = |key: KeyEvent, prefix: bool| {
+            map_key(
+                key,
+                KeyContext {
+                    searching: true,
+                    ..cx(Focus::Terminal, None, false, prefix, &keymap)
+                },
+            )
+        };
+        for k in [
+            key(KeyCode::Char('a'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            key(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            key(KeyCode::PageUp, KeyModifiers::SHIFT),
+            key(KeyCode::F(5), KeyModifiers::NONE),
+        ] {
+            assert!(
+                matches!(searching(k, false), Some(Action::ScrollbackKey(got)) if got == k),
+                "{k:?}"
+            );
+        }
+        // The prefix still opens Portico's commands...
+        let space = key(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert!(matches!(searching(space, false), Some(Action::Prefix)));
+        // ...but `Ctrl-Space` twice is not sent while the bar is open.
+        assert!(matches!(searching(space, true), Some(Action::CancelPrefix)));
+        assert!(matches!(
+            map_key(space, cx(Focus::Terminal, None, false, true, &keymap)),
+            Some(Action::TerminalKey(got)) if got == space
         ));
     }
 

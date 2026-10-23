@@ -161,6 +161,17 @@ impl App {
         self.active_tab()?.focused()
     }
 
+    /// The focused pane's terminal, mutable.
+    pub(crate) fn active_terminal_mut(&mut self) -> Option<&mut TerminalView> {
+        let index = self.active?;
+        self.tabs.get_mut(index)?.focused_mut()?.view_mut()
+    }
+
+    /// The focused pane's search bar is open.
+    pub(crate) fn searching(&self) -> bool {
+        self.focus == Focus::Terminal && self.active_terminal().is_some_and(|v| v.search.is_some())
+    }
+
     /// Every terminal of every tab.
     pub(crate) fn views(&self) -> impl Iterator<Item = &TerminalView> {
         self.tabs

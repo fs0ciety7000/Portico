@@ -247,6 +247,7 @@ fn keys_open_the_panel_and_toggle_recording() {
         prefix,
         pane_repeat: false,
         picking: false,
+        searching: false,
         keymap: &keymap,
     };
     let shift = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);

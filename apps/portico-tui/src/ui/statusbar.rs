@@ -487,6 +487,12 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 ("Esc", "back"),
             ],
         ),
+        // The search bar has the keys: its own hints (Shift-↵ is not told
+        // apart from ↵ by most terminals, Ctrl-N is).
+        Focus::Terminal if app.searching() => (
+            " SEARCH ",
+            &[("↵", "older"), ("Ctrl-N", "newer"), ("Esc", "close")],
+        ),
         Focus::Terminal => {
             let mut hints = Vec::new();
             if app
@@ -505,6 +511,9 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
             }
             hints.push(("Ctrl-Space".to_owned(), "commands"));
             hints.extend(keyed(app, &["terminal.scroll_up"]));
+            if let Some((key, label)) = app.keymap.hint("terminal.search") {
+                hints.push((format!("Ctrl-Space {key}"), label));
+            }
             return (" TERMINAL ", hints);
         }
         // `Ctrl-Space S`: choosing the host of a new pane.

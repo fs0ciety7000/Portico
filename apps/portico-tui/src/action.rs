@@ -66,6 +66,10 @@ pub(crate) enum Action {
     Paste(String),
     ScrollUp,
     ScrollDown,
+    /// `Ctrl-Space /`: opens the focused pane's scrollback search.
+    ScrollbackSearch,
+    /// A key for the focused pane's open search bar (never the remote).
+    ScrollbackKey(KeyEvent),
     TerminalDirty(TerminalId),
     TerminalOpened {
         alias: String,

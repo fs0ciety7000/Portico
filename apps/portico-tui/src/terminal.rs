@@ -7,6 +7,10 @@
 //! per frame, never an unbounded queue of actions. Because the reader only
 //! pulls from the engine's bounded channel as fast as it parses, SSH
 //! backpressure is preserved end to end.
+//!
+//! A pane may have its scrollback search open ([`crate::term_search`]):
+//! the reader then holds the view still while it parses, and every key
+//! goes to the search bar, never to the remote.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -23,9 +27,10 @@ use portico_core::ids::{SessionId, TerminalId};
 use tokio::sync::mpsc;
 
 use crate::action::Action;
+use crate::term_search::{self, ScrollSearch};
 
 /// Lines of scrollback kept per terminal.
-const SCROLLBACK: usize = 10_000;
+pub(crate) const SCROLLBACK: usize = 10_000;
 /// A new size reaches the remote PTY once the geometry has been still this
 /// long (a burst of pane resizes sends one `window-change`).
 pub(crate) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -117,6 +122,10 @@ pub(crate) struct TerminalView {
     /// Why the remote shell ended, once it did.
     pub(crate) ended: Option<Ended>,
     pub(crate) closed: bool,
+    /// Scrollback search, while its bar is open.
+    pub(crate) search: Option<ScrollSearch>,
+    /// Shared with the reader: a search is open, output must not move the view.
+    hold: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -156,14 +165,22 @@ impl TerminalView {
         };
         let term: SharedTerm = Arc::new(Mutex::new(Term::new(config, &size, proxy)));
         let dirty = Arc::new(AtomicBool::new(false));
+        let hold = Arc::new(AtomicBool::new(false));
 
         let (reader_term, reader_dirty) = (Arc::clone(&term), Arc::clone(&dirty));
+        let reader_hold = Arc::clone(&hold);
         tokio::spawn(async move {
             let mut parser: Processor = Processor::new();
             while let Some(bytes) = output.recv().await {
                 {
                     let mut term = reader_term.lock().unwrap_or_else(PoisonError::into_inner);
+                    let lifted = reader_hold
+                        .load(Ordering::Acquire)
+                        .then(|| term_search::hold_before(&mut term));
                     parser.advance(&mut *term, &bytes);
+                    if let Some(lifted) = lifted {
+                        term_search::hold_after(&mut term, lifted);
+                    }
                 }
                 // Coalesce: only one pending redraw per frame.
                 if !reader_dirty.swap(true, Ordering::AcqRel) {
@@ -185,6 +202,8 @@ impl TerminalView {
             dirty,
             ended: None,
             closed: false,
+            search: None,
+            hold,
         }
     }
 
@@ -227,11 +246,97 @@ impl TerminalView {
             return;
         }
         self.size = size;
-        self.term
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .resize(size);
+        let mut term = self.term.lock().unwrap_or_else(PoisonError::into_inner);
+        term.resize(size);
+        if let Some(search) = &mut self.search {
+            search.resized(&mut term);
+        }
+        drop(term);
         self.resize_since = Some(Instant::now());
+    }
+
+    // ── scrollback search ──────────────────────────────────────────────────
+
+    /// Opens the search bar (kept as is when already open).
+    pub(crate) fn open_search(&mut self) {
+        if self.search.is_none() {
+            let term = self.term.lock().unwrap_or_else(PoisonError::into_inner);
+            self.search = Some(ScrollSearch::open(&term));
+            self.hold.store(true, Ordering::Release);
+        }
+    }
+
+    /// Closes the bar, clears the highlights, back to the live view.
+    pub(crate) fn close_search(&mut self) {
+        if self.search.take().is_some() {
+            self.hold.store(false, Ordering::Release);
+            self.scroll(Scroll::Bottom);
+        }
+    }
+
+    /// A key for the open search bar: it takes every key (none reaches
+    /// the remote). `↵` `↑` `Ctrl-P` older, `Shift-↵` `↓` `Ctrl-N` newer,
+    /// `Esc` `Ctrl-C` close, `Backspace` / `Ctrl-U` edit, characters type.
+    pub(crate) fn search_key(&mut self, key: KeyEvent) {
+        let Some(query) = self.search.as_ref().map(|s| s.query.clone()) else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Esc => self.close_search(),
+            KeyCode::Char('c') if ctrl => self.close_search(),
+            KeyCode::Enter if shift => self.search_step(false),
+            KeyCode::Enter | KeyCode::Up => self.search_step(true),
+            KeyCode::Char('p') if ctrl => self.search_step(true),
+            KeyCode::Down => self.search_step(false),
+            KeyCode::Char('n') if ctrl => self.search_step(false),
+            KeyCode::Char('u') if ctrl => self.set_search_query(""),
+            KeyCode::Backspace => {
+                let mut query = query;
+                query.pop();
+                self.set_search_query(&query);
+            }
+            KeyCode::Char(c) if !ctrl && !alt && !c.is_control() => {
+                let mut query = query;
+                query.push(c);
+                self.set_search_query(&query);
+            }
+            _ => {}
+        }
+    }
+
+    /// A paste while the bar is open types its first line into the query.
+    pub(crate) fn search_paste(&mut self, text: &str) {
+        let Some(mut query) = self.search.as_ref().map(|s| s.query.clone()) else {
+            return;
+        };
+        let line = text.lines().next().unwrap_or_default();
+        query.extend(line.chars().filter(|c| !c.is_control()));
+        self.set_search_query(&query);
+    }
+
+    /// New output: the counter and highlights follow, the view does not.
+    pub(crate) fn refresh_search(&mut self) {
+        if let Some(search) = &mut self.search {
+            let term = self.term.lock().unwrap_or_else(PoisonError::into_inner);
+            search.refresh(&term);
+        }
+    }
+
+    fn set_search_query(&mut self, query: &str) {
+        if let Some(search) = &mut self.search {
+            let mut term = self.term.lock().unwrap_or_else(PoisonError::into_inner);
+            search.set_query(&mut term, query);
+        }
+    }
+
+    fn search_step(&mut self, up: bool) {
+        if let Some(search) = &mut self.search {
+            let mut term = self.term.lock().unwrap_or_else(PoisonError::into_inner);
+            search.step(&mut term, up);
+        }
     }
 
     /// A size is waiting for the PTY.

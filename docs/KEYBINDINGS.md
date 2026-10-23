@@ -142,7 +142,7 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Panneau debug (présélectionne la session de l'onglet) | `l` | `prefix.debug` |
 | « Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation | `R` | `prefix.record` |
 | « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `prefix.recordings` |
-| Rechercher un hôte | `/` | `prefix.search` |
+| Rechercher un hôte (dans un panneau terminal, la même touche cherche dans son historique : `terminal.search`) | `/` | `prefix.search` |
 | Aide | `?` | `prefix.help` |
 | Onglet n | `1`-`9` | (fixe) |
 | Envoyer `Ctrl-Space` au programme distant | `Ctrl-Space` deux fois | (fixe) |
@@ -150,13 +150,29 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 
 ### TUI : terminal
 
-Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant.
+Les touches configurables d'un terminal doivent porter `Ctrl`, `Alt` ou `Shift` : les autres appartiennent au programme distant. Les commandes de panneau (`terminal.search`) suivent le préfixe `Ctrl-Space` et, dans un panneau terminal, priment sur la commande du préfixe de même touche (`/` cherche alors dans l'historique, plus dans la liste des hôtes).
 
 | Action | Touches | Identifiant |
 |---|---|---|
 | Remonter dans l'historique | `Shift-PgUp` | `terminal.scroll_up` |
 | Redescendre dans l'historique (toute frappe revient en bas) | `Shift-PgDn` | `terminal.scroll_down` |
+| Rechercher dans l'historique du panneau (après `Ctrl-Space` ; texte littéral, casse intelligente) | `Ctrl-Space /` | `terminal.search` |
 | Coller | collage du terminal hôte (bracketed paste si le programme distant l'active) | (fixe) |
+
+### TUI : recherche dans l'historique
+
+`Ctrl-Space /` dans un panneau terminal (`terminal.search`) ouvre une barre d'une ligne en bas du panneau (au-dessus de la barre de statut pour un onglet non divisé) : « Search », la requête et un compteur « 3 of 17 », numéroté depuis le bas comme dans la GUI (la correspondance la plus récente est 1 ; « N matches » si la courante a disparu sous la sortie ; « No match » en couleur d'avertissement, « 999+ » au-delà de 999, rien tant que la requête est vide). Texte littéral (`.*[` ne sont pas des métacaractères), casse intelligente : insensible à la casse sauf si la requête contient une majuscule. La recherche porte sur l'écran et tout l'historique du panneau (10 000 lignes). Toutes les correspondances visibles sont surlignées discrètement, la courante en couleur d'accent. Tant que la barre est ouverte, **aucune touche ni aucun collage n'atteint l'hôte distant**, et la sortie qui arrive ne déplace pas la vue (le compteur suit).
+
+| Action | Touches |
+|---|---|
+| Taper la requête (saut incrémental à la correspondance la plus proche en remontant depuis le bas de la vue) | saisie, collage (première ligne) |
+| Effacer un caractère / toute la requête | `Backspace` / `Ctrl-U` |
+| Correspondance plus ancienne (vers le haut, boucle) | `↵`, `↑`, `Ctrl-P` |
+| Correspondance plus récente (vers le bas, boucle) | `Ctrl-N`, `↓` (`Shift-↵` seulement si le terminal hôte le distingue de `↵`, ce que la plupart ne font pas) |
+| Fermer : efface les surlignages et revient en bas (sortie en direct) | `Esc`, `Ctrl-C` |
+| Commandes Portico (changer de panneau…) ; `Ctrl-Space` deux fois ne part pas vers l'hôte tant que la barre est ouverte | `Ctrl-Space`, puis la touche |
+
+Quand la correspondance courante est sur la dernière ligne de la vue en direct, la barre passe sur la première ligne du panneau pour ne pas la masquer. Chaque panneau a sa propre recherche : elle reste ouverte quand le focus passe à un autre panneau. Exécuter un snippet dans le panneau ferme sa recherche.
 
 ### TUI : panneaux
 
