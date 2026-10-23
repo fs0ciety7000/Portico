@@ -72,6 +72,7 @@ publions un correctif puis un avis (GitHub Security Advisory) une fois les utili
     `[updates] check = true`), Portico interroge `api.github.com` au plus une fois par jour (une heure
     après un échec). GitHub voit alors l'adresse IP et, par l'en-tête `User-Agent: Portico/<version>`
     (exigé par son API), la version utilisée ; rien d'autre n'est envoyé (ni cookie, ni identifiant).
-    Un proxy (`HTTPS_PROXY`) voit le nom d'hôte. La réponse n'est que lue : version (`vX.Y.Z`) et lien,
-    qui doit être une page de release de `github.com/fs0ciety7000/Portico` ; rien n'est téléchargé ni
-    exécuté, la commande de mise à jour s'affiche et se copie. Absent ou `false` : aucune requête.
+    Un proxy (`HTTPS_PROXY`, `HTTP_PROXY` ou `ALL_PROXY`) voit le nom d'hôte, le TLS restant de bout
+    en bout. La réponse n'est que lue : version (`vX.Y.Z`) et lien, qui doit être une page de release
+    de `github.com/fs0ciety7000/Portico` ; rien n'est téléchargé ni exécuté, la commande de mise à
+    jour s'affiche et se copie. Absent ou `false` : aucune requête.

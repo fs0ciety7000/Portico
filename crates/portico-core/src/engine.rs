@@ -1225,12 +1225,26 @@ impl Engine {
                 return;
             };
             crate::update::check_loop(
-                EngineCheckHost { engine },
+                EngineCheckHost {
+                    engine: engine.clone(),
+                },
                 cache,
                 crate::update::current_version(),
-                token,
+                token.clone(),
             )
             .await;
+            // The loop ended (cancelled, or the setting was turned off
+            // elsewhere): forget its handle so `update_checks_running` is
+            // truthful, unless a newer task replaced it meanwhile.
+            token.cancel();
+            let mut task = engine
+                .inner
+                .update_task
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if task.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                *task = None;
+            }
         });
     }
 
@@ -1267,6 +1281,13 @@ struct EngineCheckHost {
 impl crate::update::CheckHost for EngineCheckHost {
     fn now(&self) -> time::OffsetDateTime {
         time::OffsetDateTime::now_utc()
+    }
+
+    async fn enabled(&self) -> bool {
+        self.engine
+            .settings()
+            .await
+            .is_ok_and(|s| s.updates.check == Some(true))
     }
 
     async fn fetch(&self) -> std::result::Result<Vec<u8>, crate::update::UpdateError> {

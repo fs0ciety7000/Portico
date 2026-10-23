@@ -17,7 +17,10 @@
 //!   it tells GitHub the running version) and
 //!   `Accept: application/vnd.github+json`. No cookie, no other header, no
 //!   identifier. Timeout [`FETCH_TIMEOUT`], body capped at
-//!   [`MAX_RESPONSE_BYTES`], HTTPS only, system roots, `HTTPS_PROXY` honoured.
+//!   [`MAX_RESPONSE_BYTES`], HTTPS only, system roots. The proxy comes from the environment
+//!   (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, upper or lower case, with
+//!   `NO_PROXY`): a plain-HTTP proxy only sees a `CONNECT`, TLS to GitHub
+//!   stays end to end.
 //! - **The answer is data.** Only `tag_name` (`vX.Y.Z`), `html_url` (must
 //!   start with [`RELEASE_PAGE_PREFIX`]), `draft` and `prerelease` are read;
 //!   anything else is ignored, and the cache is validated again when read
@@ -111,8 +114,9 @@ pub trait ReleaseFetcher: Send + Sync + std::fmt::Debug {
 pub struct GithubFetcher {
     url: String,
     timeout: Duration,
-    /// Proxy from the environment (`HTTPS_PROXY`, `ALL_PROXY`…, with
-    /// `NO_PROXY`); tests pass none.
+    /// Proxy from the environment (`ureq::Proxy::try_from_env`: `ALL_PROXY`,
+    /// `HTTPS_PROXY`, `HTTP_PROXY`, upper or lower case, with `NO_PROXY`;
+    /// TLS to GitHub stays end to end through it); tests pass none.
     proxy_from_env: bool,
 }
 
@@ -394,6 +398,10 @@ pub(crate) fn next_delay(cache: &UpdateCache, now: OffsetDateTime) -> Duration {
 /// What the check loop needs from its surroundings (the engine, or a test).
 pub(crate) trait CheckHost: Send + Sync + 'static {
     fn now(&self) -> OffsetDateTime;
+    /// The persisted setting is still `check = true` (read again before
+    /// every request: another process, or the user by hand, may have
+    /// turned it off since the loop started).
+    fn enabled(&self) -> impl Future<Output = bool> + Send;
     /// One request (on `spawn_blocking` in the engine).
     fn fetch(&self) -> impl Future<Output = Result<Vec<u8>, UpdateError>> + Send;
     /// A check ended: persist `cache`; `changed`: the newer release shown
@@ -432,7 +440,8 @@ pub(crate) fn record(
 }
 
 /// Checks when due, then every [`CHECK_INTERVAL`] (an hour after a
-/// failure), until `cancel`.
+/// failure), until `cancel`, or until the persisted setting is no longer
+/// `check = true` (re-read right before each request).
 pub(crate) async fn check_loop(
     host: impl CheckHost,
     mut cache: UpdateCache,
@@ -445,6 +454,15 @@ pub(crate) async fn check_loop(
             biased;
             () = cancel.cancelled() => return,
             () = tokio::time::sleep(wait) => {}
+        }
+        let enabled = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            enabled = host.enabled() => enabled,
+        };
+        if !enabled {
+            tracing::debug!("update check turned off elsewhere: the periodic check stops");
+            return;
         }
         let outcome = tokio::select! {
             biased;

@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pretty_assertions::assert_eq;
@@ -100,6 +100,10 @@ fn only_portico_release_pages_are_kept() {
         "https://github.com/fs0ciety7000/Portico/releases/tag/v1\u{202e}",
         "https://github.com.evil.example/fs0ciety7000/Portico/releases/tag/v1",
         "https://user@github.com/fs0ciety7000/Portico/releases/tag/v1",
+        "https://github.com/fs0ciety7000/Portico/releases/x@evil.com",
+        "https://github.com/fs0ciety7000/Portico/releases/%2e%2e/%2e%2e/evil",
+        "https://github.com/fs0ciety7000/Portico/releases/x\\@evil.com",
+        "https://github.com/fs0ciety7000/Portico/releases/x:1",
         "javascript:alert(1)//https://github.com/fs0ciety7000/Portico/releases/x",
         &format!("{RELEASE_PAGE_PREFIX}{}", "a".repeat(300)),
     ] {
@@ -228,6 +232,7 @@ struct FakeHost {
     calls: Arc<AtomicUsize>,
     answer: Arc<dyn Fn() -> Result<Vec<u8>, UpdateError> + Send + Sync>,
     checked: Arc<Mutex<Vec<(UpdateCache, bool)>>>,
+    enabled: Arc<AtomicBool>,
 }
 
 impl FakeHost {
@@ -237,6 +242,7 @@ impl FakeHost {
             calls: Arc::default(),
             answer: Arc::new(answer),
             checked: Arc::default(),
+            enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -248,6 +254,10 @@ impl FakeHost {
 impl CheckHost for FakeHost {
     fn now(&self) -> OffsetDateTime {
         NOW + from_std(self.start.elapsed())
+    }
+
+    async fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
     }
 
     async fn fetch(&self) -> Result<Vec<u8>, UpdateError> {
@@ -265,6 +275,25 @@ impl CheckHost for FakeHost {
 
 async fn hours(n: u64) {
     tokio::time::sleep(Duration::from_secs(n * 3600)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_loop_stops_when_the_setting_is_off_before_a_request() {
+    let host = FakeHost::new(|| Ok(body("v0.3.1", URL)));
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(check_loop(
+        host.clone(),
+        UpdateCache::default(),
+        v("0.3.0"),
+        cancel.clone(),
+    ));
+    hours(1).await;
+    assert_eq!(host.calls(), 1);
+    host.enabled.store(false, Ordering::SeqCst);
+    hours(72).await;
+    assert_eq!(host.calls(), 1, "no request once turned off");
+    assert!(task.is_finished(), "the loop ended by itself");
+    assert!(!cancel.is_cancelled());
 }
 
 #[tokio::test(start_paused = true)]
@@ -766,4 +795,69 @@ async fn turning_it_on_checks_announces_and_turning_it_off_stops() {
     assert!(off.available.is_some());
     restarted.shutdown();
     assert!(!restarted.update_checks_running());
+}
+
+/// Lets the paused clock run until `done` (spawned blocking work included).
+async fn until(mut done: impl FnMut() -> bool) {
+    for _ in 0..10_000 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("condition not reached in time");
+}
+
+fn canned() -> Arc<Canned> {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    Arc::new(Canned {
+        calls: AtomicUsize::new(0),
+        tx,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_turned_off_elsewhere_is_never_made() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fetcher = canned();
+    let a = engine(dir.path(), fetcher.clone());
+    let b_fetcher = Arc::new(MustNotFetch::default());
+    let b = engine(dir.path(), b_fetcher.clone());
+
+    a.set_update_check(true).await.expect("on in A");
+    until(|| fetcher.calls.load(Ordering::SeqCst) == 1).await;
+    // Another Portico (B, same config) turns it off: A is not told.
+    b.set_update_check(false).await.expect("off in B");
+    assert!(!b.update_checks_running());
+    hours(72).await;
+    until(|| !a.update_checks_running()).await;
+    assert_eq!(
+        fetcher.calls.load(Ordering::SeqCst),
+        1,
+        "no request after off"
+    );
+    assert_eq!(b_fetcher.calls.load(Ordering::SeqCst), 0);
+    // Turning it on again in A starts a fresh task.
+    a.set_update_check(true).await.expect("on again");
+    assert!(a.update_checks_running());
+    a.shutdown();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_turned_off_by_hand_is_never_made() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fetcher = canned();
+    let a = engine(dir.path(), fetcher.clone());
+
+    a.set_update_check(true).await.expect("on");
+    until(|| fetcher.calls.load(Ordering::SeqCst) == 1).await;
+    let settings = crate::store::Paths::rooted(dir.path()).settings();
+    std::fs::write(&settings, "[updates]\ncheck = false\n").expect("hand edit");
+    hours(72).await;
+    until(|| !a.update_checks_running()).await;
+    assert_eq!(
+        fetcher.calls.load(Ordering::SeqCst),
+        1,
+        "no request after off"
+    );
 }
