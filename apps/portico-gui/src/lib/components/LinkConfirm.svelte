@@ -2,7 +2,9 @@
   // "Open this link?" (phase 9): every terminal link is confirmed. The full
   // URL in mono, wrapped, its host emphasised (punycode for an
   // internationalized one); a caution when an OSC 8 text names something
-  // else. Enter opens once the dialog is armed (Modal), Esc cancels.
+  // else. Enter opens once the dialog is armed (Modal), Esc cancels. With a
+  // caution, Cancel has the focus and Open is no longer the primary action:
+  // Enter acts on the focused button only.
   import { caution, splitAtHost } from "../links";
   import { links, type PendingLink } from "../state/links.svelte";
   import Caution from "./Caution.svelte";
@@ -21,7 +23,7 @@
   bind:armed
   onescape={() => links.cancel()}
   onkey={(k) => {
-    if (k !== "Enter") return false;
+    if (k !== "Enter" || link.misleading) return false;
     open();
     return true;
   }}
@@ -34,8 +36,13 @@
   {/if}
   {#snippet footer()}
     <span class="footer-note">Opens in your default browser</span>
-    <button class="secondary" onclick={() => links.cancel()}>Cancel <kbd>Esc</kbd></button>
-    <button class="primary" data-autofocus aria-disabled={!armed} onclick={open}>Open <kbd>↵</kbd></button>
+    {#if link.misleading}
+      <button class="secondary" data-autofocus onclick={() => links.cancel()}>Cancel <kbd>Esc</kbd></button>
+      <button class="secondary" aria-disabled={!armed} onclick={open} data-testid="link-open">Open</button>
+    {:else}
+      <button class="secondary" onclick={() => links.cancel()}>Cancel <kbd>Esc</kbd></button>
+      <button class="primary" data-autofocus aria-disabled={!armed} onclick={open} data-testid="link-open">Open <kbd>↵</kbd></button>
+    {/if}
   {/snippet}
 </Modal>
 
