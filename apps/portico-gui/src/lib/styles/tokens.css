@@ -92,6 +92,7 @@
   --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
   --scrim: color-mix(in srgb, var(--bg-base) 72%, transparent);
   --scrim-soft: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  --terminal-min-contrast: 1;
   color-scheme: dark;
 }
 
@@ -139,6 +140,7 @@
   --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
   --scrim: color-mix(in srgb, var(--bg-base) 72%, transparent);
   --scrim-soft: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  --terminal-min-contrast: 1;
   color-scheme: dark;
 }
 
@@ -186,6 +188,7 @@
   --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
   --scrim: color-mix(in srgb, var(--bg-base) 72%, transparent);
   --scrim-soft: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  --terminal-min-contrast: 1;
   color-scheme: dark;
 }
 
@@ -233,5 +236,56 @@
   --shadow-overlay: 0 1px 3px rgb(43 36 28 / 0.10), 0 24px 56px rgb(43 36 28 / 0.18);
   --scrim: rgb(43 36 28 / 0.22);
   --scrim-soft: rgb(43 36 28 / 0.12);
+  --terminal-min-contrast: 4.5;
   color-scheme: light;
+}
+
+/* No theme set yet: follow the system (Marble when light), as `auto` does. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg-base: #f4f1ec;
+    --bg-surface: #eeeae4;
+    --bg-elevated: #e7e2da;
+    --bg-overlay: #faf8f5;
+    --bg-selected: #e2dbcf;
+    --border-subtle: #ddd7cd;
+    --border-strong: #c8bfb2;
+    --text-primary: #1f1d1a;
+    --text-secondary: #5a554d;
+    --text-muted: #7b746a;
+    --accent: #80603a;
+    --accent-strong: #684d2e;
+    --text-on-accent: #fbf8f3;
+    --search-match: #cfd8de;
+    --search-current: #80603a;
+    --accent-selection: #80603a55;
+    --status-idle: #7b746a;
+    --status-connecting: #2a64b0;
+    --status-authenticating: #7448b5;
+    --status-connected: #25704a;
+    --status-warning: #985400;
+    --status-error: #b5362c;
+    --ansi-0: #2b2824;
+    --ansi-1: #b0352b;
+    --ansi-2: #2a6e47;
+    --ansi-3: #835a00;
+    --ansi-4: #2c5ca3;
+    --ansi-5: #84419c;
+    --ansi-6: #1a6b72;
+    --ansi-7: #57524a;
+    --ansi-8: #6e685f;
+    --ansi-9: #c43c2c;
+    --ansi-10: #1d7845;
+    --ansi-11: #8f6300;
+    --ansi-12: #3366b8;
+    --ansi-13: #9446ad;
+    --ansi-14: #127783;
+    --ansi-15: #fbf9f6;
+    --shadow-raised: 0 1px 2px rgb(43 36 28 / 0.08), 0 10px 28px rgb(43 36 28 / 0.12);
+    --shadow-overlay: 0 1px 3px rgb(43 36 28 / 0.10), 0 24px 56px rgb(43 36 28 / 0.18);
+    --scrim: rgb(43 36 28 / 0.22);
+    --scrim-soft: rgb(43 36 28 / 0.12);
+    --terminal-min-contrast: 4.5;
+    color-scheme: light;
+  }
 }

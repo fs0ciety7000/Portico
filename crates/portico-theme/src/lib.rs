@@ -36,6 +36,46 @@ impl Rgb {
     pub fn to_hex(self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
     }
+
+    /// WCAG relative luminance (0 = black, 1 = white).
+    pub fn luminance(self) -> f64 {
+        let ch = |v: u8| {
+            let s = f64::from(v) / 255.0;
+            if s <= 0.039_28 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(self.0) + 0.7152 * ch(self.1) + 0.0722 * ch(self.2)
+    }
+
+    /// WCAG contrast ratio with `other` (1 to 21).
+    pub fn contrast(self, other: Rgb) -> f64 {
+        let (la, lb) = (self.luminance(), other.luminance());
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// `self` as text on `bg`, moved towards black (light `bg`) or white
+    /// (dark `bg`) just enough to reach `min` contrast, in sixteenth steps.
+    /// Unchanged when it already does (the remote's colour is kept when
+    /// readable). Used by light themes for colours the remote picks.
+    #[must_use]
+    pub fn readable_on(self, bg: Rgb, min: f64) -> Rgb {
+        if self.contrast(bg) >= min {
+            return self;
+        }
+        let target: u8 = if bg.luminance() > 0.18 { 0 } else { u8::MAX };
+        let mix = |v: u8, step: u16| {
+            let (v, t) = (u16::from(v), u16::from(target));
+            u8::try_from((v * (16 - step) + t * step) / 16).unwrap_or(target)
+        };
+        (1..=16)
+            .map(|step| Rgb(mix(self.0, step), mix(self.1, step), mix(self.2, step)))
+            .find(|c| c.contrast(bg) >= min)
+            .unwrap_or(Rgb(target, target, target))
+    }
 }
 
 /// Semantic surface / text / accent palette.
@@ -180,6 +220,18 @@ impl Appearance {
         match self {
             Self::Dark => SHADOWS_DARK,
             Self::Light => SHADOWS_LIGHT,
+        }
+    }
+
+    /// Least contrast of terminal text on its background, enforced by the
+    /// UIs on the colours the remote picks (xterm.js `minimumContrastRatio`,
+    /// the TUI's renderer): none on a dark theme (its palette is the
+    /// reference), AA on a light one, where many prompts and tools use
+    /// pale 256-colour or true colours made for a dark background.
+    pub const fn terminal_min_contrast(self) -> f64 {
+        match self {
+            Self::Dark => 1.0,
+            Self::Light => 4.5,
         }
     }
 
@@ -566,78 +618,103 @@ pub fn export_css() -> String {
             "\n/* {} — {} */\n{selector} {{",
             theme.name, theme.description
         );
-        let p = &theme.palette;
-        for (name, c) in [
-            ("bg-base", p.bg_base),
-            ("bg-surface", p.bg_surface),
-            ("bg-elevated", p.bg_elevated),
-            ("bg-overlay", p.bg_overlay),
-            ("bg-selected", p.bg_selected),
-            ("border-subtle", p.border_subtle),
-            ("border-strong", p.border_strong),
-            ("text-primary", p.text_primary),
-            ("text-secondary", p.text_secondary),
-            ("text-muted", p.text_muted),
-            ("accent", p.accent),
-            ("accent-strong", p.accent_strong),
-            ("text-on-accent", p.text_on_accent),
-            ("search-match", p.search_match),
-            ("search-current", p.search_current),
-        ] {
-            let _ = writeln!(css, "  --{name}: {};", c.to_hex());
-        }
-        let _ = writeln!(
-            css,
-            "  --accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
-            p.accent.to_hex()
-        );
-        let s = &theme.status;
-        for (name, c) in [
-            ("idle", s.idle),
-            ("connecting", s.connecting),
-            ("authenticating", s.authenticating),
-            ("connected", s.connected),
-            ("warning", s.warning),
-            ("error", s.error),
-        ] {
-            let _ = writeln!(css, "  --status-{name}: {};", c.to_hex());
-        }
-        for (i, c) in theme.ansi.0.iter().enumerate() {
-            let _ = writeln!(css, "  --ansi-{i}: {};", c.to_hex());
-        }
-        for (k, v) in theme.appearance.shadows() {
-            let _ = writeln!(css, "  --shadow-{k}: {v};");
-        }
-        for (k, v) in theme.appearance.scrims() {
-            let _ = writeln!(css, "  --{k}: {v};");
-        }
-        let _ = writeln!(css, "  color-scheme: {};", theme.appearance.css());
+        write_theme_vars(&mut css, theme, "  ");
         css.push_str("}\n");
     }
+    // No `data-theme` yet (first start, before the view's script runs): the
+    // page follows the system, as `auto` (the default) will once it runs.
+    let light = Theme::light_theme();
+    let _ = writeln!(
+        css,
+        "\n/* No theme set yet: follow the system ({} when light), as `auto` does. */\n@media (prefers-color-scheme: light) {{\n  :root:not([data-theme]) {{",
+        light.name
+    );
+    write_theme_vars(&mut css, light, "    ");
+    css.push_str("  }\n}\n");
     css
+}
+
+/// The colour tokens of one theme (palette, statuses, ANSI, shadows,
+/// scrims, `color-scheme`), one declaration per line.
+fn write_theme_vars(css: &mut String, theme: &Theme, indent: &str) {
+    let p = &theme.palette;
+    for (name, c) in [
+        ("bg-base", p.bg_base),
+        ("bg-surface", p.bg_surface),
+        ("bg-elevated", p.bg_elevated),
+        ("bg-overlay", p.bg_overlay),
+        ("bg-selected", p.bg_selected),
+        ("border-subtle", p.border_subtle),
+        ("border-strong", p.border_strong),
+        ("text-primary", p.text_primary),
+        ("text-secondary", p.text_secondary),
+        ("text-muted", p.text_muted),
+        ("accent", p.accent),
+        ("accent-strong", p.accent_strong),
+        ("text-on-accent", p.text_on_accent),
+        ("search-match", p.search_match),
+        ("search-current", p.search_current),
+    ] {
+        let _ = writeln!(css, "{indent}--{name}: {};", c.to_hex());
+    }
+    let _ = writeln!(
+        css,
+        "{indent}--accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
+        p.accent.to_hex()
+    );
+    let s = &theme.status;
+    for (name, c) in [
+        ("idle", s.idle),
+        ("connecting", s.connecting),
+        ("authenticating", s.authenticating),
+        ("connected", s.connected),
+        ("warning", s.warning),
+        ("error", s.error),
+    ] {
+        let _ = writeln!(css, "{indent}--status-{name}: {};", c.to_hex());
+    }
+    for (i, c) in theme.ansi.0.iter().enumerate() {
+        let _ = writeln!(css, "{indent}--ansi-{i}: {};", c.to_hex());
+    }
+    for (k, v) in theme.appearance.shadows() {
+        let _ = writeln!(css, "{indent}--shadow-{k}: {v};");
+    }
+    for (k, v) in theme.appearance.scrims() {
+        let _ = writeln!(css, "{indent}--{k}: {v};");
+    }
+    let _ = writeln!(
+        css,
+        "{indent}--terminal-min-contrast: {};",
+        theme.appearance.terminal_min_contrast()
+    );
+    let _ = writeln!(css, "{indent}color-scheme: {};", theme.appearance.css());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// WCAG relative luminance.
-    fn luminance(c: Rgb) -> f64 {
-        let ch = |v: u8| {
-            let s = f64::from(v) / 255.0;
-            if s <= 0.039_28 {
-                s / 12.92
-            } else {
-                ((s + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+    fn contrast(a: Rgb, b: Rgb) -> f64 {
+        a.contrast(b)
     }
 
-    fn contrast(a: Rgb, b: Rgb) -> f64 {
-        let (la, lb) = (luminance(a), luminance(b));
-        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
+    #[test]
+    fn readable_on_moves_only_what_is_unreadable() {
+        let marble = MARBLE.palette.bg_base;
+        // A pale 256-colour green (#87af87) made for dark backgrounds.
+        let pale = Rgb::hex(0x87_af_87);
+        assert!(pale.contrast(marble) < 4.5);
+        let fixed = pale.readable_on(marble, 4.5);
+        assert!(fixed.contrast(marble) >= 4.5, "{}", fixed.to_hex());
+        assert!(fixed.1 > fixed.0, "keeps its hue: {}", fixed.to_hex());
+        // Readable colours stay exactly as the remote sent them.
+        let ink = MARBLE.ansi.0[4];
+        assert_eq!(ink.readable_on(marble, 4.5), ink);
+        // On a dark background it lightens.
+        let dark = OBSIDIAN.palette.bg_base;
+        let navy = Rgb::hex(0x10_20_60);
+        assert!(navy.readable_on(dark, 4.5).contrast(dark) >= 4.5);
+        assert_eq!(Rgb::hex(0xff_ff_ff).luminance().round(), 1.0);
     }
 
     #[test]
@@ -915,7 +992,25 @@ mod tests {
             }
             assert!(block.contains("--scrim:"), "{}", theme.id);
             assert!(block.contains("--scrim-soft:"), "{}", theme.id);
+            let min = format!(
+                "--terminal-min-contrast: {};",
+                theme.appearance.terminal_min_contrast()
+            );
+            assert!(block.contains(&min), "{}: {min}", theme.id);
         }
+    }
+
+    #[test]
+    fn without_a_theme_set_the_page_follows_the_system() {
+        let css = export_css();
+        let block = css
+            .split(":root:not([data-theme])")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(css.contains("@media (prefers-color-scheme: light) {"));
+        let bg = format!("--bg-base: {};", MARBLE.palette.bg_base.to_hex());
+        assert!(block.contains(&bg), "{block}");
+        assert!(block.contains("color-scheme: light;"));
     }
 
     #[test]
