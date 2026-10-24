@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json && node --test scripts/test-shortcuts.ts scripts/test-hostlist.ts scripts/test-panes.ts scripts/test-recording.ts scripts/test-hostform.ts scripts/test-import.ts scripts/test-webgl.ts scripts/test-terminal.ts scripts/test-paths.ts && node scripts/gen-keybindings.ts --check",
+    "check": "svelte-check --tsconfig ./tsconfig.json && node --test scripts/test-shortcuts.ts scripts/test-hostlist.ts scripts/test-panes.ts scripts/test-recording.ts scripts/test-hostform.ts scripts/test-import.ts scripts/test-webgl.ts scripts/test-terminal.ts scripts/test-paths.ts scripts/test-webview.ts && node scripts/gen-keybindings.ts --check",
     "test:shortcuts": "node --test scripts/test-shortcuts.ts",
     "test:panes": "node --test scripts/test-panes.ts",
     "e2e": "e2e/run.sh",

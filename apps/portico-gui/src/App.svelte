@@ -5,6 +5,7 @@
   import { describe, formatRtt, isTauri, sentence, setHome, type Host } from "./lib/api";
   import { backend } from "./lib/backend";
   import { isMac } from "./lib/keys";
+  import { guardBrowserFeatures, isWindowsWebview } from "./lib/webview";
   import { dur } from "./lib/motion";
   import { SEARCH_HINT_KEYS } from "./lib/termsearch";
   import { buildRows, relocate, rowHost, type Row } from "./lib/hostlist";
@@ -875,6 +876,10 @@
       for (const u of unlisten) void u.then((f) => f());
     };
   });
+
+  // WebView2 (Windows): reload, back, print, find and the browser context
+  // menu never act (lib/webview.ts). Nothing on Linux or macOS.
+  onMount(() => (isWindowsWebview(navigator.userAgent) ? guardBrowserFeatures(window) : undefined));
 
   /** "⌥⌘←→" / "Ctrl-Shift-←→": the focus keys of the panes, in one hint. */
   function arrowsLabel(): string | undefined {
