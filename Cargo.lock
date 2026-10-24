@@ -4199,6 +4199,7 @@ dependencies = [
  "keyring",
  "nucleo-matcher",
  "pkcs8",
+ "portico-winsec",
  "pretty_assertions",
  "rand 0.10.3",
  "russh",
@@ -4275,6 +4276,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeroize",
+]
+
+[[package]]
+name = "portico-winsec"
+version = "0.4.0"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/portico-core",
     "crates/portico-theme",
+    "crates/portico-winsec",
     "apps/portico-tui",
     "apps/portico-gui/src-tauri",
 ]
@@ -12,6 +13,7 @@ members = [
 default-members = [
     "crates/portico-core",
     "crates/portico-theme",
+    "crates/portico-winsec",
     "apps/portico-tui",
 ]
 
@@ -27,6 +29,8 @@ authors = ["Portico contributors"]
 # Internal
 portico-core = { path = "crates/portico-core" }
 portico-theme = { path = "crates/portico-theme" }
+# Windows file ACLs: the one crate allowed `unsafe` (ADR "Phase 8 — ACL Windows").
+portico-winsec = { path = "crates/portico-winsec" }
 
 # Async runtime & plumbing
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "process", "signal"] }
