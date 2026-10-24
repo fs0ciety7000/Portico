@@ -56,6 +56,12 @@
   const total = $derived(Math.max(recording.duration ?? 0, seen, time));
   const progress = $derived(total > 0 ? Math.min(1, time / total) : 0);
 
+  /** Same rule as the live terminal (`--terminal-min-contrast`). */
+  function minContrast(): number {
+    const n = Number(getComputedStyle(document.documentElement).getPropertyValue("--terminal-min-contrast").trim());
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  }
+
   function readTheme(): Record<string, string> {
     const css = getComputedStyle(document.documentElement);
     const v = (name: string) => css.getPropertyValue(name).trim();
@@ -207,6 +213,7 @@
       fontFamily: font.family,
       fontSize: font.size,
       theme: readTheme(),
+      minimumContrastRatio: minContrast(),
       cols: recording.width ?? 80,
       rows: recording.height ?? 24,
     });
@@ -253,7 +260,10 @@
 
   $effect(() => {
     void themeId;
-    if (term) term.options.theme = readTheme();
+    if (term) {
+      term.options.theme = readTheme();
+      term.options.minimumContrastRatio = minContrast();
+    }
   });
 </script>
 

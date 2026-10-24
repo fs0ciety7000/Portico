@@ -309,6 +309,8 @@ export interface PlayerLook {
   fontSize: number;
   // xterm.js ITheme, kept opaque here.
   theme: Record<string, string>;
+  /** `--terminal-min-contrast` (1 = off); absent = off. */
+  minimumContrastRatio?: number;
   cols: number;
   rows: number;
 }
@@ -327,6 +329,7 @@ export function playerOptions(look: PlayerLook) {
     cols: Math.max(1, Math.min(1000, Math.floor(look.cols) || 80)),
     rows: Math.max(1, Math.min(1000, Math.floor(look.rows) || 24)),
     theme: look.theme,
+    minimumContrastRatio: Math.max(1, Math.min(21, look.minimumContrastRatio ?? 1)),
     disableStdin: true,
     cursorBlink: false,
     cursorStyle: "bar" as const,

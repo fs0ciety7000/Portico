@@ -156,7 +156,7 @@
   .scrim {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--bg-base) 72%, transparent);
+    background: var(--scrim);
     z-index: 20;
   }
   .center {

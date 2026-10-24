@@ -114,7 +114,8 @@ export interface Backend {
   sessionLogsText(session: number): Promise<string>;
   effectiveConfig(alias: string): Promise<EffectiveConfig>;
   getSettings(): Promise<Settings>;
-  saveTheme(theme: string): Promise<void>;
+  saveTheme(theme: string, darkTheme: string): Promise<void>;
+  setWindowTheme(theme: string): Promise<void>;
   saveCopyOnSelect(on: boolean): Promise<void>;
   /** A confirmed terminal link (the view asked first), or a validated release page. */
   openUrl(url: string): Promise<void>;

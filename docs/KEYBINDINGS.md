@@ -27,7 +27,8 @@ complètes et à jour sont les blocs générés ci-dessous.
 thème choisi en gardant le reste du fichier (clés inconnues et commentaires compris).
 
 ```toml
-theme = "basalt"             # obsidian (défaut), basalt, travertine
+theme = "auto"               # auto (défaut), obsidian, basalt, travertine, marble
+dark_theme = "basalt"        # thème sombre d'auto (défaut obsidian ; écrit par `t`)
 
 [keymap.tui]
 "hosts.files" = "F"          # une touche…
@@ -47,7 +48,11 @@ theme = "basalt"             # obsidian (défaut), basalt, travertine
   de 4 touches, touche réservée (`Ctrl-C`, `Esc`, `Ctrl-Space`, les chiffres `1`-`9` des onglets), touche
   d'un terminal sans `Ctrl`, `Alt` ni `Shift`, et conflit avec une autre action du même contexte (deux
   entrées sur la même touche sont ignorées toutes les deux ; échanger deux touches fonctionne).
-- Un thème inconnu revient au thème par défaut, avec un toast. Un fichier invalide est ignoré en entier
+- **Auto** : la TUI demande la couleur de fond du terminal au démarrage (OSC 11, ~0,3 ms ; 100 ms au plus
+  si le terminal ne répond pas, puis `COLORFGBG`, sinon sombre) : fond clair → Marble, sinon `dark_theme`.
+  Pas de bascule en cours de session : relancer Portico, ou choisir un thème avec `t`. Le `dark_theme` est
+  le dernier thème sombre sur lequel on s'est arrêté (ceux traversés en enchaînant `t` ne comptent pas).
+- Un thème inconnu revient à Auto, avec un toast. Un fichier invalide est ignoré en entier
   (toast avec l'erreur) ; il n'est jamais réécrit tant qu'il ne se relit pas.
 - L'aide `?` et la barre de statut affichent toujours les touches effectives.
 - Ligne de commande : `portico --help`, `portico --version`, `portico --print-keybindings` (tables TUI en
@@ -441,7 +446,8 @@ stable, utilisable dans `settings.toml` (dossier de configuration de Portico : `
 Linux, `~/Library/Application Support/dev.Portico.portico/` sous macOS) :
 
 ```toml
-theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé quand on change de thème
+theme = "auto"                   # auto (défaut), obsidian, basalt, travertine, marble
+dark_theme = "basalt"            # thème sombre d'auto : le dernier thème sombre choisi
 
 [keymap.gui]
 "app.files" = "Mod+Shift+O"      # remplace ⌘⇧F / Ctrl-Shift-F
@@ -462,8 +468,12 @@ theme = "basalt"                 # obsidian, basalt, travertine ; mémorisé qua
   `Ctrl-<touche>` seul dans un terminal, `Esc` et `Tab`), action fixe (`tab.copy`, `tab.paste`).
 - Un `settings.toml` invalide (au sens du moteur) est ignoré entièrement et signalé ; Portico ne le réécrit
   pas. La palette, les infobulles et la barre de statut affichent les combinaisons effectives.
-- Le thème est appliqué avant le premier rendu (dernier thème mémorisé localement, confirmé par
-  `settings.toml`) ; un nom inconnu donne le thème par défaut et une notification.
+- Le thème est appliqué avant le premier rendu (dernier réglage mémorisé localement, confirmé par
+  `settings.toml` ; sans mémoire, la page suit déjà le système) ; un nom inconnu donne Auto et une
+  notification. **Auto** suit `prefers-color-scheme` en direct (Marble si le système est clair, sinon
+  `dark_theme`), barre de titre et fond de fenêtre compris. Choisir un thème sombre (réglages, palette)
+  en fait le thème sombre d'Auto ; en enchaînant `t` (moins de 1,5 s entre deux appuis), les thèmes
+  seulement traversés ne comptent pas.
 - Les actions de panneau (`pane.*`) n'écoutent que dans un onglet terminal : elles peuvent reprendre une
   combinaison de la liste des hôtes (`Mod+D` divise dans un terminal et bascule le favori dans la liste).
 
@@ -622,7 +632,7 @@ Actives quand la liste des hôtes est affichée et que le focus n'est pas dans u
 | Replier le groupe de l'hôte sélectionné | `hosts.collapse` | `←` | `←` |
 | Déplier le groupe | `hosts.expand` | `→` | `→` |
 | Vider « Recent » (confirmation) | `hosts.clear-recent` | `⇧X` | `Shift-X` |
-| Thème suivant (mémorisé dans `settings.toml`) | `app.theme` | `t` | `t` |
+| Thème suivant : Obsidian, Basalt, Travertine Night, Marble, puis Auto (mémorisé dans `settings.toml`) | `app.theme` | `t` | `t` |
 | Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes) | `hosts.recordings` | `v` | `v` |
 
 ## Terminal (GUI) : touches fixes

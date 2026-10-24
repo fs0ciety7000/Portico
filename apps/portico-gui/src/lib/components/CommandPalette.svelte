@@ -93,7 +93,7 @@
   .scrim {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--bg-base) 55%, transparent);
+    background: var(--scrim-soft);
     backdrop-filter: blur(2px);
     z-index: 10;
   }

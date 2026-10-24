@@ -118,6 +118,14 @@
     };
   }
 
+  /** Least contrast of remote-picked colours (`--terminal-min-contrast`:
+   * none on dark themes, AA on Marble, where prompts made for dark
+   * terminals would fade). */
+  function minContrast(): number {
+    const n = Number(getComputedStyle(document.documentElement).getPropertyValue("--terminal-min-contrast").trim());
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  }
+
   // ── Input: one send loop, order preserved between text and binary ──
   let queue: { data: string; binary: boolean }[] = [];
   let flushScheduled = false;
@@ -352,6 +360,7 @@
         leave: () => (tip = null),
       },
       theme: readTheme(covered),
+      minimumContrastRatio: minContrast(),
     });
     fit = new FitAddon();
     term.loadAddon(fit);
@@ -448,7 +457,10 @@
   $effect(() => {
     void themeId;
     const hide = covered;
-    if (term) term.options.theme = readTheme(hide);
+    if (term) {
+      term.options.theme = readTheme(hide);
+      term.options.minimumContrastRatio = minContrast();
+    }
     // Highlights follow the theme.
     untrack(() => {
       if (!searchOpen) return;
