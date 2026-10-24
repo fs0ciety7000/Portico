@@ -992,7 +992,7 @@
         <h2>{pane.alias}</h2>
         <StatusBadge status={status.status} label={status.label} latencyMs={session?.latencyMs ?? null} />
         {#if waiting}
-          <p class="muted wide">Press <kbd>Esc</kbd>{#if closeKey} or <kbd>{closeKey}</kbd>{/if} to cancel</p>
+          <p class="muted wide">Press <kbd>Esc</kbd>{#if closeKey}{" "}or <kbd>{closeKey}</kbd>{/if} to cancel</p>
           <p class="muted narrow">Esc to cancel</p>
         {:else}
           <div class="actions">

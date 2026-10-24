@@ -106,8 +106,8 @@
       {:else if total === 0}
         <p>No hosts yet.</p>
         <p class="muted">
-          Add one here{#if keymap.label("host.add")} with <kbd>{keymap.label("host.add")}</kbd>{/if}, or add a <span class="mono">Host</span> block to
-          <span class="mono">~/.ssh/config</span> and reload{#if keymap.label("app.reload")} with <kbd>{keymap.label("app.reload")}</kbd>{/if}.
+          Add one here{#if keymap.label("host.add")}{" "}with <kbd>{keymap.label("host.add")}</kbd>{/if}, or add a <span class="mono">Host</span> block to
+          <span class="mono">~/.ssh/config</span> and reload{#if keymap.label("app.reload")}{" "}with <kbd>{keymap.label("app.reload")}</kbd>{/if}.
         </p>
       {/if}
     </div>
