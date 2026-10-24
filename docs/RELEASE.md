@@ -11,11 +11,24 @@ et comment un utilisateur vérifie ce qu'il télécharge. Le workflow est
 | `Portico_<v>_amd64.deb`, `Portico_<v>_arm64.deb` | Debian 12+, Ubuntu 22.04+ | Tauri bundler | non (somme SHA256) |
 | `Portico_<v>_amd64.AppImage`, `Portico_<v>_aarch64.AppImage` | Linux glibc ≥ 2.35 | Tauri bundler + linuxdeploy | non (somme SHA256) |
 | `Portico_<v>_universal.dmg` | macOS 13+ (Apple Silicon et Intel) | Tauri bundler | Developer ID + notarisation **si les secrets existent** (voir plus bas) |
+| `Portico_<v>_x64-setup.exe` | Windows 11 x64 (Windows 10 1809+ attendu, non testé) | Tauri bundler (NSIS) | **non** pour l'instant (somme SHA256 ; SmartScreen, voir « Installation ») |
 | `portico-<v>-<target>.tar.gz` (TUI) | `x86_64`/`aarch64-unknown-linux-gnu`, `x86_64`/`aarch64-unknown-linux-musl`, `x86_64`/`aarch64-apple-darwin` | `cargo build --release` | non (somme SHA256) |
+| `portico-<v>-x86_64-pc-windows-msvc.zip` (TUI) | Windows 11 x64 (Windows Terminal) | `cargo build --release`, runtime C statique (`+crt-static`) | non (somme SHA256) |
 | `SHA256SUMS` et un `<fichier>.sha256` par artefact | toutes | job `publish` | — |
 
 Chaque tarball TUI contient un dossier `portico-<v>-<target>/` avec le binaire `portico` et `README.md`
-(et les fichiers `LICENSE-MIT` et `LICENSE-APACHE` de la racine du dépôt).
+(et les fichiers `LICENSE-MIT` et `LICENSE-APACHE` de la racine du dépôt). Le zip Windows a la même
+forme : un seul dossier `portico-<v>-x86_64-pc-windows-msvc/` avec `portico.exe`, `README.md` et les
+licences (Scoop et winget en dépendent : `extract_dir`, `RelativeFilePath`).
+
+**Windows, installeur de la GUI** : NSIS **par utilisateur** (`installMode: currentUser`), sans droits
+administrateur, dans `%LOCALAPPDATA%\Portico` (raccourci du menu Démarrer, entrée « Applications
+installées » sous `HKCU\…\Uninstall\Portico`). Le *bootstrapper* Evergreen de WebView2 est embarqué et
+ne s'exécute (silencieusement) que si le runtime manque, ce qui n'arrive pas sous Windows 11. Un
+*downgrade* silencieux est refusé (`allowDowngrades: false`). La désinstallation ne touche ni `~/.ssh`
+ni les données de Portico (`%APPDATA%\Portico\portico\`, partagées avec la TUI) ; la case « supprimer
+les données de l'application » ne vise que l'état WebView2 (`%LOCALAPPDATA%\dev.portico.app`). Pas de
+MSI (WiX, installation par machine) pour l'instant.
 
 **Quelle archive TUI choisir sous Linux ?** La variante `gnu` est recommandée sur un poste de travail :
 elle résout les noms via la glibc, donc via NSS (`/etc/nsswitch.conf`), ce qui couvre mDNS (`hote.local`
@@ -41,19 +54,24 @@ sur n'importe quelle distribution (Alpine, conteneurs, vieilles glibc), mais ne 
    git tag -a vX.Y.Z -m "Portico X.Y.Z"
    git push origin main vX.Y.Z
    ```
-4. Le workflow construit tout en parallèle (6 jobs TUI, 2 jobs GUI Linux, 1 job `gui-macos-build`
-   sans secret), puis `gui-macos-sign` attend l'**approbation d'un reviewer** de l'environnement
+4. Le workflow construit tout en parallèle (7 jobs TUI dont Windows, 2 jobs GUI Linux, 1 job
+   `gui-windows`, 1 job `gui-macos-build`, tous sans secret), puis `gui-macos-sign` attend
+   l'**approbation d'un reviewer** de l'environnement
    `release`, signe et notarise l'app ; enfin le job `publish` calcule les sommes et crée une
    **Release brouillon** contenant tous les fichiers.
-5. Relire le brouillon : notes de version, présence des 11 artefacts (2 deb, 2 AppImage, 1 dmg, 6 tarballs), de leurs `.sha256` et de `SHA256SUMS`, mention
+5. Relire le brouillon : notes de version, présence des 13 artefacts (2 deb, 2 AppImage, 1 dmg,
+   1 installeur NSIS, 6 tarballs, 1 zip), de leurs `.sha256` et de `SHA256SUMS`, mention
    `-unsigned` ou `-not-notarized` dans le nom du dmg (voir plus bas). Publier à la main
    (une Release ni brouillon ni *pre-release*).
-6. La publication déclenche la **distribution** (tap Homebrew et AUR, voir « Distribution ») :
-   fusionner la PR ouverte sur le tap, vérifier les deux paquets sur l'AUR.
+6. La publication déclenche la **distribution** (tap Homebrew, AUR, bucket Scoop, manifestes winget,
+   voir « Distribution ») : fusionner les PR ouvertes sur le tap et sur le bucket, vérifier les deux
+   paquets sur l'AUR, ouvrir à la main la PR winget.
 
 **Essai à blanc** : *Actions → Release → Run workflow* (`workflow_dispatch`, champ `distribute`
 vide) construit tous les artefacts sans créer de Release et **sans signer** (le job de signature ne
-tourne que sur un push de tag) ; ils restent attachés à l'exécution (90 jours).
+tourne que sur un push de tag) ; ils restent attachés à l'exécution (90 jours). Lancé sur une branche
+(*Use workflow from*), c'est aussi le moyen d'obtenir l'installeur Windows et le zip TUI d'une PR pour un
+essai sur un PC (artefacts `gui-windows-x64` et `tui-x86_64-pc-windows-msvc`).
 
 **Construire localement** (Linux, `libwebkit2gtk-4.1-dev` installé) :
 ```bash
@@ -62,7 +80,18 @@ APPIMAGE_EXTRACT_AND_RUN=1 pnpm tauri build --bundles deb,appimage   # → targe
 cargo build --release --locked -p portico-tui                        # → target/release/portico
 ```
 
-## Secrets (macOS uniquement)
+**Construire localement sous Windows** (Visual Studio Build Tools avec « Développement Desktop en C++ »,
+Rust `stable-x86_64-pc-windows-msvc`, Node 22 et pnpm ; WebView2 est déjà là sous Windows 11) :
+```powershell
+cd apps\portico-gui; pnpm install --frozen-lockfile
+pnpm tauri build --bundles nsis          # → target\release\bundle\nsis\Portico_<v>_x64-setup.exe
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+cargo build --release --locked -p portico-tui   # → target\release\portico.exe
+```
+Sans les épingles du workflow, le bundler télécharge lui-même NSIS (vérifié par SHA-1) et le
+*bootstrapper* WebView2 dans `%LOCALAPPDATA%\tauri\`.
+
+## Secrets (macOS uniquement ; Windows : pas encore de signature)
 
 Aucun secret n'est dans le dépôt, ni au niveau du dépôt dans GitHub : ils vivent **uniquement** dans
 l'environnement GitHub `release`, que seul le job `gui-macos-sign` référence.
@@ -154,6 +183,38 @@ Ouvrir ne suffit plus), ou `xattr -dr com.apple.quarantine /Applications/Portico
   jour de la CLI Tauri : relire `linuxdeploy.rs` de la version de `tauri-bundler` correspondante,
   retélécharger, recalculer les empreintes, puis mettre `EXPECTED_TAURI_CLI` à jour.
 
+- **Outillage NSIS épinglé et vérifié** (job `gui-windows`) : `tauri-bundler` 2.10.3 ne télécharge NSIS
+  que si `%LOCALAPPDATA%\tauri\NSIS` manque ou est incomplet (fichiers requis, `NSIS.exe` et
+  `nsis_tauri_utils.dll` contrôlés par SHA-1 : `bundle/windows/nsis/mod.rs`). Le job préremplit ce
+  dossier, dans la disposition que le bundler construit lui-même, à partir de copies vérifiées par
+  SHA-256 :
+
+  | Fichier | Source épinglée | SHA-256 |
+  |---|---|---|
+  | `nsis-3.13.zip` (→ `NSIS\`) | `tauri-apps/binary-releases`, release `nsis-3.13` | `ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8` |
+  | `nsis_tauri_utils.dll` (→ `NSIS\Plugins\x86-unicode\additional\`) | `tauri-apps/nsis-tauri-utils`, release `nsis_tauri_utils-v0.5.3` | `5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709` |
+
+  Les SHA-1 de ces deux fichiers, et celui de `NSIS.exe` dans l'archive, ont été recalculés le
+  2026-10-24 et sont **identiques** aux constantes du bundler (`NSIS_SHA1`, `NSIS_TAURI_UTILS_SHA1`,
+  `NSIS_EXE_SHA1`) : les épingles SHA-256 désignent bien les fichiers que Tauri attend. Le bundle tourne
+  ensuite cargo hors ligne, et le journal (`--verbose`) ne doit contenir aucun téléchargement ni
+  « Verifying NSIS package » / « Recreating » / « Redownloading ». Même contrôle de version de
+  `@tauri-apps/cli` que pour l'AppImage.
+- **Bootstrapper WebView2** (`webviewInstallMode: embedBootstrapper`) : le bundler réutilise
+  `%LOCALAPPDATA%\tauri\MicrosoftEdgeWebview2Setup.exe` s'il existe. Microsoft met ce fichier à jour
+  sur place (pas d'empreinte fixe possible) : le job le télécharge depuis le lien officiel
+  (`go.microsoft.com/fwlink/p/?LinkId=2124703`) et exige une **signature Authenticode valide** au nom de
+  `CN=Microsoft Corporation` ; empreinte et signataire vont dans le résumé du job. L'alternative
+  `downloadBootstrapper` le ferait télécharger **à l'installation**, chez l'utilisateur, par le
+  greffon `NSISdl` sans cette vérification.
+- **Installation de bout en bout sur le runner** : installation silencieuse (`/S`, sans droits
+  administrateur), clé `HKCU\…\Uninstall\Portico` présente avec la bonne version (celle que nomme le
+  `ProductCode` winget), lancement de l'app (elle doit tenir 10 s : WebView2, durcissement du processus,
+  moteur), puis désinstallation silencieuse.
+- **TUI Windows** : `RUSTFLAGS=-C target-feature=+crt-static` (pas de dépendance au redistribuable
+  VC++) ; test de fumée `portico.exe --version` et `--help`, et contrôle des imports DLL
+  (`llvm-readobj --coff-imports`) : ni `vcruntime*.dll` ni `msvcp*.dll`.
+
   **Non vérifié hors CI** : le build Tauri complet avec le cache prérempli (le chemin du cache et les
   noms de fichiers sont lus dans le code du bundler, et l'outillage a été exercé seul, mais pas le
   `pnpm tauri build` de bout en bout dans cet environnement), et toute la partie aarch64 (empreintes
@@ -174,6 +235,13 @@ Ouvrir ne suffit plus), ou `xattr -dr com.apple.quarantine /Applications/Portico
   `SHA256SUMS` publié dans la Release GitHub (canal HTTPS de GitHub). Pas de dépôt APT signé pour l'instant.
 - **TUI macOS** : binaires non signés (un binaire en ligne de commande téléchargé par `curl` n'est pas mis
   en quarantaine ; via un navigateur : `xattr -d com.apple.quarantine portico`).
+- **Windows** : installeur NSIS, `portico-gui.exe` et `portico.exe` **non signés** (Authenticode) tant
+  qu'aucun certificat n'est choisi (ADR « Signature Windows », `docs/STACK.md` : Azure Trusted Signing
+  ou certificat OV). L'intégrité repose sur `SHA256SUMS`. Conséquences : SmartScreen avertit au premier
+  lancement de l'installeur téléchargé, et **Smart App Control** (Windows 11), s'il est actif, bloque
+  les binaires non signés sans recours (voir « Installation »). Le futur job `gui-windows-sign` est
+  décrit dans `release.yml` (job `gui-windows`) : environnement `release`, tags seulement, signature de
+  l'exécutable puis de l'installeur par `bundle.windows.signCommand`, comme `gui-macos-sign`.
 
 ## Vérifier un téléchargement
 
@@ -195,6 +263,14 @@ dpkg-deb -I Portico_0.1.0_amd64.deb && dpkg-deb -c Portico_0.1.0_amd64.deb
 sudo apt install ./Portico_0.1.0_amd64.deb
 ```
 
+```powershell
+# Windows (PowerShell) : comparer à la ligne de SHA256SUMS (ou au fichier .sha256)
+(Get-FileHash .\Portico_0.5.0_x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+Get-Content .\Portico_0.5.0_x64-setup.exe.sha256
+# Signature Authenticode (aujourd'hui : NotSigned)
+Get-AuthenticodeSignature .\Portico_0.5.0_x64-setup.exe
+```
+
 ## Installation
 
 - **deb** : `sudo apt install ./Portico_<v>_amd64.deb` (installe `/usr/bin/portico-gui`, l'entrée de menu
@@ -212,11 +288,34 @@ sudo apt install ./Portico_0.1.0_amd64.deb
   (Homebrew 7 ignore sinon les taps tiers non approuvés : `brew trust <owner>/portico`).
 - **AUR** (Arch Linux) : `portico-bin` (TUI) et `portico-gui-bin` (GUI), par exemple
   `yay -S portico-bin portico-gui-bin`, ou `git clone https://aur.archlinux.org/portico-bin.git && cd portico-bin && makepkg -si`.
+- **Windows, GUI** : lancer `Portico_<v>_x64-setup.exe` (aucun droit administrateur). Comme
+  l'installeur n'est pas signé, **SmartScreen** affiche « Windows a protégé votre ordinateur » au premier
+  lancement d'un fichier téléchargé par un navigateur : après avoir vérifié la somme (ci-dessus),
+  *Informations complémentaires → Exécuter quand même* (en anglais : *More info → Run anyway*). C'est
+  l'équivalent du « Ouvrir quand même » de macOS ; l'app installée ne redemande rien.
+- **Windows, TUI** : extraire le zip (dans l'Explorateur : *Propriétés → Débloquer* avant, ou
+  `Unblock-File .\portico-<v>-x86_64-pc-windows-msvc.zip` en PowerShell, pour retirer la marque
+  « téléchargé d'Internet »), placer `portico.exe` dans un dossier du `PATH`, et lancer `portico` dans
+  **Windows Terminal** (la console historique `conhost` fonctionne, avec un rendu moins fidèle).
+- **Scoop** (TUI) : `scoop bucket add portico https://github.com/<owner>/scoop-portico`, puis
+  `scoop install portico/portico` ; mise à jour par `scoop update portico`. Scoop vérifie la somme du
+  manifeste et n'ajoute pas de marque « Internet » : pas d'invite SmartScreen.
+- **winget** (dès que les manifestes sont acceptés dans `microsoft/winget-pkgs`) :
+  `winget install fs0ciety7000.Portico` (GUI) et `winget install fs0ciety7000.PorticoTUI` (TUI,
+  commande `portico`).
+- **Smart App Control** (Windows 11, *Sécurité Windows → Contrôle des applications et du navigateur*) :
+  s'il est **activé**, il bloque les exécutables non signés sans réputation, sans bouton de
+  contournement ; Portico ne peut alors pas tourner tant qu'il n'est pas signé. En mode « évaluation »
+  ou désactivé, rien ne change. Portico ne demande jamais de le désactiver.
 
 Les secrets restent dans le trousseau système : sous Linux, un service Secret Service (GNOME Keyring,
 KeePassXC, KWallet ≥ 5.97…) doit tourner dans la session ; à défaut, Portico propose son vault chiffré.
+Sous Windows, c'est le **Gestionnaire d'identification** (*Credential Manager*, identifiants
+génériques), toujours disponible. L'agent SSH est celui d'**OpenSSH pour Windows** (service
+`ssh-agent`, tube `\\.\pipe\openssh-ssh-agent`, ou `SSH_AUTH_SOCK` s'il désigne un tube) ; Pageant
+(PuTTY) n'est pas pris en charge.
 
-## Distribution (Homebrew, AUR)
+## Distribution (Homebrew, AUR, Scoop, winget)
 
 Les paquets sont **générés depuis la Release publiée** : mêmes fichiers, mêmes sommes que `SHA256SUMS`,
 rien n'est reconstruit.
@@ -227,6 +326,9 @@ rien n'est reconstruit.
 | Tap `<owner>/homebrew-portico` | cask `portico` (GUI) | `Portico_<v>_universal*.dmg`, `depends_on macos: :ventura` (= 13 ou plus, comme `minimumSystemVersion`) | idem |
 | AUR | `portico-bin` (TUI) | tarballs `x86_64`/`aarch64-unknown-linux-gnu` | [`packaging/aur/`](../packaging/aur/) |
 | AUR | `portico-gui-bin` (GUI) | `.deb` `amd64`/`arm64`, extrait | idem |
+| Bucket Scoop `<owner>/scoop-portico` | `portico` (TUI) | zip `x86_64-pc-windows-msvc` (`extract_dir`, *shim* `portico.exe`) | [`packaging/scoop/`](../packaging/scoop/) |
+| `microsoft/winget-pkgs` (PR **à la main**) | `fs0ciety7000.Portico` (GUI) | `Portico_<v>_x64-setup.exe`, type `nullsoft`, `Scope: user`, `ProductCode: Portico` | [`packaging/winget/`](../packaging/winget/) |
+| idem | `fs0ciety7000.PorticoTUI` (TUI) | zip, `NestedInstallerType: portable`, alias `portico` | idem |
 
 - **AUR, GUI : le `.deb` plutôt que l'AppImage.** Le `.deb` ne contient que `portico-gui`, l'entrée de
   menu et les icônes ; il se lie au WebKitGTK d'Arch (`webkit2gtk-4.1`), donc les correctifs de sécurité
@@ -253,22 +355,27 @@ rien n'est reconstruit.
 ### Déroulé
 
 1. La publication de la Release (`release: published` ; un brouillon ne déclenche rien, une
-   *pre-release* est ignorée) lance trois jobs, et **aucun build** :
+   *pre-release* est ignorée) lance quatre jobs, et **aucun build** :
    - `dist-render` (aucun secret, `contents: read`) : vérifie que la Release est publiée et finale
-     (`vX.Y.Z`, ni brouillon ni *pre-release*), télécharge les 7 artefacts utiles (4 tarballs, 2 `.deb`,
-     le dmg) et `SHA256SUMS`, les vérifie (`sha256sum --strict -c`), rend les fichiers
-     (`render.sh` refuse un artefact absent de `SHA256SUMS` ou une somme mal formée), contrôle la
-     syntaxe (`ruby -c`, `bash -n`) et les transmet dans l'artefact `distribution` (7 jours) ;
+     (`vX.Y.Z`, ni brouillon ni *pre-release*), télécharge les 9 artefacts utiles (4 tarballs, 2 `.deb`,
+     le dmg, le zip Windows, l'installeur NSIS) et `SHA256SUMS`, les vérifie (`sha256sum --strict -c`),
+     rend les fichiers (chaque `render.sh` refuse un artefact absent de `SHA256SUMS` ou une somme mal
+     formée), contrôle la syntaxe (`ruby -c`, `bash -n`, `jq` pour Scoop, YAML pour winget) et les
+     transmet dans l'artefact `distribution` (7 jours) ; les manifestes winget sont aussi attachés à
+     part (artefact `winget-manifests`, 30 jours) ;
    - `homebrew` (`permissions: {}`, secret `HOMEBREW_TAP_TOKEN`) : pousse `Formula/portico.rb` et
      `Casks/portico.rb` sur la branche `portico-<v>` du tap et **ouvre une PR** (ou met à jour celle qui
      existe). La PR laisse au propriétaire le dernier mot, et à la CI du tap (`brew test-bot`) le temps
      de tourner ;
+   - `scoop` (`permissions: {}`, secret `SCOOP_BUCKET_TOKEN`) : pousse `bucket/portico.json` sur la
+     branche `portico-<v>` du bucket et **ouvre une PR** (ou met à jour celle qui existe), exactement
+     comme `homebrew` ;
    - `aur` (`permissions: {}`, secret `AUR_SSH_PRIVATE_KEY`) : pousse `PKGBUILD` et `.SRCINFO` sur
      `master` de `portico-bin` et `portico-gui-bin` (commit `Update to <v>-<pkgrel>`). L'AUR n'a pas de
      PR. La clé d'hôte de `aur.archlinux.org` n'est acceptée que si son empreinte ed25519 est celle
      publiée sur la page d'accueil de l'AUR (`SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4`).
-2. Les deux jobs à secret n'exécutent **aucun code du dépôt** ni action tierce (sauf
-   `download-artifact`) : `git`, `gh` et `ssh` du runner, sur les fichiers rendus. Le jeton du tap passe
+2. Les trois jobs à secret n'exécutent **aucun code du dépôt** ni action tierce (sauf
+   `download-artifact`) : `git`, `gh` et `ssh` du runner, sur les fichiers rendus. Les jetons du tap et du bucket passent
    en en-tête HTTP de chaque commande (`http.extraheader`), jamais dans une URL ni dans `.git/config` ;
    la clé AUR est écrite en `0600` dans `$RUNNER_TEMP` et supprimée en fin de job (`if: always()`).
 3. **Sans secret, le job se saute proprement** : avertissement et ligne dans le résumé, statut vert.
@@ -309,6 +416,25 @@ Pour republier la même version avec un `PKGBUILD` corrigé, rendre localement a
    chez les utilisateurs Arch. Chaque distribution attend donc une approbation.
 5. **Tags protégés** (*Settings → Rules → Rulesets*, cible *Tags*, motif `v*`) : création, mise à jour et
    suppression réservées aux administrateurs (*bypass list*). Cela protège `release` comme `distribution`.
+6. **Bucket Scoop** : créer le dépôt **public** `<owner>/scoop-portico` (autre nom : variable
+   `SCOOP_BUCKET_REPO`), **non vide** (un README sur `main`), avec un dossier `bucket/` (il est créé par
+   la première PR sinon). Jeton *fine-grained* restreint à ce seul dépôt, **Contents** et **Pull
+   requests** en lecture-écriture, expiration courte ; secret `SCOOP_BUCKET_TOKEN` dans l'environnement
+   `distribution`. Sans lui, le job se saute (avertissement), comme les autres.
+7. **winget** (pas d'automatisation : il faudrait un jeton sur un *fork* de `microsoft/winget-pkgs`) :
+   à chaque Release publiée,
+   1. télécharger l'artefact `winget-manifests` de l'exécution `dist-render` (ou rendre localement :
+      `packaging/winget/render.sh X.Y.Z SHA256SUMS out/winget`, `RELEASE_DATE=AAAA-MM-JJ`) ;
+   2. sur un PC Windows : `winget validate --manifest out\winget\manifests\f\fs0ciety7000\Portico\X.Y.Z`
+      (idem pour `PorticoTUI`), puis `winget settings --enable LocalManifestFiles` et
+      `winget install --manifest <dossier>` pour un essai réel (désinstaller ensuite) ;
+   3. *fork* de `microsoft/winget-pkgs`, copier les deux dossiers `manifests/f/fs0ciety7000/…/X.Y.Z/`
+      dans le fork, une branche et une PR **par paquet** (règle du dépôt), en suivant son modèle de PR.
+      Le pipeline de validation de Microsoft (installation, analyse antivirus) tourne sur la PR ; un
+      installeur non signé est accepté mais peut être retenu plus longtemps. `wingetcreate update`
+      (outil de Microsoft) peut faire les mêmes étapes à partir des URL de la Release.
+   Le premier envoi crée les paquets ; l'identifiant (`WINGET_PUBLISHER`, `fs0ciety7000` par défaut) ne
+   doit plus changer ensuite.
 
 ### Vérifications
 
@@ -317,6 +443,10 @@ Pour republier la même version avec un `PKGBUILD` corrigé, rendre localement a
 packaging/homebrew/render.sh X.Y.Z SHA256SUMS out/homebrew
 packaging/aur/render.sh X.Y.Z SHA256SUMS out/aur
 ruby -c out/homebrew/Formula/portico.rb out/homebrew/Casks/portico.rb
+packaging/scoop/render.sh X.Y.Z SHA256SUMS out/scoop && jq . out/scoop/bucket/portico.json
+RELEASE_DATE=2026-10-24 packaging/winget/render.sh X.Y.Z SHA256SUMS out/winget
+# Scoop (PowerShell, Windows) : manifeste local, sans bucket
+#   scoop install .\out\scoop\bucket\portico.json ; portico --version ; scoop uninstall portico
 # Homebrew (dans un tap local : brew tap-new local/portico, fichiers copiés dedans) :
 brew style local/portico
 brew audit --strict --new --os all --arch all --formula local/portico/portico
@@ -344,7 +474,16 @@ namcap PKGBUILD && makepkg -f && namcap portico-bin-*.pkg.tar.zst
   `--persona pedantic`) sans nouvelle remarque ; contrôle des artefacts et rendu exécutés localement sur
   une fausse Release (artefact modifié refusé).
 
+**Vérifié le 2026-10-24** (Scoop et winget, Linux x86_64, fausses sommes) : les deux `render.sh` rendent
+un JSON valide et six manifestes YAML valides, refusent une version `vX.Y.Z`, un zip absent de
+`SHA256SUMS` et un identifiant winget pointé, sans rien écrire ; `shellcheck` sans remarque sur les deux
+scripts et sur les blocs `run:` bash du workflow. `actionlint` n'a pas pu être lancé dans cet
+environnement : relecture et analyse YAML seulement.
+
 **Non vérifié** : une exécution réelle des jobs (aucune Release publiée, ni tap, ni compte AUR, ni secret) ;
+les jobs Windows (`tui` msvc, `gui-windows`, CI `gui-windows`), qui ne tournent que sur les runners
+`windows-latest` ; `scoop install` et `winget validate`/`install` des fichiers rendus (à faire sur le PC
+Windows du propriétaire, voir `docs/TESTING.md`) ;
 le cask sur macOS (installation, `zap`, Gatekeeper) ; les paquets `aarch64` (Arch Linux ARM n'est pas un
 portage officiel d'Arch : sommes rendues, paquets non construits) ; `brew audit --new` en ligne, qui
 signalera probablement un dépôt GitHub encore peu « notable » (sans effet pour un tap tiers).
@@ -353,7 +492,11 @@ signalera probablement un dépôt GitHub encore peu « notable » (sans effet po
 
 - **Pas de mise à jour automatique** : le *updater* Tauri n'est pas activé (il exigerait une clé de
   signature des mises à jour et un point de publication ; à décider par ADR, sans service tiers imposé).
-- **Pas de Windows**, pas de `.rpm`, pas de Flatpak/Snap. Homebrew et l'AUR : voir les limites de « Distribution ».
+- Pas de `.rpm`, pas de Flatpak/Snap. Homebrew et l'AUR : voir les limites de « Distribution ».
+- **Windows** : x64 seulement (pas d'`aarch64-pc-windows-msvc` pour l'instant), **non signé**
+  (SmartScreen ; Smart App Control bloque), pas de MSI. La GUI a besoin de WebView2 Evergreen (présent
+  sous Windows 11 ; installé par l'installeur sinon, ce qui demande un accès Internet à ce moment-là).
+  Pageant (PuTTY) n'est pas un agent pris en charge : OpenSSH pour Windows seulement.
 - **Linux non signé** (voir plus haut). L'AppImage n'embarque pas de signature GPG.
 - **AppImage** : construite sur Ubuntu 22.04 (glibc 2.35) ; elle embarque WebKitGTK et GTK, d'où sa taille.
   Plus ancien que glibc 2.35 : non supporté.

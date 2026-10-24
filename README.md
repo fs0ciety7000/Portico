@@ -5,7 +5,7 @@
 <h1 align="center">Portico</h1>
 
 <p align="center">
-  Gestionnaire de sessions SSH <b>local-first</b>, rapide et <b>keyboard-first</b>, pour macOS et Linux.<br/>
+  Gestionnaire de sessions SSH <b>local-first</b>, rapide et <b>keyboard-first</b>, pour macOS, Linux et Windows.<br/>
   Un moteur Rust, deux interfaces : une TUI et une GUI.
 </p>
 
@@ -13,10 +13,25 @@
 
 - **Zéro lock-in** : tout fonctionne hors ligne. Vos données Portico sont en TOML lisible.
 - **Votre setup est la source de vérité** : `~/.ssh/config` (Include, Match, ProxyJump…), `known_hosts`, `ssh-agent` et vos clés.
-- **Sécurisé** : secrets dans le trousseau système (Keychain, Secret Service), jamais en clair.
+- **Sécurisé** : secrets dans le trousseau système (Keychain, Secret Service, Gestionnaire d'identification Windows), jamais en clair.
 - **Premium** : trois thèmes sombres (Obsidian, Basalt, Travertine Night) et un clair (Marble), plus **Auto** qui suit le système (Marble le jour, votre thème sombre la nuit) ; statut de connexion et latence toujours visibles.
 
 > 🚧 **Phase 0 terminée** (fondations). La connexion interactive arrive en phase 1, voir [`docs/PLAN.md`](docs/PLAN.md).
+
+## Installer
+
+Chaque [Release](https://github.com/fs0ciety7000/Portico/releases) publie les fichiers et leur `SHA256SUMS`
+(vérification, signature et détails : [`docs/RELEASE.md`](docs/RELEASE.md)).
+
+| Système | GUI | TUI (`portico`) |
+|---|---|---|
+| macOS 13+ | `brew install --cask fs0ciety7000/portico/portico`, ou le `.dmg` universel | `brew install fs0ciety7000/portico/portico` |
+| Linux | `.deb` (Debian 12+, Ubuntu 22.04+), AppImage, AUR `portico-gui-bin` | tarball `gnu` ou `musl`, Homebrew, AUR `portico-bin` |
+| Windows 11 x64 | `Portico_<v>_x64-setup.exe` (par utilisateur, sans droits admin), `winget install fs0ciety7000.Portico` | zip, `scoop bucket add portico https://github.com/fs0ciety7000/scoop-portico` puis `scoop install portico/portico`, `winget install fs0ciety7000.PorticoTUI` |
+
+Sous Windows, les binaires ne sont **pas encore signés** : au premier lancement de l'installeur,
+SmartScreen demande *Informations complémentaires → Exécuter quand même* (*More info → Run anyway*),
+après vérification de la somme. Portico y lit `%USERPROFILE%\.ssh` et l'agent d'OpenSSH pour Windows.
 
 ## Démarrer
 

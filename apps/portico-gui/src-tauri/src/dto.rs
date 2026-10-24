@@ -61,17 +61,35 @@ impl From<&HostEntry> for HostDto {
     }
 }
 
-/// `~/…` for paths under the home directory (shorter, and does not expose
-/// the account's home path in screenshots).
-pub(crate) fn display_path(path: &Path) -> String {
-    std::env::var_os("HOME")
+/// The user's home directory, the one `~` stands for: `HOME` on Unix,
+/// `USERPROFILE` on Windows (as OpenSSH for Windows does). An empty value
+/// is no home.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const HOME_VAR: &str = "USERPROFILE";
+    #[cfg(not(windows))]
+    const HOME_VAR: &str = "HOME";
+    std::env::var_os(HOME_VAR)
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .and_then(|home| {
-            path.strip_prefix(home)
-                .ok()
-                .map(|rest| format!("~/{}", rest.display()))
-        })
+}
+
+/// `~/…` for paths under the home directory (shorter, and does not expose
+/// the account's home path in screenshots). The part after `~` is joined
+/// with `/` on every platform, the spelling of `ssh_config` (and of
+/// OpenSSH for Windows): `~/.ssh/id_ed25519`, never `~/.ssh\id_ed25519`.
+pub(crate) fn display_path(path: &Path) -> String {
+    home_dir()
+        .and_then(|home| path.strip_prefix(home).ok().map(tilde_path))
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn tilde_path(rest: &Path) -> String {
+    let parts: Vec<_> = rest
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect();
+    format!("~/{}", parts.join("/"))
 }
 
 /// Text that may come from a server or a hand-edited file (log messages,
@@ -205,11 +223,12 @@ mod tests {
 
     #[test]
     fn home_paths_are_shortened() {
-        let home = std::env::var("HOME").unwrap();
+        let home = home_dir().unwrap();
         assert_eq!(
-            display_path(&Path::new(&home).join(".ssh/config")),
+            display_path(&home.join(".ssh").join("config")),
             "~/.ssh/config"
         );
+        assert_eq!(display_path(&home), "~/");
         assert_eq!(
             display_path(Path::new("/etc/ssh/ssh_config")),
             "/etc/ssh/ssh_config"

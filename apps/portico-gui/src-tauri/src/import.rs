@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn preview_shows_destination_changes_and_unverified_fingerprints() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = crate::dto::home_dir() else {
             return;
         };
         let dir = tempfile::tempdir().expect("tempdir");
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn report_paths_are_shown_from_home() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = crate::dto::home_dir() else {
             return;
         };
         let report = ImportReport {

@@ -1,6 +1,10 @@
-# LF everywhere, Windows checkouts included (exact-text fixtures and
-# snapshots, rustfmt --check): Git's autocrlf would turn them into CRLF.
+# LF everywhere, Windows checkouts included (Git for Windows defaults to
+# core.autocrlf=true): generated files (tokens.css, docs/KEYBINDINGS.md),
+# fixtures, snapshots and rustfmt --check compare text byte for byte.
 * text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
 
 # The Termius CSV fixture must keep its UTF-8 BOM and CRLF line ends.
 crates/portico-core/tests/fixtures/termius/termius_template.csv -text

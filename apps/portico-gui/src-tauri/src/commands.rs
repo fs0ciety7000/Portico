@@ -45,7 +45,7 @@ pub(crate) async fn search_hosts(
 /// Home directory, so the view can show `~/…` paths.
 #[tauri::command]
 pub(crate) fn home_dir() -> Option<String> {
-    std::env::var("HOME").ok()
+    crate::dto::home_dir().and_then(|home| home.into_os_string().into_string().ok())
 }
 
 #[tauri::command]
