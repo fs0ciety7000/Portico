@@ -5,6 +5,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Test orchestration: one long scenario script, child processes killed on drop.
 #![allow(clippy::too_many_lines, clippy::zombie_processes)]
+// The OpenSSH binaries it drives (sshd, ssh-agent over a Unix socket) are
+// those of a Unix host: on Windows the whole file compiles to nothing.
+#![cfg(unix)]
 
 mod support;
 

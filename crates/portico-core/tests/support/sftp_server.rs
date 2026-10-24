@@ -3,7 +3,39 @@
 
 use std::collections::HashMap;
 use std::fs;
+/// Positional I/O on both platforms (`pread`/`pwrite`, `seek_read`/`seek_write`).
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
+
+#[cfg(unix)]
+fn read_at(f: &fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    f.read_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(f: &fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    f.seek_read(buf, offset)
+}
+
+#[cfg(unix)]
+fn write_all_at(f: &fs::File, data: &[u8], offset: u64) -> std::io::Result<()> {
+    f.write_all_at(data, offset)
+}
+
+#[cfg(windows)]
+fn write_all_at(f: &fs::File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !data.is_empty() {
+        let n = f.seek_write(data, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        data = data.get(n..).unwrap_or_default();
+        offset += n as u64;
+    }
+    Ok(())
+}
 use std::path::{Component, Path, PathBuf};
 
 use russh_sftp::protocol::{
@@ -92,7 +124,6 @@ impl russh_sftp::server::Handler for SftpServer {
         pflags: OpenFlags,
         attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
-        use std::os::unix::fs::OpenOptionsExt;
         let path = self.local(&filename)?;
         let mut options = fs::OpenOptions::new();
         options
@@ -104,9 +135,12 @@ impl russh_sftp::server::Handler for SftpServer {
         } else {
             options.create(pflags.contains(OpenFlags::CREATE));
         }
+        #[cfg(unix)]
         if let Some(mode) = attrs.permissions {
-            options.mode(mode & 0o7777);
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode & 0o7777);
         }
+        #[cfg(not(unix))]
+        let _ = attrs;
         let file = options.open(path).map_err(|e| io(&e))?;
         Ok(Handle {
             id,
@@ -130,7 +164,7 @@ impl russh_sftp::server::Handler for SftpServer {
             return Err(StatusCode::Failure);
         };
         let mut buf = vec![0; len as usize];
-        let n = f.read_at(&mut buf, offset).map_err(|e| io(&e))?;
+        let n = read_at(f, &mut buf, offset).map_err(|e| io(&e))?;
         if n == 0 {
             return Err(StatusCode::Eof);
         }
@@ -148,7 +182,7 @@ impl russh_sftp::server::Handler for SftpServer {
         let Some(Open::File(f)) = self.handles.get(&handle) else {
             return Err(StatusCode::Failure);
         };
-        f.write_all_at(&data, offset).map_err(|e| io(&e))?;
+        write_all_at(f, &data, offset).map_err(|e| io(&e))?;
         Ok(ok(id))
     }
 
@@ -185,14 +219,17 @@ impl russh_sftp::server::Handler for SftpServer {
         path: String,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
         if let Some(mode) = attrs.permissions {
+            use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(
                 self.local(&path)?,
                 fs::Permissions::from_mode(mode & 0o7777),
             )
             .map_err(|e| io(&e))?;
         }
+        #[cfg(not(unix))]
+        let _ = (&path, attrs);
         Ok(ok(id))
     }
 
