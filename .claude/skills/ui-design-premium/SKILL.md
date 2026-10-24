@@ -35,7 +35,9 @@ Après une modification de `portico-theme`, lancer `cargo run -p portico-theme -
 **Contraste** (testé dans `portico-theme`) : texte principal ≥ 7:1 (AAA), secondaire ≥ 4.5:1, statuts ≥ 4.5:1 sur `bg-surface`.
 Un nouveau thème doit passer ces tests.
 
-**Thèmes** : Obsidian (défaut, laiton), Basalt (acier), Travertine Night (terracotta). Chacun fournit aussi sa palette ANSI 16 couleurs, harmonisée avec les statuts.
+**Thèmes** : Obsidian (défaut sombre, laiton), Basalt (acier), Travertine Night (terracotta), et **Marble** (clair : marbre chaud, texte graphite, bronze). Chacun fournit aussi sa palette ANSI 16 couleurs, harmonisée avec les statuts. Le réglage **Auto** (défaut) suit le système : Marble en clair, le thème sombre retenu en sombre.
+
+**Clair comme sombre** : jamais de `black`/`white`/`rgba()` dans un composant. Ombres (`--shadow-*`), voiles de modale (`--scrim`, `--scrim-soft`) et contraste minimal du terminal (`--terminal-min-contrast`) sont des tokens par apparence. En clair, l'élévation s'inverse : les modales sont le plan le plus clair, survol, champs et sélection s'enfoncent dans la pierre.
 
 ## Espacement, formes, typographie
 
@@ -101,6 +103,6 @@ Un nouveau thème doit passer ces tests.
 - [ ] Aucune valeur en dur, uniquement des tokens
 - [ ] Les quatre états (chargement, vide, erreur, nominal) sont soignés
 - [ ] Tout est utilisable au clavier, avec un focus visible et des raccourcis documentés
-- [ ] Les trois thèmes ont été vérifiés (capture), et la TUI sur un terminal 80×24
+- [ ] Les quatre thèmes ont été vérifiés (capture, Marble compris), et la TUI sur un terminal 80×24
 - [ ] Animations ≤ 260 ms, transform/opacity, reduced-motion respecté
 - [ ] Revue par `agent-design-review` avec captures

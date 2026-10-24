@@ -14,7 +14,7 @@
 - **Zéro lock-in** : tout fonctionne hors ligne. Vos données Portico sont en TOML lisible.
 - **Votre setup est la source de vérité** : `~/.ssh/config` (Include, Match, ProxyJump…), `known_hosts`, `ssh-agent` et vos clés.
 - **Sécurisé** : secrets dans le trousseau système (Keychain, Secret Service), jamais en clair.
-- **Premium** : trois thèmes sombres (Obsidian, Basalt, Travertine Night), statut de connexion et latence toujours visibles.
+- **Premium** : trois thèmes sombres (Obsidian, Basalt, Travertine Night) et un clair (Marble), plus **Auto** qui suit le système (Marble le jour, votre thème sombre la nuit) ; statut de connexion et latence toujours visibles.
 
 > 🚧 **Phase 0 terminée** (fondations). La connexion interactive arrive en phase 1, voir [`docs/PLAN.md`](docs/PLAN.md).
 
