@@ -951,6 +951,10 @@ async fn the_status_bar_keeps_status_and_rec_at_80_columns() {
             .is_some_and(|p| p.state() == PlayerState::Playing)
     })
     .await;
+    // The engine's own keepalive may have reported a real loopback RTT
+    // (`<1 ms`) while the events were pumped (timing-dependent: seen on
+    // Windows): pin the latency again so the assertion stays about layout.
+    measured(&mut lab.app);
     for state in ["▶ Playing", "❚❚ Paused"] {
         let lines = screen(&mut lab.app, 80, 24);
         let all = text(&lines);
