@@ -168,6 +168,9 @@ pub(crate) struct App {
     /// or `Shift`+arrow, until this instant the arrows and `Shift`+arrows
     /// keep moving the focus / the divider without the prefix.
     pub(crate) pane_repeat: Option<Instant>,
+    /// Drops a terminal reply that arrives after the background query gave
+    /// up (see `appearance.rs`).
+    pub(crate) stray_reply: crate::appearance::StrayReplyFilter,
     /// A refusal on one line of the status bar (never over a pane).
     pub(crate) note: Option<StatusNote>,
     /// Pending dialogs; the front one is shown and receives keys.
@@ -271,6 +274,7 @@ impl App {
             focus: Focus::Hosts,
             overlay: None,
             theme: crate::theme::ThemeState::default(),
+            stray_reply: crate::appearance::StrayReplyFilter::default(),
             inventory: None,
             load_error: None,
             query: String::new(),
@@ -347,19 +351,7 @@ impl App {
         // Before the first frame: the saved theme, no flash of the default.
         let settings = self.engine.settings().await.map_err(|e| e.summary());
         self.update(Action::SettingsLoaded(settings));
-        // The terminal background, asked once now, before anything reads
-        // the input (see `appearance.rs`): `auto` uses it, now or when the
-        // user cycles to it later (the query cannot run once the input
-        // reader has started).
-        if let Ok(found) = tokio::task::spawn_blocking(crate::appearance::detect).await {
-            tracing::debug!(
-                appearance = ?found.appearance,
-                source = ?found.source,
-                elapsed_us = found.elapsed.as_micros(),
-                "terminal background"
-            );
-            self.update(Action::SystemAppearance(found.appearance));
-        }
+        self.detect_appearance(crate::appearance::detect).await;
         self.spawn_load_hosts();
         self.spawn_load_recent();
         // No request unless the user turned the check on (the engine decides).
@@ -401,10 +393,44 @@ impl App {
         Ok(())
     }
 
+    /// The terminal background for `auto`, once, before anything reads the
+    /// input (see `appearance.rs`). Only `auto` asks the terminal (`query`,
+    /// blocking); a fixed theme takes `COLORFGBG`, then dark, for when the
+    /// user cycles to `auto` later (the query cannot run once the input
+    /// reader has started).
+    pub(crate) async fn detect_appearance(&mut self, query: fn() -> crate::appearance::Detection) {
+        let found = if self.theme.is_auto() {
+            match tokio::task::spawn_blocking(query).await {
+                Ok(found) => found,
+                Err(_) => return,
+            }
+        } else {
+            crate::appearance::without_query()
+        };
+        tracing::debug!(
+            appearance = ?found.appearance,
+            source = ?found.source,
+            complete = found.complete,
+            elapsed_us = found.elapsed.as_micros(),
+            "terminal background"
+        );
+        if !found.complete {
+            self.stray_reply.arm(Instant::now(), found.inside_osc);
+        }
+        self.update(Action::SystemAppearance(found.appearance));
+    }
+
     pub(crate) fn map_event(&mut self, event: Event) -> Option<Action> {
         match event {
             Event::Key(key) => {
                 let now = Instant::now();
+                // The late end of the background query, never keys.
+                if self
+                    .stray_reply
+                    .swallow(key, now, self.focus == Focus::Terminal)
+                {
+                    return None;
+                }
                 // Help over a panel: its keys only, the panel waits below.
                 let action = if self.help.over_panel && self.dialogs.is_empty() {
                     (key.kind == crossterm::event::KeyEventKind::Press)

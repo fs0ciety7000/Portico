@@ -1219,6 +1219,120 @@ mod render_tests {
         assert!(!lines.join("\n").contains("Keyboard shortcuts"));
     }
 
+    /// A detection that gave up mid-reply (the terminal answers late).
+    fn incomplete_light() -> crate::appearance::Detection {
+        crate::appearance::Detection {
+            appearance: portico_theme::Appearance::Dark,
+            source: crate::appearance::Source::Fallback,
+            elapsed: std::time::Duration::from_millis(100),
+            complete: false,
+            inside_osc: false,
+        }
+    }
+
+    /// The keys `crossterm` makes of an OSC 11 reply: `ESC ]` is Alt+],
+    /// the body plain characters, ST (`ESC \`) Alt+\ and BEL Ctrl+G.
+    fn osc11_reply_as_keys(body: &str, bel: bool) -> Vec<crossterm::event::Event> {
+        use crossterm::event::Event;
+        let mut keys = vec![Event::Key(KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        ))];
+        keys.extend(body.chars().map(|c| Event::Key(key(KeyCode::Char(c)))));
+        keys.push(Event::Key(if bel {
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)
+        } else {
+            KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT)
+        }));
+        keys
+    }
+
+    #[tokio::test]
+    async fn late_osc11_reply_is_not_typed_into_hosts() {
+        let mut app = hosts_app();
+        // Without the filter, such a reply is a burst of shortcuts.
+        let typed: Vec<Action> = osc11_reply_as_keys("11;rgba:f4f4/f1f1/ecec/ffff", false)
+            .into_iter()
+            .filter_map(|e| app.map_event(e))
+            .collect();
+        assert!(
+            typed.iter().any(|a| matches!(a, Action::OpenFiles)),
+            "{typed:?}"
+        );
+        let mut app = hosts_app();
+        app.detect_appearance(incomplete_light).await;
+        assert!(app.stray_reply.armed());
+        for bel in [false, true] {
+            if bel {
+                app.detect_appearance(incomplete_light).await;
+            }
+            for event in osc11_reply_as_keys("11;rgba:f4f4/f1f1/ecec/ffff", bel) {
+                let action = app.map_event(event);
+                assert!(
+                    !matches!(
+                        action,
+                        Some(
+                            Action::OpenFiles | Action::EditHost | Action::AddHost | Action::Reload
+                        )
+                    ),
+                    "{action:?}"
+                );
+                if let Some(action) = action {
+                    app.update(action);
+                }
+            }
+            assert!(app.overlay.is_none());
+            assert!(app.dialogs.is_empty());
+            assert!(app.files.is_none());
+            assert_eq!(app.focus, Focus::Hosts);
+            assert!(!app.stray_reply.armed(), "disarmed at the end of the reply");
+        }
+        // The user's keys are theirs again.
+        assert!(matches!(
+            app.map_event(crossterm::event::Event::Key(key(KeyCode::Char('j')))),
+            Some(Action::SelectNext)
+        ));
+    }
+
+    static QUERIED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counted_light() -> crate::appearance::Detection {
+        QUERIED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::appearance::Detection {
+            appearance: portico_theme::Appearance::Light,
+            source: crate::appearance::Source::Osc11,
+            elapsed: std::time::Duration::ZERO,
+            complete: true,
+            inside_osc: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_theme_skips_background_query() {
+        use std::sync::atomic::Ordering;
+        let mut app = test_app();
+        app.update(Action::SettingsLoaded(Ok(Settings {
+            theme: Some("basalt".into()),
+            ..Settings::default()
+        })));
+        let before = QUERIED.load(Ordering::SeqCst);
+        app.detect_appearance(counted_light).await;
+        assert_eq!(QUERIED.load(Ordering::SeqCst), before, "not asked");
+        assert_eq!(app.styles().theme.id, "basalt");
+        assert!(!app.stray_reply.armed());
+        // Cycling to Auto later: `COLORFGBG`, then dark, never the query.
+        assert_eq!(
+            app.theme.system,
+            crate::appearance::without_query().appearance
+        );
+        // Auto (absent key) asks.
+        let mut app = test_app();
+        app.update(Action::SettingsLoaded(Ok(Settings::default())));
+        app.detect_appearance(counted_light).await;
+        assert!(QUERIED.load(Ordering::SeqCst) > before);
+        assert_eq!(app.styles().theme.id, "marble");
+    }
+
     #[test]
     fn auto_theme_from_settings_and_the_detected_background() {
         let mut app = test_app();

@@ -48,9 +48,11 @@ dark_theme = "basalt"        # thème sombre d'auto (défaut obsidian ; écrit p
   de 4 touches, touche réservée (`Ctrl-C`, `Esc`, `Ctrl-Space`, les chiffres `1`-`9` des onglets), touche
   d'un terminal sans `Ctrl`, `Alt` ni `Shift`, et conflit avec une autre action du même contexte (deux
   entrées sur la même touche sont ignorées toutes les deux ; échanger deux touches fonctionne).
-- **Auto** : la TUI demande la couleur de fond du terminal au démarrage (OSC 11, ~0,3 ms ; 100 ms au plus
-  si le terminal ne répond pas, puis `COLORFGBG`, sinon sombre) : fond clair → Marble, sinon `dark_theme`.
-  Pas de bascule en cours de session : relancer Portico, ou choisir un thème avec `t`. Le `dark_theme` est
+- **Auto** : quand le réglage est `auto` (ou absent), la TUI demande la couleur de fond du terminal au
+  démarrage (OSC 11, ~0,3 ms ; 100 ms au plus si le terminal ne répond pas, 1 s au plus pour finir une
+  réponse commencée, puis `COLORFGBG`, sinon sombre) : fond clair → Marble, sinon `dark_theme`. Avec un
+  thème fixe, rien n'est demandé au terminal : passer ensuite à Auto avec `t` suit `COLORFGBG`, sinon
+  sombre. Pas de bascule en cours de session : relancer Portico, ou choisir un thème avec `t`. Le `dark_theme` est
   le dernier thème sombre sur lequel on s'est arrêté (ceux traversés en enchaînant `t` ne comptent pas).
 - Un thème inconnu revient à Auto, avec un toast. Un fichier invalide est ignoré en entier
   (toast avec l'erreur) ; il n'est jamais réécrit tant qu'il ne se relit pas.
