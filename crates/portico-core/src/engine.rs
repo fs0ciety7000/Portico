@@ -1126,12 +1126,19 @@ impl Engine {
 
     /// Remembers the theme without touching the rest of `settings.toml`
     /// (read and write under one lock: two UIs never lose each other's
-    /// changes).
-    pub async fn set_theme(&self, theme: Option<String>) -> Result<crate::settings::Settings> {
+    /// changes). `dark_theme`, when given, also becomes the dark theme
+    /// `auto` uses; `None` keeps the remembered one.
+    pub async fn set_theme(
+        &self,
+        theme: Option<String>,
+        dark_theme: Option<String>,
+    ) -> Result<crate::settings::Settings> {
         let path = self.inner.config.paths.settings();
-        tokio::task::spawn_blocking(move || crate::settings::set_theme(&path, theme.as_deref()))
-            .await
-            .map_err(|_| Error::EngineClosed)?
+        tokio::task::spawn_blocking(move || {
+            crate::settings::set_theme(&path, theme.as_deref(), dark_theme.as_deref())
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?
     }
 
     /// Remembers the GUI's "Copy on select" preference, alone, like

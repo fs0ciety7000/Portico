@@ -1,7 +1,8 @@
 //! User settings: `settings.toml` in the config dir (Phase 4).
 //!
 //! ```toml
-//! theme = "obsidian"
+//! theme = "auto"          # or a theme id: "obsidian", "marble"…
+//! dark_theme = "basalt"   # the dark theme `auto` uses
 //!
 //! [keymap.tui]
 //! "connect" = "enter"
@@ -23,7 +24,7 @@
 //!
 //! [`save`] is a read-modify-write of the TOML *document* under an
 //! exclusive inter-process lock (`settings.toml.lock`): the known keys
-//! (`theme`, `keymap.tui`, `keymap.gui`, `gui.copy_on_select`, `updates.check`) are replaced, every other key,
+//! (`theme`, `dark_theme`, `keymap.tui`, `keymap.gui`, `gui.copy_on_select`, `updates.check`) are replaced, every other key,
 //! comment and layout is kept. The write is atomic (`0600`).
 
 use std::collections::BTreeMap;
@@ -46,8 +47,12 @@ const MAX_SETTINGS_FILE_BYTES: u64 = 256 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Theme id (`obsidian`, `basalt`, `travertine-night`…); `None` = default.
+    /// Theme id (`obsidian`, `basalt`, `travertine`, `marble`…) or `auto`
+    /// (follow the system); `None` = the UIs' default, `auto`.
     pub theme: Option<String>,
+    /// The dark theme `auto` uses when the system is dark (the last dark
+    /// theme chosen explicitly); `None` = the UIs' default dark theme.
+    pub dark_theme: Option<String>,
     pub keymap: Keymaps,
     /// Preferences of the desktop app only (phase 9).
     pub gui: GuiSettings,
@@ -108,6 +113,9 @@ impl Settings {
     pub fn validate(&self) -> std::result::Result<(), SettingsError> {
         if let Some(theme) = &self.theme {
             check_string("theme", theme)?;
+        }
+        if let Some(theme) = &self.dark_theme {
+            check_string("dark_theme", theme)?;
         }
         for (field, map) in [
             ("keymap.tui", &self.keymap.tui),
@@ -173,12 +181,20 @@ pub(crate) fn save(path: &Path, settings: &Settings) -> Result<Settings> {
     save_locked(path, settings)
 }
 
-/// Changes only the theme: read and write happen under one lock, so a
+/// Changes only the theme (and, when `dark_theme` is given, the dark theme
+/// `auto` uses; `None` keeps it): read and write happen under one lock, so a
 /// keymap saved meanwhile by another UI is never overwritten. Blocking.
-pub(crate) fn set_theme(path: &Path, theme: Option<&str>) -> Result<Settings> {
+pub(crate) fn set_theme(
+    path: &Path,
+    theme: Option<&str>,
+    dark_theme: Option<&str>,
+) -> Result<Settings> {
     let _lock = store::lock_exclusive(&store::lock_path(path))?;
     let mut settings = load(path)?;
     settings.theme = theme.map(str::to_owned);
+    if let Some(dark) = dark_theme {
+        settings.dark_theme = Some(dark.to_owned());
+    }
     settings.validate()?;
     save_locked(path, &settings)
 }
@@ -216,10 +232,15 @@ fn save_locked(path: &Path, settings: &Settings) -> Result<Settings> {
     let text = store::read_capped(path, MAX_SETTINGS_FILE_BYTES)?.unwrap_or_default();
     let mut doc = store::parse_document(path, &text)?;
     let root = doc.as_table_mut();
-    match &settings.theme {
-        Some(theme) => set_string(root, "theme", theme),
-        None => {
-            root.remove("theme");
+    for (key, value) in [
+        ("theme", &settings.theme),
+        ("dark_theme", &settings.dark_theme),
+    ] {
+        match value {
+            Some(theme) => set_string(root, key, theme),
+            None => {
+                root.remove(key);
+            }
         }
     }
     let keymap = store::child_table(root, "keymap", path)?;
@@ -287,12 +308,45 @@ mod tests {
         other.keymap.gui.insert("app.logs".into(), "F12".into());
         save(&path, &other).expect("save");
         // …then changes the theme: the keymap survives.
-        let saved = set_theme(&path, Some("basalt")).expect("theme");
+        let saved = set_theme(&path, Some("basalt"), None).expect("theme");
         assert_eq!(saved.theme.as_deref(), Some("basalt"));
         assert_eq!(
             saved.keymap.gui.get("app.logs").map(String::as_str),
             Some("F12")
         );
+    }
+
+    #[test]
+    fn dark_theme_is_kept_unless_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let saved = set_theme(&path, Some("basalt"), Some("basalt")).expect("theme");
+        assert_eq!(saved.dark_theme.as_deref(), Some("basalt"));
+        // `auto` (or a light theme) keeps the remembered dark theme.
+        let saved = set_theme(&path, Some("auto"), None).expect("auto");
+        assert_eq!(saved.theme.as_deref(), Some("auto"));
+        assert_eq!(saved.dark_theme.as_deref(), Some("basalt"));
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("theme = \"auto\""), "{text}");
+        assert!(text.contains("dark_theme = \"basalt\""), "{text}");
+        let saved = set_theme(&path, None, None).expect("default");
+        assert_eq!(saved.theme, None);
+        assert_eq!(
+            load(&path).expect("load").dark_theme.as_deref(),
+            Some("basalt")
+        );
+        // Bounds apply to the new key too.
+        let bad = Settings {
+            dark_theme: Some(" ".into()),
+            ..Settings::default()
+        };
+        assert!(matches!(
+            bad.validate(),
+            Err(SettingsError::Invalid {
+                field: "dark_theme",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -368,7 +422,7 @@ mod tests {
         .expect("write");
         assert_eq!(load(&path).expect("load").updates.check, None);
         // An unrelated save never answers the question for the user.
-        set_theme(&path, Some("obsidian")).expect("theme");
+        set_theme(&path, Some("obsidian"), None).expect("theme");
         assert_eq!(load(&path).expect("load").updates.check, None);
         assert!(
             !std::fs::read_to_string(&path)
