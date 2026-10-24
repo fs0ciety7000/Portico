@@ -5,7 +5,7 @@
 // `dark_theme` the dark theme `auto` uses. `auto` paints Marble while the
 // system is light (`prefers-color-scheme`, followed live) and the dark
 // theme otherwise. Choosing a dark theme makes it the dark theme of `auto`;
-// a run of `t` presses (each within CYCLE_RUN_MS of the previous one) does
+// a run of `t` presses (no other shortcut in between, like the TUI) does
 // not, for the themes it only passes through.
 //
 // Theme without a flash: the setting is cached in browser storage and
@@ -28,8 +28,8 @@ const DEFAULT_DARK = "obsidian";
 const LIGHT_THEME = "marble";
 /** Themes known before `list_themes` answers (cached ids are checked against the tokens). */
 const ID = /^[a-z0-9-]{1,64}$/;
-/** Two `t` presses closer than this belong to one run (see the header). */
-const CYCLE_RUN_MS = 1500;
+/** The "Theme · …" notice of `t` (as short as the TUI's). */
+const CYCLE_TOAST_MS = 1500;
 /** Problems listed in the notice before "and n more". */
 const LISTED = 3;
 /** A notice that lists entries stays longer than the usual 4 s. */
@@ -94,7 +94,8 @@ class SettingsState {
   copyOnSelect: boolean = $state(false);
   /** The settings dialog is open. */
   open: boolean = $state(false);
-  #lastCycle = 0;
+  /** Inside a run of `t` presses (see the header); any other shortcut ends it. */
+  #cycling = false;
 
   constructor() {
     // The system flips (macOS appearance, GNOME dark style): `auto` follows
@@ -184,14 +185,19 @@ class SettingsState {
 
   /** `t`: the next choice (see the header for the dark theme of a run). */
   cycle() {
-    const now = Date.now();
-    const continuing = now - this.#lastCycle < CYCLE_RUN_MS;
-    this.#lastCycle = now;
+    const continuing = this.#cycling;
+    this.#cycling = true;
     // The theme left at the start of a run is the one the user had settled on.
     if (!continuing && this.#isDark(this.selection)) this.darkTheme = this.selection;
     const list = this.choices;
     const next = list[(list.indexOf(this.selection) + 1) % list.length];
     if (next) this.select(next, true);
+    workspace.notify({ code: "theme", message: `Theme · ${this.label}` }, "info", CYCLE_TOAST_MS);
+  }
+
+  /** Any shortcut other than `t`: the next `t` starts a new run. */
+  endCycle() {
+    this.#cycling = false;
   }
 
   /** Applies and remembers "Copy on select"; back to the old value if it cannot be saved. */

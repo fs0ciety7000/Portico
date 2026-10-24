@@ -474,8 +474,8 @@ dark_theme = "basalt"            # thème sombre d'auto : le dernier thème somb
   `settings.toml` ; sans mémoire, la page suit déjà le système) ; un nom inconnu donne Auto et une
   notification. **Auto** suit `prefers-color-scheme` en direct (Marble si le système est clair, sinon
   `dark_theme`), barre de titre et fond de fenêtre compris. Choisir un thème sombre (réglages, palette)
-  en fait le thème sombre d'Auto ; en enchaînant `t` (moins de 1,5 s entre deux appuis), les thèmes
-  seulement traversés ne comptent pas.
+  en fait le thème sombre d'Auto ; en enchaînant `t` (aucun autre raccourci entre deux appuis, comme
+  dans la TUI), les thèmes seulement traversés ne comptent pas. Chaque `t` affiche « Theme · … » (1,5 s).
 - Les actions de panneau (`pane.*`) n'écoutent que dans un onglet terminal : elles peuvent reprendre une
   combinaison de la liste des hôtes (`Mod+D` divise dans un terminal et bascule le favori dans la liste).
 

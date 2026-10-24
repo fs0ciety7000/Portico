@@ -632,7 +632,7 @@
         ]
       : []),
     { id: "app.reload", title: "Reload ~/.ssh/config", shortcut: k("app.reload"), run: load },
-    { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: settings.label, run: () => settings.cycle() },
+    { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: `Now: ${settings.label}`, run: () => settings.cycle() },
     { id: "app.settings", title: "Settings…", hint: "theme, copy on select, updates", shortcut: k("app.settings"), run: () => (settings.open = true) },
     ...(updates.available
       ? [{ id: "app.update", title: `Update available: Portico ${updates.available.version}…`, hint: "release notes, update command", shortcut: k("app.update"), run: () => updates.show() }]
@@ -654,6 +654,8 @@
 
   /** Runs a keymap action (ids of `shortcuts.ts`). */
   function runAction(id: string) {
+    // A run of `t` presses ends at any other shortcut (see settings.svelte.ts).
+    if (id !== "app.theme") settings.endCycle();
     const goto = /^tab\.goto-(\d)$/.exec(id);
     if (goto?.[1]) return workspace.go(Number(goto[1]) - 1);
     const arrow = /^pane\.focus-(left|right|up|down)$/.exec(id);

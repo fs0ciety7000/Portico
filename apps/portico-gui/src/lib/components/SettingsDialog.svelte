@@ -53,7 +53,7 @@
             onclick={() => settings.select(t.id)}
           >
             {#if t.id === AUTO}
-              <!-- Both halves of Auto: the light theme's accent and the dark theme's. -->
+              <!-- Both halves of Auto: the light theme (left) and the dark theme (right). -->
               <span class="swatch split" aria-hidden="true"><span data-theme="marble"></span><span data-theme={settings.darkTheme}></span></span>
             {:else}
               <span class="swatch" data-theme={t.id}></span>
@@ -126,20 +126,50 @@
     box-shadow: inset var(--size-bar) 0 0 0 var(--accent);
     color: var(--text-primary);
   }
-  /* Each theme's own accent, read from its token block. */
+  /* Each theme in small: its page (bg-base, hairline ring) around a core of
+     its accent, read from its own token block (data-theme on the swatch). */
   .swatch {
+    position: relative;
+    flex: none;
     width: var(--space-3);
     height: var(--space-3);
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--bg-base);
     box-shadow: inset 0 0 0 1px var(--border-strong);
   }
-  /* Auto: two half discs, each in its own theme's accent. */
+  .swatch:not(.split)::after,
+  .swatch.split > span::after {
+    content: "";
+    position: absolute;
+    top: 25%;
+    width: calc(var(--space-3) / 2);
+    height: calc(var(--space-3) / 2);
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .swatch:not(.split)::after { left: 25%; }
+  /* Auto: two half discs, light on the left, dark on the right; the core
+     is split the same way (each half clips its own half of it). */
   .swatch.split {
     display: inline-flex;
-    overflow: hidden;
     background: none;
+    box-shadow: none;
   }
-  .swatch.split > span { flex: 1 1 50%; background: var(--accent); }
+  .swatch.split > span {
+    position: relative;
+    flex: 1 1 50%;
+    overflow: hidden;
+    background: var(--bg-base);
+  }
+  .swatch.split > span:first-child {
+    border-radius: 100% 0 0 100% / 50% 0 0 50%;
+    box-shadow: inset 1px 0 0 var(--border-strong), inset 0 1px 0 var(--border-strong), inset 0 -1px 0 var(--border-strong);
+  }
+  .swatch.split > span:last-child {
+    border-radius: 0 100% 100% 0 / 0 50% 50% 0;
+    box-shadow: inset -1px 0 0 var(--border-strong), inset 0 1px 0 var(--border-strong), inset 0 -1px 0 var(--border-strong);
+  }
+  .swatch.split > span:first-child::after { left: 50%; }
+  .swatch.split > span:last-child::after { right: 50%; }
   .note { color: var(--text-muted); font-size: var(--text-sm); }
 </style>
