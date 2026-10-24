@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "portico-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "portico-gui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "directories",
@@ -4247,14 +4247,14 @@ dependencies = [
 
 [[package]]
 name = "portico-theme"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "portico-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "bytes",
