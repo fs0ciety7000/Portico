@@ -56,6 +56,17 @@ pub enum KeyError {
     UnsafeDir { path: PathBuf },
     #[error("no ssh-agent is reachable{}", socket.as_ref().map(|s| format!(" at {}", s.display())).unwrap_or_default())]
     AgentUnavailable { socket: Option<PathBuf> },
+    /// Windows: the agent pipe is served by another account; nothing was
+    /// sent to it.
+    #[error("the ssh-agent at {} is not trusted: {reason}", socket.display())]
+    AgentUntrusted {
+        socket: PathBuf,
+        reason: &'static str,
+    },
+    /// The agent endpoint is of a kind this platform cannot use (Windows:
+    /// a socket file, e.g. the `SSH_AUTH_SOCK` of Git Bash / MSYS).
+    #[error("{} is not a named pipe: Portico cannot use this ssh-agent", socket.display())]
+    AgentEndpointUnsupported { socket: PathBuf },
     #[error("ssh-agent refused the request: {0}")]
     AgentRefused(String),
     #[error("{} is encrypted", path.display())]
@@ -94,10 +105,12 @@ impl KeyError {
             ),
             Self::UnsafeDir { .. } => ("key_unsafe_dir", Some(UNSAFE_DIR_HINT)),
             Self::AgentUnavailable { .. } => ("agent_unavailable", Some(AGENT_UNAVAILABLE_HINT)),
-            Self::AgentRefused(_) => (
-                "agent_refused",
-                Some("The agent may be locked (ssh-add -X) or not accept this key type."),
+            Self::AgentUntrusted { .. } => ("agent_untrusted", Some(AGENT_UNTRUSTED_HINT)),
+            Self::AgentEndpointUnsupported { .. } => (
+                "agent_endpoint_unsupported",
+                Some("Unset SSH_AUTH_SOCK to use the Windows agent, or point it to a named pipe."),
             ),
+            Self::AgentRefused(_) => ("agent_refused", Some(AGENT_REFUSED_HINT)),
             Self::NeedsPassphrase { .. } => ("key_needs_passphrase", None),
             Self::WrongPassphrase { .. } => ("key_wrong_passphrase", Some("Try again.")),
             Self::BadPrivateKey { .. } => (
@@ -317,8 +330,23 @@ const UNSAFE_DIR_HINT: &str = "Make it yours and private: \
 const AGENT_UNAVAILABLE_HINT: &str =
     "Start ssh-agent (eval $(ssh-agent)) or set IdentityAgent / SSH_AUTH_SOCK.";
 #[cfg(windows)]
-const AGENT_UNAVAILABLE_HINT: &str = "Start the \"OpenSSH Authentication Agent\" service \
-     (Start-Service ssh-agent) or set IdentityAgent / SSH_AUTH_SOCK to a named pipe.";
+const AGENT_UNAVAILABLE_HINT: &str = "Enable and start the \"OpenSSH Authentication Agent\" \
+     service (admin PowerShell: Get-Service ssh-agent | Set-Service -StartupType Automatic; \
+     Start-Service ssh-agent), or set IdentityAgent / SSH_AUTH_SOCK to a named pipe.";
+
+/// What to do when the agent pipe is served by another account.
+const AGENT_UNTRUSTED_HINT: &str = "Another account may be impersonating the agent: \
+     start the \"OpenSSH Authentication Agent\" service, or point IdentityAgent / \
+     SSH_AUTH_SOCK to your own agent's pipe.";
+
+/// What an agent refusal may mean. The Windows agent has no lock
+/// (`ssh-add -x` is not supported there).
+#[cfg(not(windows))]
+const AGENT_REFUSED_HINT: &str =
+    "The agent may be locked (ssh-add -X) or not accept this key type.";
+#[cfg(windows)]
+const AGENT_REFUSED_HINT: &str = "The Windows agent keeps keys until they are removed and \
+     may refuse a lifetime: add the key without one. It may also not accept this key type.";
 
 /// Bidirectional overrides and isolates: they can make a comment display
 /// as something else (`evil\u{202E}moc.liame`).
@@ -583,6 +611,49 @@ fn read_certificate(path: &Path) -> Option<CertificateInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_error_summaries() {
+        let socket = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
+        let summary = |e: KeyError| crate::Error::from(e).summary();
+        let untrusted = summary(KeyError::AgentUntrusted {
+            socket: socket.clone(),
+            reason: "the pipe is served by another account",
+        });
+        assert_eq!(untrusted.code, "agent_untrusted");
+        assert!(
+            untrusted.message.contains("openssh-ssh-agent"),
+            "{untrusted:?}"
+        );
+        assert!(untrusted.hint.is_some_and(|h| h.contains("service")));
+        let unsupported = summary(KeyError::AgentEndpointUnsupported {
+            socket: PathBuf::from("/tmp/ssh-x/agent.1"),
+        });
+        assert_eq!(unsupported.code, "agent_endpoint_unsupported");
+        assert!(
+            unsupported
+                .hint
+                .is_some_and(|h| h.contains("Unset SSH_AUTH_SOCK"))
+        );
+        let unavailable = summary(KeyError::AgentUnavailable {
+            socket: Some(socket),
+        });
+        assert_eq!(unavailable.code, "agent_unavailable");
+        let hint = unavailable.hint.unwrap_or_default();
+        if cfg!(windows) {
+            assert!(
+                hint.contains("Set-Service -StartupType Automatic"),
+                "{hint}"
+            );
+        } else {
+            assert!(hint.contains("ssh-agent"), "{hint}");
+        }
+        let refused = summary(KeyError::AgentRefused("no".into()));
+        assert_eq!(refused.code, "agent_refused");
+        let hint = refused.hint.unwrap_or_default();
+        // The Windows agent has no lock: never suggest one there.
+        assert_eq!(hint.contains("locked"), !cfg!(windows), "{hint}");
+    }
 
     // Throwaway test key (public half only).
     const ED25519_PUB: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFPhl4hO0pS1bxgFwR0cIGijellPogqzFcdSn+al5ZRJ user@example.com";

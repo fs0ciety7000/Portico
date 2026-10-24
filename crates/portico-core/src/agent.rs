@@ -16,12 +16,16 @@ use russh::keys::ssh_key::{PrivateKey, PublicKey};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_socket::AgentConnectError;
 use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::keys::{CertValidity, KeyError, KeyGenRequest, LocalKey, cert_validity};
 
 /// Agent requests are local: anything slower means a stuck agent.
 const AGENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Opening the agent's socket or pipe (the Windows pipe open already gives
+/// up after about 2 s while busy).
+const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An identity held by the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,10 +78,28 @@ impl Engine {
             socket: socket.clone(),
         };
         let path = socket.clone().ok_or_else(unavailable)?;
-        tokio::time::timeout(AGENT_TIMEOUT, crate::agent_socket::connect(&path))
-            .await
-            .map_err(|_| unavailable())?
-            .map_err(|_| unavailable().into())
+        let connected =
+            tokio::time::timeout(AGENT_CONNECT_TIMEOUT, crate::agent_socket::connect(&path))
+                .await
+                .map_err(|_| {
+                    tracing::warn!(socket = %path.display(), "ssh-agent did not answer");
+                    unavailable()
+                })?;
+        connected.map_err(|e| match e {
+            AgentConnectError::Untrusted(reason) => {
+                tracing::warn!(socket = %path.display(), reason, "ssh-agent refused");
+                KeyError::AgentUntrusted {
+                    socket: path.clone(),
+                    reason,
+                }
+                .into()
+            }
+            AgentConnectError::Unsupported => KeyError::AgentEndpointUnsupported {
+                socket: path.clone(),
+            }
+            .into(),
+            AgentConnectError::Io(_) => unavailable().into(),
+        })
     }
 
     /// `ssh-add -l`.
