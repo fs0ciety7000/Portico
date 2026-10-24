@@ -2,7 +2,7 @@
   // Settings (phase 9): the theme, "Copy on select" and (0.3.0) the daily
   // update check, all written to settings.toml by the core (only their own
   // keys change). Each change applies at once; Esc or Done closes.
-  import { settings } from "../state/settings.svelte";
+  import { AUTO, settings } from "../state/settings.svelte";
   import { ago, updates } from "../state/updates.svelte";
   import { keymap } from "../state/keymap.svelte";
   import Modal from "./Modal.svelte";
@@ -11,13 +11,20 @@
   const close = () => (settings.open = false);
   let group: HTMLDivElement | undefined = $state();
 
-  /** A radio group: the arrows select the previous / next theme and move the focus (one tab stop). */
+  /** Auto first, then every theme. */
+  const options = $derived([
+    { id: AUTO, name: "Auto", description: "Follows the system: Marble when it is light, your dark theme when it is dark." },
+    ...settings.themes,
+  ]);
+  const darkName = $derived(settings.themes.find((t) => t.id === settings.darkTheme)?.name ?? settings.darkTheme);
+
+  /** A radio group: the arrows select the previous / next choice and move the focus (one tab stop). */
   function onThemeKey(e: KeyboardEvent) {
     const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
     if (step === undefined || e.altKey || e.ctrlKey || e.metaKey) return;
     e.preventDefault();
-    const list = settings.themes;
-    const at = list.findIndex((t) => t.id === settings.themeId);
+    const list = options;
+    const at = list.findIndex((t) => t.id === settings.selection);
     const next = list[(at + step + list.length) % list.length];
     if (!next) return;
     settings.select(next.id);
@@ -32,24 +39,32 @@
       <span id="theme-label">Theme</span>
       <!-- svelte-ignore a11y_interactive_supports_focus: the radios inside take the focus (roving tabindex) -->
       <div class="themes" role="radiogroup" aria-labelledby="theme-label" bind:this={group} onkeydown={onThemeKey}>
-        {#each settings.themes as t (t.id)}
+        {#each options as t (t.id)}
           <button
             type="button"
             role="radio"
             class="theme"
-            class:on={t.id === settings.themeId}
-            aria-checked={t.id === settings.themeId}
-            tabindex={t.id === settings.themeId ? 0 : -1}
+            class:on={t.id === settings.selection}
+            aria-checked={t.id === settings.selection}
+            tabindex={t.id === settings.selection ? 0 : -1}
             data-id={t.id}
-            data-autofocus={t.id === settings.themeId ? "" : undefined}
+            data-autofocus={t.id === settings.selection ? "" : undefined}
             title={t.description}
             onclick={() => settings.select(t.id)}
           >
-            <span class="swatch" data-theme={t.id}></span>{t.name}
+            {#if t.id === AUTO}
+              <!-- Both halves of Auto: the light theme (left) and the dark theme (right). -->
+              <span class="swatch split" aria-hidden="true"><span data-theme="marble"></span><span data-theme={settings.darkTheme}></span></span>
+            {:else}
+              <span class="swatch" data-theme={t.id}></span>
+            {/if}{t.name}
           </button>
         {/each}
       </div>
-      {#if themeKey}<p class="note">Also <kbd>{themeKey}</kbd> in the host list.</p>{/if}
+      <p class="note" data-testid="theme-note">
+        Auto uses Marble while the system is light, {darkName} while it is dark.
+        {#if themeKey}Also <kbd>{themeKey}</kbd> in the host list.{/if}
+      </p>
     </div>
     <div class="field">
       <span>Terminal</span>
@@ -83,7 +98,14 @@
 
 <style>
   .rows { display: grid; gap: var(--space-5); }
-  .themes { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  /* Auto on its own line (it follows the system), the four themes under it. */
+  .themes {
+    display: grid;
+    grid-template-columns: repeat(4, auto);
+    justify-content: start;
+    gap: var(--space-2);
+  }
+  .theme[data-id="auto"] { grid-column: 1 / -1; justify-self: start; }
   .theme {
     display: inline-flex;
     align-items: center;
@@ -104,13 +126,50 @@
     box-shadow: inset var(--size-bar) 0 0 0 var(--accent);
     color: var(--text-primary);
   }
-  /* Each theme's own accent, read from its token block. */
+  /* Each theme in small: its page (bg-base, hairline ring) around a core of
+     its accent, read from its own token block (data-theme on the swatch). */
   .swatch {
+    position: relative;
+    flex: none;
     width: var(--space-3);
     height: var(--space-3);
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--bg-base);
     box-shadow: inset 0 0 0 1px var(--border-strong);
   }
+  .swatch:not(.split)::after,
+  .swatch.split > span::after {
+    content: "";
+    position: absolute;
+    top: 25%;
+    width: calc(var(--space-3) / 2);
+    height: calc(var(--space-3) / 2);
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .swatch:not(.split)::after { left: 25%; }
+  /* Auto: two half discs, light on the left, dark on the right; the core
+     is split the same way (each half clips its own half of it). */
+  .swatch.split {
+    display: inline-flex;
+    background: none;
+    box-shadow: none;
+  }
+  .swatch.split > span {
+    position: relative;
+    flex: 1 1 50%;
+    overflow: hidden;
+    background: var(--bg-base);
+  }
+  .swatch.split > span:first-child {
+    border-radius: 100% 0 0 100% / 50% 0 0 50%;
+    box-shadow: inset 1px 0 0 var(--border-strong), inset 0 1px 0 var(--border-strong), inset 0 -1px 0 var(--border-strong);
+  }
+  .swatch.split > span:last-child {
+    border-radius: 0 100% 100% 0 / 0 50% 50% 0;
+    box-shadow: inset -1px 0 0 var(--border-strong), inset 0 1px 0 var(--border-strong), inset 0 -1px 0 var(--border-strong);
+  }
+  .swatch.split > span:first-child::after { left: 50%; }
+  .swatch.split > span:last-child::after { right: 50%; }
   .note { color: var(--text-muted); font-size: var(--text-sm); }
 </style>

@@ -40,8 +40,6 @@
   --size-icon-xs: 11px;
   --size-menu: 224px;
   --tracking-caps: 0.08em;
-  --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
-  --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-emphasized: cubic-bezier(0.3, 0, 0, 1.0);
   --font-ui: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -72,7 +70,7 @@
   --status-connecting: #8aaad6;
   --status-authenticating: #b39de0;
   --status-connected: #7fc8a0;
-  --status-warning: #f2c14e;
+  --status-warning: #f4cb4e;
   --status-error: #e57c70;
   --ansi-0: #1c2025;
   --ansi-1: #e57c70;
@@ -90,6 +88,11 @@
   --ansi-13: #c9b6ee;
   --ansi-14: #99dada;
   --ansi-15: #f4f1ea;
+  --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
+  --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
+  --scrim: color-mix(in srgb, var(--bg-base) 72%, transparent);
+  --scrim-soft: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  --terminal-min-contrast: 1;
   color-scheme: dark;
 }
 
@@ -133,6 +136,11 @@
   --ansi-13: #cbbdf0;
   --ansi-14: #9cdce3;
   --ansi-15: #f2f5f9;
+  --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
+  --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
+  --scrim: color-mix(in srgb, var(--bg-base) 72%, transparent);
+  --scrim-soft: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  --terminal-min-contrast: 1;
   color-scheme: dark;
 }
 
@@ -176,5 +184,108 @@
   --ansi-13: #d0bbe6;
   --ansi-14: #a8d8ca;
   --ansi-15: #f7f0e6;
+  --shadow-raised: 0 12px 32px rgb(0 0 0 / 0.4);
+  --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.5);
+  --scrim: color-mix(in srgb, var(--bg-base) 72%, transparent);
+  --scrim-soft: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  --terminal-min-contrast: 1;
   color-scheme: dark;
+}
+
+/* Marble — Warm light marble, graphite text, deep bronze accent. For daylight. */
+[data-theme="marble"] {
+  --bg-base: #f4f1ec;
+  --bg-surface: #eeeae4;
+  --bg-elevated: #e7e2da;
+  --bg-overlay: #faf8f5;
+  --bg-selected: #e2dbcf;
+  --border-subtle: #ddd7cd;
+  --border-strong: #c8bfb2;
+  --text-primary: #1f1d1a;
+  --text-secondary: #5a554d;
+  --text-muted: #716a60;
+  --accent: #80603a;
+  --accent-strong: #684d2e;
+  --text-on-accent: #fbf8f3;
+  --search-match: #cfd8de;
+  --search-current: #80603a;
+  --accent-selection: #80603a55;
+  --status-idle: #716a60;
+  --status-connecting: #2a64b0;
+  --status-authenticating: #7448b5;
+  --status-connected: #25704a;
+  --status-warning: #aa4e00;
+  --status-error: #b22e32;
+  --ansi-0: #2b2824;
+  --ansi-1: #b0352b;
+  --ansi-2: #2a6e47;
+  --ansi-3: #835a00;
+  --ansi-4: #2c5ca3;
+  --ansi-5: #84419c;
+  --ansi-6: #1a6b72;
+  --ansi-7: #57524a;
+  --ansi-8: #6e685f;
+  --ansi-9: #c43c2c;
+  --ansi-10: #1d7845;
+  --ansi-11: #8f6300;
+  --ansi-12: #3366b8;
+  --ansi-13: #9446ad;
+  --ansi-14: #127783;
+  --ansi-15: #fbf9f6;
+  --shadow-raised: 0 1px 2px rgb(43 36 28 / 0.08), 0 10px 28px rgb(43 36 28 / 0.12);
+  --shadow-overlay: 0 1px 3px rgb(43 36 28 / 0.10), 0 24px 56px rgb(43 36 28 / 0.18);
+  --scrim: rgb(43 36 28 / 0.22);
+  --scrim-soft: rgb(43 36 28 / 0.12);
+  --terminal-min-contrast: 4.5;
+  color-scheme: light;
+}
+
+/* No theme set yet: follow the system (Marble when light), as `auto` does. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg-base: #f4f1ec;
+    --bg-surface: #eeeae4;
+    --bg-elevated: #e7e2da;
+    --bg-overlay: #faf8f5;
+    --bg-selected: #e2dbcf;
+    --border-subtle: #ddd7cd;
+    --border-strong: #c8bfb2;
+    --text-primary: #1f1d1a;
+    --text-secondary: #5a554d;
+    --text-muted: #716a60;
+    --accent: #80603a;
+    --accent-strong: #684d2e;
+    --text-on-accent: #fbf8f3;
+    --search-match: #cfd8de;
+    --search-current: #80603a;
+    --accent-selection: #80603a55;
+    --status-idle: #716a60;
+    --status-connecting: #2a64b0;
+    --status-authenticating: #7448b5;
+    --status-connected: #25704a;
+    --status-warning: #aa4e00;
+    --status-error: #b22e32;
+    --ansi-0: #2b2824;
+    --ansi-1: #b0352b;
+    --ansi-2: #2a6e47;
+    --ansi-3: #835a00;
+    --ansi-4: #2c5ca3;
+    --ansi-5: #84419c;
+    --ansi-6: #1a6b72;
+    --ansi-7: #57524a;
+    --ansi-8: #6e685f;
+    --ansi-9: #c43c2c;
+    --ansi-10: #1d7845;
+    --ansi-11: #8f6300;
+    --ansi-12: #3366b8;
+    --ansi-13: #9446ad;
+    --ansi-14: #127783;
+    --ansi-15: #fbf9f6;
+    --shadow-raised: 0 1px 2px rgb(43 36 28 / 0.08), 0 10px 28px rgb(43 36 28 / 0.12);
+    --shadow-overlay: 0 1px 3px rgb(43 36 28 / 0.10), 0 24px 56px rgb(43 36 28 / 0.18);
+    --scrim: rgb(43 36 28 / 0.22);
+    --scrim-soft: rgb(43 36 28 / 0.12);
+    --terminal-min-contrast: 4.5;
+    color-scheme: light;
+  }
 }

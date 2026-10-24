@@ -289,7 +289,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Hosts,
         ["t"],
         "theme",
-        "Changer de thème (enregistré dans `settings.toml`)",
+        "Thème suivant : Obsidian, Basalt, Travertine Night, Marble, puis Auto (enregistré dans `settings.toml`)",
         Action::CycleTheme
     ),
     bind!(

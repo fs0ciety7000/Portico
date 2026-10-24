@@ -595,6 +595,8 @@ test("tunnel -L: shown with its spec, carries traffic, stops", async () => {
 
 test("restart: theme kept, vault unlocked at startup, key login without prompt", async () => {
   await hostsView();
+  // The default is Auto; `t` goes through the themes in order: Obsidian, then Basalt.
+  await type("t");
   await type("t");
   await waitFor("theme saved", () => existsSync(join(configDir, "settings.toml")) && readFileSync(join(configDir, "settings.toml"), "utf8").includes("basalt"));
   await s.quit();

@@ -2,8 +2,9 @@
 // effective config and settings. Never used inside the desktop app.
 //
 // URL switches: `?keymap=custom` loads a keymap with two invalid entries
-// (notice), `?theme=<id>` starts with a saved theme (an unknown one shows
-// the fallback notice), `?recent=none` starts without recent hosts,
+// (notice), `?theme=<id>` starts with a saved theme (`auto` included; an
+// unknown one shows the fallback notice), `?dark=<id>` with the dark theme
+// of `auto`, `?recent=none` starts without recent hosts,
 // `?updates=ask` starts with the update question (`[updates] check` absent),
 // `?updates=off` with the check off; by default the check is on and the
 // simulated GitHub answer is a newer release, 0.3.1 (no request is made).
@@ -66,6 +67,7 @@ export function demoMeta(hooks: MetaHooks) {
         ];
   const logSessions: DemoLogSession[] = [];
   let theme: string | null = params.get("theme");
+  let darkTheme: string | null = params.get("dark");
   let copyOnSelect = params.get("copy") === "on";
   const updatesParam = params.get("updates");
   let updateCheck: boolean | null = updatesParam === "ask" ? null : updatesParam !== "off";
@@ -234,10 +236,14 @@ export function demoMeta(hooks: MetaHooks) {
         };
       },
       async getSettings(): Promise<Settings> {
-        return { theme, keymap, copyOnSelect, error: null };
+        return { theme, darkTheme, keymap, copyOnSelect, error: null };
       },
-      async saveTheme(id: string) {
+      async saveTheme(id: string, dark: string) {
         theme = id;
+        darkTheme = dark;
+      },
+      async setWindowTheme() {
+        // No window in the browser preview.
       },
       async saveCopyOnSelect(on: boolean) {
         copyOnSelect = on;

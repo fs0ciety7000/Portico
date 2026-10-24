@@ -223,6 +223,18 @@ avec cette clé (E2E bureau).
 
 **Sortie** : vérifiée (E2E bureau 22/22, captures TUI 80×24 et GUI 3 thèmes).
 
+### Phase 10 : thème clair ✅ *(décision du propriétaire, 2026-10-24 ; `CLAUDE.md` §3 amendé)*
+- **Marble** : surfaces marbre chaud (jamais blanc pur), texte graphite, un seul accent bronze, élévation inversée
+  (dialogues au plan le plus clair), statuts réaccordés pour le clair, palette ANSI claire ; contraste testé dans les
+  quatre thèmes (texte primaire AAA, secondaire et muted AA, statuts jamais confondus avec l'accent : Δteinte ≥ 15°
+  ou ΔL ≥ 10). Couleurs choisies par le serveur foncées juste assez pour 4,5:1 sur fond clair
+- **Auto** : Marble quand le système est clair, le thème sombre choisi sinon (`theme = "auto"`, `dark_theme`) ; GUI en
+  direct (`prefers-color-scheme`, sans flash au démarrage), TUI par requête OSC 11 au démarrage (seulement en Auto,
+  réponse tardive jamais lue comme des touches), repli `COLORFGBG` puis sombre. `t` : Obsidian → Basalt → Travertine
+  Night → Marble → Auto
+
+**Sortie** : vérifiée (E2E bureau 22/22, captures GUI démo + WebKitGTK, TUI 80×24).
+
 ### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
 - Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
 - **Modèle de sécurité des fichiers refait avec des ACL** (équivalents de `0600`/`0700`, refus des liens), durcissement du
@@ -245,7 +257,7 @@ avec cette clé (E2E bureau).
 | Forwarding | Forwards persistants avec redémarrage auto, forwarding d'agent (opt-in et averti) |
 | Vault enrichi | Plusieurs coffres, export et import chiffrés, déverrouillage biométrique (Touch ID via Keychain `protected`) |
 | Terminal | Broadcast d'input multi-hôtes (avec garde-fou), recherche dans le scrollback, liens cliquables |
-| Plateformes | Thème clair |
+| Plateformes | Thèmes clairs supplémentaires si demandés |
 | GUI native | Réévaluation de `gpui` si la GUI web atteint ses limites de performance |
 | Intégrations | Teleport ou certificats éphémères (CA SSH d'entreprise) |
 
@@ -266,6 +278,16 @@ avec cette clé (E2E bureau).
 | 7 Sync locale | ❌ abandonnée | | | |
 | 8 Windows | ⏳ | | | |
 | 9 Confort du terminal, mises à jour | ✅ | 736 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
+| 10 Thème clair Marble, Auto | ✅ | 760 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (4 thèmes, 80×24 / 880–1200 px) |
+
+## Revues de la phase 10 (2026-10-24)
+
+Aucun constat CRITIQUE ni ÉLEVÉ ; tous les constats ont été traités.
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` Marble, Auto | 1 MOYEN, 1 FAIBLE | Une réponse OSC 11 tardive (terminal lent, SSH) n'est plus lue comme des touches : lecture prolongée jusqu'à DA1 dès qu'un octet arrive (1 s max), puis filtre de 5 s sur les touches égarées ; requête seulement en Auto. Vérifié : lecture bornée, rien de journalisé, `set_window_theme` validé, capabilities et CSP inchangées |
+| `agent-design-review` Marble, Auto | 2 IMPORTANT, 7 MINEUR | Avertissement Marble éloigné de l'accent bronze (et règle testée dans les quatre thèmes) ; captures régénérées ; pastilles de thème (fond + cœur d'accent, Auto en deux moitiés) ; `t` affiche le thème dans la GUI comme dans la TUI ; texte muted Marble AA ; voile sous les modales TUI en clair ; ellipse sur `user@host` |
 
 ## Revues de la phase 9 (2026-10-23)
 

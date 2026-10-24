@@ -138,6 +138,8 @@ pub(crate) struct ThemeDto {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
+    /// `dark` or `light` (`auto` picks the light theme on a light system).
+    pub appearance: portico_theme::Appearance,
 }
 
 /// Terminal size from the view: cells, and pixels when known (0 otherwise).

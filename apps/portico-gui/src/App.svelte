@@ -18,7 +18,7 @@
   import { hosts } from "./lib/state/hosts.svelte";
   import { keymap } from "./lib/state/keymap.svelte";
   import { logs } from "./lib/state/logs.svelte";
-  import { settings } from "./lib/state/settings.svelte";
+  import { AUTO, settings } from "./lib/state/settings.svelte";
   import { importer } from "./lib/state/importer.svelte";
   import { emptyDraft, NEEDS_PASTE_MODE, scopeLabel, snippets, type SnippetTarget } from "./lib/state/snippets.svelte";
   import type { Snippet } from "./lib/api";
@@ -632,7 +632,7 @@
         ]
       : []),
     { id: "app.reload", title: "Reload ~/.ssh/config", shortcut: k("app.reload"), run: load },
-    { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: settings.theme?.name, run: () => settings.cycle() },
+    { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: `Now: ${settings.label}`, run: () => settings.cycle() },
     { id: "app.settings", title: "Settings…", hint: "theme, copy on select, updates", shortcut: k("app.settings"), run: () => (settings.open = true) },
     ...(updates.available
       ? [{ id: "app.update", title: `Update available: Portico ${updates.available.version}…`, hint: "release notes, update command", shortcut: k("app.update"), run: () => updates.show() }]
@@ -648,11 +648,14 @@
           },
         ]
       : []),
+    { id: "theme-auto", title: "Theme: Auto", hint: "Marble when the system is light, your dark theme otherwise", run: () => settings.select(AUTO) },
     ...settings.themes.map((t) => ({ id: `theme-${t.id}`, title: `Theme: ${t.name}`, hint: t.description, run: () => settings.select(t.id) })),
   ]);
 
   /** Runs a keymap action (ids of `shortcuts.ts`). */
   function runAction(id: string) {
+    // A run of `t` presses ends at any other shortcut (see settings.svelte.ts).
+    if (id !== "app.theme") settings.endCycle();
     const goto = /^tab\.goto-(\d)$/.exec(id);
     if (goto?.[1]) return workspace.go(Number(goto[1]) - 1);
     const arrow = /^pane\.focus-(left|right|up|down)$/.exec(id);
@@ -1062,7 +1065,7 @@
     {/if}
     <span class="theme-name">
       {#if !isTauri()}<span class="demo" title="Browser preview with a simulated engine">Demo</span>{/if}
-      {settings.theme?.name ?? ""}
+      {settings.label}
     </span>
     <span class="version" title="Portico version">v{__APP_VERSION__}</span>
   </footer>

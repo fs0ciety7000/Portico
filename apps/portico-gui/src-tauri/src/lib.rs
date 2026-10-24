@@ -156,6 +156,16 @@ fn run_app() {
             app.manage(Files::default());
             app.manage(Imports::default());
             app.manage(Arc::new(Playbacks::default()));
+            // Before the page paints: a light system gets the light theme's
+            // background (what `auto`, the default, shows), not a dark flash.
+            // The view then sets the exact theme (`set_window_theme`).
+            if let Some(window) = app.get_webview_window("main")
+                && window.theme().is_ok_and(|t| t == tauri::Theme::Light)
+            {
+                let _ = window.set_background_color(Some(settings::background(
+                    portico_theme::Theme::light_theme(),
+                )));
+            }
             Ok(())
         })
         // Dropped files become upload tokens; their paths stay in Rust.
@@ -235,6 +245,7 @@ fn run_app() {
             debug::effective_config,
             settings::get_settings,
             settings::save_theme,
+            settings::set_window_theme,
             settings::save_copy_on_select,
             links::open_url,
             updates::start_update_checks,

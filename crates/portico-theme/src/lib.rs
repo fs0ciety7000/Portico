@@ -9,6 +9,11 @@
 //! Identity: *architectural minimalism*. Deep mineral backgrounds, marble
 //! text, one restrained metallic accent, colour reserved for meaning
 //! (connection status). See `.claude/skills/ui-design-premium/SKILL.md`.
+//!
+//! Three dark themes and one light one (**Marble**). The `auto` setting
+//! ([`AUTO`]) follows the system: Marble when it is light, the user's dark
+//! theme otherwise ([`Theme::resolve`]). Every theme passes the same
+//! contrast and ΔE tests (see the tests at the bottom).
 
 // Colour literals are grouped by RGB byte (`0xRR_GG_BB`) on purpose.
 #![allow(clippy::mistyped_literal_suffixes)]
@@ -30,6 +35,46 @@ impl Rgb {
 
     pub fn to_hex(self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
+    }
+
+    /// WCAG relative luminance (0 = black, 1 = white).
+    pub fn luminance(self) -> f64 {
+        let ch = |v: u8| {
+            let s = f64::from(v) / 255.0;
+            if s <= 0.039_28 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(self.0) + 0.7152 * ch(self.1) + 0.0722 * ch(self.2)
+    }
+
+    /// WCAG contrast ratio with `other` (1 to 21).
+    pub fn contrast(self, other: Rgb) -> f64 {
+        let (la, lb) = (self.luminance(), other.luminance());
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// `self` as text on `bg`, moved towards black (light `bg`) or white
+    /// (dark `bg`) just enough to reach `min` contrast, in sixteenth steps.
+    /// Unchanged when it already does (the remote's colour is kept when
+    /// readable). Used by light themes for colours the remote picks.
+    #[must_use]
+    pub fn readable_on(self, bg: Rgb, min: f64) -> Rgb {
+        if self.contrast(bg) >= min {
+            return self;
+        }
+        let target: u8 = if bg.luminance() > 0.18 { 0 } else { u8::MAX };
+        let mix = |v: u8, step: u16| {
+            let (v, t) = (u16::from(v), u16::from(target));
+            u8::try_from((v * (16 - step) + t * step) / 16).unwrap_or(target)
+        };
+        (1..=16)
+            .map(|step| Rgb(mix(self.0, step), mix(self.1, step), mix(self.2, step)))
+            .find(|c| c.contrast(bg) >= min)
+            .unwrap_or(Rgb(target, target, target))
     }
 }
 
@@ -79,11 +124,31 @@ pub struct StatusPalette {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct AnsiPalette(pub [Rgb; 16]);
 
+/// Light or dark: decides the CSS `color-scheme`, the shadows, the scrim
+/// and which theme `auto` picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    /// The CSS `color-scheme` value.
+    pub const fn css(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Theme {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
+    pub appearance: Appearance,
     pub palette: Palette,
     pub status: StatusPalette,
     pub ansi: AnsiPalette,
@@ -111,11 +176,72 @@ pub const MOTION: [(&str, u16); 4] = [("instant", 0), ("fast", 120), ("base", 18
 /// only animations allowed to exceed `slow`.
 pub const MOTION_LOOP_MS: u16 = 1200;
 
-/// Elevation shadows (GUI), identical in every dark theme.
-pub const SHADOWS: [(&str, &str); 2] = [
+/// Elevation shadows (GUI) of the dark themes: deep and black.
+pub const SHADOWS_DARK: [(&str, &str); 2] = [
     ("raised", "0 12px 32px rgb(0 0 0 / 0.4)"),
     ("overlay", "0 24px 64px rgb(0 0 0 / 0.5)"),
 ];
+
+/// Elevation shadows of a light theme: a warm graphite, soft and wide (a
+/// black shadow on marble reads as dirt), with a tight contact shadow so an
+/// overlay keeps a crisp edge.
+pub const SHADOWS_LIGHT: [(&str, &str); 2] = [
+    (
+        "raised",
+        "0 1px 2px rgb(43 36 28 / 0.08), 0 10px 28px rgb(43 36 28 / 0.12)",
+    ),
+    (
+        "overlay",
+        "0 1px 3px rgb(43 36 28 / 0.10), 0 24px 56px rgb(43 36 28 / 0.18)",
+    ),
+];
+
+/// Modal scrims (GUI, `--scrim` behind dialogs, `--scrim-soft` behind the
+/// command palette). Dark: the base colour dims the app. Light: the base
+/// colour would only wash it out, so a light graphite veil separates the
+/// dialog instead.
+pub const SCRIMS_DARK: [(&str, &str); 2] = [
+    (
+        "scrim",
+        "color-mix(in srgb, var(--bg-base) 72%, transparent)",
+    ),
+    (
+        "scrim-soft",
+        "color-mix(in srgb, var(--bg-base) 55%, transparent)",
+    ),
+];
+pub const SCRIMS_LIGHT: [(&str, &str); 2] = [
+    ("scrim", "rgb(43 36 28 / 0.22)"),
+    ("scrim-soft", "rgb(43 36 28 / 0.12)"),
+];
+
+impl Appearance {
+    pub const fn shadows(self) -> [(&'static str, &'static str); 2] {
+        match self {
+            Self::Dark => SHADOWS_DARK,
+            Self::Light => SHADOWS_LIGHT,
+        }
+    }
+
+    /// Least contrast of terminal text on its background, enforced by the
+    /// UIs on the colours the remote picks (xterm.js `minimumContrastRatio`,
+    /// the TUI's renderer): none on a dark theme (its palette is the
+    /// reference), AA on a light one, where many prompts and tools use
+    /// pale 256-colour or true colours made for a dark background.
+    pub const fn terminal_min_contrast(self) -> f64 {
+        match self {
+            Self::Dark => 1.0,
+            Self::Light => 4.5,
+        }
+    }
+
+    pub const fn scrims(self) -> [(&'static str, &'static str); 2] {
+        match self {
+            Self::Dark => SCRIMS_DARK,
+            Self::Light => SCRIMS_LIGHT,
+        }
+    }
+}
 
 /// Standard easing (decelerate) and emphasized easing (spring-like overshoot-free).
 pub const EASING_STANDARD: &str = "cubic-bezier(0.2, 0, 0, 1)";
@@ -184,6 +310,7 @@ pub const OBSIDIAN: Theme = Theme {
     id: "obsidian",
     name: "Obsidian",
     description: "Near-black mineral surfaces, marble text, brushed-brass accent.",
+    appearance: Appearance::Dark,
     palette: Palette {
         bg_base: Rgb::hex(0x0b_0c_0e),
         bg_surface: Rgb::hex(0x11_13_16),
@@ -206,7 +333,7 @@ pub const OBSIDIAN: Theme = Theme {
         connecting: Rgb::hex(0x8a_aa_d6),
         authenticating: Rgb::hex(0xb3_9d_e0),
         connected: Rgb::hex(0x7f_c8_a0),
-        warning: Rgb::hex(0xf2_c1_4e),
+        warning: Rgb::hex(0xf4_cb_4e),
         error: Rgb::hex(0xe5_7c_70),
     },
     ansi: AnsiPalette([
@@ -234,6 +361,7 @@ pub const BASALT: Theme = Theme {
     id: "basalt",
     name: "Basalt",
     description: "Cool volcanic grey-blue, steel accent. Calm and technical.",
+    appearance: Appearance::Dark,
     palette: Palette {
         bg_base: Rgb::hex(0x0d_10_14),
         bg_surface: Rgb::hex(0x12_16_1c),
@@ -284,6 +412,7 @@ pub const TRAVERTINE: Theme = Theme {
     id: "travertine",
     name: "Travertine Night",
     description: "Warm dark stone, terracotta accent. Soft on the eyes at night.",
+    appearance: Appearance::Dark,
     palette: Palette {
         bg_base: Rgb::hex(0x12_10_0e),
         bg_surface: Rgb::hex(0x18_15_12),
@@ -329,8 +458,75 @@ pub const TRAVERTINE: Theme = Theme {
     ]),
 };
 
-/// All built-in themes; the first one is the default.
-pub const THEMES: [Theme; 3] = [OBSIDIAN, BASALT, TRAVERTINE];
+/// **Marble**: the light theme. Warm polished marble (never pure white),
+/// graphite text, a deep bronze accent; statuses and ANSI colours darkened
+/// for a light ground. Measured contrasts are in the `docs/STACK.md` decision log.
+///
+/// ANSI: the remote paints on `bg-base`, so every colour that carries text
+/// stays ≥ 4.5:1 on it, bright ones included (they gain chroma, not
+/// lightness). `white` (7) is a readable stone grey, as in most light
+/// terminal palettes. Exception, by design: `bright white` (15) stays light
+/// for white-on-colour segments (prompts, status lines); on the default
+/// background the UIs' minimum-contrast rule darkens it to a readable grey.
+pub const MARBLE: Theme = Theme {
+    id: "marble",
+    name: "Marble",
+    description: "Warm light marble, graphite text, deep bronze accent. For daylight.",
+    appearance: Appearance::Light,
+    palette: Palette {
+        bg_base: Rgb::hex(0xf4_f1_ec),
+        bg_surface: Rgb::hex(0xee_ea_e4),
+        bg_elevated: Rgb::hex(0xe7_e2_da),
+        bg_overlay: Rgb::hex(0xfa_f8_f5),
+        bg_selected: Rgb::hex(0xe2_db_cf),
+        border_subtle: Rgb::hex(0xdd_d7_cd),
+        border_strong: Rgb::hex(0xc8_bf_b2),
+        text_primary: Rgb::hex(0x1f_1d_1a),
+        text_secondary: Rgb::hex(0x5a_55_4d),
+        text_muted: Rgb::hex(0x71_6a_60),
+        accent: Rgb::hex(0x80_60_3a),
+        accent_strong: Rgb::hex(0x68_4d_2e),
+        text_on_accent: Rgb::hex(0xfb_f8_f3),
+        search_match: Rgb::hex(0xcf_d8_de),
+        search_current: Rgb::hex(0x80_60_3a),
+    },
+    status: StatusPalette {
+        idle: Rgb::hex(0x71_6a_60),
+        connecting: Rgb::hex(0x2a_64_b0),
+        authenticating: Rgb::hex(0x74_48_b5),
+        connected: Rgb::hex(0x25_70_4a),
+        warning: Rgb::hex(0xaa_4e_00),
+        error: Rgb::hex(0xb2_2e_32),
+    },
+    ansi: AnsiPalette([
+        Rgb::hex(0x2b_28_24),
+        Rgb::hex(0xb0_35_2b),
+        Rgb::hex(0x2a_6e_47),
+        Rgb::hex(0x83_5a_00),
+        Rgb::hex(0x2c_5c_a3),
+        Rgb::hex(0x84_41_9c),
+        Rgb::hex(0x1a_6b_72),
+        Rgb::hex(0x57_52_4a),
+        Rgb::hex(0x6e_68_5f),
+        Rgb::hex(0xc4_3c_2c),
+        Rgb::hex(0x1d_78_45),
+        Rgb::hex(0x8f_63_00),
+        Rgb::hex(0x33_66_b8),
+        Rgb::hex(0x94_46_ad),
+        Rgb::hex(0x12_77_83),
+        Rgb::hex(0xfb_f9_f6),
+    ]),
+};
+
+/// ANSI indices of a light theme exempt from the "readable on the
+/// background" rule: `bright white` (see [`MARBLE`]).
+pub const ANSI_LIGHT_EXEMPT: [usize; 1] = [15];
+
+/// All built-in themes; the first one is the default dark theme.
+pub const THEMES: [Theme; 4] = [OBSIDIAN, BASALT, TRAVERTINE, MARBLE];
+
+/// The theme setting that follows the system appearance.
+pub const AUTO: &str = "auto";
 
 impl Theme {
     pub fn by_id(id: &str) -> Option<&'static Theme> {
@@ -339,6 +535,44 @@ impl Theme {
 
     pub fn default_theme() -> &'static Theme {
         &THEMES[0]
+    }
+
+    pub const fn is_light(&self) -> bool {
+        matches!(self.appearance, Appearance::Light)
+    }
+
+    /// The light theme `auto` uses.
+    pub fn light_theme() -> &'static Theme {
+        THEMES
+            .iter()
+            .find(|t| t.is_light())
+            .unwrap_or_else(Self::default_theme)
+    }
+
+    /// The dark theme `auto` uses: `dark_theme` when it names a dark
+    /// theme, the default otherwise.
+    pub fn auto_dark(dark_theme: Option<&str>) -> &'static Theme {
+        dark_theme
+            .and_then(Self::by_id)
+            .filter(|t| !t.is_light())
+            .unwrap_or_else(Self::default_theme)
+    }
+
+    /// The theme to paint for a setting (`theme`: an id, [`AUTO`] or
+    /// absent = auto), the remembered dark theme and the system appearance.
+    /// `None` for an unknown id (the UIs warn and fall back to `auto`).
+    pub fn resolve(
+        theme: Option<&str>,
+        dark_theme: Option<&str>,
+        system: Appearance,
+    ) -> Option<&'static Theme> {
+        match theme {
+            None | Some(AUTO) => Some(match system {
+                Appearance::Light => Self::light_theme(),
+                Appearance::Dark => Self::auto_dark(dark_theme),
+            }),
+            Some(id) => Self::by_id(id),
+        }
     }
 }
 
@@ -365,9 +599,6 @@ pub fn export_css() -> String {
         let _ = writeln!(css, "  --size-{k}: {v};");
     }
     let _ = writeln!(css, "  --tracking-caps: {TRACKING_CAPS};");
-    for (k, v) in SHADOWS {
-        let _ = writeln!(css, "  --shadow-{k}: {v};");
-    }
     let _ = writeln!(css, "  --ease-standard: {EASING_STANDARD};");
     let _ = writeln!(css, "  --ease-emphasized: {EASING_EMPHASIZED};");
     let _ = writeln!(css, "  --font-ui: {FONT_UI};");
@@ -386,72 +617,103 @@ pub fn export_css() -> String {
             "\n/* {} — {} */\n{selector} {{",
             theme.name, theme.description
         );
-        let p = &theme.palette;
-        for (name, c) in [
-            ("bg-base", p.bg_base),
-            ("bg-surface", p.bg_surface),
-            ("bg-elevated", p.bg_elevated),
-            ("bg-overlay", p.bg_overlay),
-            ("bg-selected", p.bg_selected),
-            ("border-subtle", p.border_subtle),
-            ("border-strong", p.border_strong),
-            ("text-primary", p.text_primary),
-            ("text-secondary", p.text_secondary),
-            ("text-muted", p.text_muted),
-            ("accent", p.accent),
-            ("accent-strong", p.accent_strong),
-            ("text-on-accent", p.text_on_accent),
-            ("search-match", p.search_match),
-            ("search-current", p.search_current),
-        ] {
-            let _ = writeln!(css, "  --{name}: {};", c.to_hex());
-        }
-        let _ = writeln!(
-            css,
-            "  --accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
-            p.accent.to_hex()
-        );
-        let s = &theme.status;
-        for (name, c) in [
-            ("idle", s.idle),
-            ("connecting", s.connecting),
-            ("authenticating", s.authenticating),
-            ("connected", s.connected),
-            ("warning", s.warning),
-            ("error", s.error),
-        ] {
-            let _ = writeln!(css, "  --status-{name}: {};", c.to_hex());
-        }
-        for (i, c) in theme.ansi.0.iter().enumerate() {
-            let _ = writeln!(css, "  --ansi-{i}: {};", c.to_hex());
-        }
-        let _ = writeln!(css, "  color-scheme: dark;");
+        write_theme_vars(&mut css, theme, "  ");
         css.push_str("}\n");
     }
+    // No `data-theme` yet (first start, before the view's script runs): the
+    // page follows the system, as `auto` (the default) will once it runs.
+    let light = Theme::light_theme();
+    let _ = writeln!(
+        css,
+        "\n/* No theme set yet: follow the system ({} when light), as `auto` does. */\n@media (prefers-color-scheme: light) {{\n  :root:not([data-theme]) {{",
+        light.name
+    );
+    write_theme_vars(&mut css, light, "    ");
+    css.push_str("  }\n}\n");
     css
+}
+
+/// The colour tokens of one theme (palette, statuses, ANSI, shadows,
+/// scrims, `color-scheme`), one declaration per line.
+fn write_theme_vars(css: &mut String, theme: &Theme, indent: &str) {
+    let p = &theme.palette;
+    for (name, c) in [
+        ("bg-base", p.bg_base),
+        ("bg-surface", p.bg_surface),
+        ("bg-elevated", p.bg_elevated),
+        ("bg-overlay", p.bg_overlay),
+        ("bg-selected", p.bg_selected),
+        ("border-subtle", p.border_subtle),
+        ("border-strong", p.border_strong),
+        ("text-primary", p.text_primary),
+        ("text-secondary", p.text_secondary),
+        ("text-muted", p.text_muted),
+        ("accent", p.accent),
+        ("accent-strong", p.accent_strong),
+        ("text-on-accent", p.text_on_accent),
+        ("search-match", p.search_match),
+        ("search-current", p.search_current),
+    ] {
+        let _ = writeln!(css, "{indent}--{name}: {};", c.to_hex());
+    }
+    let _ = writeln!(
+        css,
+        "{indent}--accent-selection: {}{ACCENT_SELECTION_ALPHA:02x};",
+        p.accent.to_hex()
+    );
+    let s = &theme.status;
+    for (name, c) in [
+        ("idle", s.idle),
+        ("connecting", s.connecting),
+        ("authenticating", s.authenticating),
+        ("connected", s.connected),
+        ("warning", s.warning),
+        ("error", s.error),
+    ] {
+        let _ = writeln!(css, "{indent}--status-{name}: {};", c.to_hex());
+    }
+    for (i, c) in theme.ansi.0.iter().enumerate() {
+        let _ = writeln!(css, "{indent}--ansi-{i}: {};", c.to_hex());
+    }
+    for (k, v) in theme.appearance.shadows() {
+        let _ = writeln!(css, "{indent}--shadow-{k}: {v};");
+    }
+    for (k, v) in theme.appearance.scrims() {
+        let _ = writeln!(css, "{indent}--{k}: {v};");
+    }
+    let _ = writeln!(
+        css,
+        "{indent}--terminal-min-contrast: {};",
+        theme.appearance.terminal_min_contrast()
+    );
+    let _ = writeln!(css, "{indent}color-scheme: {};", theme.appearance.css());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// WCAG relative luminance.
-    fn luminance(c: Rgb) -> f64 {
-        let ch = |v: u8| {
-            let s = f64::from(v) / 255.0;
-            if s <= 0.039_28 {
-                s / 12.92
-            } else {
-                ((s + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+    fn contrast(a: Rgb, b: Rgb) -> f64 {
+        a.contrast(b)
     }
 
-    fn contrast(a: Rgb, b: Rgb) -> f64 {
-        let (la, lb) = (luminance(a), luminance(b));
-        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
+    #[test]
+    fn readable_on_moves_only_what_is_unreadable() {
+        let marble = MARBLE.palette.bg_base;
+        // A pale 256-colour green (#87af87) made for dark backgrounds.
+        let pale = Rgb::hex(0x87_af_87);
+        assert!(pale.contrast(marble) < 4.5);
+        let fixed = pale.readable_on(marble, 4.5);
+        assert!(fixed.contrast(marble) >= 4.5, "{}", fixed.to_hex());
+        assert!(fixed.1 > fixed.0, "keeps its hue: {}", fixed.to_hex());
+        // Readable colours stay exactly as the remote sent them.
+        let ink = MARBLE.ansi.0[4];
+        assert_eq!(ink.readable_on(marble, 4.5), ink);
+        // On a dark background it lightens.
+        let dark = OBSIDIAN.palette.bg_base;
+        let navy = Rgb::hex(0x10_20_60);
+        assert!(navy.readable_on(dark, 4.5).contrast(dark) >= 4.5);
+        assert_eq!(Rgb::hex(0xff_ff_ff).luminance().round(), 1.0);
     }
 
     #[test]
@@ -538,6 +800,16 @@ mod tests {
         (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
     }
 
+    /// Distance in degrees between the CIE `LCh` hues of two colours.
+    fn hue_distance(a: Rgb, b: Rgb) -> f64 {
+        let hue = |c| {
+            let (_, a, b) = lab(c);
+            b.atan2(a).to_degrees().rem_euclid(360.0)
+        };
+        let d = (hue(a) - hue(b)).abs();
+        d.min(360.0 - d)
+    }
+
     fn delta_e(a: Rgb, b: Rgb) -> f64 {
         let (l1, a1, b1) = lab(a);
         let (l2, a2, b2) = lab(b);
@@ -580,6 +852,17 @@ mod tests {
                     "{}: accent too close to {name} (ΔE {d:.1})",
                     t.id
                 );
+                // ΔE alone lets a status share the accent's hue and
+                // lightness (a more saturated accent): one of them must
+                // differ clearly.
+                let (hue, lightness) = (hue_distance(t.palette.accent, c), {
+                    (lab(t.palette.accent).0 - lab(c).0).abs()
+                });
+                assert!(
+                    hue >= 15.0 || lightness >= 10.0,
+                    "{}: {name} reads as the accent (Δhue {hue:.1}°, ΔL {lightness:.1})",
+                    t.id
+                );
             }
         }
     }
@@ -607,6 +890,151 @@ mod tests {
             let d = delta_e(p.search_match, p.search_current);
             assert!(d >= 20.0, "{}: match and current match (ΔE {d:.1})", t.id);
         }
+    }
+
+    /// A light theme's terminal: every ANSI colour that carries text is
+    /// AA on the terminal background, and so is the default foreground.
+    /// Dark themes keep their own rule (0 and 8 are surfaces and dim text).
+    #[test]
+    fn light_ansi_colours_are_readable_on_the_terminal_background() {
+        let light: Vec<_> = THEMES.iter().filter(|t| t.is_light()).collect();
+        assert!(!light.is_empty());
+        for t in light {
+            let bg = t.palette.bg_base;
+            for (i, c) in t.ansi.0.iter().enumerate() {
+                if ANSI_LIGHT_EXEMPT.contains(&i) {
+                    continue;
+                }
+                let r = contrast(*c, bg);
+                assert!(r >= 4.5, "{}: ansi {i} {} at {r:.2}:1", t.id, c.to_hex());
+            }
+            // Bright white stays light: white-on-colour segments still work.
+            for i in ANSI_LIGHT_EXEMPT {
+                let c = t.ansi.0.get(i).copied().unwrap_or(bg);
+                assert!(contrast(c, t.ansi.0[0]) >= 7.0, "{}: ansi {i}", t.id);
+            }
+        }
+    }
+
+    /// Dark themes: the 14 text colours (all but black and bright black,
+    /// which are surfaces and dim text there) read on the background.
+    #[test]
+    fn dark_ansi_colours_are_readable_on_the_terminal_background() {
+        for t in THEMES.iter().filter(|t| !t.is_light()) {
+            for (i, c) in t.ansi.0.iter().enumerate() {
+                if i == 0 || i == 8 {
+                    continue;
+                }
+                let r = contrast(*c, t.palette.bg_base);
+                assert!(r >= 4.5, "{}: ansi {i} at {r:.2}:1", t.id);
+            }
+        }
+    }
+
+    /// A light theme's elevation reads the other way round: dialogs are the
+    /// lightest plane, hover, inputs and selection sink into the stone.
+    #[test]
+    fn light_surfaces_step_in_lightness() {
+        for t in THEMES.iter().filter(|t| t.is_light()) {
+            let p = t.palette;
+            let l = |c| lab(c).0;
+            // Overlay above base, then surface, elevated, selected below.
+            assert!(l(p.bg_overlay) > l(p.bg_base), "{}", t.id);
+            assert!(l(p.bg_base) > l(p.bg_surface), "{}", t.id);
+            assert!(l(p.bg_surface) > l(p.bg_elevated), "{}", t.id);
+            assert!(l(p.bg_elevated) > l(p.bg_selected), "{}", t.id);
+            // Never pure white: marble, not paper.
+            assert_ne!(p.bg_overlay, Rgb::hex(0xff_ff_ff));
+            assert!(
+                contrast(p.accent, p.bg_base) >= 4.5,
+                "{} accent as text",
+                t.id
+            );
+            assert!(contrast(p.text_muted, p.bg_selected) >= 3.0, "{}", t.id);
+            // Muted stays AA on the page and a step apart from secondary.
+            assert!(contrast(p.text_muted, p.bg_base) >= 4.5, "{}", t.id);
+            let d = delta_e(p.text_muted, p.text_secondary);
+            assert!(d >= 8.0, "{}: muted vs secondary ΔE {d:.1}", t.id);
+        }
+    }
+
+    #[test]
+    fn auto_follows_the_system() {
+        use Appearance::{Dark, Light};
+        let id = |t: Option<&Theme>| t.map(|t| t.id);
+        assert_eq!(THEMES.iter().filter(|t| t.is_light()).count(), 1);
+        assert!(!Theme::default_theme().is_light());
+        assert_eq!(id(Theme::resolve(None, None, Light)), Some("marble"));
+        assert_eq!(id(Theme::resolve(None, None, Dark)), Some("obsidian"));
+        assert_eq!(
+            id(Theme::resolve(Some(AUTO), Some("basalt"), Dark)),
+            Some("basalt")
+        );
+        assert_eq!(
+            id(Theme::resolve(Some(AUTO), Some("basalt"), Light)),
+            Some("marble")
+        );
+        // A light or unknown "dark theme" falls back to the default.
+        assert_eq!(
+            id(Theme::resolve(Some(AUTO), Some("marble"), Dark)),
+            Some("obsidian")
+        );
+        assert_eq!(
+            id(Theme::resolve(Some(AUTO), Some("nope"), Dark)),
+            Some("obsidian")
+        );
+        // An explicit theme ignores the system.
+        assert_eq!(
+            id(Theme::resolve(Some("travertine"), None, Light)),
+            Some("travertine")
+        );
+        assert_eq!(
+            id(Theme::resolve(Some("marble"), None, Dark)),
+            Some("marble")
+        );
+        assert_eq!(id(Theme::resolve(Some("solarized"), None, Dark)), None);
+        assert!(Theme::by_id(AUTO).is_none(), "auto is not a theme id");
+    }
+
+    #[test]
+    fn each_theme_exports_its_appearance() {
+        let css = export_css();
+        for theme in THEMES {
+            let block = css
+                .split(&format!("[data-theme=\"{}\"]", theme.id))
+                .nth(1)
+                .and_then(|b| b.split('}').next())
+                .unwrap_or_default();
+            let scheme = format!("color-scheme: {};", theme.appearance.css());
+            assert!(block.contains(&scheme), "{}: {scheme}", theme.id);
+            for (k, v) in theme.appearance.shadows() {
+                assert!(
+                    block.contains(&format!("--shadow-{k}: {v};")),
+                    "{}",
+                    theme.id
+                );
+            }
+            assert!(block.contains("--scrim:"), "{}", theme.id);
+            assert!(block.contains("--scrim-soft:"), "{}", theme.id);
+            let min = format!(
+                "--terminal-min-contrast: {};",
+                theme.appearance.terminal_min_contrast()
+            );
+            assert!(block.contains(&min), "{}: {min}", theme.id);
+        }
+    }
+
+    #[test]
+    fn without_a_theme_set_the_page_follows_the_system() {
+        let css = export_css();
+        let block = css
+            .split(":root:not([data-theme])")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(css.contains("@media (prefers-color-scheme: light) {"));
+        let bg = format!("--bg-base: {};", MARBLE.palette.bg_base.to_hex());
+        assert!(block.contains(&bg), "{block}");
+        assert!(block.contains("color-scheme: light;"));
     }
 
     #[test]

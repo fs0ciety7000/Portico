@@ -731,7 +731,7 @@ async fn no_request_while_the_setting_is_absent_or_false() {
 
     // Unrelated settings changes do not turn it on.
     engine
-        .set_theme(Some("basalt".into()))
+        .set_theme(Some("basalt".into()), None)
         .await
         .expect("theme");
     engine.start_update_checks().await.expect("status");

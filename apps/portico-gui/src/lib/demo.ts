@@ -62,9 +62,10 @@ export const demoHosts: Host[] = [
 ];
 
 export const demoThemes: ThemeInfo[] = [
-  { id: "obsidian", name: "Obsidian", description: "Near-black mineral surfaces, marble text, brushed-brass accent." },
-  { id: "basalt", name: "Basalt", description: "Cool volcanic grey-blue, steel accent." },
-  { id: "travertine", name: "Travertine Night", description: "Warm dark stone, terracotta accent." },
+  { id: "obsidian", name: "Obsidian", description: "Near-black mineral surfaces, marble text, brushed-brass accent.", appearance: "dark" },
+  { id: "basalt", name: "Basalt", description: "Cool volcanic grey-blue, steel accent.", appearance: "dark" },
+  { id: "travertine", name: "Travertine Night", description: "Warm dark stone, terracotta accent.", appearance: "dark" },
+  { id: "marble", name: "Marble", description: "Warm light marble, graphite text, deep bronze accent. For daylight.", appearance: "light" },
 ];
 
 type Listener = (e: EngineEvent) => void;

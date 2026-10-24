@@ -56,6 +56,7 @@ pub(crate) fn list_themes() -> Vec<ThemeDto> {
             id: t.id,
             name: t.name,
             description: t.description,
+            appearance: t.appearance,
         })
         .collect()
 }

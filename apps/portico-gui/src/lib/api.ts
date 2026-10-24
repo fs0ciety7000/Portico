@@ -82,6 +82,8 @@ export interface ThemeInfo {
   id: string;
   name: string;
   description: string;
+  /** Mirrors `portico_theme::Appearance`: `auto` picks the light one on a light system. */
+  appearance: "dark" | "light";
 }
 
 /** Mirrors `portico_core::ErrorSummary`. */
@@ -301,7 +303,10 @@ export interface EffectiveConfig {
 
 /** Mirrors `settings::SettingsDto` (GUI part of settings.toml). */
 export interface Settings {
+  /** A theme id or `auto`; `null` = `auto`. */
   theme: string | null;
+  /** The dark theme `auto` uses (`null` = the default). */
+  darkTheme: string | null;
   keymap: Record<string, string>;
   /** `[gui] copy_on_select` (phase 9). */
   copyOnSelect: boolean;
@@ -728,7 +733,10 @@ export const api = {
   sessionLogsText: (session: number) => invoke<string>("session_logs_text", { session }),
   effectiveConfig: (alias: string) => invoke<EffectiveConfig>("effective_config", { alias }),
   getSettings: () => invoke<Settings>("get_settings"),
-  saveTheme: (theme: string) => invoke<void>("save_theme", { theme }),
+  /** `theme`: an id or `auto`; `darkTheme`: the dark theme `auto` uses. */
+  saveTheme: (theme: string, darkTheme: string) => invoke<void>("save_theme", { theme, darkTheme }),
+  /** The window follows the painted theme: title bar appearance and background. */
+  setWindowTheme: (theme: string) => invoke<void>("set_window_theme", { theme }),
   saveCopyOnSelect: (on: boolean) => invoke<void>("save_copy_on_select", { on }),
   /** Re-validated in Rust (http/https only, no credentials), then the system browser. */
   openUrl: (url: string) => invoke<void>("open_url", { url }),

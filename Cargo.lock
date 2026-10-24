@@ -1008,9 +1008,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "cc907c45bb7e9ef8fc3778defd0f3cd8c81288f1b4e748eba064948f20c47122"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "portico-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "portico-gui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "directories",
@@ -4247,14 +4247,14 @@ dependencies = [
 
 [[package]]
 name = "portico-theme"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "portico-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "bytes",
@@ -4266,6 +4266,7 @@ dependencies = [
  "ratatui",
  "russh",
  "russh-sftp",
+ "rustix",
  "secrecy",
  "serde_json",
  "tempfile",
@@ -6157,7 +6158,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

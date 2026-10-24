@@ -141,7 +141,7 @@ export const ACTIONS: ActionDef[] = [
   { id: "hosts.collapse", title: "Collapse group", doc: "Replier le groupe de l'hôte sélectionné", scope: "hosts", defaults: both("Left") },
   { id: "hosts.expand", title: "Expand group", doc: "Déplier le groupe", scope: "hosts", defaults: both("Right") },
   { id: "hosts.clear-recent", title: "Clear recent", doc: "Vider « Recent » (confirmation)", scope: "hosts", defaults: both("Shift+X") },
-  { id: "app.theme", title: "Next theme", doc: "Thème suivant (mémorisé dans `settings.toml`)", scope: "hosts", defaults: both("T") },
+  { id: "app.theme", title: "Next theme", doc: "Thème suivant : Obsidian, Basalt, Travertine Night, Marble, puis Auto (mémorisé dans `settings.toml`)", scope: "hosts", defaults: both("T") },
   ...panes,
   // Recording (ADR "Enregistrement de sessions, asciicast v2"). Linux: Ctrl-Shift-R
   // in a terminal; `app.reload` (Mod+R) only listens in the host list.

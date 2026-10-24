@@ -8,7 +8,7 @@ use std::io::Write;
 use crossterm::event::KeyEvent;
 use portico_core::settings::Settings;
 use portico_core::{EngineEvent, ErrorSummary};
-use portico_theme::{THEMES, Theme};
+use portico_theme::{AUTO, Theme};
 
 use crate::action::Action;
 use crate::app::{App, Focus, Overlay};
@@ -122,6 +122,7 @@ impl App {
                 }
             }
             Action::SettingsLoaded(result) => self.apply_settings(result),
+            Action::SystemAppearance(appearance) => self.theme.system = appearance,
             Action::ThemeSaved(Err(e)) => self.notify_error(ErrorSummary {
                 message: format!("theme not saved: {}", e.message),
                 ..e
@@ -500,16 +501,26 @@ impl App {
             }
         };
         let mut problems = Vec::new();
-        if let Some(id) = &settings.theme {
-            if let Some(i) = THEMES.iter().position(|t| t.id == id) {
-                self.theme_index = i;
-            } else {
-                self.theme_index = 0;
+        // `auto` when absent; an unknown id warns and falls back to it.
+        self.theme.fixed = None;
+        if let Some(id) = settings.theme.as_deref().filter(|id| *id != AUTO) {
+            self.theme.fixed = Theme::by_id(id);
+            if self.theme.fixed.is_none() {
                 problems.push(format!(
-                    "Unknown theme “{}”: using {}",
+                    "Unknown theme “{}”: using Auto",
+                    crate::ui::fmt::truncate(id, 24),
+                ));
+            }
+        }
+        self.theme.dark = Theme::default_theme();
+        if let Some(id) = &settings.dark_theme {
+            match Theme::by_id(id).filter(|t| !t.is_light()) {
+                Some(dark) => self.theme.dark = dark,
+                None => problems.push(format!(
+                    "dark_theme “{}” is not a dark theme: using {}",
                     crate::ui::fmt::truncate(id, 24),
                     Theme::default_theme().name
-                ));
+                )),
             }
         }
         let (keymap, ignored) = Keymap::with_overrides(&settings.keymap.tui);
@@ -523,13 +534,13 @@ impl App {
     /// `t`: next theme, saved to `settings.toml` (only the theme changes:
     /// another UI's settings are kept).
     pub(crate) fn cycle_theme(&mut self) {
-        self.theme_index = (self.theme_index + 1) % THEMES.len();
-        let theme = self.styles().theme;
-        self.notify(format!("Theme · {}", theme.name));
-        let (engine, id) = (self.engine.clone(), theme.id);
+        self.theme = self.theme.next();
+        self.notify(format!("Theme · {}", self.theme.label()));
+        let (theme, dark) = self.theme.to_settings();
+        let engine = self.engine.clone();
         spawn(self, async move {
             let result = engine
-                .set_theme(Some(id.to_owned()))
+                .set_theme(Some(theme.to_owned()), Some(dark.to_owned()))
                 .await
                 .map(|_| ())
                 .map_err(|e| e.summary());
@@ -597,6 +608,57 @@ mod render_tests {
             count: 3,
         }])));
         app
+    }
+
+    #[test]
+    fn long_host_target_ends_with_an_ellipsis() {
+        let mut app = test_app();
+        let mut long = test_host("api", None);
+        long.resolved.hostname = "api-gateway.internal.eu-west-3.example.com".into();
+        long.meta.tags = vec!["prod".into()];
+        let mut short = test_host("db", None);
+        short.meta.tags = vec!["sql".into()];
+        app.update(Action::HostsLoaded(Ok(HostInventory {
+            hosts: vec![long, short],
+            warnings: Vec::new(),
+        })));
+        let lines = screen(&mut app, 80, 24);
+        let row = lines
+            .iter()
+            .find(|l| l.contains("api-gateway"))
+            .unwrap_or_else(|| panic!("{}", lines.join("\n")));
+        assert!(row.contains('…'), "cut with an ellipsis: {row}");
+        assert!(!row.contains("#prod"), "no tag after a cut target: {row}");
+        // The ellipsis is the last character before the panel's border.
+        let after = row.split_once('…').unwrap().1;
+        assert!(after.trim_start().starts_with('│'), "{row}");
+        let row = lines.iter().find(|l| l.contains("● db")).unwrap();
+        assert!(row.contains("db  db #sql") && !row.contains('…'), "{row}");
+    }
+
+    #[test]
+    fn light_theme_dims_the_screen_under_a_modal() {
+        use crate::theme::c;
+        let bg_at = |app: &mut App, x: u16, y: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+            terminal.backend().buffer().cell((x, y)).unwrap().bg
+        };
+        for (id, dims) in [("marble", true), ("obsidian", false)] {
+            let mut app = hosts_app();
+            app.update(Action::SettingsLoaded(Ok(Settings {
+                theme: Some(id.into()),
+                ..Settings::default()
+            })));
+            let p = app.styles().theme.palette;
+            // A cell of the details panel, far from the centred modal.
+            let before = bg_at(&mut app, 78, 20);
+            assert!([c(p.bg_base), c(p.bg_surface)].contains(&before), "{id}");
+            app.update(Action::AskClearRecent);
+            assert!(!app.dialogs.is_empty());
+            let under = if dims { c(p.bg_elevated) } else { before };
+            assert_eq!(bg_at(&mut app, 78, 20), under, "{id}");
+        }
     }
 
     #[test]
@@ -1206,6 +1268,157 @@ mod render_tests {
         assert!(app.debug_panel.is_some());
         let lines = screen(&mut app, 80, 24);
         assert!(!lines.join("\n").contains("Keyboard shortcuts"));
+    }
+
+    /// A detection that gave up mid-reply (the terminal answers late).
+    fn incomplete_light() -> crate::appearance::Detection {
+        crate::appearance::Detection {
+            appearance: portico_theme::Appearance::Dark,
+            source: crate::appearance::Source::Fallback,
+            elapsed: std::time::Duration::from_millis(100),
+            complete: false,
+            inside_osc: false,
+        }
+    }
+
+    /// The keys `crossterm` makes of an OSC 11 reply: `ESC ]` is Alt+],
+    /// the body plain characters, ST (`ESC \`) Alt+\ and BEL Ctrl+G.
+    fn osc11_reply_as_keys(body: &str, bel: bool) -> Vec<crossterm::event::Event> {
+        use crossterm::event::Event;
+        let mut keys = vec![Event::Key(KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        ))];
+        keys.extend(body.chars().map(|c| Event::Key(key(KeyCode::Char(c)))));
+        keys.push(Event::Key(if bel {
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)
+        } else {
+            KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT)
+        }));
+        keys
+    }
+
+    #[tokio::test]
+    async fn late_osc11_reply_is_not_typed_into_hosts() {
+        let mut app = hosts_app();
+        // Without the filter, such a reply is a burst of shortcuts.
+        let typed: Vec<Action> = osc11_reply_as_keys("11;rgba:f4f4/f1f1/ecec/ffff", false)
+            .into_iter()
+            .filter_map(|e| app.map_event(e))
+            .collect();
+        assert!(
+            typed.iter().any(|a| matches!(a, Action::OpenFiles)),
+            "{typed:?}"
+        );
+        let mut app = hosts_app();
+        app.detect_appearance(incomplete_light).await;
+        assert!(app.stray_reply.armed());
+        for bel in [false, true] {
+            if bel {
+                app.detect_appearance(incomplete_light).await;
+            }
+            for event in osc11_reply_as_keys("11;rgba:f4f4/f1f1/ecec/ffff", bel) {
+                let action = app.map_event(event);
+                assert!(
+                    !matches!(
+                        action,
+                        Some(
+                            Action::OpenFiles | Action::EditHost | Action::AddHost | Action::Reload
+                        )
+                    ),
+                    "{action:?}"
+                );
+                if let Some(action) = action {
+                    app.update(action);
+                }
+            }
+            assert!(app.overlay.is_none());
+            assert!(app.dialogs.is_empty());
+            assert!(app.files.is_none());
+            assert_eq!(app.focus, Focus::Hosts);
+            assert!(!app.stray_reply.armed(), "disarmed at the end of the reply");
+        }
+        // The user's keys are theirs again.
+        assert!(matches!(
+            app.map_event(crossterm::event::Event::Key(key(KeyCode::Char('j')))),
+            Some(Action::SelectNext)
+        ));
+    }
+
+    static QUERIED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counted_light() -> crate::appearance::Detection {
+        QUERIED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::appearance::Detection {
+            appearance: portico_theme::Appearance::Light,
+            source: crate::appearance::Source::Osc11,
+            elapsed: std::time::Duration::ZERO,
+            complete: true,
+            inside_osc: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_theme_skips_background_query() {
+        use std::sync::atomic::Ordering;
+        let mut app = test_app();
+        app.update(Action::SettingsLoaded(Ok(Settings {
+            theme: Some("basalt".into()),
+            ..Settings::default()
+        })));
+        let before = QUERIED.load(Ordering::SeqCst);
+        app.detect_appearance(counted_light).await;
+        assert_eq!(QUERIED.load(Ordering::SeqCst), before, "not asked");
+        assert_eq!(app.styles().theme.id, "basalt");
+        assert!(!app.stray_reply.armed());
+        // Cycling to Auto later: `COLORFGBG`, then dark, never the query.
+        assert_eq!(
+            app.theme.system,
+            crate::appearance::without_query().appearance
+        );
+        // Auto (absent key) asks.
+        let mut app = test_app();
+        app.update(Action::SettingsLoaded(Ok(Settings::default())));
+        app.detect_appearance(counted_light).await;
+        assert!(QUERIED.load(Ordering::SeqCst) > before);
+        assert_eq!(app.styles().theme.id, "marble");
+    }
+
+    #[test]
+    fn auto_theme_from_settings_and_the_detected_background() {
+        let mut app = test_app();
+        // Absent theme: auto, dark on an undetected terminal.
+        app.update(Action::SettingsLoaded(Ok(Settings::default())));
+        assert!(app.theme.is_auto());
+        assert_eq!(app.styles().theme.id, "obsidian");
+        let settings = Settings {
+            theme: Some("auto".into()),
+            dark_theme: Some("basalt".into()),
+            ..Settings::default()
+        };
+        app.update(Action::SettingsLoaded(Ok(settings)));
+        assert_eq!(app.styles().theme.id, "basalt");
+        assert!(app.toast.is_none());
+        app.update(Action::SystemAppearance(portico_theme::Appearance::Light));
+        assert_eq!(app.styles().theme.id, "marble");
+        let lines = screen(&mut app, 80, 24);
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.trim_end().ends_with("Auto · Marble")),
+            "{lines:?}"
+        );
+        // A light theme as the dark one is refused, with a notice.
+        let settings = Settings {
+            theme: Some("auto".into()),
+            dark_theme: Some("marble".into()),
+            ..Settings::default()
+        };
+        app.update(Action::SystemAppearance(portico_theme::Appearance::Dark));
+        app.update(Action::SettingsLoaded(Ok(settings)));
+        assert_eq!(app.styles().theme.id, "obsidian");
+        let hint = app.toast.clone().and_then(|t| t.hint).unwrap_or_default();
+        assert!(hint.contains("is not a dark theme"), "{hint}");
     }
 
     #[test]
