@@ -4,9 +4,11 @@ name: Release
 # - push of a tag `v<version>` (must match the workspace version): build + sign + draft release
 # - workflow_dispatch: build only (dry run, unsigned), artifacts attached to the run
 # - release *published* (never a draft, never a pre-release), or workflow_dispatch
-#   with `distribute: vX.Y.Z`: render the Homebrew tap and AUR files from that
-#   release's SHA256SUMS, open a PR on the tap and push to the AUR. Nothing is
-#   built; each target is skipped (with a warning) when its secret is missing.
+#   with `distribute: vX.Y.Z`: render the Homebrew tap, AUR, Scoop and winget
+#   files from that release's SHA256SUMS, open a PR on the tap and on the Scoop
+#   bucket, push to the AUR, and attach the winget manifests to the run (their
+#   PR to microsoft/winget-pkgs is opened by hand). Nothing is built; each
+#   target is skipped (with a warning) when its secret is missing.
 # Procedure, secrets and verification: docs/RELEASE.md.
 #
 # Supply chain rules (docs/RELEASE.md, "Chaîne d'approvisionnement"):
@@ -16,8 +18,14 @@ name: Release
 # - Apple secrets live in the `release` environment and are only exposed to
 #   `gui-macos-sign`, which runs on tags, after the builds, and runs no
 #   third-party tool;
-# - AppImage tooling is pinned and checked by SHA-256 before the build;
-# - distribution secrets (HOMEBREW_TAP_TOKEN, AUR_SSH_PRIVATE_KEY) live in the
+# - AppImage tooling and the NSIS toolchain are pinned and checked by SHA-256
+#   before the build; the WebView2 bootstrapper embedded in the Windows
+#   installer must carry a valid Microsoft Authenticode signature;
+# - Windows builds are unsigned for now (no certificate: docs/STACK.md, ADR
+#   "Signature Windows"); the place of a future signing job is marked in
+#   `gui-windows`;
+# - distribution secrets (HOMEBREW_TAP_TOKEN, AUR_SSH_PRIVATE_KEY,
+#   SCOOP_BUCKET_TOKEN) live in the
 #   `distribution` environment, each one exposed only to the job that pushes
 #   to its target; those jobs run system tools only (no action but
 #   download-artifact, no package manager, no repository script).
@@ -93,6 +101,8 @@ jobs:
           - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, musl: true }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-latest }
+          # MSVC, C runtime linked statically: no VC++ redistributable needed.
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, windows: true }
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -110,6 +120,9 @@ jobs:
         if: matrix.musl
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.windows && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --locked -p portico-tui --target "$TARGET"
       - name: Smoke test (renders under a pty, quits on q)
         if: runner.os == 'Linux'
@@ -125,7 +138,30 @@ jobs:
           grep -q PORTICO "$RUNNER_TEMP/tui.out"
           grep -q "Check for new versions" "$RUNNER_TEMP/tui.out"
           test ! -e "$RUNNER_TEMP/home/.config/portico/settings.toml" || ! grep -q "^check" "$RUNNER_TEMP/home/.config/portico/settings.toml"
+      - name: Smoke test (Windows; runs, prints its version, static C runtime)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/portico.exe"
+          version_line=$("$bin" --version)
+          echo "$version_line"
+          case "$version_line" in
+            *"$VERSION"*) ;;
+            *) echo "::error::portico.exe --version does not print $VERSION"; exit 1 ;;
+          esac
+          "$bin" --help > /dev/null
+          # crt-static: the VC++ redistributable DLLs are never imported.
+          if command -v llvm-readobj > /dev/null; then
+            llvm-readobj --coff-imports "$bin" | grep -i 'Name: .*\.dll' | sort -u
+            if llvm-readobj --coff-imports "$bin" | grep -iE 'Name: (vcruntime|msvcp)[0-9_]*\.dll'; then
+              echo "::error::portico.exe imports the VC++ runtime (crt-static did not apply)"; exit 1
+            fi
+          else
+            echo "::warning::llvm-readobj not found: the DLL imports of portico.exe were not checked"
+          fi
       - name: Package
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -138,10 +174,35 @@ jobs:
           done
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ls -l "dist/$name/portico" "dist/$name.tar.gz"
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # .NET's ZipFile writes `/` separators (the zip specification), with
+        # the folder as the single top-level entry, like the tarballs: Scoop's
+        # extract_dir and winget's RelativeFilePath depend on it.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "portico-$env:VERSION-$env:TARGET"
+          $stage = Join-Path 'dist' $name
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/$env:TARGET/release/portico.exe" $stage
+          Copy-Item README.md $stage
+          foreach ($f in 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
+            if (Test-Path $f) { Copy-Item $f $stage }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = Join-Path (Resolve-Path 'dist') "$name.zip"
+          [IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path $stage), $zip, [IO.Compression.CompressionLevel]::Optimal, $true)
+          $entries = [IO.Compression.ZipFile]::OpenRead($zip).Entries.FullName
+          $entries
+          if ($entries -notcontains "$name/portico.exe") { throw "$name/portico.exe is not in $zip" }
+          Get-Item $zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tui-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: error
 
   gui-linux:
@@ -271,6 +332,150 @@ jobs:
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  gui-windows:
+    name: gui windows (x64, NSIS, unsigned)
+    needs: version
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # The Tauri CLI whose bundler the NSIS pins below were checked against
+      # (tauri-bundler 2.10.3: NSIS 3.13, nsis_tauri_utils 0.5.3, cache dir
+      # %LOCALAPPDATA%\tauri, the SHA-1 it checks itself).
+      EXPECTED_TAURI_CLI: "2.12.3"
+    # Code signing (later, docs/STACK.md, ADR "Signature Windows"): a
+    # `gui-windows-sign` job in the `release` environment, on tags only,
+    # after this one, signing the app executable and then the installer
+    # (Azure Trusted Signing or an OV certificate, through the bundler's
+    # `bundle.windows.signCommand`), like `gui-macos-sign`. No secret is
+    # read here.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master 2026-10-01
+        with:
+          toolchain: stable
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install frontend dependencies
+        working-directory: apps/portico-gui
+        run: pnpm install --frozen-lockfile
+      - name: Tauri CLI matches the pinned NSIS tooling
+        working-directory: apps/portico-gui
+        run: |
+          set -eu
+          cli=$(node -p "require('@tauri-apps/cli/package.json').version")
+          test "$cli" = "$EXPECTED_TAURI_CLI" || {
+            echo "::error::@tauri-apps/cli is $cli, NSIS pins were checked for $EXPECTED_TAURI_CLI: re-check versions and hashes (docs/RELEASE.md)"; exit 1; }
+      - name: NSIS tooling (pinned, SHA-256 verified)
+        # The bundler only downloads NSIS when `%LOCALAPPDATA%\tauri\NSIS` is
+        # missing or incomplete (it then checks a SHA-1); pre-filling it with
+        # verified copies, in the layout it builds itself, means nothing is
+        # fetched at bundle time.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:LOCALAPPDATA 'tauri'
+          $work = Join-Path $env:RUNNER_TEMP 'nsis-tools'
+          New-Item -ItemType Directory -Force -Path $tools, $work | Out-Null
+          $rel = 'https://github.com'
+          Invoke-WebRequest -Uri "$rel/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip" -OutFile (Join-Path $work 'nsis-3.13.zip')
+          Invoke-WebRequest -Uri "$rel/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll" -OutFile (Join-Path $work 'nsis_tauri_utils.dll')
+          $pins = @{
+            'nsis-3.13.zip'        = 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8'
+            'nsis_tauri_utils.dll' = '5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709'
+          }
+          foreach ($f in $pins.Keys) {
+            $got = (Get-FileHash -Algorithm SHA256 (Join-Path $work $f)).Hash.ToLowerInvariant()
+            if ($got -ne $pins[$f]) { throw "${f}: SHA-256 $got, expected $($pins[$f])" }
+            "${f}: $got"
+          }
+          $nsis = Join-Path $tools 'NSIS'
+          if (Test-Path $nsis) { Remove-Item -Recurse -Force $nsis }
+          Expand-Archive -Path (Join-Path $work 'nsis-3.13.zip') -DestinationPath $tools
+          Move-Item (Join-Path $tools 'nsis-3.13') $nsis
+          $plugins = Join-Path $nsis 'Plugins/x86-unicode/additional'
+          New-Item -ItemType Directory -Force -Path $plugins | Out-Null
+          Copy-Item (Join-Path $work 'nsis_tauri_utils.dll') $plugins
+          Get-ChildItem $nsis
+      - name: WebView2 bootstrapper (Microsoft-signed, embedded in the installer)
+        # `embedBootstrapper`: the bundler reuses
+        # `%LOCALAPPDATA%\tauri\MicrosoftEdgeWebview2Setup.exe` when present.
+        # Microsoft updates this file in place (no fixed hash): its
+        # Authenticode signature is what is checked.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:LOCALAPPDATA 'tauri/MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $dest
+          $sig = Get-AuthenticodeSignature -FilePath $dest
+          if ($sig.Status -ne 'Valid') { throw "WebView2 bootstrapper signature: $($sig.Status) ($($sig.StatusMessage))" }
+          $subject = $sig.SignerCertificate.Subject
+          if ($subject -notmatch '^CN=Microsoft Corporation, ') { throw "WebView2 bootstrapper signed by '$subject'" }
+          $sha = (Get-FileHash -Algorithm SHA256 $dest).Hash.ToLowerInvariant()
+          "WebView2 bootstrapper: $sha, signed by $subject" | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+      - name: Fetch crates (the bundle step then runs cargo offline)
+        run: cargo fetch --locked
+      - name: Bundle (NSIS)
+        working-directory: apps/portico-gui
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          set -euo pipefail
+          pnpm tauri build --ci --verbose --bundles nsis -- --locked 2>&1 | tee "$RUNNER_TEMP/bundle.log"
+      - name: Nothing was downloaded while bundling
+        # The bundler's downloads log "Downloading <url>"; a refetch of NSIS
+        # logs "Verifying NSIS package", "Recreating it" or "Redownloading".
+        run: |
+          set -eu
+          if grep -inE 'downloading https?://|verifying nsis package|recreating it|redownloading' "$RUNNER_TEMP/bundle.log"; then
+            echo "::error::the NSIS build fetched tooling at bundle time (see the lines above): the pinned cache was not used"
+            exit 1
+          fi
+      - name: Install, start and uninstall (per-user, silent)
+        # The installer needs no administrator rights, registers the
+        # uninstall key winget's ProductCode names, and the app starts
+        # (WebView2, process hardening) and stays up.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-Item "target/release/bundle/nsis/Portico_$($env:VERSION)_x64-setup.exe"
+          $setup
+          (Get-AuthenticodeSignature $setup.FullName).Status
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Portico'
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Portico'
+          $reg = Get-ItemProperty -Path $key
+          if ($reg.DisplayVersion -ne $env:VERSION) { throw "uninstall key version '$($reg.DisplayVersion)', expected $env:VERSION" }
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notmatch '^uninstall' } | Select-Object -First 1
+          if (-not $exe) { throw "no executable installed in $dir" }
+          Get-ChildItem $dir
+          $env:PORTICO_LOG = 'info'
+          $app = Start-Process -FilePath $exe.FullName -PassThru `
+            -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'gui.err') -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'gui.out')
+          Start-Sleep -Seconds 10
+          $alive = -not $app.HasExited
+          if ($alive) { Stop-Process -Id $app.Id -Force }
+          Get-Content (Join-Path $env:RUNNER_TEMP 'gui.err') -ErrorAction SilentlyContinue | Select-Object -First 40
+          if (-not $alive) { throw "Portico exited at startup (code $($app.ExitCode))" }
+          $uninstall = $reg.UninstallString.Trim('"')
+          $u = Start-Process -FilePath $uninstall -ArgumentList '/S' -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "uninstaller exit code $($u.ExitCode)" }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-windows-x64
+          path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
   gui-macos-build:
@@ -495,7 +700,7 @@ jobs:
 
   publish:
     name: draft release
-    needs: [version, tui, gui-linux, gui-macos-build, gui-macos-sign]
+    needs: [version, tui, gui-linux, gui-windows, gui-macos-build, gui-macos-sign]
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -527,8 +732,10 @@ jobs:
           ls -l
           test -z "$(find . -mindepth 1 -type d)"
           test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
-          # 6 TUI tarballs, 2 deb, 2 AppImage, 1 dmg.
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 11
+          test "$(find . -maxdepth 1 -name '*-setup.exe' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -name 'portico-*-x86_64-pc-windows-msvc.zip' | wc -l)" -eq 1
+          # 6 TUI tarballs, 1 TUI zip, 2 deb, 2 AppImage, 1 dmg, 1 NSIS installer.
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 13
       - name: Checksums
         working-directory: dist
         run: |
@@ -548,14 +755,14 @@ jobs:
             --title "Portico $VERSION" \
             --notes "Draft built by the Release workflow from $GITHUB_SHA. Verify downloads with SHA256SUMS (see docs/RELEASE.md)."
 
-  # ---- Distribution: Homebrew tap and AUR, from a PUBLISHED release --------
+  # ---- Distribution: Homebrew, AUR, Scoop, winget, from a PUBLISHED release
   # Runs on `release: published` (a draft never triggers it, a pre-release is
   # skipped) or by hand with `distribute: vX.Y.Z` to retry. This job holds no
   # secret: it checks the release's assets against its SHA256SUMS, renders the
   # files and hands them over as an artifact. The jobs that hold a secret run
   # no repository code: they only copy that artifact into their target.
   dist-render:
-    name: distribution files (Homebrew, AUR)
+    name: distribution files (Homebrew, AUR, Scoop, winget)
     if: >-
       (github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease)
       || (github.event_name == 'workflow_dispatch' && inputs.distribute != '')
@@ -580,7 +787,11 @@ jobs:
           state=$(gh release view "$TAG" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
           test "$state" = "false false" || {
             echo "::error::$TAG is a draft or a pre-release (draft, prerelease = $state): not distributed"; exit 1; }
+          published=$(gh release view "$TAG" --json publishedAt --jq '.publishedAt[0:10]')
+          [[ $published =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+            echo "::error::unexpected publication date '$published'"; exit 1; }
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "date=$published" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -608,20 +819,23 @@ jobs:
             --pattern "portico-$VERSION-*-unknown-linux-gnu.tar.gz" \
             --pattern "portico-$VERSION-*-apple-darwin.tar.gz" \
             --pattern "Portico_${VERSION}_*.deb" \
-            --pattern "Portico_${VERSION}_universal*.dmg"
+            --pattern "Portico_${VERSION}_universal*.dmg" \
+            --pattern "portico-$VERSION-x86_64-pc-windows-msvc.zip" \
+            --pattern "Portico_${VERSION}_x64-setup.exe"
           cd "$assets"
           ls -l
-          # 4 TUI tarballs (gnu, darwin), 2 .deb, 1 dmg: every one must be
-          # listed in SHA256SUMS and match it.
+          # 4 TUI tarballs (gnu, darwin), 2 .deb, 1 dmg, 1 TUI zip, 1 NSIS
+          # installer: every one must be listed in SHA256SUMS and match it.
           find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort > "$RUNNER_TEMP/names"
           awk 'NR == FNR { want[$0] = 1; next } { n = $2; sub(/^\*/, "", n) } n in want' \
             "$RUNNER_TEMP/names" SHA256SUMS > "$RUNNER_TEMP/subset"
-          test "$(wc -l < "$RUNNER_TEMP/names")" -eq 7
-          test "$(wc -l < "$RUNNER_TEMP/subset")" -eq 7
+          test "$(wc -l < "$RUNNER_TEMP/names")" -eq 9
+          test "$(wc -l < "$RUNNER_TEMP/subset")" -eq 9
           sha256sum --strict -c "$RUNNER_TEMP/subset"
-      - name: Render the tap and AUR files
+      - name: Render the tap, AUR, Scoop and winget files
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_DATE: ${{ steps.release.outputs.date }}
           PORTICO_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           AUR_MAINTAINER: ${{ vars.AUR_MAINTAINER }}
         run: |
@@ -631,16 +845,23 @@ jobs:
           LICENSE_DIR=at-tag packaging/aur/render.sh "$VERSION" "$sums" dist/aur
           ruby -c dist/homebrew/Formula/portico.rb
           ruby -c dist/homebrew/Casks/portico.rb
+          packaging/scoop/render.sh "$VERSION" "$sums" dist/scoop
+          jq -e --arg v "$VERSION" '.version == $v and (.architecture."64bit".hash | test("^[0-9a-f]{64}$"))' \
+            dist/scoop/bucket/portico.json > /dev/null
+          packaging/winget/render.sh "$VERSION" "$sums" dist/winget
+          find dist/winget -name '*.yaml' -print0 \
+            | xargs -0 ruby -ryaml -e 'ARGV.each { |f| m = YAML.safe_load_file(f); abort("#{f}: wrong version") unless m["PackageVersion"] == ENV["VERSION"] }'
           if grep -qE '_universal-(unsigned|not-notarized)\.dmg' dist/homebrew/Casks/portico.rb; then
             echo "::warning::the cask points to a dmg that is not notarized: a Gatekeeper caveat was added"
           fi
           # A tarball keeps .SRCINFO (an artifact upload drops hidden files).
-          tar -C dist -cf distribution.tar homebrew aur
+          tar -C dist -cf distribution.tar homebrew aur scoop winget
           {
             echo "### Distribution files for $TAG"
             echo '```'
             tar -tf distribution.tar | grep -v '/$'
             echo '```'
+            echo "winget: download the \`winget-manifests\` artifact of this run and open the pull request on microsoft/winget-pkgs by hand (docs/RELEASE.md, \"Winget\")."
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -648,6 +869,12 @@ jobs:
           path: distribution.tar
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: winget-manifests
+          path: dist/winget
+          if-no-files-found: error
+          retention-days: 30
 
   homebrew:
     name: homebrew tap (pull request)
@@ -726,6 +953,82 @@ jobs:
               --body "Formula and cask for Portico $VERSION, rendered by the Release workflow of $GITHUB_SERVER_URL/$GITHUB_REPOSITORY (run $GITHUB_RUN_ID) from the release's SHA256SUMS.")
           fi
           echo "Homebrew: $pr" >> "$GITHUB_STEP_SUMMARY"
+
+  scoop:
+    name: scoop bucket (pull request)
+    needs: dist-render
+    runs-on: ubuntu-latest
+    # SCOOP_BUCKET_TOKEN lives in this environment only: a fine-grained token
+    # restricted to the bucket repository (Contents and Pull requests: write).
+    environment: distribution
+    permissions: {}
+    env:
+      VERSION: ${{ needs.dist-render.outputs.version }}
+      BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO || format('{0}/scoop-portico', github.repository_owner) }}
+    steps:
+      - id: mode
+        name: Token present
+        env:
+          HAS_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SCOOP_BUCKET_TOKEN is not set in the distribution environment: the Scoop bucket is not updated"
+            echo "Scoop: skipped (no SCOOP_BUCKET_TOKEN)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.mode.outputs.enabled == 'true'
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/dist
+      - name: Open or update the pull request on the bucket
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          tar -C "$dist" -xf "$dist/distribution.tar"
+          # The token goes in a per-command header, never in a remote URL or
+          # in .git/config.
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          bucketgit() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+          work="$RUNNER_TEMP/bucket"
+          bucketgit clone --quiet --depth 1 "https://github.com/$BUCKET_REPO.git" "$work"
+          cd "$work"
+          branch="portico-$VERSION"
+          # The pull request needs a base: an empty bucket has none.
+          if ! git rev-parse --verify --quiet HEAD >/dev/null; then
+            echo "::error::$BUCKET_REPO is empty: push a first commit (e.g. a README) to its default branch, then re-run (docs/RELEASE.md)"
+            exit 1
+          fi
+          base=$(git symbolic-ref --short HEAD)
+          if [ "$base" = "$branch" ]; then
+            echo "::error::the default branch of $BUCKET_REPO is $branch: rename it (e.g. to main), then re-run"
+            exit 1
+          fi
+          git switch --quiet -c "$branch"
+          mkdir -p bucket
+          cp "$dist/scoop/bucket/portico.json" bucket/portico.json
+          git add bucket/portico.json
+          if git diff --cached --quiet; then
+            echo "Scoop: $BUCKET_REPO already at $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898333+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "portico: Update to version $VERSION"
+          bucketgit push --quiet --force origin "HEAD:refs/heads/$branch"
+          export GH_TOKEN="$TOKEN"
+          pr=$(gh pr list --repo "$BUCKET_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --repo "$BUCKET_REPO" --base "$base" --head "$branch" --title "portico: Update to version $VERSION" \
+              --body "Manifest for Portico $VERSION, rendered by the Release workflow of $GITHUB_SERVER_URL/$GITHUB_REPOSITORY (run $GITHUB_RUN_ID) from the release's SHA256SUMS.")
+          fi
+          echo "Scoop: $pr" >> "$GITHUB_STEP_SUMMARY"
 
   aur:
     name: aur (portico-bin, portico-gui-bin)
