@@ -264,12 +264,18 @@ fn init_tracing() {
 
 /// Opens `<dir>/portico-tui.log` for this run: directory created `0700`,
 /// file `0600`, and a symlink in its place is refused (never followed).
+/// On Windows "private" is an owner-only DACL (portico-core's `0600`).
 fn open_private_log(dir: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)?;
+    #[cfg(windows)]
+    portico_core::store::create_private_dir_all(dir).map_err(std::io::Error::other)?;
+    #[cfg(not(windows))]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir)?;
+    }
     let path = dir.join("portico-tui.log");
     if path
         .symlink_metadata()
@@ -284,7 +290,11 @@ fn open_private_log(dir: &std::path::Path) -> std::io::Result<std::fs::File> {
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    #[cfg(windows)]
+    portico_core::store::windows::with_dacl_rights(&mut options);
     let file = options.open(&path)?;
+    #[cfg(windows)]
+    portico_core::store::windows::restrict_file(&file, &path)?;
     // An older file may have been created with looser permissions.
     #[cfg(unix)]
     {

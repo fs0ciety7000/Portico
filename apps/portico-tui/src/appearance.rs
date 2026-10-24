@@ -27,6 +27,10 @@
 //! [`StrayReplyFilter`] swallows such a late OSC reply for a few seconds;
 //! a late DA1 reply is dropped by `crossterm` itself.
 //!
+//! Windows (Phase 8): the query is not sent. Reading the console input
+//! straight from its handle, without crossterm, has no safe wrapper, so
+//! `auto` uses `COLORFGBG`, then dark ([`detect`] is [`without_query`]).
+//!
 //! Invariants: the query runs in raw mode before Portico reads any input
 //! (`crossterm`'s event reader is not started yet); bytes are read straight
 //! from the stdin descriptor (no buffering that would steal keystrokes from
@@ -34,7 +38,9 @@
 //! few milliseconds are dropped, never interpreted. Blocking: call it from
 //! `spawn_blocking`.
 
+#[cfg(unix)]
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::fd::AsFd as _;
 use std::time::{Duration, Instant};
 
@@ -44,11 +50,13 @@ use portico_theme::Appearance;
 /// Longest wait for the terminal's answers. Local terminals answer in about
 /// a millisecond; over SSH, a round-trip. Spent in full only by a terminal
 /// that answers neither query.
+#[cfg(unix)]
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Longest wait for the end of a reply that has started (its DA1 part):
 /// a slow link answers late, but a terminal that started answering will
 /// finish.
+#[cfg(unix)]
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long after startup an unfinished reply may still arrive as keys.
@@ -59,15 +67,19 @@ pub(crate) const STRAY_REPLY_WINDOW: Duration = Duration::from_secs(5);
 const STRAY_REPLY_MAX_KEYS: u8 = 64;
 
 /// Largest answer read: two short replies; anything longer is not ours.
+#[cfg(unix)]
 const MAX_REPLY_BYTES: usize = 512;
 
 /// `OSC 11 ; ? ST` then `CSI c` (DA1).
+#[cfg(unix)]
 const QUERY: &[u8] = b"\x1b]11;?\x1b\\\x1b[c";
 
 /// Where the appearance came from (for the log).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
     /// The terminal answered OSC 11.
+    // Never produced on Windows, where the terminal is not queried.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Osc11,
     /// `COLORFGBG`.
     ColorFgBg,
@@ -89,6 +101,7 @@ pub(crate) struct Detection {
 }
 
 /// Queries the terminal (see the module doc), then `COLORFGBG`, then dark.
+#[cfg(unix)]
 pub(crate) fn detect() -> Detection {
     let started = Instant::now();
     let replied = query_terminal(QUERY_TIMEOUT, REPLY_TIMEOUT);
@@ -109,6 +122,12 @@ pub(crate) fn detect() -> Detection {
             ..without_query()
         },
     }
+}
+
+/// Windows: `COLORFGBG`, then dark (see the module doc).
+#[cfg(not(unix))]
+pub(crate) fn detect() -> Detection {
+    without_query()
 }
 
 /// `COLORFGBG`, then dark: no question to the terminal (a fixed theme).
@@ -133,6 +152,7 @@ pub(crate) fn without_query() -> Detection {
 /// Sends the queries and reads until the DA1 reply or the size cap; gives
 /// up after `idle` if nothing arrived, after `started` once a reply began.
 /// `None` when nothing could be written.
+#[cfg(unix)]
 fn query_terminal(idle: Duration, started: Duration) -> Option<Vec<u8>> {
     let mut out = std::io::stdout();
     out.write_all(QUERY).ok()?;
@@ -233,6 +253,7 @@ impl StrayReplyFilter {
 }
 
 /// An OSC reply begun and not terminated (BEL or ST) in `bytes`.
+#[cfg(any(unix, test))]
 fn inside_osc_reply(bytes: &[u8]) -> bool {
     bytes
         .windows(2)
@@ -242,6 +263,7 @@ fn inside_osc_reply(bytes: &[u8]) -> bool {
 }
 
 /// A complete DA1 reply: `ESC [ ?` … `c`.
+#[cfg(any(unix, test))]
 fn has_da1_reply(bytes: &[u8]) -> bool {
     bytes.windows(3).enumerate().any(|(at, w)| {
         w == b"\x1b[?"
@@ -254,6 +276,7 @@ fn has_da1_reply(bytes: &[u8]) -> bool {
 
 /// The background of an OSC 11 reply (`ESC ] 11 ; rgb:R/G/B` ended by BEL
 /// or ST, 1 to 4 hex digits per channel; `rgba:` too), as an appearance.
+#[cfg(any(unix, test))]
 pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance> {
     let text = String::from_utf8_lossy(bytes);
     let start = text.find("\x1b]11;")?;
@@ -273,6 +296,7 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance> {
 }
 
 /// One channel, `h` to `hhhh`, scaled to 0..=1.
+#[cfg(any(unix, test))]
 fn channel(hex: &str) -> Option<f64> {
     if hex.is_empty() || hex.len() > 4 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
@@ -284,6 +308,7 @@ fn channel(hex: &str) -> Option<f64> {
 }
 
 /// CIE L* (0..=100) of an sRGB colour.
+#[cfg(any(unix, test))]
 fn lightness(r: f64, g: f64, b: f64) -> f64 {
     let lin = |v: f64| {
         if v <= 0.040_45 {

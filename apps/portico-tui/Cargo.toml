@@ -28,12 +28,15 @@ tracing-subscriber.workspace = true
 bytes.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
-# `event`: poll on stdin with a timeout for the OSC 11 background query of
-# the `auto` theme (`appearance.rs`), without `unsafe`.
-rustix = { workspace = true, features = ["event"] }
 # `local-offset`: dates in local time, the offset read once at startup
 # (before the runtime's threads, see `ui::fmt::init_local_offset`).
 time = { workspace = true, features = ["local-offset"] }
+
+# `event`: poll on stdin with a timeout for the OSC 11 background query of
+# the `auto` theme (`appearance.rs`), without `unsafe`. Unix only: on
+# Windows the query is not sent (COLORFGBG, then dark).
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["event"] }
 
 [dev-dependencies]
 tempfile.workspace = true

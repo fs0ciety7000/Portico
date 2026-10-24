@@ -193,7 +193,8 @@ impl FilesView {
         session: SessionId,
         alias: String,
     ) -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
+        let home = crate::ui::fmt::home_dir()
+            .unwrap_or_else(|| if cfg!(windows) { r"C:\" } else { "/" }.to_owned());
         let mut view = Self {
             session,
             alias,

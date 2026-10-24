@@ -556,10 +556,17 @@ fn nothing_to_import() -> ErrorSummary {
     }
 }
 
-/// `path` with the home directory shown as `~`.
+/// `path` with the home directory shown as `~`, `/` separators after it
+/// on every platform (the form of the `Include` line printed next to it).
 fn shown_path(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
-        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        Ok(rest) if !home.as_os_str().is_empty() => {
+            let parts: Vec<String> = rest
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            format!("~/{}", parts.join("/"))
+        }
         _ => path.display().to_string(),
     }
 }
