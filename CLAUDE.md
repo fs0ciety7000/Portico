@@ -36,11 +36,11 @@ Claude n'est pas qu'un exécutant. Sur Portico, il :
 
 **Direction** : minimalisme architectural. Le logo est un portique : un entablement sur deux colonnes
 qui encadrent une arche (`design/portico-mark.svg`), accompagné d'un wordmark en capitales espacées (Geist)
-(`design/portico-wordmark.svg`). L'ensemble doit faire premium, rester sobre, être monochrome
-et adapté au mode sombre.
+(`design/portico-wordmark.svg`). L'ensemble doit faire premium, rester sobre, être monochrome,
+pensé d'abord pour le mode sombre, avec un thème clair de même rang.
 
 - **Le design est une priorité absolue**, au même rang que la correction fonctionnelle.
-- Surfaces minérales sombres, texte « marbre », **un seul accent** métallique par thème.
+- Surfaces minérales (sombres, ou marbre clair pour le thème clair), **un seul accent** métallique par thème.
 - **La couleur saturée est réservée au sens** : statuts de connexion, erreurs, avertissements.
 - Statuts toujours visibles et soignés : `idle → connecting → authenticating → connected` avec latence, ou `error` avec un *hint* actionnable.
 - Micro-interactions de 120 à 260 ms maximum, courbe `--ease-standard`, en respectant `prefers-reduced-motion`.
@@ -49,8 +49,10 @@ et adapté au mode sombre.
 - **Source unique des tokens** : `crates/portico-theme`. La GUI consomme le CSS généré
   (`cargo run -p portico-theme --bin export-tokens`) et un test échoue si ce CSS est périmé.
   **Aucune couleur en dur** dans les composants.
-- Thèmes : **Obsidian** (défaut, accent laiton), **Basalt** (gris-bleu, acier), **Travertine Night** (pierre chaude, terracotta).
-  Le contraste est testé : texte principal AAA, texte secondaire AA.
+- Thèmes sombres : **Obsidian** (défaut, accent laiton), **Basalt** (gris-bleu, acier), **Travertine Night** (pierre chaude, terracotta).
+  Thème clair : **Marble** (marbre clair, accent bronze). Le réglage « Auto » suit l'apparence du système
+  (Marble en clair, le thème sombre choisi en sombre). Le contraste est testé dans les quatre : texte principal AAA,
+  texte secondaire AA.
 
 Les règles détaillées se trouvent dans le skill `ui-design-premium`.
 
