@@ -800,7 +800,7 @@ mod tests {
         (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
     }
 
-    /// Distance in degrees between the CIE LCh hues of two colours.
+    /// Distance in degrees between the CIE `LCh` hues of two colours.
     fn hue_distance(a: Rgb, b: Rgb) -> f64 {
         let hue = |c| {
             let (_, a, b) = lab(c);
