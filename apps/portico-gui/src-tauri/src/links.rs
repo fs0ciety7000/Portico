@@ -8,9 +8,12 @@
 //!   (`user:pass@`); a refusal has the code `link_refused`;
 //! - the parsed (normalized) form is opened, never the raw text: an
 //!   internationalized host is in its punycode form, as the dialog showed it;
-//! - the opener is the platform's (`open` on macOS, `xdg-open` elsewhere),
-//!   started without a shell with the URL as its only argument (it starts
-//!   with `http`, never with `-`); no webview permission is involved;
+//! - the opener is the platform's (`open` on macOS, `url.dll`'s
+//!   `FileProtocolHandler` through `rundll32` on Windows, `xdg-open`
+//!   elsewhere), started without a shell (never `cmd /c start`, which would
+//!   parse `&` and `^`) with the URL as its last argument (it starts with
+//!   `http`, never with `-`, and holds no space or quote once normalized);
+//!   no webview permission is involved;
 //! - only the host is logged, never the path or the query string.
 
 use std::process::{Command, Stdio};
@@ -82,17 +85,35 @@ pub(crate) fn checked_link(raw: &str) -> Result<url::Url, ErrorSummary> {
 
 /// The platform opener, started without a shell; output discarded.
 fn launch(link: &str) -> std::io::Result<std::process::Child> {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    Command::new(program)
+    opener()
         .arg(link)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+}
+
+#[cfg(target_os = "macos")]
+fn opener() -> Command {
+    Command::new("open")
+}
+
+/// `ShellExecute`'s default action for the URL (the default browser), by
+/// absolute path: a bare `rundll32.exe` would also be looked up next to
+/// Portico's own executable.
+#[cfg(windows)]
+fn opener() -> Command {
+    let system_root = std::env::var_os("SystemRoot")
+        .filter(|root| !root.is_empty())
+        .map_or_else(|| std::path::PathBuf::from(r"C:\Windows"), Into::into);
+    let mut command = Command::new(system_root.join("System32").join("rundll32.exe"));
+    command.arg("url.dll,FileProtocolHandler");
+    command
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn opener() -> Command {
+    Command::new("xdg-open")
 }
 
 /// Opens a confirmed link in the system browser.
@@ -117,7 +138,7 @@ pub(crate) async fn open_url(url: String) -> Result<(), ErrorSummary> {
             Err(ErrorSummary {
                 code: "link_open_failed".into(),
                 message: "the system browser could not be started".into(),
-                hint: Some(if cfg!(target_os = "macos") {
+                hint: Some(if cfg!(any(target_os = "macos", windows)) {
                     "Copy the address and open it in your browser.".into()
                 } else {
                     "Check that xdg-open is installed, or copy the address and open it in your browser.".into()
@@ -157,6 +178,26 @@ mod tests {
             checked_link("https://bücher.example/").unwrap().host_str(),
             Some("xn--bcher-kva.example")
         );
+    }
+
+    /// The opener gets one argument that no command line parser can split
+    /// or unquote (Windows: `rundll32` hands the rest of its command line
+    /// to `url.dll`): quotes and the like come out percent-encoded.
+    #[test]
+    fn normalized_links_hold_no_quote_or_space() {
+        for raw in [
+            "https://example.com/a\"b",
+            "https://example.com/?q=\"x\"&r=<y>",
+            "https://example.com/#\"frag\"",
+            "https://example.com/a`b",
+        ] {
+            let link = checked_link(raw).unwrap();
+            assert!(
+                !link.as_str().contains(['"', ' ', '<', '>', '`']),
+                "{raw} -> {link}"
+            );
+            assert!(link.as_str().starts_with("https://"));
+        }
     }
 
     #[test]
