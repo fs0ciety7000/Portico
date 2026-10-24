@@ -333,7 +333,7 @@ pub const OBSIDIAN: Theme = Theme {
         connecting: Rgb::hex(0x8a_aa_d6),
         authenticating: Rgb::hex(0xb3_9d_e0),
         connected: Rgb::hex(0x7f_c8_a0),
-        warning: Rgb::hex(0xf2_c1_4e),
+        warning: Rgb::hex(0xf4_cb_4e),
         error: Rgb::hex(0xe5_7c_70),
     },
     ansi: AnsiPalette([
@@ -465,10 +465,9 @@ pub const TRAVERTINE: Theme = Theme {
 /// ANSI: the remote paints on `bg-base`, so every colour that carries text
 /// stays ≥ 4.5:1 on it, bright ones included (they gain chroma, not
 /// lightness). `white` (7) is a readable stone grey, as in most light
-/// terminal palettes. Exception, by design: `bright white` (15) stays a
-/// light marble so white-on-colour segments (prompts, status lines) keep
-/// working; bright white text on the default background is then faint,
-/// which is the remote's choice.
+/// terminal palettes. Exception, by design: `bright white` (15) stays light
+/// for white-on-colour segments (prompts, status lines); on the default
+/// background the UIs' minimum-contrast rule darkens it to a readable grey.
 pub const MARBLE: Theme = Theme {
     id: "marble",
     name: "Marble",
@@ -484,7 +483,7 @@ pub const MARBLE: Theme = Theme {
         border_strong: Rgb::hex(0xc8_bf_b2),
         text_primary: Rgb::hex(0x1f_1d_1a),
         text_secondary: Rgb::hex(0x5a_55_4d),
-        text_muted: Rgb::hex(0x7b_74_6a),
+        text_muted: Rgb::hex(0x71_6a_60),
         accent: Rgb::hex(0x80_60_3a),
         accent_strong: Rgb::hex(0x68_4d_2e),
         text_on_accent: Rgb::hex(0xfb_f8_f3),
@@ -492,12 +491,12 @@ pub const MARBLE: Theme = Theme {
         search_current: Rgb::hex(0x80_60_3a),
     },
     status: StatusPalette {
-        idle: Rgb::hex(0x7b_74_6a),
+        idle: Rgb::hex(0x71_6a_60),
         connecting: Rgb::hex(0x2a_64_b0),
         authenticating: Rgb::hex(0x74_48_b5),
         connected: Rgb::hex(0x25_70_4a),
-        warning: Rgb::hex(0x98_54_00),
-        error: Rgb::hex(0xb5_36_2c),
+        warning: Rgb::hex(0xaa_4e_00),
+        error: Rgb::hex(0xb2_2e_32),
     },
     ansi: AnsiPalette([
         Rgb::hex(0x2b_28_24),
@@ -801,6 +800,16 @@ mod tests {
         (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
     }
 
+    /// Distance in degrees between the CIE LCh hues of two colours.
+    fn hue_distance(a: Rgb, b: Rgb) -> f64 {
+        let hue = |c| {
+            let (_, a, b) = lab(c);
+            b.atan2(a).to_degrees().rem_euclid(360.0)
+        };
+        let d = (hue(a) - hue(b)).abs();
+        d.min(360.0 - d)
+    }
+
     fn delta_e(a: Rgb, b: Rgb) -> f64 {
         let (l1, a1, b1) = lab(a);
         let (l2, a2, b2) = lab(b);
@@ -841,6 +850,17 @@ mod tests {
                 assert!(
                     d >= 20.0,
                     "{}: accent too close to {name} (ΔE {d:.1})",
+                    t.id
+                );
+                // ΔE alone lets a status share the accent's hue and
+                // lightness (a more saturated accent): one of them must
+                // differ clearly.
+                let (hue, lightness) = (hue_distance(t.palette.accent, c), {
+                    (lab(t.palette.accent).0 - lab(c).0).abs()
+                });
+                assert!(
+                    hue >= 15.0 || lightness >= 10.0,
+                    "{}: {name} reads as the accent (Δhue {hue:.1}°, ΔL {lightness:.1})",
                     t.id
                 );
             }
@@ -931,6 +951,10 @@ mod tests {
                 t.id
             );
             assert!(contrast(p.text_muted, p.bg_selected) >= 3.0, "{}", t.id);
+            // Muted stays AA on the page and a step apart from secondary.
+            assert!(contrast(p.text_muted, p.bg_base) >= 4.5, "{}", t.id);
+            let d = delta_e(p.text_muted, p.text_secondary);
+            assert!(d >= 8.0, "{}: muted vs secondary ΔE {d:.1}", t.id);
         }
     }
 
