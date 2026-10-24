@@ -32,6 +32,16 @@
 //! debugger attachment; the TUI binary only gets `RLIMIT_CORE = 0`. This is
 //! reported as [`StepStatus::Unsupported`].
 //!
+//! Windows (Phase 8): neither measure is applied, both are reported as
+//! [`StepStatus::Unsupported`]. There is no `RLIMIT_CORE`: Windows Error
+//! Reporting writes a local crash dump only when an administrator enabled
+//! `LocalDumps` in the registry, and opting one program out
+//! (`WerAddExcludedApplication`) is a per-user registry write we do not make
+//! behind the user's back. Other processes of the same user can open this
+//! one (`PROCESS_VM_READ`), as on macOS without the hardened runtime: a
+//! process DACL would not stop them (the owner can always rewrite it). No
+//! measure needs administrator rights, so none is attempted.
+//!
 //! Hardening is best effort: a failure is reported, never fatal.
 
 use serde::Serialize;
@@ -119,7 +129,14 @@ fn disable_core_dumps() -> StepStatus {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn disable_core_dumps() -> StepStatus {
+    StepStatus::Unsupported {
+        reason: "no RLIMIT_CORE on Windows; WER dumps only if an administrator enabled LocalDumps",
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn disable_core_dumps() -> StepStatus {
     StepStatus::Unsupported {
         reason: "no RLIMIT_CORE on this platform",
@@ -144,7 +161,19 @@ fn deny_ptrace() -> StepStatus {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+#[cfg(windows)]
+fn deny_ptrace() -> StepStatus {
+    StepStatus::Unsupported {
+        reason: "same-user processes can open this one; no per-process opt-out on Windows",
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
 fn deny_ptrace() -> StepStatus {
     StepStatus::Unsupported {
         reason: "no ptrace protection on this platform",
@@ -175,6 +204,14 @@ mod tests {
             // /proc/self stays readable by the process itself.
             assert!(std::fs::read_to_string("/proc/self/status").is_ok());
         }
+        #[cfg(windows)]
+        assert!(
+            report
+                .steps
+                .iter()
+                .all(|s| matches!(s.status, StepStatus::Unsupported { .. })),
+            "{report:?}"
+        );
         // Idempotent.
         let again = harden_process();
         #[cfg(target_os = "linux")]

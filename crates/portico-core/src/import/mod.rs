@@ -1005,9 +1005,14 @@ pub fn termius_target(paths: &Paths) -> PathBuf {
 /// The `Include` line for `target`: `~/…` when it is under the home
 /// directory, double-quoted when it contains a space (macOS
 /// `Application Support`).
+///
+/// Separators are always `/` (OpenSSH for Windows reads them, and a `\\`
+/// would be an escape for OpenSSH's argument splitting): the line is the
+/// same text on every platform for a path under the home directory.
 pub fn include_line(paths: &Paths, target: &Path) -> String {
     let shown = match target.strip_prefix(&paths.home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", crate::store::slash_relative(rest)),
+        Err(_) if cfg!(windows) => target.display().to_string().replace('\\', "/"),
         Err(_) => target.display().to_string(),
     };
     if shown.chars().any(char::is_whitespace) {

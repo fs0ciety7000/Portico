@@ -386,6 +386,13 @@ pub(crate) fn check_identity_file(
     let text = raw
         .to_str()
         .ok_or_else(|| invalid("the path is not UTF-8"))?;
+    // Windows: `C:\Users\me\.ssh\id` is checked (and resolved) with `/`
+    // separators, the form Portico writes; a backslash stays refused
+    // elsewhere (it is an escape for OpenSSH).
+    #[cfg(windows)]
+    let normalized = text.replace('\\', "/");
+    #[cfg(windows)]
+    let text = normalized.as_str();
     check_path_chars(text).map_err(invalid)?;
     let path = match text.strip_prefix("~/") {
         Some(rest) => home.join(rest),
@@ -422,10 +429,11 @@ pub(crate) fn check_identity_file(
     Ok(path)
 }
 
-/// `~/…` under the home directory, double-quoted when it holds a space.
+/// `~/…` under the home directory (`/` separators on every platform),
+/// double-quoted when it holds a space.
 fn identity_value(home: &Path, path: &Path) -> String {
     let shown = match path.strip_prefix(home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", crate::store::slash_relative(rest)),
         Err(_) => path.display().to_string(),
     };
     if shown.contains(' ') {

@@ -553,6 +553,91 @@ fn each_method_says_how_to_update() {
     }
 }
 
+#[test]
+fn windows_installs() {
+    use Frontend::{Gui, Tui};
+    use InstallMethod::{Other, Scoop, WindowsInstaller, WindowsZip};
+    let win = |exe: &str| InstallProbe {
+        exe: PathBuf::from(exe),
+        windows: true,
+        local_app_data: Some(PathBuf::from(r"C:\Users\Ana\AppData\Local")),
+        ..InstallProbe::default()
+    };
+    let cases = [
+        (
+            win(r"C:\Users\Ana\scoop\apps\portico\0.5.0\portico.exe"),
+            Tui,
+            Scoop,
+        ),
+        (
+            win(r"\\?\D:\Tools\Scoop\Apps\Portico-GUI\current\portico-gui.exe"),
+            Gui,
+            Scoop,
+        ),
+        (
+            win(r"\\?\C:\Users\Ana\AppData\Local\Portico\portico-gui.exe"),
+            Gui,
+            WindowsInstaller,
+        ),
+        (
+            win(r"c:\users\ana\appdata\local\PORTICO\portico-gui.exe"),
+            Gui,
+            WindowsInstaller,
+        ),
+        // Another app's folder, a lookalike prefix: not the installer.
+        (
+            win(r"C:\Users\Ana\AppData\Local\Portico2\portico-gui.exe"),
+            Gui,
+            Other,
+        ),
+        (win(r"C:\Users\Ana\Tools\portico.exe"), Tui, WindowsZip),
+        (
+            win(r"C:\Users\Ana\scoop\apps\other\1\portico.exe"),
+            Tui,
+            WindowsZip,
+        ),
+        (
+            win(r"C:\src\Portico\target\release\portico-gui.exe"),
+            Gui,
+            Other,
+        ),
+        (win(""), Tui, Other),
+    ];
+    for (probe, frontend, expected) in cases {
+        assert_eq!(install_method(&probe, frontend), expected, "{probe:?}");
+    }
+    // Without `windows`, the same paths go through the Unix rules.
+    let unix = InstallProbe {
+        windows: false,
+        ..win(r"C:\Users\Ana\scoop\apps\portico\0.5.0\portico.exe")
+    };
+    assert_eq!(install_method(&unix, Tui), Other);
+
+    assert_eq!(
+        instruction(Scoop, Tui, "0.5.0").command.as_deref(),
+        Some("scoop update portico")
+    );
+    assert_eq!(
+        instruction(Scoop, Gui, "0.5.0").command.as_deref(),
+        Some("scoop update portico-gui")
+    );
+    let installer = instruction(WindowsInstaller, Gui, "0.5.0");
+    assert_eq!(
+        installer.text,
+        "Download the new installer from the release page, or with winget:"
+    );
+    assert_eq!(
+        installer.command.as_deref(),
+        Some("winget upgrade fs0ciety7000.Portico")
+    );
+    let zip = instruction(WindowsZip, Tui, "0.5.0");
+    assert_eq!(
+        zip.text,
+        "Download the new .zip from the release page and replace portico.exe."
+    );
+    assert_eq!(zip.command, None);
+}
+
 // ── the real fetcher, against a local server ────────────────────────────
 
 /// Serves one connection with `response`; returns the request received.

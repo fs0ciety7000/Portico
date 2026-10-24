@@ -2,7 +2,9 @@
 //!
 //! Backends, in order of preference:
 //! 1. [`KeyringStore`]: macOS Keychain / Linux Secret Service (GNOME Keyring,
-//!    `KWallet` via Secret Service) through the `keyring` crate.
+//!    `KWallet` via Secret Service) / Windows Credential Manager (generic
+//!    credentials, target `<account>.dev.portico`, the crate's default
+//!    `Enterprise` persistence) through the `keyring` crate.
 //! 2. [`VaultStore`]: local file encrypted with XChaCha20-Poly1305, key
 //!    derived from a master passphrase with Argon2id (see [`crate::vault`]).
 //!    Used when no system keyring is available (headless Linux, SSH

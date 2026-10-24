@@ -365,8 +365,25 @@ pub fn sanitize_alias(alias: &str) -> String {
         .collect();
     if trimmed.is_empty() {
         "session".to_owned()
+    } else if cfg!(windows) {
+        avoid_device_stem(trimmed)
     } else {
         trimmed
+    }
+}
+
+/// Windows: `aux.lan` → `aux_.lan`, so `<alias>-<time>.cast` never starts
+/// with a device name (`AUX.lan-….cast` would open the device).
+fn avoid_device_stem(name: String) -> String {
+    let (stem, rest) = name.split_once('.').unwrap_or((name.as_str(), ""));
+    if crate::store::windows_name_problem(stem) && !stem.is_empty() {
+        if rest.is_empty() {
+            format!("{stem}_")
+        } else {
+            format!("{stem}_.{rest}")
+        }
+    } else {
+        name
     }
 }
 
@@ -400,7 +417,9 @@ pub fn validate_name(name: &str) -> std::result::Result<(), RecordingError> {
         && !name.contains("..")
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        // Windows: no device name (`nul.cast`, `COM1.x.cast`).
+        && !(cfg!(windows) && crate::store::windows_name_problem(name));
     if ok { Ok(()) } else { Err(invalid()) }
 }
 
@@ -424,6 +443,10 @@ struct PrivateDir {
     path: PathBuf,
     #[cfg(unix)]
     fd: std::os::fd::OwnedFd,
+    /// Windows: the checked folder, opened without `FILE_SHARE_DELETE`, so
+    /// it cannot be renamed or replaced while files are created in it.
+    #[cfg(windows)]
+    _pinned: File,
 }
 
 /// Creates the recordings folder (`0700`) or checks the existing one: a
@@ -469,7 +492,39 @@ fn open_private_dir(dir: &Path) -> Result<PrivateDir> {
     })
 }
 
-#[cfg(not(unix))]
+/// Windows: the folder is opened as itself (a junction or symlink is
+/// refused), pinned, and audited through that handle: an owner other than
+/// the user, `SYSTEM` or `Administrators` is refused, a DACL letting anyone
+/// else in is replaced by the owner-only one (the `fchmod` above).
+#[cfg(windows)]
+fn open_private_dir(dir: &Path) -> Result<PrivateDir> {
+    let unsafe_path = || {
+        rec_err(RecordingError::UnsafePath {
+            path: dir.to_path_buf(),
+        })
+    };
+    let handle = match crate::winfs::open_dir(dir, true, true) {
+        Ok(handle) => handle,
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Err(unsafe_path()),
+        Err(e) => return Err(Error::io(dir, e)),
+    };
+    if let Some(audit) = crate::winfs::audit(&handle).map_err(|e| Error::io(dir, e))? {
+        if !audit.owner_trusted() {
+            return Err(rec_err(RecordingError::ForeignOwner {
+                path: dir.to_path_buf(),
+            }));
+        }
+        if audit.others_can_read || audit.others_can_write {
+            crate::winfs::restrict_dir_handle(&handle, dir).map_err(|e| Error::io(dir, e))?;
+        }
+    }
+    Ok(PrivateDir {
+        path: dir.to_path_buf(),
+        _pinned: handle,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_private_dir(dir: &Path) -> Result<PrivateDir> {
     if !check_dir(dir)? {
         return Err(rec_err(RecordingError::UnsafePath {
@@ -493,7 +548,21 @@ impl PrivateDir {
         Ok(File::from(fd))
     }
 
-    #[cfg(not(unix))]
+    /// Windows: `CREATE_NEW` in the pinned folder, owner-only DACL set
+    /// before the header is written.
+    #[cfg(windows)]
+    fn create_new(&self, name: &str) -> std::io::Result<File> {
+        let path = self.path.join(name);
+        let file = crate::winfs::private_new_file().open(&path)?;
+        if let Err(e) = crate::winfs::restrict_file(&file, &path) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+        Ok(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn create_new(&self, name: &str) -> std::io::Result<File> {
         std::fs::OpenOptions::new()
             .write(true)
@@ -520,6 +589,13 @@ fn open_nofollow(path: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
         opts.custom_flags(i32::try_from(flags.bits()).unwrap_or(0));
+    }
+    // A reparse point is opened as itself: its metadata then says "not a
+    // regular file" and the caller refuses it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(portico_winsec::access::FILE_FLAG_OPEN_REPARSE_POINT);
     }
     opts.open(path)
 }
@@ -1919,3 +1995,23 @@ pub(crate) fn delete(dir: &Path, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod windows_names {
+    #[test]
+    fn device_stems_are_avoided() {
+        assert_eq!(super::avoid_device_stem("aux.lan".into()), "aux_.lan");
+        assert_eq!(super::avoid_device_stem("NUL".into()), "NUL_");
+        assert_eq!(super::avoid_device_stem("com1.x.y".into()), "com1_.x.y");
+        assert_eq!(super::avoid_device_stem("web.lan".into()), "web.lan");
+        assert_eq!(super::avoid_device_stem("console".into()), "console");
+        #[cfg(windows)]
+        {
+            assert!(super::validate_name("nul.cast").is_err());
+            assert!(super::validate_name("COM1.prod-1.cast").is_err());
+            assert!(super::validate_name("web-1.cast").is_ok());
+            let name = format!("{}-20261022T113005Z.cast", super::sanitize_alias("aux.lan"));
+            assert!(super::validate_name(&name).is_ok(), "{name}");
+        }
+    }
+}

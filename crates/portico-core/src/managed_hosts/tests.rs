@@ -1262,3 +1262,38 @@ fn a_password_with_no_vault_says_vault_missing() {
     .expect("update");
     assert_eq!(delete(&fx.config, "db").expect("delete"), "db");
 }
+
+/// Key paths as Windows gives them (`C:\Users\me\.ssh\id`) and with `/`:
+/// both accepted and resolved to the same file, written `~/…` with `/`;
+/// every other check still applies.
+#[test]
+fn identity_file_separators() {
+    let fx = Fixture::new("");
+    let home = fx.root().to_path_buf();
+    let key = fx.key("id_win");
+    let slashed = PathBuf::from(key.to_string_lossy().replace('\\', "/"));
+    let resolved = check_identity_file(&home, &slashed).expect("slashes");
+    assert!(crate::store::same_file(&resolved, &key), "{resolved:?}");
+    assert_eq!(identity_value(&home, &resolved), "~/.ssh/id_win");
+    assert!(check_identity_file(&home, Path::new("~/.ssh/id_win")).is_ok());
+    // Still refused: quotes, `..`, a public key, outside the home.
+    for bad in [
+        "~/.ssh/\"id_win",
+        "~/.ssh/../.ssh/id_win",
+        "~/.ssh/id_win.pub",
+    ] {
+        assert!(check_identity_file(&home, Path::new(bad)).is_err(), "{bad}");
+    }
+    #[cfg(windows)]
+    {
+        // The native form, as discovered keys have it.
+        let native = PathBuf::from(key.to_string_lossy().replace('/', "\\"));
+        let resolved = check_identity_file(&home, &native).expect("backslashes");
+        assert!(crate::store::same_file(&resolved, &key), "{resolved:?}");
+        assert_eq!(identity_value(&home, &resolved), "~/.ssh/id_win");
+        assert!(check_identity_file(&home, Path::new(r"~\.ssh\id_win")).is_ok());
+        assert!(check_identity_file(&home, Path::new(r"~\.ssh\..\.ssh\id_win")).is_err());
+    }
+    #[cfg(not(windows))]
+    assert!(check_identity_file(&home, Path::new(r"~/.ssh\id_win")).is_err());
+}

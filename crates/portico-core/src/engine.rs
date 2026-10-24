@@ -69,6 +69,8 @@ pub struct EngineConfig {
     /// Where passwords and passphrases are remembered.
     pub secrets: Arc<dyn SecretStore>,
     /// `SSH_AUTH_SOCK` captured at startup (`IdentityAgent` may override it).
+    /// On Windows, the OpenSSH agent pipe when the variable is unset (see
+    /// [`crate::agent_socket`]).
     pub agent_socket: Option<PathBuf>,
     pub connect_timeout: Duration,
     pub keepalive: Duration,
@@ -88,7 +90,7 @@ impl EngineConfig {
             paths,
             local_user: local_user(),
             event_capacity: DEFAULT_EVENT_CAPACITY,
-            agent_socket: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+            agent_socket: crate::agent_socket::default_socket(std::env::var_os("SSH_AUTH_SOCK")),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             keepalive: DEFAULT_KEEPALIVE,
             update_fetcher: crate::update::github(),
@@ -104,10 +106,16 @@ impl EngineConfig {
     }
 }
 
+/// The local account name (`%u`, default remote user): `USER`/`LOGNAME`
+/// on Unix, `USERNAME` on Windows (what OpenSSH for Windows uses).
 fn local_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "user".to_owned())
+    #[cfg(windows)]
+    let name = std::env::var("USERNAME");
+    #[cfg(not(windows))]
+    let name = std::env::var("USER").or_else(|_| std::env::var("LOGNAME"));
+    name.ok()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "user".to_owned())
 }
 
 /// Terminal geometry.

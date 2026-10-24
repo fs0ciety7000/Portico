@@ -92,14 +92,8 @@ impl KeyError {
                 "copy_id_failed",
                 Some("Check that the account has a writable home and a POSIX shell."),
             ),
-            Self::UnsafeDir { .. } => (
-                "key_unsafe_dir",
-                Some("Make it yours and private: chmod 700 ~/.ssh."),
-            ),
-            Self::AgentUnavailable { .. } => (
-                "agent_unavailable",
-                Some("Start ssh-agent (eval $(ssh-agent)) or set IdentityAgent / SSH_AUTH_SOCK."),
-            ),
+            Self::UnsafeDir { .. } => ("key_unsafe_dir", Some(UNSAFE_DIR_HINT)),
+            Self::AgentUnavailable { .. } => ("agent_unavailable", Some(AGENT_UNAVAILABLE_HINT)),
             Self::AgentRefused(_) => (
                 "agent_refused",
                 Some("The agent may be locked (ssh-add -X) or not accept this key type."),
@@ -263,6 +257,9 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     {
         Some("only letters, digits, dot, dash and underscore")
+    } else if cfg!(windows) && crate::store::windows_name_problem(name) {
+        // `nul`, `com1.key`, `x.`: a device or a name Win32 rewrites.
+        Some("a name Windows reserves (CON, NUL, COM1…) or ending in a dot")
     } else if [".pub", "-cert", "-cert.pub"]
         .iter()
         .any(|s| name.ends_with(s))
@@ -307,6 +304,22 @@ fn validate_comment(comment: &str) -> Result<()> {
     }
 }
 
+/// How to make a key directory private again.
+#[cfg(not(windows))]
+const UNSAFE_DIR_HINT: &str = "Make it yours and private: chmod 700 ~/.ssh.";
+#[cfg(windows)]
+const UNSAFE_DIR_HINT: &str = "Make it yours and private: \
+     icacls %USERPROFILE%\\.ssh /inheritance:r /grant:r %USERNAME%:F";
+
+/// What to do when no agent answers (the agent is started differently on
+/// Windows: a service, not a shell command).
+#[cfg(not(windows))]
+const AGENT_UNAVAILABLE_HINT: &str =
+    "Start ssh-agent (eval $(ssh-agent)) or set IdentityAgent / SSH_AUTH_SOCK.";
+#[cfg(windows)]
+const AGENT_UNAVAILABLE_HINT: &str = "Start the \"OpenSSH Authentication Agent\" service \
+     (Start-Service ssh-agent) or set IdentityAgent / SSH_AUTH_SOCK to a named pipe.";
+
 /// Bidirectional overrides and isolates: they can make a comment display
 /// as something else (`evil\u{202E}moc.liame`).
 pub(crate) fn is_bidi_control(c: char) -> bool {
@@ -336,13 +349,29 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
                 .into());
             }
         }
+        // Windows: a trusted owner (the user, SYSTEM, Administrators) and
+        // nobody else able to write — the OpenSSH for Windows rule.
+        #[cfg(windows)]
+        if !crate::winfs::dir_is_safe(dir).map_err(|e| Error::io(dir, e))? {
+            return Err(KeyError::UnsafeDir {
+                path: dir.to_path_buf(),
+            }
+            .into());
+        }
         return Ok(());
     }
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir).map_err(|e| Error::io(dir, e))
+    #[cfg(windows)]
+    {
+        crate::store::create_private_dir_all(dir)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir).map_err(|e| Error::io(dir, e))
+    }
 }
 
 /// The uid of this process: the owner of a file it creates (no `unsafe`
@@ -366,14 +395,19 @@ fn current_uid() -> Result<u32> {
     created.map(|m| m.uid()).map_err(|e| Error::io(&dir, e))
 }
 
-/// Creates `path` exclusively (never follows or replaces anything).
+/// Creates `path` exclusively (never follows or replaces anything). On
+/// Windows a private `mode` (no group/other bit: `0600`) becomes an
+/// owner-only DACL, set before any byte is written; other modes keep the
+/// inherited DACL (a `.pub`, `0644`).
 pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    #[cfg(not(windows))]
     let mut opts = std::fs::OpenOptions::new();
+    #[cfg(not(windows))]
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
-    #[cfg(not(unix))]
-    let _ = mode;
+    #[cfg(windows)]
+    let opts = crate::winfs::private_new_file();
     let mut file = opts.open(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => KeyError::Exists {
             path: path.to_path_buf(),
@@ -381,6 +415,18 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .into(),
         _ => Error::io(path, e),
     })?;
+    // No group/other bit: the Unix mode bits read better than `trailing_zeros`.
+    #[cfg(windows)]
+    #[allow(clippy::verbose_bit_mask)]
+    if mode & 0o077 == 0
+        && let Err(e) = crate::winfs::restrict_file(&file, path)
+    {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(Error::io(path, e));
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = mode;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     if let Err(e) = written {
         drop(file);
@@ -664,7 +710,23 @@ mod tests {
         std::fs::write(dir.path().join("id_half.pub"), "keep me").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("/nonexistent", dir.path().join("id_link")).unwrap();
-        for name in ["id_taken", "id_half", "id_link"] {
+        // Windows: a dangling symlink needs Developer Mode or an elevated
+        // token (CI); without one the case is skipped.
+        // Wine maps it to a Unix symlink that `CREATE_NEW` follows: not
+        // Windows' behaviour, skipped too.
+        #[cfg(windows)]
+        let linked =
+            std::os::windows::fs::symlink_file(r"C:\nonexistent", dir.path().join("id_link"))
+                .is_ok()
+                && !crate::winfs::tests::under_wine();
+        #[cfg(not(windows))]
+        let linked = true;
+        let names: &[&str] = if linked {
+            &["id_taken", "id_half", "id_link"]
+        } else {
+            &["id_taken", "id_half"]
+        };
+        for &name in names {
             let err =
                 generate(dir.path(), &request(name, KeyAlgorithm::Ed25519, None)).unwrap_err();
             assert_eq!(err.summary().code, "key_exists", "{name}");

@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use russh::keys::HashAlg;
-use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::{AgentIdentity, Constraint};
 use russh::keys::ssh_key::{PrivateKey, PublicKey};
 use secrecy::{ExposeSecret, SecretString};
@@ -50,7 +49,7 @@ impl AgentCertificate {
     }
 }
 
-type Client = AgentClient<tokio::net::UnixStream>;
+type Client = crate::session::signer::Agent;
 
 impl Engine {
     /// Key pairs in `~/.ssh` (public halves only; never reads private keys).
@@ -75,7 +74,7 @@ impl Engine {
             socket: socket.clone(),
         };
         let path = socket.clone().ok_or_else(unavailable)?;
-        tokio::time::timeout(AGENT_TIMEOUT, AgentClient::connect_uds(&path))
+        tokio::time::timeout(AGENT_TIMEOUT, crate::agent_socket::connect(&path))
             .await
             .map_err(|_| unavailable())?
             .map_err(|_| unavailable().into())

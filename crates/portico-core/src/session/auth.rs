@@ -1104,6 +1104,19 @@ fn load_identities(
                     .and_then(|t| Certificate::from_openssh(t.trim()).ok())
                     .filter(|c| c.public_key() == public.key_data())
             });
+        // Windows: OpenSSH refuses a private key other accounts can read;
+        // Portico warns (its Unix behaviour does not refuse loose modes).
+        #[cfg(windows)]
+        if let Some(key) = private.as_deref()
+            && crate::winfs::readable_by_others(key)
+        {
+            notes.push(format!(
+                "warning: {} is readable by other accounts (OpenSSH would refuse it): \
+                 icacls \"{}\" /inheritance:r /grant:r %USERNAME%:F",
+                key.display(),
+                key.display()
+            ));
+        }
         identities.push(FileIdentity {
             has_private: private.is_some(),
             path: private.unwrap_or(base),
@@ -1160,30 +1173,22 @@ fn public_half(path: &Path) -> Option<PublicKey> {
 }
 
 async fn connect_agent_at(ctx: &SessionCtx, socket: &Path) -> Option<Agent> {
-    #[cfg(unix)]
-    {
-        match russh::keys::agent::client::AgentClient::connect_uds(socket).await {
-            Ok(agent) => {
-                ctx.log(
-                    LogLevel::Debug,
-                    "agent",
-                    format!("connected to {}", socket.display()),
-                );
-                Some(agent.dynamic())
-            }
-            Err(e) => {
-                ctx.log(
-                    LogLevel::Warn,
-                    "agent",
-                    format!("cannot reach ssh-agent at {}: {e}", socket.display()),
-                );
-                None
-            }
+    match crate::agent_socket::connect(socket).await {
+        Ok(agent) => {
+            ctx.log(
+                LogLevel::Debug,
+                "agent",
+                format!("connected to {}", socket.display()),
+            );
+            Some(agent)
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (ctx, socket);
-        None
+        Err(e) => {
+            ctx.log(
+                LogLevel::Warn,
+                "agent",
+                format!("cannot reach ssh-agent at {}: {e}", socket.display()),
+            );
+            None
+        }
     }
 }

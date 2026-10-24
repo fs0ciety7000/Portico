@@ -14,7 +14,7 @@
 mod auth;
 pub(crate) mod handler;
 pub(crate) mod route;
-mod signer;
+pub(crate) mod signer;
 mod stream;
 pub(crate) mod terminal;
 

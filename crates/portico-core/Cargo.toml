@@ -41,6 +41,10 @@ semver.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+# Owner-only DACLs (the Windows `0600`/`0700`), see `winfs.rs`.
+[target.'cfg(windows)'.dependencies]
+portico-winsec.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 pretty_assertions.workspace = true
