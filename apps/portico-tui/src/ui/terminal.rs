@@ -214,6 +214,7 @@ impl<T: EventListener> Widget for TermWidget<'_, T> {
             colors: content.colors,
         };
         let cols = u16::try_from(self.term.columns()).unwrap_or(u16::MAX);
+        let min_contrast = self.theme.appearance.terminal_min_contrast();
         for indexed in content.display_iter {
             let cell = indexed.cell;
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -244,12 +245,7 @@ impl<T: EventListener> Widget for TermWidget<'_, T> {
             if cell.flags.contains(Flags::STRIKEOUT) {
                 modifier |= Modifier::CROSSED_OUT;
             }
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::HIDDEN) {
-                fg = bg;
-            }
+            (fg, bg) = cell_colours(cell.flags, fg, bg, min_contrast);
             if let Some(search) = self.search {
                 let point = indexed.point;
                 if search.current.as_ref().is_some_and(|m| m.contains(&point)) {
@@ -388,6 +384,33 @@ impl Palette<'_> {
     }
 }
 
+/// Inverse, hidden and, on a light theme, a pale colour made for dark
+/// terminals darkened just enough to read (like xterm.js in the GUI; dim
+/// text keeps its fade).
+fn cell_colours(flags: Flags, mut fg: Color, mut bg: Color, min_contrast: f64) -> (Color, Color) {
+    if flags.contains(Flags::INVERSE) {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if flags.contains(Flags::HIDDEN) {
+        fg = bg;
+    } else if min_contrast > 1.0 && !flags.contains(Flags::DIM) {
+        fg = readable(fg, bg, min_contrast);
+    }
+    (fg, bg)
+}
+
+/// `fg` moved just enough to reach `min` contrast on `bg` (both RGB;
+/// anything else is left alone).
+fn readable(fg: Color, bg: Color, min: f64) -> Color {
+    match (fg, bg) {
+        (Color::Rgb(r, g, b), Color::Rgb(br, bgg, bb)) => {
+            let out = portico_theme::Rgb(r, g, b).readable_on(portico_theme::Rgb(br, bgg, bb), min);
+            Color::Rgb(out.0, out.1, out.2)
+        }
+        _ => fg,
+    }
+}
+
 /// A dim (SGR 2) colour: two thirds of the way from the background to the
 /// colour. On a dark theme that is two thirds of its value (towards black);
 /// on a light one it fades towards the marble, never darker than the colour
@@ -418,6 +441,21 @@ fn cell_char(c: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn light_theme_darkens_only_unreadable_remote_colours() {
+        use super::{Color, readable};
+        let bg = Color::Rgb(0xf4, 0xf1, 0xec);
+        // xterm 256-colour 108 (#87af87), a common prompt green.
+        let Color::Rgb(r, g, b) = readable(Color::Rgb(0x87, 0xaf, 0x87), bg, 4.5) else {
+            panic!("rgb expected");
+        };
+        let out = portico_theme::Rgb(r, g, b);
+        assert!(out.contrast(portico_theme::Rgb(0xf4, 0xf1, 0xec)) >= 4.5);
+        let ink = Color::Rgb(0x2c, 0x5c, 0xa3);
+        assert_eq!(readable(ink, bg, 4.5), ink);
+        assert_eq!(readable(Color::Reset, bg, 4.5), Color::Reset);
+    }
+
     #[test]
     fn dim_fades_towards_the_background() {
         use super::{Color, dim};
