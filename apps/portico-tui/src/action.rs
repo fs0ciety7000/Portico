@@ -176,6 +176,8 @@ pub(crate) enum Action {
     // Settings
     SettingsLoaded(Result<Settings, ErrorSummary>),
     ThemeSaved(Result<(), ErrorSummary>),
+    /// The terminal background found at startup (for `auto`).
+    SystemAppearance(portico_theme::Appearance),
     /// The engine bus dropped events for us: state is resynchronised
     /// through requests.
     EngineLagged,

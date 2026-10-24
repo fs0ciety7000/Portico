@@ -14,7 +14,6 @@ use portico_core::ids::{SessionId, TerminalId};
 use portico_core::search::{Hit, HostSearch};
 use portico_core::vault::VaultStatus;
 use portico_core::{Engine, EngineEvent, ErrorSummary};
-use portico_theme::{THEMES, Theme};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
@@ -136,7 +135,8 @@ pub(crate) struct App {
     pub(crate) running: bool,
     pub(crate) focus: Focus,
     pub(crate) overlay: Option<Overlay>,
-    pub(crate) theme_index: usize,
+    /// The theme setting (`auto` by default, see [`crate::theme::ThemeState`]).
+    pub(crate) theme: crate::theme::ThemeState,
     pub(crate) inventory: Option<HostInventory>,
     pub(crate) load_error: Option<String>,
     pub(crate) query: String,
@@ -270,7 +270,7 @@ impl App {
             running: true,
             focus: Focus::Hosts,
             overlay: None,
-            theme_index: 0,
+            theme: crate::theme::ThemeState::default(),
             inventory: None,
             load_error: None,
             query: String::new(),
@@ -323,11 +323,7 @@ impl App {
     }
 
     pub(crate) fn styles(&self) -> Styles {
-        Styles::new(
-            THEMES
-                .get(self.theme_index)
-                .unwrap_or_else(|| Theme::default_theme()),
-        )
+        Styles::new(self.theme.theme())
     }
 
     pub(crate) fn is_loading(&self) -> bool {
@@ -351,6 +347,19 @@ impl App {
         // Before the first frame: the saved theme, no flash of the default.
         let settings = self.engine.settings().await.map_err(|e| e.summary());
         self.update(Action::SettingsLoaded(settings));
+        // The terminal background, asked once now, before anything reads
+        // the input (see `appearance.rs`): `auto` uses it, now or when the
+        // user cycles to it later (the query cannot run once the input
+        // reader has started).
+        if let Ok(found) = tokio::task::spawn_blocking(crate::appearance::detect).await {
+            tracing::debug!(
+                appearance = ?found.appearance,
+                source = ?found.source,
+                elapsed_us = found.elapsed.as_micros(),
+                "terminal background"
+            );
+            self.update(Action::SystemAppearance(found.appearance));
+        }
         self.spawn_load_hosts();
         self.spawn_load_recent();
         // No request unless the user turned the check on (the engine decides).
@@ -421,6 +430,10 @@ impl App {
                     self.prefix = false;
                 }
                 self.track_pane_repeat(action.as_ref(), key, now);
+                // Any other key ends a run of `t` presses (see `ThemeState::next`).
+                if action.is_some() && !matches!(action, Some(Action::CycleTheme)) {
+                    self.theme.cycling = false;
+                }
                 action
             }
             Event::Paste(text) => Some(Action::Paste(text)),

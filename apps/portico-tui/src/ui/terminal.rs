@@ -342,7 +342,7 @@ impl Palette<'_> {
                         } else if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
                             .contains(&idx)
                         {
-                            dim(self.ansi(idx - NamedColor::DimBlack as usize))
+                            dim(self.ansi(idx - NamedColor::DimBlack as usize), self.theme)
                         } else if foreground {
                             c(p.text_primary)
                         } else {
@@ -388,11 +388,22 @@ impl Palette<'_> {
     }
 }
 
-fn dim(color: Color) -> Color {
+/// A dim (SGR 2) colour: two thirds of the way from the background to the
+/// colour. On a dark theme that is two thirds of its value (towards black);
+/// on a light one it fades towards the marble, never darker than the colour
+/// itself (darkening would make dim text stand out more).
+fn dim(color: Color, theme: &Theme) -> Color {
+    let bg = if theme.is_light() {
+        theme.palette.bg_base
+    } else {
+        portico_theme::Rgb(0, 0, 0)
+    };
     match color {
         Color::Rgb(r, g, b) => {
-            let f = |v: u8| u8::try_from(u16::from(v) * 2 / 3).unwrap_or(v);
-            Color::Rgb(f(r), f(g), f(b))
+            let f = |v: u8, toward: u8| {
+                u8::try_from((u16::from(v) * 2 + u16::from(toward)) / 3).unwrap_or(v)
+            };
+            Color::Rgb(f(r, bg.0), f(g, bg.1), f(b, bg.2))
         }
         other => other,
     }
@@ -407,6 +418,23 @@ fn cell_char(c: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dim_fades_towards_the_background() {
+        use super::{Color, dim};
+        let obsidian = portico_theme::Theme::by_id("obsidian").unwrap();
+        let marble = portico_theme::Theme::by_id("marble").unwrap();
+        // Dark: two thirds of the value, as before.
+        assert_eq!(
+            dim(Color::Rgb(90, 60, 30), obsidian),
+            Color::Rgb(60, 40, 20)
+        );
+        // Light: towards the marble (lighter), never darker.
+        let Color::Rgb(r, g, b) = dim(Color::Rgb(0x1f, 0x1d, 0x1a), marble) else {
+            panic!("rgb expected");
+        };
+        assert!(r > 0x1f && g > 0x1d && b > 0x1a, "{r} {g} {b}");
+    }
+
     use super::cell_char;
 
     #[test]

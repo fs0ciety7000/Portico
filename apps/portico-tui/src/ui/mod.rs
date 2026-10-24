@@ -209,7 +209,7 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
     }
 
     // Window [first, last] around the active tab within the budget.
-    let theme = s.theme.name;
+    let theme = app.theme.label();
     let active = app.active.map_or(0, |i| i + 1);
     let budget_with_theme = width.saturating_sub(brand_width + theme.chars().count() + 3);
     let budget = width.saturating_sub(brand_width + 1);

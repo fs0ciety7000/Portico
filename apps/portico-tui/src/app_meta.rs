@@ -8,7 +8,7 @@ use std::io::Write;
 use crossterm::event::KeyEvent;
 use portico_core::settings::Settings;
 use portico_core::{EngineEvent, ErrorSummary};
-use portico_theme::{THEMES, Theme};
+use portico_theme::{AUTO, Theme};
 
 use crate::action::Action;
 use crate::app::{App, Focus, Overlay};
@@ -122,6 +122,7 @@ impl App {
                 }
             }
             Action::SettingsLoaded(result) => self.apply_settings(result),
+            Action::SystemAppearance(appearance) => self.theme.system = appearance,
             Action::ThemeSaved(Err(e)) => self.notify_error(ErrorSummary {
                 message: format!("theme not saved: {}", e.message),
                 ..e
@@ -500,16 +501,26 @@ impl App {
             }
         };
         let mut problems = Vec::new();
-        if let Some(id) = &settings.theme {
-            if let Some(i) = THEMES.iter().position(|t| t.id == id) {
-                self.theme_index = i;
-            } else {
-                self.theme_index = 0;
+        // `auto` when absent; an unknown id warns and falls back to it.
+        self.theme.fixed = None;
+        if let Some(id) = settings.theme.as_deref().filter(|id| *id != AUTO) {
+            self.theme.fixed = Theme::by_id(id);
+            if self.theme.fixed.is_none() {
                 problems.push(format!(
-                    "Unknown theme “{}”: using {}",
+                    "Unknown theme “{}”: using Auto",
+                    crate::ui::fmt::truncate(id, 24),
+                ));
+            }
+        }
+        self.theme.dark = Theme::default_theme();
+        if let Some(id) = &settings.dark_theme {
+            match Theme::by_id(id).filter(|t| !t.is_light()) {
+                Some(dark) => self.theme.dark = dark,
+                None => problems.push(format!(
+                    "dark_theme “{}” is not a dark theme: using {}",
                     crate::ui::fmt::truncate(id, 24),
                     Theme::default_theme().name
-                ));
+                )),
             }
         }
         let (keymap, ignored) = Keymap::with_overrides(&settings.keymap.tui);
@@ -523,13 +534,13 @@ impl App {
     /// `t`: next theme, saved to `settings.toml` (only the theme changes:
     /// another UI's settings are kept).
     pub(crate) fn cycle_theme(&mut self) {
-        self.theme_index = (self.theme_index + 1) % THEMES.len();
-        let theme = self.styles().theme;
-        self.notify(format!("Theme · {}", theme.name));
-        let (engine, id) = (self.engine.clone(), theme.id);
+        self.theme = self.theme.next();
+        self.notify(format!("Theme · {}", self.theme.label()));
+        let (theme, dark) = self.theme.to_settings();
+        let engine = self.engine.clone();
         spawn(self, async move {
             let result = engine
-                .set_theme(Some(id.to_owned()))
+                .set_theme(Some(theme.to_owned()), Some(dark.to_owned()))
                 .await
                 .map(|_| ())
                 .map_err(|e| e.summary());
@@ -1206,6 +1217,43 @@ mod render_tests {
         assert!(app.debug_panel.is_some());
         let lines = screen(&mut app, 80, 24);
         assert!(!lines.join("\n").contains("Keyboard shortcuts"));
+    }
+
+    #[test]
+    fn auto_theme_from_settings_and_the_detected_background() {
+        let mut app = test_app();
+        // Absent theme: auto, dark on an undetected terminal.
+        app.update(Action::SettingsLoaded(Ok(Settings::default())));
+        assert!(app.theme.is_auto());
+        assert_eq!(app.styles().theme.id, "obsidian");
+        let settings = Settings {
+            theme: Some("auto".into()),
+            dark_theme: Some("basalt".into()),
+            ..Settings::default()
+        };
+        app.update(Action::SettingsLoaded(Ok(settings)));
+        assert_eq!(app.styles().theme.id, "basalt");
+        assert!(app.toast.is_none());
+        app.update(Action::SystemAppearance(portico_theme::Appearance::Light));
+        assert_eq!(app.styles().theme.id, "marble");
+        let lines = screen(&mut app, 80, 24);
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.trim_end().ends_with("Auto · Marble")),
+            "{lines:?}"
+        );
+        // A light theme as the dark one is refused, with a notice.
+        let settings = Settings {
+            theme: Some("auto".into()),
+            dark_theme: Some("marble".into()),
+            ..Settings::default()
+        };
+        app.update(Action::SystemAppearance(portico_theme::Appearance::Dark));
+        app.update(Action::SettingsLoaded(Ok(settings)));
+        assert_eq!(app.styles().theme.id, "obsidian");
+        let hint = app.toast.clone().and_then(|t| t.hint).unwrap_or_default();
+        assert!(hint.contains("is not a dark theme"), "{hint}");
     }
 
     #[test]

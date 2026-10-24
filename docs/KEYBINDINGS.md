@@ -89,7 +89,7 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Onglet suivant | `]`, `Tab` | `hosts.next_tab` |
 | Onglet précédent | `[`, `Shift-Tab` | `hosts.prev_tab` |
 | Recharger `~/.ssh/config` | `r` | `hosts.reload` |
-| Changer de thème (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
+| Thème suivant : Obsidian, Basalt, Travertine Night, Marble, puis Auto (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
 | « Update » : la version disponible (notes de version, commande de mise à jour copiable en OSC 52), ou l'état de la vérification quotidienne | `u` | `hosts.update` |
 | « Updates » : état de la vérification quotidienne des nouvelles versions, `y` l'active ou la désactive (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`) | `U` | `hosts.update_check` |
 | Aide | `?` | `hosts.help` |
