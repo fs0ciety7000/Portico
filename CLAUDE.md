@@ -1,7 +1,7 @@
 # CLAUDE.md — Portico
 
 > **Portico** : gestionnaire de sessions SSH moderne, *local-first*, rapide et *keyboard-first*,
-> pour macOS et Linux. Alternative ouverte à Termius, sans cloud ni lock-in.
+> pour macOS, Linux et Windows. Alternative ouverte à Termius, sans cloud ni lock-in.
 > Un moteur Rust (`portico-core`) et deux interfaces : une **TUI** et une **GUI**.
 
 Ce fichier est le contrat du projet. Toute contribution (humaine ou agent) le respecte.
@@ -78,7 +78,8 @@ Portico/
 │   │       ├── snippets.rs     # snippets globaux / par hôte / par tag, placeholders
 │   │       ├── logs.rs         # LogRing par session (panneau debug)
 │   │       └── store.rs        # chemins XDG/macOS, TOML atomique 0600
-│   └── portico-theme/          # design tokens (Rust) → ratatui + CSS généré
+│   ├── portico-theme/          # design tokens (Rust) → ratatui + CSS généré
+│   └── portico-winsec/         # Windows seulement : DACL propriétaire seul (seul crate autorisé à `unsafe`)
 ├── apps/
 │   ├── portico-tui/            # binaire `portico` (ratatui + crossterm + alacritty_terminal)
 │   └── portico-gui/            # Tauri 2 + Svelte 5 + xterm.js
@@ -132,6 +133,8 @@ Portico/
 - **Zéro `unwrap()`, `expect()`, `panic!`, `todo!`, `unimplemented!`, `dbg!` hors tests** : c'est un lint `deny` dans le workspace.
   On utilise `?`, `ok_or`, `unwrap_or_else`, ou `lock().unwrap_or_else(PoisonError::into_inner)`.
 - `#![forbid(unsafe_code)]` est actif au niveau workspace. Une exception exige une ADR dans `docs/STACK.md`.
+  Seule exception actuelle : `crates/portico-winsec` (appels Win32 pour les ACL, compilé seulement sous Windows,
+  `unsafe` refusé par défaut et autorisé fonction par fonction avec un commentaire `SAFETY:` par bloc).
 - **Erreurs typées** : un enum `thiserror` par module, agrégé dans `portico_core::Error`, avec `#[non_exhaustive]`.
   Pas d'`anyhow` dans `portico-core`. Les UIs affichent `Error::summary()` (code, message, hint)
   et ne font **jamais** de *string matching*.

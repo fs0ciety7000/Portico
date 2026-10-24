@@ -230,7 +230,7 @@ export interface UpdateStatus {
 
 /** Mirrors `portico_core::update::UpdateInstruction`: how to update this install. */
 export interface UpdateInstruction {
-  method: "homebrew" | "app_image" | "pacman" | "deb" | "mac_app" | "other";
+  method: "homebrew" | "app_image" | "pacman" | "deb" | "mac_app" | "scoop" | "windows_installer" | "windows_zip" | "other";
   text: string;
   /** A command to copy (Homebrew), else `null`. */
   command: string | null;
