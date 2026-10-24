@@ -155,7 +155,7 @@ fn default_download_dir() -> PathBuf {
     downloads_under(
         &dirs
             .map(|d| d.home_dir().to_path_buf())
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .or_else(crate::dto::home_dir)
             .unwrap_or_else(|| PathBuf::from(".")),
     )
 }
@@ -588,8 +588,8 @@ mod tests {
         let home = std::path::Path::new("/home/someone");
         assert_ne!(downloads_under(home), home);
         assert_ne!(default_download_dir(), PathBuf::from("/"));
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_ne!(default_download_dir(), PathBuf::from(home));
+        if let Some(home) = crate::dto::home_dir() {
+            assert_ne!(default_download_dir(), home);
         }
     }
 

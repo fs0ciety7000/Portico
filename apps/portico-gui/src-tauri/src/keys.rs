@@ -502,10 +502,10 @@ mod tests {
 
     #[test]
     fn local_keys_are_named_by_file_and_shown_safely() {
-        let home = std::env::var("HOME").unwrap();
+        let ssh = crate::dto::home_dir().unwrap().join(".ssh");
         let key = LocalKey {
-            private_path: Path::new(&home).join(".ssh/id_ed25519"),
-            public_path: Path::new(&home).join(".ssh/id_ed25519.pub"),
+            private_path: ssh.join("id_ed25519"),
+            public_path: ssh.join("id_ed25519.pub"),
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:abc".into(),
             comment: "me\u{202e}@evil\u{1b}[2J".into(),
