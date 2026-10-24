@@ -143,6 +143,8 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     // A section row: borders and padding (4), the selection symbol column
     // and the space after it (2), then the title and its count on the right.
     let row_width = usize::from(list.width).saturating_sub(6);
+    // A host row: the same, minus the leading space of a section title.
+    let host_width = row_width.saturating_add(1);
     let items: Vec<ListItem<'_>> = app
         .entries
         .iter()
@@ -185,12 +187,26 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
                 spans.push(Span::styled(" ★", s.accent()));
             }
             let target = match &h.resolved.user {
-                Some(u) => format!("  {u}@{}", h.resolved.hostname),
-                None => format!("  {}", h.resolved.hostname),
+                Some(u) => format!("{u}@{}", h.resolved.hostname),
+                None => h.resolved.hostname.clone(),
             };
-            spans.push(Span::styled(target, s.muted()));
-            for t in &h.meta.tags {
-                spans.push(Span::styled(format!(" #{t}"), s.secondary()));
+            // What is left of the row (after the selection column): the
+            // target cut with an ellipsis, then the tags that fit whole.
+            let used: usize = spans.iter().map(Span::width).sum();
+            let mut left = host_width.saturating_sub(used);
+            if left > 3 {
+                let target = super::fmt::truncate(&target, left - 2);
+                left = left.saturating_sub(target.chars().count() + 2);
+                spans.push(Span::styled(format!("  {target}"), s.muted()));
+                for t in &h.meta.tags {
+                    let tag = format!(" #{t}");
+                    let width = tag.chars().count();
+                    if width > left {
+                        break;
+                    }
+                    left -= width;
+                    spans.push(Span::styled(tag, s.secondary()));
+                }
             }
             ListItem::new(Line::from(spans))
         })

@@ -611,6 +611,57 @@ mod render_tests {
     }
 
     #[test]
+    fn long_host_target_ends_with_an_ellipsis() {
+        let mut app = test_app();
+        let mut long = test_host("api", None);
+        long.resolved.hostname = "api-gateway.internal.eu-west-3.example.com".into();
+        long.meta.tags = vec!["prod".into()];
+        let mut short = test_host("db", None);
+        short.meta.tags = vec!["sql".into()];
+        app.update(Action::HostsLoaded(Ok(HostInventory {
+            hosts: vec![long, short],
+            warnings: Vec::new(),
+        })));
+        let lines = screen(&mut app, 80, 24);
+        let row = lines
+            .iter()
+            .find(|l| l.contains("api-gateway"))
+            .unwrap_or_else(|| panic!("{}", lines.join("\n")));
+        assert!(row.contains('…'), "cut with an ellipsis: {row}");
+        assert!(!row.contains("#prod"), "no tag after a cut target: {row}");
+        // The ellipsis is the last character before the panel's border.
+        let after = row.split_once('…').unwrap().1;
+        assert!(after.trim_start().starts_with('│'), "{row}");
+        let row = lines.iter().find(|l| l.contains("● db")).unwrap();
+        assert!(row.contains("db  db #sql") && !row.contains('…'), "{row}");
+    }
+
+    #[test]
+    fn light_theme_dims_the_screen_under_a_modal() {
+        use crate::theme::c;
+        let bg_at = |app: &mut App, x: u16, y: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+            terminal.backend().buffer().cell((x, y)).unwrap().bg
+        };
+        for (id, dims) in [("marble", true), ("obsidian", false)] {
+            let mut app = hosts_app();
+            app.update(Action::SettingsLoaded(Ok(Settings {
+                theme: Some(id.into()),
+                ..Settings::default()
+            })));
+            let p = app.styles().theme.palette;
+            // A cell of the details panel, far from the centred modal.
+            let before = bg_at(&mut app, 78, 20);
+            assert!([c(p.bg_base), c(p.bg_surface)].contains(&before), "{id}");
+            app.update(Action::AskClearRecent);
+            assert!(!app.dialogs.is_empty());
+            let under = if dims { c(p.bg_elevated) } else { before };
+            assert_eq!(bg_at(&mut app, 78, 20), under, "{id}");
+        }
+    }
+
+    #[test]
     fn host_list_sections_and_selection() {
         let mut app = hosts_app();
         let lines = screen(&mut app, 80, 24);

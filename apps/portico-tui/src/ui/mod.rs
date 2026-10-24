@@ -152,10 +152,32 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     } else {
         toast_zone
     };
+    render_panels(app, frame, band, panel_open);
+    // After the panels: their scroll is clamped to what they show, so the
+    // bar's keys (`G follow`) match the screen.
+    statusbar::render(app, frame, status);
+    if app.overlay == Some(Overlay::Help) {
+        scrim(s, frame);
+    }
+    // Help, then toasts: above the panels, so a result is never hidden.
+    overlays::render(app, frame, toast_zone);
+    if let Some(d) = app.dialogs.front() {
+        scrim(s, frame);
+        dialog::render(d, s, tick, frame);
+    }
+}
+
+/// The overlay panels (tunnels, keys, snippets…) over a scrim, clear of
+/// the toast `band`.
+fn render_panels(app: &mut App, frame: &mut Frame<'_>, band: u16, panel_open: bool) {
+    let s = app.styles();
+    if panel_open || app.overlay == Some(Overlay::Tunnels) {
+        scrim(s, frame);
+    }
     if app.overlay == Some(Overlay::Tunnels)
         && let Some(panel) = &mut app.tunnels_panel
     {
-        tunnels::render(panel, &app.tunnels, s, tick, frame, band);
+        tunnels::render(panel, &app.tunnels, s, app.tick, frame, band);
     }
     match app.overlay {
         Some(Overlay::Keys) => keys::render(app, frame, band),
@@ -166,13 +188,29 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         Some(Overlay::Recordings) => recordings::render(app, frame, band),
         _ => {}
     }
-    // After the panels: their scroll is clamped to what they show, so the
-    // bar's keys (`G follow`) match the screen.
-    statusbar::render(app, frame, status);
-    // Help, then toasts: above the panels, so a result is never hidden.
-    overlays::render(app, frame, toast_zone);
-    if let Some(d) = app.dialogs.front() {
-        dialog::render(d, s, tick, frame);
+}
+
+/// Light themes only: the screen under a modal sinks from the page planes
+/// (`bg-base`, `bg-surface`) to `bg-elevated`, the TUI's scrim, so the
+/// modal (`bg-overlay`, the lightest plane) stands apart. Dark themes need
+/// none: their overlay is already lighter than the page. Idempotent.
+fn scrim(s: crate::theme::Styles, frame: &mut Frame<'_>) {
+    if !s.theme.is_light() {
+        return;
+    }
+    let p = &s.theme.palette;
+    let page = [crate::theme::c(p.bg_base), crate::theme::c(p.bg_surface)];
+    let under = crate::theme::c(p.bg_elevated);
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buffer.cell_mut((x, y))
+                && page.contains(&cell.bg)
+            {
+                cell.set_bg(under);
+            }
+        }
     }
 }
 
