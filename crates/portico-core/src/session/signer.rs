@@ -25,6 +25,10 @@ use crate::secrets::{SecretKey, SecretStore};
 
 /// Passphrase attempts before giving up on a key (OpenSSH: 3).
 const PASSPHRASE_ATTEMPTS: u32 = 3;
+/// An agent signature. Longer than the other agent requests: the agent may
+/// ask the user first (`ssh-add -c`, 1Password, a FIDO touch). Past this
+/// the key is skipped and the agent dropped for this login.
+const AGENT_SIGN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin + 'static>>;
 
@@ -46,6 +50,9 @@ pub(crate) enum Outcome {
     Signed,
     /// The key could not be unlocked (dismissed or wrong passphrase).
     Skipped,
+    /// The agent did not answer the signature request in time (skipped;
+    /// the agent must not be used again on this connection).
+    AgentTimedOut,
 }
 
 pub(crate) enum KeySigner<'a> {
@@ -328,12 +335,26 @@ impl russh::Signer for KeySigner<'_> {
                 agent,
                 ctx,
                 outcome,
-            } => match agent.sign_request(key, hash_alg, to_sign.clone()).await {
-                Ok(signed) => {
+            } => match tokio::time::timeout(
+                AGENT_SIGN_TIMEOUT,
+                agent.sign_request(key, hash_alg, to_sign.clone()),
+            )
+            .await
+            {
+                Ok(Ok(signed)) => {
                     *outcome = Outcome::Signed;
                     Ok(signed)
                 }
-                Err(e) => {
+                Err(_) => {
+                    ctx.log(
+                        LogLevel::Warn,
+                        "agent",
+                        "ssh-agent did not answer the signature request: skipped",
+                    );
+                    *outcome = Outcome::AgentTimedOut;
+                    refusal(key, hash_alg, to_sign)
+                }
+                Ok(Err(e)) => {
                     // Refused confirmation, cancelled Touch ID, FIDO timeout…:
                     // move on to the next identity like `ssh` does.
                     ctx.log(LogLevel::Warn, "agent", format!("agent did not sign: {e}"));

@@ -814,3 +814,44 @@ pub async fn start_agent_with(
     }
     socket
 }
+
+/// An agent that accepts connections and never answers (a hung agent).
+/// The connections are held open until the test ends.
+#[cfg(unix)]
+pub fn start_silent_agent(dir: &std::path::Path) -> PathBuf {
+    let socket = dir.join("silent-agent.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    socket
+}
+
+/// [`start_silent_agent`] on a named pipe (served by the test's own user,
+/// which the agent check accepts).
+#[cfg(windows)]
+pub fn start_silent_agent(_dir: &std::path::Path) -> PathBuf {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    let name = format!(
+        r"\\.\pipe\portico-test-silent-agent-{:016x}",
+        rand::random::<u64>()
+    );
+    let mut server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&name)
+        .unwrap();
+    let pipe = name.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while server.connect().await.is_ok() {
+            let Ok(next) = ServerOptions::new().create(&pipe) else {
+                break;
+            };
+            held.push(std::mem::replace(&mut server, next));
+        }
+    });
+    PathBuf::from(name)
+}

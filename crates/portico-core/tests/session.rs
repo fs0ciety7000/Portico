@@ -725,6 +725,39 @@ async fn identities_only_hides_unrelated_agent_keys() {
     }));
 }
 
+/// A hung agent (accepts, never answers) is skipped after a short timeout:
+/// the password is asked, the login succeeds, the session never times out.
+#[tokio::test]
+async fn a_silent_agent_is_skipped_for_the_next_method() {
+    let server = TestServer::start(Behaviour {
+        password: Some(("alice".into(), "pw".into())),
+        ..Behaviour::default()
+    })
+    .await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let socket = support::start_silent_agent(agent_dir.path());
+    let mut env = Env::with_agent(&target_config("t", server.port, ""), socket);
+    env.trust(&server);
+    let started = std::time::Instant::now();
+    let (id, out) = env
+        .connect("t", |k| match k {
+            PromptKind::Password { .. } => PromptResponse::Secret {
+                value: secret("pw"),
+                remember: false,
+            },
+            other => panic!("{other:?}"),
+        })
+        .await;
+    assert!(out.connected(), "{:?}", out.phases);
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    let logs = env.engine.session_logs(id).unwrap();
+    assert!(
+        logs.iter()
+            .any(|l| l.message.contains("did not answer: skipped")),
+        "{logs:?}"
+    );
+}
+
 // ── review regressions (protocol) ──────────────────────────────────────────
 
 #[tokio::test]
