@@ -2,7 +2,7 @@
 //!
 //! | Unix                                   | Windows (here)                                        |
 //! |----------------------------------------|-------------------------------------------------------|
-//! | file created `0600`                    | [`private_new_file`] then [`restrict_file`]: protected DACL, current user only, set on the handle **before any byte is written** |
+//! | file created `0600`                    | [`private_new_file`] then [`restrict_file`]: protected DACL, current user only, set on the handle **before any byte is written**; owner set to the user (an elevated process would otherwise leave `Administrators`) |
 //! | directory created `0700`               | [`restrict_dir`]: same DACL, inheritable (`OI\|CI`)   |
 //! | `O_NOFOLLOW`                           | `FILE_FLAG_OPEN_REPARSE_POINT` (a symlink or junction is opened as itself, then refused as "not a regular file") |
 //! | owner = euid, no `g/o` write (`0o022`) | [`audit_dir`]: owner is the user, `SYSTEM` or `Administrators`, nobody else can write (the OpenSSH for Windows rule) |
@@ -26,21 +26,30 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const NO_ACL_ERRORS: [i32; 2] = [1, 50];
 
 /// Options creating a new file (`CREATE_NEW`: never an existing name, nor a
-/// symlink planted there) whose handle may rewrite its DACL.
+/// symlink planted there) whose handle may rewrite its DACL and owner (a
+/// creator is granted what it asks for).
 pub(crate) fn private_new_file() -> OpenOptions {
     let mut opts = OpenOptions::new();
     opts.write(true)
         .create_new(true)
-        .access_mode(access::GENERIC_WRITE | access::READ_CONTROL | access::WRITE_DAC)
+        .access_mode(
+            access::GENERIC_WRITE | access::READ_CONTROL | access::WRITE_DAC | access::WRITE_OWNER,
+        )
         .custom_flags(access::FILE_FLAG_OPEN_REPARSE_POINT);
     opts
 }
 
 /// Adds the rights [`restrict_file`] needs to options that open (or create)
-/// a file for reading and writing.
+/// a file for reading and writing. `MAXIMUM_ALLOWED` picks up
+/// `WRITE_OWNER` when the DACL grants it (to make the user the owner), and
+/// does not fail the open when it does not.
 pub(crate) fn with_dacl_rights(opts: &mut OpenOptions) {
     opts.access_mode(
-        access::GENERIC_READ | access::GENERIC_WRITE | access::READ_CONTROL | access::WRITE_DAC,
+        access::GENERIC_READ
+            | access::GENERIC_WRITE
+            | access::READ_CONTROL
+            | access::WRITE_DAC
+            | access::MAXIMUM_ALLOWED,
     );
 }
 
@@ -65,7 +74,9 @@ pub(crate) fn restrict_file(file: &File, path: &Path) -> io::Result<()> {
 pub(crate) fn open_dir(path: &Path, write_dac: bool, pin: bool) -> io::Result<File> {
     let mut rights = access::READ_CONTROL | access::FILE_READ_ATTRIBUTES | access::SYNCHRONIZE;
     if write_dac {
-        rights |= access::WRITE_DAC;
+        // `MAXIMUM_ALLOWED`: also `WRITE_OWNER` when granted (see
+        // `with_dacl_rights`).
+        rights |= access::WRITE_DAC | access::MAXIMUM_ALLOWED;
     }
     let mut share = access::FILE_SHARE_READ | access::FILE_SHARE_WRITE;
     if !pin {
@@ -149,6 +160,13 @@ pub(crate) mod tests {
         );
         if !under_wine() {
             assert!(!readable_by_others(&path));
+            // The user's, even from an elevated process (CI).
+            let opened = OpenOptions::new()
+                .access_mode(access::READ_CONTROL)
+                .open(&path)
+                .expect("open");
+            let audit = audit(&opened).expect("audit").expect("ACLs");
+            assert_eq!(audit.owner, portico_winsec::Principal::CurrentUser);
         }
     }
 
@@ -160,6 +178,9 @@ pub(crate) mod tests {
         restrict_dir(&sub).expect("restrict");
         if !under_wine() {
             assert!(dir_is_safe(&sub).expect("audit"));
+            let opened = open_dir(&sub, false, false).expect("open");
+            let audit = audit(&opened).expect("audit").expect("ACLs");
+            assert_eq!(audit.owner, portico_winsec::Principal::CurrentUser);
         }
         assert!(open_dir(&dir.path().join("missing"), false, false).is_err());
     }

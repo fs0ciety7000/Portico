@@ -1,13 +1,16 @@
 //! Win32 implementation (see the crate doc for the `unsafe` policy).
 
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree,
+    ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
@@ -24,7 +27,15 @@ use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_READ_DATA, FILE_WRITE_DATA,
     WRITE_DAC, WRITE_OWNER,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::System::ErrorReporting::{WER_FAULT_REPORTING_FLAG_NOHEAP, WerSetFlags};
+use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+
+use crate::{Audit, Principal};
 
 /// `ACCESS_ALLOWED_ACE_TYPE` (`winnt.h`): the only allow ACE whose SID sits
 /// at a fixed offset. Deny ACEs are ignored by the audit (they only remove
@@ -120,49 +131,13 @@ impl Sid {
     }
 }
 
-/// Who owns the object, among the principals OpenSSH for Windows trusts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Principal {
-    CurrentUser,
-    /// `NT AUTHORITY\SYSTEM`.
-    System,
-    /// `BUILTIN\Administrators` (owner of what an elevated process creates).
-    Administrators,
-    Other,
-}
-
-/// What [`audit`] found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Audit {
-    pub owner: Principal,
-    /// A principal other than the current user, `SYSTEM` or
-    /// `Administrators` can read the content (or has no DACL to stop it).
-    pub others_can_read: bool,
-    /// … can write, delete or re-permission it.
-    pub others_can_write: bool,
-    /// The DACL is protected (does not inherit from the parent).
-    pub protected: bool,
-}
-
-impl Audit {
-    /// Owned by a trusted principal.
-    pub fn owner_trusted(&self) -> bool {
-        self.owner != Principal::Other
-    }
-
-    /// Trusted owner, and nobody else can read or write: what OpenSSH for
-    /// Windows requires of a private key.
-    pub fn is_private(&self) -> bool {
-        self.owner_trusted() && !self.others_can_read && !self.others_can_write
-    }
-}
-
 /// The trusted principals, resolved once per process (they do not change).
 #[derive(Debug)]
 struct Trusted {
     user: Sid,
     system: Sid,
     administrators: Sid,
+    installer: Sid,
 }
 
 impl Trusted {
@@ -175,6 +150,7 @@ impl Trusted {
             user: current_user()?,
             system: well_known(WinLocalSystemSid)?,
             administrators: well_known(WinBuiltinAdministratorsSid)?,
+            installer: trusted_installer(),
         };
         Ok(TRUSTED.get_or_init(|| trusted))
     }
@@ -186,6 +162,8 @@ impl Trusted {
             Principal::System
         } else if *sid == self.administrators {
             Principal::Administrators
+        } else if *sid == self.installer {
+            Principal::TrustedInstaller
         } else {
             Principal::Other
         }
@@ -195,11 +173,18 @@ impl Trusted {
 /// The user of this process's token.
 #[allow(unsafe_code)]
 fn current_user() -> io::Result<Sid> {
-    let mut raw: HANDLE = null_mut();
     // SAFETY: no precondition; returns a pseudo-handle that needs no closing.
     let process = unsafe { GetCurrentProcess() };
-    // SAFETY: `process` is valid for this process; `raw` is a valid out
-    // pointer.
+    token_user(process)
+}
+
+/// The user of the token of `process` (a handle with at least
+/// `PROCESS_QUERY_LIMITED_INFORMATION`, valid for the call).
+#[allow(unsafe_code)]
+fn token_user(process: HANDLE) -> io::Result<Sid> {
+    let mut raw: HANDLE = null_mut();
+    // SAFETY: `process` is a valid process handle (caller contract); `raw`
+    // is a valid out pointer.
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut raw) } == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -246,6 +231,26 @@ fn current_user() -> io::Result<Sid> {
     unsafe { Sid::copy_from(user.User.Sid, usize::try_from(len).unwrap_or(0)) }
 }
 
+/// `NT SERVICE\TrustedInstaller`, `S-1-5-80-956008885-3418522649-1831038044-
+/// 1853292631-2271478464`: a service SID (SHA-1 of the service name), the
+/// same on every machine, with no `WELL_KNOWN_SID_TYPE`. Built from its
+/// bytes: revision 1, 6 sub-authorities, authority 5 (NT), then the
+/// sub-authorities as native `DWORD`s, the layout of a SID.
+fn trusted_installer() -> Sid {
+    Sid {
+        words: vec![
+            u32::from_ne_bytes([1, 6, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 5]),
+            80,
+            956_008_885,
+            3_418_522_649,
+            1_831_038_044,
+            1_853_292_631,
+            2_271_478_464,
+        ],
+    }
+}
+
 /// A well-known SID of the local machine (`SYSTEM`, `Administrators`).
 #[allow(unsafe_code)]
 fn well_known(kind: WELL_KNOWN_SID_TYPE) -> io::Result<Sid> {
@@ -265,7 +270,9 @@ fn well_known(kind: WELL_KNOWN_SID_TYPE) -> io::Result<Sid> {
 
 /// Replaces the DACL of `object` (a file, or a directory when `directory`)
 /// with a protected DACL granting only the current user full control
-/// (inheritable to children for a directory). The handle needs `WRITE_DAC`.
+/// (inheritable to children for a directory), and makes the user its owner
+/// when the handle allows it. The handle needs `WRITE_DAC`, and
+/// `WRITE_OWNER` for the owner (see [`crate::access`]).
 #[allow(unsafe_code)]
 pub fn restrict_to_owner(object: &impl AsHandle, directory: bool) -> io::Result<()> {
     let user = &Trusted::get()?.user;
@@ -308,9 +315,31 @@ pub fn restrict_to_owner(object: &impl AsHandle, directory: bool) -> io::Result<
         return Err(io::Error::last_os_error());
     }
     let handle = object.as_handle();
-    // SAFETY: `handle` is a live handle borrowed for the call; the ACL is
-    // valid and outlives the call; owner, group and SACL may be null since
-    // the flags only name the DACL.
+    // Owner first choice: the user too, so that what an elevated process
+    // creates (owned by `Administrators` by default) is the user's, like
+    // what a standard one creates. Needs `WRITE_OWNER` on the handle; one
+    // opened without it gets the DACL alone (the owner stays a trusted one:
+    // the creator).
+    // SAFETY: `handle` is a live handle borrowed for the call; the SID and
+    // the ACL are valid and outlive the call; group and SACL may be null
+    // since the flags only name the owner and the DACL.
+    let status = unsafe {
+        SetSecurityInfo(
+            handle.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            user.as_psid(),
+            null_mut(),
+            acl.as_ptr().cast::<ACL>(),
+            null(),
+        )
+    };
+    if status != ERROR_ACCESS_DENIED {
+        return win32(status);
+    }
+    // SAFETY: as above, with the DACL alone (owner left as is, may be null).
     let status = unsafe {
         SetSecurityInfo(
             handle.as_raw_handle(),
@@ -364,6 +393,15 @@ pub fn audit(object: &impl AsHandle) -> io::Result<Audit> {
     };
     win32(status)?;
     let guard = LocalDescriptor(descriptor);
+    if owner.is_null() {
+        // No owner at all: a volume without security (FAT32, exFAT, some
+        // network shares). Said as "not supported", like the other ACL
+        // calls there, so callers treat it as "no ACL to check".
+        drop(guard);
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(ERROR_NOT_SUPPORTED).unwrap_or(50),
+        ));
+    }
     // SAFETY: `owner` points to the owner SID inside the live descriptor;
     // `IsValidSid` + the SID length bound the copy (a SID is at most
     // `SECURITY_MAX_SID_SIZE` bytes).
@@ -462,6 +500,107 @@ unsafe fn protected(descriptor: PSECURITY_DESCRIPTOR) -> bool {
     ok != 0 && control & SE_DACL_PROTECTED != 0
 }
 
+/// Who runs the server end of the named pipe `pipe` (a client handle):
+/// the user of the server process's token, `None` when that token cannot
+/// be opened (another account's process, or a service: a standard user may
+/// not open a `SYSTEM` token). Combine with the pipe's owner ([`audit`])
+/// through [`crate::agent_server_trusted`].
+#[allow(unsafe_code)]
+pub fn pipe_server_user(pipe: &impl AsHandle) -> io::Result<Option<Principal>> {
+    let trusted = Trusted::get()?;
+    let mut pid = 0u32;
+    // SAFETY: the handle is live for the call (borrowed); `pid` is a valid
+    // out pointer. Fails (no pid) on anything but a pipe client handle.
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_handle().as_raw_handle(), &raw mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: plain call; the returned handle, when not null, is new and
+    // owned by nobody else.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        let e = io::Error::last_os_error();
+        return if e.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED).ok() {
+            Ok(None)
+        } else {
+            Err(e)
+        };
+    }
+    // SAFETY: `raw` is a new process handle (checked non-null) that nothing
+    // else owns; `OwnedHandle` closes it exactly once.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    match token_user(process.as_raw_handle()) {
+        Ok(sid) => Ok(Some(trusted.classify(&sid))),
+        Err(e) if e.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED).ok() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A string allocated by the shell (`CoTaskMemAlloc`).
+struct CoTaskString(*mut u16);
+
+impl Drop for CoTaskString {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: the block was allocated by `SHGetKnownFolderPath` (or is
+        // null, which `CoTaskMemFree` accepts), and is freed only here.
+        unsafe { CoTaskMemFree(self.0.cast_const().cast()) };
+    }
+}
+
+/// Longest path the known-folder API returns (`UNICODE_STRING` limit, in
+/// UTF-16 units): bounds the scan for the terminating NUL.
+const MAX_KNOWN_FOLDER_LEN: usize = 32_767;
+
+/// `%PROGRAMDATA%` (usually `C:\ProgramData`), from the known folder
+/// `FOLDERID_ProgramData`: the environment variable can be set by whoever
+/// starts the process, the known folder cannot.
+#[allow(unsafe_code)]
+pub fn program_data_dir() -> io::Result<PathBuf> {
+    let mut raw: *mut u16 = null_mut();
+    // SAFETY: the GUID is a static; flags 0 (`KF_FLAG_DEFAULT`); a null
+    // token is the current user; `raw` is a valid out pointer. The string
+    // it receives is freed by the guard (also on failure, as documented).
+    let status =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, null_mut(), &raw mut raw) };
+    let guard = CoTaskString(raw);
+    if status != 0 || guard.0.is_null() {
+        return Err(io::Error::other(format!(
+            "no ProgramData known folder (HRESULT {status:#010x})"
+        )));
+    }
+    let mut units = Vec::new();
+    for index in 0..MAX_KNOWN_FOLDER_LEN {
+        // SAFETY: the string is NUL-terminated and alive (guard); `index`
+        // never passes its NUL, since the loop stops there.
+        let unit = unsafe { guard.0.wrapping_add(index).read() };
+        if unit == 0 {
+            return Ok(PathBuf::from(OsString::from_wide(&units)));
+        }
+        units.push(unit);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "ProgramData path too long",
+    ))
+}
+
+/// Asks Windows Error Reporting to leave the heap out of this process's
+/// crash reports (`WER_FAULT_REPORTING_FLAG_NOHEAP`): a report sent or kept
+/// after a crash does not carry the memory that may hold secrets. Per
+/// process, no registry write, no rights needed.
+#[allow(unsafe_code)]
+pub fn disable_wer_heap_dumps() -> io::Result<()> {
+    // SAFETY: plain call with a documented flag; no pointer.
+    let status = unsafe { WerSetFlags(WER_FAULT_REPORTING_FLAG_NOHEAP) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "WerSetFlags: HRESULT {status:#010x}"
+        )))
+    }
+}
+
 fn win32(status: u32) -> io::Result<()> {
     if status == ERROR_SUCCESS {
         Ok(())
@@ -488,7 +627,11 @@ mod tests {
     fn open_dir(path: &std::path::Path) -> std::fs::File {
         use std::os::windows::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
-            .access_mode(crate::access::READ_CONTROL | crate::access::WRITE_DAC)
+            .access_mode(
+                crate::access::READ_CONTROL
+                    | crate::access::WRITE_DAC
+                    | crate::access::MAXIMUM_ALLOWED,
+            )
             .custom_flags(crate::access::FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)
             .unwrap()
@@ -509,6 +652,57 @@ mod tests {
     }
 
     #[test]
+    fn program_data_is_absolute() {
+        let dir = program_data_dir().unwrap();
+        assert!(dir.is_absolute(), "{}", dir.display());
+    }
+
+    #[test]
+    fn wer_flags_are_accepted() {
+        if under_wine() {
+            return; // wine may not implement WER
+        }
+        disable_wer_heap_dumps().unwrap();
+    }
+
+    #[test]
+    fn trusted_installer_sid() {
+        assert_eq!(
+            format!("{:?}", trusted_installer()),
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+        );
+    }
+
+    #[test]
+    fn a_file_is_not_a_pipe() {
+        let file = tempfile::tempfile().unwrap();
+        assert!(pipe_server_user(&file).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_pipe_of_this_user_is_a_trusted_agent_server() {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let name = format!(r"\\.\pipe\portico-winsec-test-{}", std::process::id());
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let client = ClientOptions::new().open(&name).unwrap();
+        if under_wine() {
+            return; // no pipe security descriptor under wine
+        }
+        let user = pipe_server_user(&client).unwrap();
+        let owner = audit(&client).unwrap().owner;
+        assert_eq!(user, Some(Principal::CurrentUser));
+        // `Administrators` when the test runs elevated (CI).
+        assert!(
+            matches!(owner, Principal::CurrentUser | Principal::Administrators),
+            "{owner:?}"
+        );
+        assert!(crate::agent_server_trusted(owner, user));
+    }
+
+    #[test]
     fn restricted_file_is_private() {
         use std::os::windows::fs::OpenOptionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -519,7 +713,8 @@ mod tests {
             .access_mode(
                 crate::access::GENERIC_WRITE
                     | crate::access::READ_CONTROL
-                    | crate::access::WRITE_DAC,
+                    | crate::access::WRITE_DAC
+                    | crate::access::WRITE_OWNER,
             )
             .open(&path)
             .unwrap();
@@ -530,6 +725,8 @@ mod tests {
         }
         assert!(audit.is_private(), "{audit:?}");
         assert!(audit.protected, "{audit:?}");
+        // The user's even when this test runs elevated (CI runners), where
+        // a new file is owned by `Administrators`.
         assert_eq!(audit.owner, Principal::CurrentUser);
     }
 
@@ -544,6 +741,7 @@ mod tests {
         }
         let dir_audit = audit(&open_dir(&sub)).unwrap();
         assert!(dir_audit.is_private(), "{dir_audit:?}");
+        assert_eq!(dir_audit.owner, Principal::CurrentUser);
         let child = sub.join("child");
         std::fs::write(&child, b"x").unwrap();
         let opened = {
