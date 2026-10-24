@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Never published to crates.io: it depends on path crates (portico-winsec).
+publish = false
 
 [dependencies]
 tokio.workspace = true
