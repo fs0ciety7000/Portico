@@ -751,9 +751,15 @@ async fn a_silent_agent_is_skipped_for_the_next_method() {
     assert!(out.connected(), "{:?}", out.phases);
     assert!(started.elapsed() < std::time::Duration::from_secs(15));
     let logs = env.engine.session_logs(id).unwrap();
+    // Wine: the pipe's owner cannot be read, so the agent is refused
+    // before it is asked anything (still skipped, never a timeout).
+    let expected = if support::under_wine() {
+        "refused"
+    } else {
+        "did not answer: skipped"
+    };
     assert!(
-        logs.iter()
-            .any(|l| l.message.contains("did not answer: skipped")),
+        logs.iter().any(|l| l.message.contains(expected)),
         "{logs:?}"
     );
 }
