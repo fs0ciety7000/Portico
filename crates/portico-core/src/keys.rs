@@ -332,7 +332,8 @@ const AGENT_UNAVAILABLE_HINT: &str =
 #[cfg(windows)]
 const AGENT_UNAVAILABLE_HINT: &str = "Enable and start the \"OpenSSH Authentication Agent\" \
      service (admin PowerShell: Get-Service ssh-agent | Set-Service -StartupType Automatic; \
-     Start-Service ssh-agent), or set IdentityAgent / SSH_AUTH_SOCK to a named pipe.";
+     Start-Service ssh-agent), or set SSH_AUTH_SOCK to a named pipe \
+     (in ssh_config: IdentityAgent //./pipe/<name>).";
 
 /// What to do when the agent pipe is served by another account.
 const AGENT_UNTRUSTED_HINT: &str = "Another account may be impersonating the agent: \

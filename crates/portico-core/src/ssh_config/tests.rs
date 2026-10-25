@@ -319,7 +319,7 @@ mod windows_paths {
     fn drive_paths_tilde_backslash_and_pipes() {
         let home = Path::new(r"C:\Users\alice");
         let cfg = SshConfig::parse_str(
-            "Host a\n  IdentityFile C:\\Users\\alice\\.ssh\\id_work\n  IdentityFile ~\\.ssh\\id_ed25519\n  IdentityAgent \\\\.\\pipe\\openssh-ssh-agent\n  UserKnownHostsFile \"C:\\Users\\alice\\My Files\\known_hosts\"\n",
+            "Host a\n  IdentityFile C:\\Users\\alice\\.ssh\\id_work\n  IdentityFile ~\\.ssh\\id_ed25519\n  IdentityAgent //./pipe/openssh-ssh-agent\n  UserKnownHostsFile \"C:\\Users\\alice\\My Files\\known_hosts\"\n",
             &home.join(r".ssh\config"),
             &home.join(".ssh"),
         )
@@ -332,13 +332,33 @@ mod windows_paths {
                 PathBuf::from(r"C:\Users\alice\.ssh\id_ed25519"),
             ]
         );
+        // The `/` form is the one to write (no escape for OpenSSH).
         assert_eq!(
             h.identity_agent.as_deref(),
-            Some(r"\\.\pipe\openssh-ssh-agent")
+            Some("//./pipe/openssh-ssh-agent")
         );
         assert!(crate::agent_socket::is_named_pipe(Path::new(
             h.identity_agent.as_deref().unwrap_or_default()
         )));
+        // `\\.\pipe\…` loses a backslash to OpenSSH's escaping (`\\` is
+        // `\`), like with `ssh`: not a pipe any more. Doubled, it is one.
+        for (written, pipe) in [
+            (r"\\.\pipe\openssh-ssh-agent", false),
+            (r"\\\\.\pipe\openssh-ssh-agent", true),
+        ] {
+            let cfg = SshConfig::parse_str(
+                &format!("Host b\n  IdentityAgent {written}\n"),
+                &home.join(r".ssh\config"),
+                &home.join(".ssh"),
+            )
+            .expect("valid");
+            let agent = cfg.resolve("b", &win_ctx(home)).identity_agent;
+            assert_eq!(
+                crate::agent_socket::is_named_pipe(Path::new(agent.as_deref().unwrap_or_default())),
+                pipe,
+                "{written} -> {agent:?}"
+            );
+        }
         assert_eq!(
             h.user_known_hosts_files,
             [PathBuf::from(r"C:\Users\alice\My Files\known_hosts")]
