@@ -32,15 +32,28 @@
 //! debugger attachment; the TUI binary only gets `RLIMIT_CORE = 0`. This is
 //! reported as [`StepStatus::Unsupported`].
 //!
-//! Windows (Phase 8): neither measure is applied, both are reported as
-//! [`StepStatus::Unsupported`]. There is no `RLIMIT_CORE`: Windows Error
-//! Reporting writes a local crash dump only when an administrator enabled
-//! `LocalDumps` in the registry, and opting one program out
-//! (`WerAddExcludedApplication`) is a per-user registry write we do not make
-//! behind the user's back. Other processes of the same user can open this
-//! one (`PROCESS_VM_READ`), as on macOS without the hardened runtime: a
-//! process DACL would not stop them (the owner can always rewrite it). No
-//! measure needs administrator rights, so none is attempted.
+//! Windows (Phase 8):
+//!
+//! - **`core_dumps`**: `WerSetFlags(WER_FAULT_REPORTING_FLAG_NOHEAP)`
+//!   (`portico-winsec`): when Portico crashes, the report Windows Error
+//!   Reporting builds (queued under `%LOCALAPPDATA%\Microsoft\Windows\WER`,
+//!   possibly sent to Microsoft depending on the consent settings) leaves
+//!   the heap out, where secrets live. Per process, no registry write, no
+//!   rights needed. What it does **not** stop: a full dump an administrator
+//!   asked for (`LocalDumps` with `DumpType` 2 in the registry, a debugger,
+//!   Task Manager's "Create dump file"); opting out of those
+//!   (`WerAddExcludedApplication`) is a per-user registry write we do not
+//!   make behind the user's back.
+//! - **`ptrace`**: `Unsupported`. Other processes of the same user can open
+//!   this one (`PROCESS_VM_READ`), as on macOS without the hardened
+//!   runtime: a process DACL would not stop them (the owner can always
+//!   rewrite it).
+//!
+//! Both binaries are also linked with `/DEPENDENTLOADFLAG:0x800`
+//! (`LOAD_LIBRARY_SEARCH_SYSTEM32` for the DLLs they import, MSVC only, see
+//! their `build.rs`): a DLL planted next to `portico.exe` (a Downloads
+//! folder) is not loaded instead of the system one. No measure needs
+//! administrator rights, so none is attempted.
 //!
 //! Hardening is best effort: a failure is reported, never fatal.
 
@@ -131,8 +144,11 @@ fn disable_core_dumps() -> StepStatus {
 
 #[cfg(windows)]
 fn disable_core_dumps() -> StepStatus {
-    StepStatus::Unsupported {
-        reason: "no RLIMIT_CORE on Windows; WER dumps only if an administrator enabled LocalDumps",
+    match portico_winsec::disable_wer_heap_dumps() {
+        Ok(()) => StepStatus::Applied,
+        Err(e) => StepStatus::Failed {
+            reason: e.to_string(),
+        },
     }
 }
 
@@ -205,13 +221,27 @@ mod tests {
             assert!(std::fs::read_to_string("/proc/self/status").is_ok());
         }
         #[cfg(windows)]
-        assert!(
-            report
-                .steps
-                .iter()
-                .all(|s| matches!(s.status, StepStatus::Unsupported { .. })),
-            "{report:?}"
-        );
+        {
+            let status = |name: &str| {
+                report
+                    .steps
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| s.status.clone())
+            };
+            // Wine may not implement WER: only Windows itself is asserted.
+            if !crate::winfs::tests::under_wine() {
+                assert_eq!(
+                    status("core_dumps"),
+                    Some(StepStatus::Applied),
+                    "{report:?}"
+                );
+            }
+            assert!(
+                matches!(status("ptrace"), Some(StepStatus::Unsupported { .. })),
+                "{report:?}"
+            );
+        }
         // Idempotent.
         let again = harden_process();
         #[cfg(target_os = "linux")]

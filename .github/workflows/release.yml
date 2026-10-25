@@ -157,8 +157,15 @@ jobs:
             if llvm-readobj --coff-imports "$bin" | grep -iE 'Name: (vcruntime|msvcp)[0-9_]*\.dll'; then
               echo "::error::portico.exe imports the VC++ runtime (crt-static did not apply)"; exit 1
             fi
+            # /DEPENDENTLOADFLAG:0x800 (build.rs): imports resolved from System32 only.
+            flags=$(llvm-readobj --coff-load-config "$bin" | grep -i 'DependentLoadFlags' || true)
+            echo "$flags"
+            case "$flags" in
+              *0x800*) ;;
+              *) echo "::error::portico.exe was not linked with /DEPENDENTLOADFLAG:0x800 ($flags)"; exit 1 ;;
+            esac
           else
-            echo "::warning::llvm-readobj not found: the DLL imports of portico.exe were not checked"
+            echo "::warning::llvm-readobj not found: the DLL imports and load flags of portico.exe were not checked"
           fi
       - name: Package
         if: runner.os != 'Windows'
@@ -469,9 +476,28 @@ jobs:
           if ($alive) { Stop-Process -Id $app.Id -Force }
           Get-Content (Join-Path $env:RUNNER_TEMP 'gui.err') -ErrorAction SilentlyContinue | Select-Object -First 40
           if (-not $alive) { throw "Portico exited at startup (code $($app.ExitCode))" }
+          # /DEPENDENTLOADFLAG:0x800 (build.rs): imports resolved from System32 only.
+          $readobj = Get-Command llvm-readobj -ErrorAction SilentlyContinue
+          if ($readobj) {
+            $flags = (& $readobj.Source --coff-load-config $exe.FullName | Select-String -Pattern 'DependentLoadFlags') -join ' '
+            $flags
+            if ($flags -notmatch '0x800') { throw "the GUI was not linked with /DEPENDENTLOADFLAG:0x800 ($flags)" }
+          } else {
+            Write-Warning 'llvm-readobj not found: the load flags of the GUI were not checked'
+          }
+          # Portico's data (%LOCALAPPDATA%\Portico\portico\data, created at
+          # startup when the app writes state) sits under the install folder:
+          # the uninstaller removes its own files only and keeps it.
+          $data = Join-Path $dir 'portico'
+          $hadData = Test-Path $data
           $uninstall = $reg.UninstallString.Trim('"')
           $u = Start-Process -FilePath $uninstall -ArgumentList '/S' -Wait -PassThru
           if ($u.ExitCode -ne 0) { throw "uninstaller exit code $($u.ExitCode)" }
+          # NSIS uninstallers copy themselves and return early: wait for the files to go.
+          for ($i = 0; $i -lt 30 -and (Test-Path $exe.FullName); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path $exe.FullName) { throw "$($exe.FullName) is still there after uninstalling" }
+          if ($hadData -and -not (Test-Path $data)) { throw "the uninstaller deleted Portico's data ($data)" }
+          "user data kept after uninstall: $hadData ($data)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gui-windows-x64
