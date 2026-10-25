@@ -26,7 +26,11 @@ administrateur, dans `%LOCALAPPDATA%\Portico` (raccourci du menu Démarrer, entr
 installées » sous `HKCU\…\Uninstall\Portico`). Le *bootstrapper* Evergreen de WebView2 est embarqué et
 ne s'exécute (silencieusement) que si le runtime manque, ce qui n'arrive pas sous Windows 11. Un
 *downgrade* silencieux est refusé (`allowDowngrades: false`). La désinstallation ne touche ni `~/.ssh`
-ni les données de Portico (`%APPDATA%\Portico\portico\`, partagées avec la TUI) ; la case « supprimer
+ni les données de Portico, partagées avec la TUI : réglages (`%APPDATA%\Portico\portico\config\`,
+itinérants) et données (`%LOCALAPPDATA%\Portico\portico\data\` : vault, enregistrements, journaux,
+**locaux**). Ce dernier dossier est sous le dossier d'installation : le désinstalleur de Tauri ne supprime
+que ses propres fichiers puis un `RMDir` non récursif (vérifié dans `installer.nsi` de `tauri-bundler`
+2.10.3, et par la CI : l'exécutable disparaît, les données restent). La case « supprimer
 les données de l'application » ne vise que l'état WebView2 (`%LOCALAPPDATA%\dev.portico.app`). Pas de
 MSI (WiX, installation par machine) pour l'instant.
 

@@ -126,9 +126,11 @@ plan se déroule sur le PC Windows 11 du propriétaire ; cocher dans une copie e
       (perçu, ou chronomètre de capture d'écran) ; pas de flash blanc avec le thème clair ou sombre.
 - [ ] Zip TUI : *Propriétés → Débloquer* (ou `Unblock-File`), extraire, `portico --version` dans Windows
       Terminal ; **interface utilisable en moins de 100 ms** à froid.
-- [ ] Désinstaller (*Applications installées*) : `%APPDATA%\Portico\portico\` (réglages, `hosts.toml`,
-      `hosts.conf`, vault, enregistrements) et `%USERPROFILE%\.ssh` **restent** ; avec la case « supprimer
-      les données », seul `%LOCALAPPDATA%\dev.portico.app` (WebView2) disparaît.
+- [ ] Désinstaller (*Applications installées*) : `%APPDATA%\Portico\portico\config\` (réglages,
+      `hosts.toml`, `hosts.conf`), `%LOCALAPPDATA%\Portico\portico\data\` (vault, enregistrements,
+      journaux : sous le dossier d'installation, que le désinstalleur ne vide pas) et `%USERPROFILE%\.ssh`
+      **restent** ; avec la case « supprimer les données », seul `%LOCALAPPDATA%\dev.portico.app` (WebView2)
+      disparaît.
 - [ ] Réinstaller une version **plus ancienne** par-dessus en silencieux (`setup.exe /S`) : refusé
       (`allowDowngrades: false`).
 
@@ -142,7 +144,11 @@ pour la GUI sous Windows : `Ctrl`, `Ctrl-Shift` dans un terminal).
      s'applique ; la config effective (panneau debug, onglet *Effective config*) montre l'origine
      `fichier:ligne` avec des chemins `~/.ssh/…`.
    - [ ] Un `Include C:/Users/<moi>/.ssh/autre` (absolu, barres obliques) et un `IdentityFile` en
-     `C:\Users\<moi>\.ssh\cle` (barres inverses) sont compris ; `~` vaut `%USERPROFILE%`.
+     `C:\Users\<moi>\.ssh\cle` (barres inverses) sont compris ; `~` vaut `%USERPROFILE%` ; un
+     `IdentityFile ~/ma\ cle` ou `'~/ma cle'` (échappement et guillemets simples d'OpenSSH) aussi.
+   - [ ] Utilisateur par défaut : sans `User`, Portico se connecte avec le même nom que `ssh.exe`
+     (`ssh -G <hôte> | findstr /b user`) : nom du compte en minuscules, `domaine\nom` pour un compte de
+     domaine.
 2. **Recherche floue, tags, groupes**
    - [ ] GUI · [ ] TUI : recherche floue, `#tag`, `*` (favoris), `@groupe` ; ajout et retrait d'un tag,
      d'un groupe ; `hosts.toml` écrit dans `%APPDATA%\Portico\portico\config\`.
@@ -169,7 +175,21 @@ pour la GUI sous Windows : `Ctrl`, `Ctrl-Shift` dans un terminal).
    - [ ] **Agent OpenSSH (tube nommé)** : `ssh-add C:\Users\<moi>\.ssh\id_ed25519` dans PowerShell, puis la
      liste de l'agent dans Portico montre la clé ; ajout et retrait depuis Portico visibles par `ssh-add -l`.
    - [ ] `SSH_AUTH_SOCK` défini sur un tube (`$env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'`) : utilisé ;
-     service `ssh-agent` **arrêté** : erreur claire avec un *hint* (démarrer le service), aucune attente.
+     `IdentityAgent //./pipe/openssh-ssh-agent` dans `~/.ssh/config` aussi (la graphie `\\.\pipe\…` y perd une
+     barre inverse, comme avec `ssh.exe`) ; service `ssh-agent` **arrêté** (état par défaut) : à la
+     connexion, rien d'autre qu'une ligne `Debug` « no ssh-agent (service not running) », et dans le panneau
+     des clés une erreur claire avec le *hint* (activer et démarrer le service), aucune attente.
+   - [ ] `SSH_AUTH_SOCK` sur le socket de Git Bash (`/tmp/ssh-…/agent.N`) : erreur
+     `agent_endpoint_unsupported` (« unset it to use the Windows agent »).
+   - [ ] **Tube usurpé** : service arrêté, un autre compte local (session ouverte par *Changer d'utilisateur*)
+     crée `\\.\pipe\openssh-ssh-agent` (par exemple `npiperelay` ou un petit serveur PowerShell
+     `System.IO.Pipes.NamedPipeServerStream`) : l'ajout d'une clé à l'agent dans Portico est **refusé**
+     (`agent_untrusted`), rien n'est envoyé ; la connexion passe à la méthode suivante.
+   - [ ] Agent bloqué (un serveur de tube qui accepte sans jamais répondre) : la connexion bascule sur le
+     mot de passe ou la clé après environ 5 s (« did not answer: skipped » dans le journal), jamais 60 s.
+   - [ ] Ajout à l'agent : la boîte de dialogue dit que l'agent Windows garde la clé jusqu'à son retrait
+     (y compris après redémarrage) ; une durée (1 h) refusée par l'agent donne un *hint* clair, sans parler
+     d'agent verrouillé.
    - [ ] Pageant (PuTTY) lancé seul : non pris en charge, message clair (documenté).
 6. **Génération de clés**
    - [ ] GUI · [ ] TUI : ed25519, rsa 3072, ecdsa, avec passphrase ; `ssh.exe -i <clé> <hôte>`
@@ -203,8 +223,10 @@ pour la GUI sous Windows : `Ctrl`, `Ctrl-Shift` dans un terminal).
 13. **Secrets : Gestionnaire d'identification (vault en repli)**
     - [ ] GUI · [ ] TUI : mémoriser un mot de passe d'hôte ; il apparaît dans *Panneau de configuration →
       Gestionnaire d'identification → Informations d'identification Windows → génériques* (service
-      `dev.portico`), **jamais** en clair dans `%APPDATA%\Portico\` (`findstr /s /i <motdepasse>
-      %APPDATA%\Portico\*` ne trouve rien) ni dans les journaux.
+      `dev.portico`), avec la persistance **Ordinateur local** (`cmdkey /list` : « Persistance : Ordinateur
+      local », jamais « Entreprise » : pas de copie vers un profil itinérant), **jamais** en clair dans
+      `%APPDATA%\Portico\` ni `%LOCALAPPDATA%\Portico\portico\` (`findstr /s /i <motdepasse> …\*` ne trouve
+      rien) ni dans les journaux.
     - [ ] Supprimer l'hôte Portico : l'identifiant disparaît du Gestionnaire. Vault chiffré : création,
       déverrouillage, changement de passphrase.
 14. **Mode debug : journaux par session**
@@ -222,19 +244,45 @@ icacls "$env:USERPROFILE\.ssh\id_portico_test"          # clé générée par Po
 icacls "$env:USERPROFILE\.ssh\portico"                  # dossier des clés importées, et ses fichiers
 icacls "$env:APPDATA\Portico\portico\config\hosts.toml"
 icacls "$env:APPDATA\Portico\portico\config\hosts.conf"
-icacls "$env:APPDATA\Portico\portico\data"              # vault, enregistrements, journaux
+icacls "$env:LOCALAPPDATA\Portico\portico\data"         # vault, enregistrements, journaux (local, jamais itinérant)
 icacls "$env:USERPROFILE\.ssh\known_hosts"              # après acceptation d'une clé hôte
 ```
-- [ ] Une clé privée rendue lisible par d'autres (`icacls <clé> /grant Users:R`) : Portico avertit ou
-      refuse, comme OpenSSH (`ssh -i` répond « UNPROTECTED PRIVATE KEY FILE »).
+- [ ] Le **propriétaire** de chacun est l'utilisateur (`(Get-Acl <chemin>).Owner`), y compris quand Portico a
+      été lancé **en administrateur** (sinon Windows y mettrait `BUILTIN\Administrators`).
+- [ ] Une clé privée rendue lisible par d'autres (`icacls <clé> /grant Users:R`) : Portico avertit (ligne
+      `Warn` du journal de connexion, avec la commande `icacls` exacte : chemin absolu et nom du compte,
+      sans `%VAR%`, à coller tel quel dans PowerShell), comme OpenSSH (`ssh -i` répond « UNPROTECTED
+      PRIVATE KEY FILE »).
+- [ ] `known_hosts` **système** : un compte standard crée `C:\ProgramData\ssh\ssh_known_hosts` (possible
+      tant qu'OpenSSH Server n'a pas créé le dossier) avec la clé d'un faux serveur : Portico l'**ignore**
+      (ligne `Warn` « skipped (not owned by the system…) ») et pose la question de clé hôte. Le même
+      fichier créé par un administrateur (propriétaire `Administrators`, non modifiable par les
+      utilisateurs) est utilisé. Lancer Portico avec `$env:PROGRAMDATA = 'C:\Users\<moi>\x'` ne change pas
+      le dossier lu (dossier connu, pas la variable).
 - [ ] **Points d'analyse** : un *junction* (`mklink /J`, sans droits admin) ou un lien symbolique
       (`mklink`, mode développeur) à la place de `hosts.toml`, du dossier `data` ou d'une destination de
       download : refusé, jamais suivi.
+- [ ] **`~/.ssh` en junction** (décision : suivi, comme un `~/.ssh` lien symbolique sous Unix) : déplacer
+      `%USERPROFILE%\.ssh` vers `D:\ssh` et `mklink /J %USERPROFILE%\.ssh D:\ssh` : les hôtes, `known_hosts` et
+      les clés sont lus, la génération et l'import de clés fonctionnent si `D:\ssh` vous appartient et
+      qu'aucun autre compte ne peut y écrire (sinon `key_unsafe_dir`, avec la commande `icacls` exacte) ;
+      `~/.ssh/portico` en junction reste refusé.
+- [ ] **Volume sans ACL** (clé USB **FAT32** puis **exFAT**) : `~/.ssh` en junction vers un dossier de la
+      clé (le dossier des enregistrements n'est pas réglable : il ne peut pas être testé là) : génération
+      et import de clés fonctionnent, une ligne `Warn` « no ACL support on this volume » est journalisée
+      (comme les modes Unix sur un tel montage), aucune erreur `InvalidData` ; `ssh.exe` d'OpenSSH, lui,
+      peut refuser ces clés (attendu) ; un `GlobalKnownHostsFile` posé sur ce volume est ignoré (« no file
+      permissions to verify »).
 - [ ] **Aucun droit administrateur** n'est demandé, à aucun moment (installation, premier lancement,
       génération de clé, tunnel).
-- [ ] **Durcissement du processus** : ce que le rapport `PORTICO_LOG=info` annonce au démarrage
-      (`hardening`) correspond à ce que l'ADR Windows décrit ; un plantage provoqué ne laisse pas de
-      *minidump* contenant des secrets si l'ADR l'exclut (`%LOCALAPPDATA%\CrashDumps`).
+- [ ] **Durcissement du processus** : ce que le rapport `PORTICO_LOG=debug` annonce au démarrage
+      (`hardening` : `core_dumps` appliqué = rapport WER sans le tas, `ptrace` non disponible) correspond à
+      l'ADR Windows ; un plantage provoqué laisse au plus un rapport WER **sans tas**
+      (`%LOCALAPPDATA%\Microsoft\Windows\WER`) ; un *dump* complet n'existe que si un administrateur a
+      configuré `LocalDumps` (`%LOCALAPPDATA%\CrashDumps`, hors de portée de Portico, documenté).
+- [ ] `portico.exe` et `portico-gui.exe` copiés dans `Téléchargements` à côté d'une DLL système factice
+      (`version.dll`) : la DLL n'est pas chargée (`/DEPENDENTLOADFLAG:0x800` ; vérifiable aussi par
+      `llvm-readobj --coff-load-config`).
 
 **WebView2 et fenêtre (GUI)**
 - [ ] Hors terminal, `F5`, `Ctrl-R`, `Ctrl-Shift-R`, `Alt-←`, `Ctrl-P`, `Ctrl-F`, `F7` **ne font rien**
