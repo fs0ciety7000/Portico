@@ -835,9 +835,11 @@ pub fn start_silent_agent(dir: &std::path::Path) -> PathBuf {
 #[cfg(windows)]
 pub fn start_silent_agent(_dir: &std::path::Path) -> PathBuf {
     use tokio::net::windows::named_pipe::ServerOptions;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let name = format!(
-        r"\\.\pipe\portico-test-silent-agent-{:016x}",
-        rand::random::<u64>()
+        r"\\.\pipe\portico-test-silent-agent-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
     );
     let mut server = ServerOptions::new()
         .first_pipe_instance(true)
