@@ -7,6 +7,7 @@
   import { keys } from "../state/keys.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Modal from "./Modal.svelte";
+  import { isWindowsWebview } from "../webview";
 
   let { key }: { key: LocalKey } = $props();
 
@@ -15,6 +16,10 @@
     { label: "1 hour", secs: 3600 },
     { label: "8 hours", secs: 8 * 3600 },
   ];
+
+  // The Windows agent stores keys (registry, DPAPI) until they are
+  // removed, across reboots, and may refuse a lifetime.
+  const windowsAgent = isWindowsWebview(navigator.userAgent);
 
   let armed = $state(false);
   let lifetime = $state(0);
@@ -76,6 +81,9 @@
           <button type="button" aria-pressed={lifetime === i} data-autofocus={i === 0 && !needsPassphrase ? "" : undefined} onclick={() => (lifetime = i)}>{l.label}</button>
         {/each}
       </div>
+      {#if windowsAgent}
+        <span class="note">The Windows agent keeps keys, across restarts, until they are removed, and may refuse a lifetime.</span>
+      {/if}
     </div>
     {#if needsPassphrase}
       <label class="field">
