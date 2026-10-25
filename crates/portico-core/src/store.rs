@@ -163,8 +163,8 @@ pub(crate) fn slash_relative(rest: &Path) -> String {
 ///   `a:b` writes an NTFS alternate data stream of `a`;
 /// - a trailing dot or space (silently stripped by Win32: `a.` is `a`);
 /// - a reserved device name, with or without extension, any case, trailing
-///   spaces before the dot ignored: `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
-///   `LPT1`–`LPT9`, the superscript `COM¹²³`/`LPT¹²³`, `CONIN$`, `CONOUT$`.
+///   spaces before the dot ignored: `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`,
+///   `LPT0`–`LPT9` (`0` is listed reserved by current Microsoft docs), the superscript `COM¹²³`/`LPT¹²³`, `CONIN$`, `CONOUT$`.
 pub(crate) fn windows_name_problem(name: &str) -> bool {
     if name
         .chars()
@@ -192,7 +192,7 @@ pub(crate) fn windows_name_problem(name: &str) -> bool {
             let mut chars = n.chars();
             matches!(
                 (chars.next(), chars.next()),
-                (Some('1'..='9' | '¹' | '²' | '³'), None)
+                (Some('0'..='9' | '¹' | '²' | '³'), None)
             )
         })
     };
@@ -633,6 +633,8 @@ mod tests {
             "COM\u{b3}",
             "CONIN$",
             "conout$.x",
+            "COM0",
+            "lpt0.txt",
         ] {
             assert!(windows_name_problem(bad), "{bad:?}");
         }
@@ -643,7 +645,7 @@ mod tests {
             "CON-2026.cast",
             "nul_device",
             "COM10",
-            "COM0",
+            "COM00",
             "LPT",
             "com1x",
             "été 2026.txt",
