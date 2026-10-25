@@ -22,8 +22,9 @@ use portico_winsec::access;
 
 /// `FILE_ATTRIBUTE_REPARSE_POINT`: symlink, junction, mount point…
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-/// `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`: no ACL on this volume.
-const NO_ACL_ERRORS: [i32; 2] = [1, 50];
+/// `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`: no ACL on this volume
+/// (also what `portico_winsec::audit` answers for a NULL owner, FAT).
+const NO_ACL_ERRORS: [i32; 2] = [ERROR_INVALID_FUNCTION, 50];
 
 /// Options creating a new file (`CREATE_NEW`: never an existing name, nor a
 /// symlink planted there) whose handle may rewrite its DACL and owner (a
@@ -63,9 +64,23 @@ fn tolerate_no_acl(result: io::Result<()>, what: &Path) -> io::Result<()> {
     }
 }
 
-/// Owner-only, protected DACL on an open file (see the module doc).
+/// `ERROR_INVALID_FUNCTION`: what a FAT volume answers, but also what a
+/// device (`NUL`, a console, a pipe reached through an odd name) answers.
+const ERROR_INVALID_FUNCTION: i32 = 1;
+
+/// Owner-only, protected DACL on an open file (see the module doc). "No
+/// ACL here" is tolerated only for a regular file: a device handle that
+/// answers `ERROR_INVALID_FUNCTION` is an error, never a silent success.
 pub(crate) fn restrict_file(file: &File, path: &Path) -> io::Result<()> {
-    tolerate_no_acl(portico_winsec::restrict_to_owner(file, false), path)
+    match portico_winsec::restrict_to_owner(file, false) {
+        Err(e)
+            if e.raw_os_error() == Some(ERROR_INVALID_FUNCTION)
+                && !file.metadata().is_ok_and(|m| m.is_file()) =>
+        {
+            Err(e)
+        }
+        other => tolerate_no_acl(other, path),
+    }
 }
 
 /// Opens a directory itself (not what a reparse point leads to), for its
@@ -119,8 +134,31 @@ pub(crate) fn audit(object: &File) -> io::Result<Option<portico_winsec::Audit>> 
 
 /// Whether an existing directory is safe to create secrets in: a trusted
 /// owner, and nobody else can write (`None`: no ACLs, nothing to check).
+/// The directory itself must not be a reparse point. (Tests: Portico
+/// checks `~/.ssh` with [`dir_is_safe_following`].)
+#[cfg(test)]
 pub(crate) fn dir_is_safe(path: &Path) -> io::Result<bool> {
     let dir = open_dir(path, false, false)?;
+    Ok(audit(&dir)?.is_none_or(|a| a.owner_trusted() && !a.others_can_write))
+}
+
+/// [`dir_is_safe`] for `~/.ssh` itself, which may be a junction or a
+/// directory symlink (like a symlinked `~/.ssh` on Unix, followed there):
+/// the directory it leads to is opened and audited. Only who can write the
+/// profile folder can plant `~/.ssh`; what Portico creates inside is still
+/// opened without following reparse points.
+pub(crate) fn dir_is_safe_following(path: &Path) -> io::Result<bool> {
+    let dir = OpenOptions::new()
+        .access_mode(access::READ_CONTROL | access::FILE_READ_ATTRIBUTES | access::SYNCHRONIZE)
+        .share_mode(access::FILE_SHARE_READ | access::FILE_SHARE_WRITE | access::FILE_SHARE_DELETE)
+        .custom_flags(access::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    if !dir.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "not a directory",
+        ));
+    }
     Ok(audit(&dir)?.is_none_or(|a| a.owner_trusted() && !a.others_can_write))
 }
 
@@ -165,6 +203,30 @@ pub(crate) fn readable_by_others(path: &Path) -> bool {
     matches!(audit(&file), Ok(Some(a)) if a.others_can_read || !a.owner_trusted())
 }
 
+/// The account `icacls` should grant, as Windows names it
+/// (`DOMAIN\\user`, the computer name for a local account), from the
+/// environment (a hint only: nothing is decided from it).
+fn icacls_account() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() && !user.is_empty() => format!("{domain}\\{user}"),
+        _ if !user.is_empty() => user,
+        _ => "<your account>".to_owned(),
+    }
+}
+
+/// The `icacls` command that makes `path` private like Portico does
+/// (protected DACL, the user only), with the real account name and the
+/// absolute path: no `%VAR%`, which PowerShell would not expand.
+pub(crate) fn icacls_private(path: &Path, directory: bool) -> String {
+    let inherit = if directory { "(OI)(CI)" } else { "" };
+    format!(
+        "icacls \"{}\" /inheritance:r /grant:r \"{}:{inherit}F\"",
+        path.display(),
+        icacls_account()
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -174,6 +236,19 @@ pub(crate) mod tests {
     pub(crate) fn under_wine() -> bool {
         std::env::var_os("WINELOADER").is_some()
             || Path::new(r"C:\windows\system32\winecfg.exe").exists()
+    }
+
+    #[test]
+    fn icacls_commands_name_the_path_and_account() {
+        let file = icacls_private(Path::new(r"C:\Users\Alice Smith\.ssh\id"), false);
+        assert!(
+            file.starts_with(r#"icacls "C:\Users\Alice Smith\.ssh\id" /inheritance:r /grant:r ""#),
+            "{file}"
+        );
+        assert!(file.ends_with(r#":F""#), "{file}");
+        assert!(!file.contains('%'), "{file}");
+        let dir = icacls_private(Path::new(r"C:\Users\a\.ssh"), true);
+        assert!(dir.ends_with(r#":(OI)(CI)F""#), "{dir}");
     }
 
     #[test]
@@ -254,6 +329,29 @@ pub(crate) mod tests {
             return;
         }
         assert_eq!(machine_file_trusted(&path).expect("audit"), Some(true));
+    }
+
+    /// `~/.ssh` as a junction to a private folder is accepted (followed);
+    /// any other directory Portico checks is not.
+    #[test]
+    fn a_junctioned_ssh_dir_is_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real-ssh");
+        std::fs::create_dir(&target).expect("mkdir");
+        restrict_dir(&target).expect("restrict");
+        let link = dir.path().join(".ssh");
+        // A junction needs no privilege; `mklink /J` is a cmd builtin.
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !made || under_wine() {
+            return;
+        }
+        assert!(dir_is_safe_following(&link).expect("followed"));
+        assert!(dir_is_safe(&link).is_err());
     }
 
     #[test]

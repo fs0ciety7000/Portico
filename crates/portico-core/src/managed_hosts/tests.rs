@@ -1293,6 +1293,12 @@ fn identity_file_separators() {
         assert_eq!(identity_value(&home, &resolved), "~/.ssh/id_win");
         assert!(check_identity_file(&home, Path::new(r"~\.ssh\id_win")).is_ok());
         assert!(check_identity_file(&home, Path::new(r"~\.ssh\..\.ssh\id_win")).is_err());
+        // Another case for the home (Windows paths are case-insensitive):
+        // accepted, rebased on the home, written `~/…`.
+        let shouted = PathBuf::from(key.to_string_lossy().to_uppercase());
+        let resolved = check_identity_file(&home, &shouted).expect("other case");
+        assert!(resolved.starts_with(&home), "{resolved:?}");
+        assert!(crate::store::same_file(&resolved, &key), "{resolved:?}");
     }
     #[cfg(not(windows))]
     assert!(check_identity_file(&home, Path::new(r"~/.ssh\id_win")).is_err());

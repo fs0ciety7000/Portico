@@ -479,8 +479,8 @@ impl Auth<'_> {
             tokio::task::spawn_blocking(move || load_identities(&paths, &cert_files, explicit))
                 .await
                 .unwrap_or_default();
-        for note in notes {
-            self.ctx.log(LogLevel::Info, "auth", note);
+        for (level, note) in notes {
+            self.ctx.log(level, "auth", note);
         }
         let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
         let mut out = Vec::with_capacity(loaded.len());
@@ -1081,12 +1081,13 @@ fn plan_attempts<'a>(
 /// Reads public halves (and certificates) without decrypting anything.
 /// Accepts `IdentityFile k`, `IdentityFile k.pub`, and a missing `k` whose
 /// `k.pub` exists (agent-only identity), like OpenSSH.
-/// Returns the usable identities and diagnostic notes for the session log.
+/// Returns the usable identities and diagnostic notes for the session log
+/// (with their level).
 fn load_identities(
     paths: &[PathBuf],
     cert_files: &[PathBuf],
     explicit: bool,
-) -> (Vec<FileIdentity>, Vec<String>) {
+) -> (Vec<FileIdentity>, Vec<(LogLevel, String)>) {
     let certs: Vec<Certificate> = cert_files
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
@@ -1094,6 +1095,8 @@ fn load_identities(
         .collect();
     let mut identities = Vec::new();
     let mut notes = Vec::new();
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut warnings: Vec<String> = Vec::new();
     for configured in paths {
         let (private, public) = match locate(configured) {
             Located::Private(p) => {
@@ -1140,11 +1143,10 @@ fn load_identities(
         if let Some(key) = private.as_deref()
             && crate::winfs::readable_by_others(key)
         {
-            notes.push(format!(
-                "warning: {} is readable by other accounts (OpenSSH would refuse it): \
-                 icacls \"{}\" /inheritance:r /grant:r %USERNAME%:F",
+            warnings.push(format!(
+                "{} is readable by other accounts (OpenSSH would refuse it): {}",
                 key.display(),
-                key.display()
+                crate::winfs::icacls_private(key, false)
             ));
         }
         identities.push(FileIdentity {
@@ -1154,6 +1156,11 @@ fn load_identities(
             cert,
         });
     }
+    let notes = notes
+        .into_iter()
+        .map(|note| (LogLevel::Info, note))
+        .chain(warnings.into_iter().map(|w| (LogLevel::Warn, w)))
+        .collect();
     (identities, notes)
 }
 

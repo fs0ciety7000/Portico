@@ -80,6 +80,21 @@ pub enum KeyError {
 }
 
 impl KeyError {
+    /// A hint that needs this error's context (the static one otherwise).
+    /// Windows: the exact `icacls` command for an unsafe folder, with the
+    /// real path and account (no `%VAR%`, which PowerShell does not
+    /// expand).
+    pub(crate) fn hint_override(&self) -> Option<String> {
+        match self {
+            #[cfg(windows)]
+            Self::UnsafeDir { path } => Some(format!(
+                "Make it yours and private: {}",
+                crate::winfs::icacls_private(path, true)
+            )),
+            _ => None,
+        }
+    }
+
     pub(crate) fn code_and_hint(&self) -> (&'static str, Option<&'static str>) {
         match self {
             Self::Exists { .. } => (
@@ -320,9 +335,11 @@ fn validate_comment(comment: &str) -> Result<()> {
 /// How to make a key directory private again.
 #[cfg(not(windows))]
 const UNSAFE_DIR_HINT: &str = "Make it yours and private: chmod 700 ~/.ssh.";
+/// Windows: the general advice; [`KeyError::hint_override`] gives the exact
+/// `icacls` command for the folder.
 #[cfg(windows)]
-const UNSAFE_DIR_HINT: &str = "Make it yours and private: \
-     icacls %USERPROFILE%\\.ssh /inheritance:r /grant:r %USERNAME%:F";
+const UNSAFE_DIR_HINT: &str = "Make it yours and private with icacls (/inheritance:r, \
+     then /grant:r your account full control).";
 
 /// What to do when no agent answers (the agent is started differently on
 /// Windows: a service, not a shell command).
@@ -379,9 +396,11 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
             }
         }
         // Windows: a trusted owner (the user, SYSTEM, Administrators) and
-        // nobody else able to write — the OpenSSH for Windows rule.
+        // nobody else able to write — the OpenSSH for Windows rule. Like the
+        // `metadata` above (and Unix), a junction or symlink is followed:
+        // what is checked is the directory it leads to.
         #[cfg(windows)]
-        if !crate::winfs::dir_is_safe(dir).map_err(|e| Error::io(dir, e))? {
+        if !crate::winfs::dir_is_safe_following(dir).map_err(|e| Error::io(dir, e))? {
             return Err(KeyError::UnsafeDir {
                 path: dir.to_path_buf(),
             }

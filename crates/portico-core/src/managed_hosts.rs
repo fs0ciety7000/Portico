@@ -407,9 +407,12 @@ pub(crate) fn check_identity_file(
     {
         return Err(invalid("the path holds `.` or `..`"));
     }
-    if path.strip_prefix(home).is_err() {
+    // Windows: paths are case-insensitive (`c:/users/alice` is the home
+    // `C:\Users\Alice`): rebased on `home` so it is written `~/…`.
+    let Some(rest) = strip_home(&path, home) else {
         return Err(invalid("the key must be under your home directory"));
-    }
+    };
+    let path = home.join(rest);
     if path.extension().is_some_and(|e| e == "pub") {
         return Err(invalid("this is a public key: pick the private key"));
     }
@@ -427,6 +430,24 @@ pub(crate) fn check_identity_file(
         return Err(invalid("a link leads outside your home directory"));
     }
     Ok(path)
+}
+
+/// `path` relative to `home`, component by component: exact on Unix,
+/// case-insensitive on Windows (like the file system there; the final
+/// canonical check compares the paths as the system spells them).
+fn strip_home(path: &Path, home: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return path.strip_prefix(home).ok().map(Path::to_path_buf);
+    }
+    let fold = |c: Component<'_>| c.as_os_str().to_string_lossy().to_lowercase();
+    let mut components = path.components();
+    for expected in home.components() {
+        let actual = components.next()?;
+        if fold(actual) != fold(expected) {
+            return None;
+        }
+    }
+    Some(components.as_path().to_path_buf())
 }
 
 /// `~/…` under the home directory (`/` separators on every platform),
