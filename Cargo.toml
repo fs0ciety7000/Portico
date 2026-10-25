@@ -69,6 +69,9 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"
 
 # Secrets
 keyring = "4"
+# Windows only: entries with a chosen persistence (`Entry::new_with_modifiers`,
+# not wrapped by `keyring`). Already in the lock as a dependency of `keyring`.
+keyring-core = "1"
 secrecy = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.6"

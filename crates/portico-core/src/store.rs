@@ -33,8 +33,11 @@ pub struct Paths {
     /// `$XDG_CONFIG_HOME/portico`, `~/Library/Application Support/dev.Portico.portico`
     /// or `%APPDATA%\Portico\portico\config`.
     pub config_dir: PathBuf,
-    /// Recent sessions, logs, vault (`%APPDATA%\Portico\portico\data` on
-    /// Windows: roaming, like the config).
+    /// Recent sessions, logs, vault, recordings: `%LOCALAPPDATA%\Portico\
+    /// portico\data` on Windows, **local** (never copied to a roaming domain
+    /// profile: the vault and recordings stay on this machine); the same
+    /// folder as before on Linux and macOS (`data_local_dir` = `data_dir`
+    /// there).
     pub data_dir: PathBuf,
     /// System-wide `known_hosts` files (read-only).
     pub global_known_hosts: Vec<PathBuf>,
@@ -50,7 +53,7 @@ impl Paths {
             ssh_dir: base.home_dir().join(".ssh"),
             home: base.home_dir().to_path_buf(),
             config_dir: project.config_dir().to_path_buf(),
-            data_dir: project.data_dir().to_path_buf(),
+            data_dir: project.data_local_dir().to_path_buf(),
             global_known_hosts: global_known_hosts(),
         })
     }

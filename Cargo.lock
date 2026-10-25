@@ -4197,6 +4197,7 @@ dependencies = [
  "futures",
  "hmac",
  "keyring",
+ "keyring-core",
  "nucleo-matcher",
  "pkcs8",
  "portico-winsec",

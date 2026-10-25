@@ -46,6 +46,8 @@ rustix.workspace = true
 # Owner-only DACLs (the Windows `0600`/`0700`), see `winfs.rs`.
 [target.'cfg(windows)'.dependencies]
 portico-winsec.workspace = true
+# Credential Manager entries persisted `Local` (never roaming), see `secrets.rs`.
+keyring-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
