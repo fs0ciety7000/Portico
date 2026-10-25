@@ -124,6 +124,35 @@ pub(crate) fn dir_is_safe(path: &Path) -> io::Result<bool> {
     Ok(audit(&dir)?.is_none_or(|a| a.owner_trusted() && !a.others_can_write))
 }
 
+/// Whether the machine-wide file at `path` can be trusted for this user:
+/// the file (opened as itself: a reparse point is refused) and its folder
+/// are owned by the machine and no other account can change them
+/// (`Audit::machine_owned_and_locked`). `None`: a volume without ACLs.
+pub(crate) fn machine_file_trusted(path: &Path) -> io::Result<Option<bool>> {
+    let file = OpenOptions::new()
+        .access_mode(access::READ_CONTROL | access::FILE_READ_ATTRIBUTES)
+        .custom_flags(access::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Ok(Some(false));
+    }
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(Some(false));
+    };
+    let dir = match open_dir(parent, false, false) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Ok(Some(false)),
+        Err(e) => return Err(e),
+    };
+    let (Some(file_audit), Some(dir_audit)) = (audit(&file)?, audit(&dir)?) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        file_audit.machine_owned_and_locked() && dir_audit.machine_owned_and_locked(),
+    ))
+}
+
 /// Whether other accounts can read the file at `path` (`false` when it
 /// cannot be told). Used to warn about a private key, like OpenSSH does.
 pub(crate) fn readable_by_others(path: &Path) -> bool {
@@ -183,6 +212,48 @@ pub(crate) mod tests {
             assert_eq!(audit.owner, portico_winsec::Principal::CurrentUser);
         }
         assert!(open_dir(&dir.path().join("missing"), false, false).is_err());
+    }
+
+    /// What a user creates (even restricted to them) is not a machine file:
+    /// a `known_hosts` planted in `%PROGRAMDATA%` by an account is skipped.
+    #[test]
+    fn a_user_file_is_not_a_machine_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("ssh");
+        std::fs::create_dir(&sub).expect("mkdir");
+        restrict_dir(&sub).expect("restrict");
+        let path = sub.join("ssh_known_hosts");
+        let file = private_new_file().open(&path).expect("create");
+        restrict_file(&file, &path).expect("restrict");
+        drop(file);
+        let trusted = machine_file_trusted(&path).expect("audit");
+        if !under_wine() {
+            assert_eq!(trusted, Some(false));
+        }
+        assert_eq!(
+            machine_file_trusted(&sub.join("missing"))
+                .expect_err("missing")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    /// A file of the system itself passes (`notepad.exe`: `TrustedInstaller`,
+    /// in a folder no user can write).
+    #[test]
+    fn a_system_file_is_a_machine_file() {
+        if under_wine() {
+            return;
+        }
+        let windir = std::env::var_os("SystemRoot").map_or_else(
+            || std::path::PathBuf::from(r"C:\Windows"),
+            std::path::PathBuf::from,
+        );
+        let path = windir.join("System32").join("notepad.exe");
+        if !path.exists() {
+            return;
+        }
+        assert_eq!(machine_file_trusted(&path).expect("audit"), Some(true));
     }
 
     #[test]

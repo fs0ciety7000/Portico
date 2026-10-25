@@ -126,12 +126,15 @@ impl Paths {
 }
 
 /// The system-wide `known_hosts` files OpenSSH reads: `/etc/ssh/…` on
-/// Unix, `%PROGRAMDATA%\ssh\…` with OpenSSH for Windows.
+/// Unix, `%PROGRAMDATA%\ssh\…` with OpenSSH for Windows. On Windows the
+/// folder comes from the known folder `FOLDERID_ProgramData`, never from
+/// the `PROGRAMDATA` variable (set by whoever starts the process), and the
+/// files are only used when the machine owns them
+/// (`known_hosts::trusted_global_files`).
 fn global_known_hosts() -> Vec<PathBuf> {
     #[cfg(windows)]
-    let dir = std::env::var_os("PROGRAMDATA")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
+    let dir = portico_winsec::program_data_dir()
+        .unwrap_or_else(|_| PathBuf::from(r"C:\ProgramData"))
         .join("ssh");
     #[cfg(not(windows))]
     let dir = PathBuf::from("/etc/ssh");

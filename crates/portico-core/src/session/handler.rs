@@ -101,9 +101,14 @@ pub(crate) struct ClientHandler {
     is_target: bool,
 }
 
-/// Loads `known_hosts` for `hop` and prepares the russh configuration.
-/// User files (first one receives new keys), then global files.
-fn known_hosts_files(paths: &crate::store::Paths, hop: &Hop) -> (Vec<PathBuf>, PathBuf) {
+/// The `known_hosts` files for `hop`: user files (the first one receives
+/// new keys), then global files (kept apart: on Windows they are only
+/// trusted when the machine owns them, see
+/// [`known_hosts::trusted_global_files`]).
+fn known_hosts_files(
+    paths: &crate::store::Paths,
+    hop: &Hop,
+) -> (Vec<PathBuf>, Vec<PathBuf>, PathBuf) {
     let mut user_files = hop.resolved.user_known_hosts_files.clone();
     if user_files.is_empty() {
         user_files = vec![paths.known_hosts(), paths.ssh_dir.join("known_hosts2")];
@@ -125,18 +130,20 @@ fn known_hosts_files(paths: &crate::store::Paths, hop: &Hop) -> (Vec<PathBuf>, P
         .first()
         .cloned()
         .unwrap_or_else(|| paths.known_hosts());
-    let mut files = user_files;
-    files.extend(global_files);
-    (files, write_file)
+    (user_files, global_files, write_file)
 }
 
 pub(crate) async fn build(ctx: &SessionCtx, hop: &Hop, is_target: bool) -> Result<Built> {
     let paths = ctx.engine.config().paths.clone();
-    let (files, write_file) = known_hosts_files(&paths, hop);
-    let known = tokio::task::spawn_blocking(move || KnownHosts::load(&files))
-        .await
-        .map_err(|_| Error::EngineClosed)??;
-    for w in &known.warnings {
+    let (mut files, global_files, write_file) = known_hosts_files(&paths, hop);
+    let (known, skipped) = tokio::task::spawn_blocking(move || {
+        let (trusted, skipped) = known_hosts::trusted_global_files(global_files);
+        files.extend(trusted);
+        KnownHosts::load(&files).map(|known| (known, skipped))
+    })
+    .await
+    .map_err(|_| Error::EngineClosed)??;
+    for w in skipped.iter().chain(&known.warnings) {
         ctx.log(LogLevel::Warn, "known_hosts", w.clone());
     }
 
