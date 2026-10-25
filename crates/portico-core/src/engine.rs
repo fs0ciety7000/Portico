@@ -110,12 +110,38 @@ impl EngineConfig {
 /// on Unix, `USERNAME` on Windows (what OpenSSH for Windows uses).
 fn local_user() -> String {
     #[cfg(windows)]
-    let name = std::env::var("USERNAME");
+    let name = windows_local_user(
+        std::env::var("USERNAME").ok().as_deref(),
+        std::env::var("USERDOMAIN").ok().as_deref(),
+        std::env::var("COMPUTERNAME").ok().as_deref(),
+    )
+    .ok_or(());
     #[cfg(not(windows))]
     let name = std::env::var("USER").or_else(|_| std::env::var("LOGNAME"));
     name.ok()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "user".to_owned())
+}
+
+/// The default login name of OpenSSH for Windows (`get_passwd`,
+/// `contrib/win32/win32compat/pwd.c`): the account name, **lowercased**;
+/// for an account of another domain than this machine (Active Directory,
+/// `AzureAD`), `domain\user`, lowercased too. A local or Microsoft
+/// account's domain is the computer name. Pure, for tests everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_local_user(
+    user: Option<&str>,
+    domain: Option<&str>,
+    computer: Option<&str>,
+) -> Option<String> {
+    let user = user.filter(|u| !u.is_empty())?;
+    let name = match (domain.filter(|d| !d.is_empty()), computer) {
+        (Some(domain), Some(computer)) if !domain.eq_ignore_ascii_case(computer) => {
+            format!("{domain}\\{user}")
+        }
+        _ => user.to_owned(),
+    };
+    Some(name.to_lowercase())
 }
 
 /// Terminal geometry.
@@ -1989,6 +2015,32 @@ impl RecordingJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_local_user_matches_openssh_for_windows() {
+        let user = |u, d, c| windows_local_user(u, d, c);
+        // Local or Microsoft account: the name, lowercased.
+        assert_eq!(
+            user(Some("Alice"), Some("LAPTOP-42"), Some("LAPTOP-42")).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            user(Some("Alice"), Some("laptop-42"), Some("LAPTOP-42")).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(user(Some("Bob"), None, None).as_deref(), Some("bob"));
+        // Domain account: `domain\user`, lowercased.
+        assert_eq!(
+            user(Some("Alice"), Some("CORP"), Some("LAPTOP-42")).as_deref(),
+            Some("corp\\alice")
+        );
+        assert_eq!(
+            user(Some("Élise"), Some("AzureAD"), Some("PC")).as_deref(),
+            Some("azuread\\élise")
+        );
+        assert_eq!(user(None, Some("CORP"), Some("PC")), None);
+        assert_eq!(user(Some(""), None, None), None);
+    }
 
     fn engine(root: &std::path::Path) -> Engine {
         Engine::new(EngineConfig {
