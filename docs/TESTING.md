@@ -259,6 +259,11 @@ icacls "$env:USERPROFILE\.ssh\known_hosts"              # après acceptation d'u
       fichier créé par un administrateur (propriétaire `Administrators`, non modifiable par les
       utilisateurs) est utilisé. Lancer Portico avec `$env:PROGRAMDATA = 'C:\Users\<moi>\x'` ne change pas
       le dossier lu (dossier connu, pas la variable).
+- [ ] Sous Windows, un fichier `known_hosts` **global** doit appartenir à la machine (`SYSTEM`,
+      `Administrators` ou `TrustedInstaller`) et n'être modifiable par aucun autre compte : un
+      `GlobalKnownHostsFile` qui appartient à l'utilisateur (par exemple `GlobalKnownHostsFile
+      ~/global_kh`) est **ignoré** avec une ligne `Warn` « skipped (not owned by the system…) », pour la
+      connexion comme pour les mots de passe retenus (liés aux clés de ces seuls fichiers de confiance).
 - [ ] **Points d'analyse** : un *junction* (`mklink /J`, sans droits admin) ou un lien symbolique
       (`mklink`, mode développeur) à la place de `hosts.toml`, du dossier `data` ou d'une destination de
       download : refusé, jamais suivi.

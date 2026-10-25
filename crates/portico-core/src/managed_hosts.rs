@@ -839,8 +839,13 @@ struct PasswordTarget {
     /// `known_hosts` name.
     host: String,
     port: u16,
-    /// `known_hosts` files holding the keys the password may be bound to.
+    /// The user's `known_hosts` files holding the keys the password may be
+    /// bound to.
     known_hosts_files: Vec<PathBuf>,
+    /// The global ones, read only when trusted, like a session does
+    /// ([`crate::known_hosts::trusted_global_files`]: on Windows, owned by
+    /// the machine).
+    global_known_hosts_files: Vec<PathBuf>,
     /// `hosts.toml`, whose index lists the keys passwords were bound to.
     meta_path: PathBuf,
 }
@@ -848,6 +853,16 @@ struct PasswordTarget {
 impl PasswordTarget {
     fn same_account(&self, other: &Self) -> bool {
         self.user == other.user && self.host == other.host && self.port == other.port
+    }
+
+    /// The `known_hosts` entries a session to this account would trust.
+    /// Blocking.
+    fn known_hosts(&self) -> Result<KnownHosts> {
+        let (trusted, _skipped) =
+            crate::known_hosts::trusted_global_files(self.global_known_hosts_files.clone());
+        let mut files = self.known_hosts_files.clone();
+        files.extend(trusted);
+        KnownHosts::load(&files)
     }
 
     fn unbound_key(&self) -> SecretKey {
@@ -866,7 +881,8 @@ impl PasswordTarget {
         if secrets.contains(&self.unbound_key()).unwrap_or(false) {
             return true;
         }
-        let mut fingerprints = KnownHosts::load(&self.known_hosts_files)
+        let mut fingerprints = self
+            .known_hosts()
             .map(|known| known.fingerprints(&self.host, self.port))
             .unwrap_or_default();
         fingerprints.extend(
@@ -905,7 +921,7 @@ impl PasswordTarget {
     /// through a host certificate, or to a key whose `known_hosts` line is
     /// gone). Blocking.
     fn forget_bound(&self, secrets: &dyn SecretStore) -> Result<()> {
-        let known = KnownHosts::load(&self.known_hosts_files)?;
+        let known = self.known_hosts()?;
         let mut fingerprints = known.fingerprints(&self.host, self.port);
         fingerprints.extend(crate::hosts::bound_password_fingerprints(
             &self.meta_path,
@@ -1071,7 +1087,6 @@ impl<'a> Editor<'a> {
         if known_hosts_files.is_empty() {
             known_hosts_files = vec![paths.known_hosts(), paths.ssh_dir.join("known_hosts2")];
         }
-        known_hosts_files.extend(paths.global_known_hosts.iter().cloned());
         PasswordTarget {
             user: resolved
                 .user
@@ -1080,6 +1095,7 @@ impl<'a> Editor<'a> {
             host,
             port,
             known_hosts_files,
+            global_known_hosts_files: paths.global_known_hosts.clone(),
             meta_path: paths.hosts_meta(),
         }
     }

@@ -21,8 +21,10 @@
 //! private keys `ssh-add` would send it. The pipe is opened here (bounded
 //! retry while it is busy), checked to be a pipe, then its server must be
 //! the agent service (`SYSTEM`) or the current user (an agent the user runs:
-//! 1Password, `KeePassXC`…), from the pipe's owner and the server process's
-//! token ([`portico_winsec::agent_server_trusted`]). Otherwise:
+//! 1Password, `KeePassXC`…), from the server process's token; when that
+//! token cannot be read, the pipe must be owned by the machine and closed
+//! to new instances from other accounts
+//! ([`portico_winsec::agent_server_trusted`]). Otherwise:
 //! [`AgentConnectError::Untrusted`].
 //!
 //! The connection itself never blocks the runtime (tokio named pipe / Unix
@@ -180,29 +182,41 @@ pub(crate) async fn connect(path: &Path) -> Result<Agent, AgentConnectError> {
     Ok(russh::keys::agent::client::AgentClient::connect(pipe).dynamic())
 }
 
-/// The pipe's owner and its server process's user must be trusted (see
-/// [`portico_winsec::agent_server_trusted`]).
+/// The pipe's server must be trusted (see
+/// [`portico_winsec::agent_server_trusted`]): the server process's user
+/// decides when its token is readable; otherwise the pipe's owner and DACL
+/// must be readable and machine-only.
 #[cfg(windows)]
 fn verify_server(
     pipe: &tokio::net::windows::named_pipe::NamedPipeClient,
 ) -> Result<(), AgentConnectError> {
-    let owner = portico_winsec::audit(pipe)
-        .map_err(|_| AgentConnectError::Untrusted("the pipe's owner cannot be read"))?
-        .owner;
     let server = portico_winsec::pipe_server_user(pipe)
         .map_err(|_| AgentConnectError::Untrusted("the pipe's server cannot be identified"))?;
-    if portico_winsec::agent_server_trusted(owner, server) {
-        Ok(())
-    } else {
-        tracing::warn!(
-            ?owner,
-            ?server,
-            "ssh-agent pipe served by another account: refused"
-        );
-        Err(AgentConnectError::Untrusted(
-            "the pipe is served by another account, not the ssh-agent service nor you",
-        ))
+    let security = match portico_winsec::pipe_audit(pipe) {
+        Ok(audit) => Some(audit),
+        Err(e) => {
+            // Only needed when the server's token is unreadable (then the
+            // pipe is refused below). The OS code is safe to log.
+            tracing::debug!(error = %e, "ssh-agent pipe: owner and DACL unreadable");
+            None
+        }
+    };
+    if portico_winsec::agent_server_trusted(server, security.as_ref()) {
+        return Ok(());
     }
+    let owner = security.map(|audit| audit.owner);
+    tracing::warn!(
+        ?owner,
+        ?server,
+        "ssh-agent pipe not served by the ssh-agent service nor you: refused"
+    );
+    Err(AgentConnectError::Untrusted(
+        if server.is_none() && owner.is_none() {
+            "the pipe's server and owner cannot be verified"
+        } else {
+            "the pipe is served by another account, not the ssh-agent service nor you"
+        },
+    ))
 }
 
 /// Neither Unix nor Windows: no agent transport.
@@ -314,9 +328,6 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_pipe_served_by_this_user_is_accepted() {
-        if crate::winfs::tests::under_wine() {
-            return; // no pipe security descriptor under wine
-        }
         let pipe = format!(
             r"\\.\pipe\portico-test-agent-{:016x}",
             rand::random::<u64>()

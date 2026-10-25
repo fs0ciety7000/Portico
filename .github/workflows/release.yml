@@ -490,14 +490,18 @@ jobs:
           # the uninstaller removes its own files only and keeps it.
           $data = Join-Path $dir 'portico'
           $hadData = Test-Path $data
+          # A sentinel in any case, so the check below is never vacuous.
+          New-Item -ItemType Directory -Force (Join-Path $data 'data') | Out-Null
+          $sentinel = Join-Path $data 'data\sentinel'
+          Set-Content $sentinel 'x'
           $uninstall = $reg.UninstallString.Trim('"')
           $u = Start-Process -FilePath $uninstall -ArgumentList '/S' -Wait -PassThru
           if ($u.ExitCode -ne 0) { throw "uninstaller exit code $($u.ExitCode)" }
           # NSIS uninstallers copy themselves and return early: wait for the files to go.
           for ($i = 0; $i -lt 30 -and (Test-Path $exe.FullName); $i++) { Start-Sleep -Seconds 1 }
           if (Test-Path $exe.FullName) { throw "$($exe.FullName) is still there after uninstalling" }
-          if ($hadData -and -not (Test-Path $data)) { throw "the uninstaller deleted Portico's data ($data)" }
-          "user data kept after uninstall: $hadData ($data)"
+          if (-not (Test-Path $sentinel)) { throw "the uninstaller deleted Portico's data ($data)" }
+          "user data kept after uninstall (written by the app: $hadData, sentinel kept: $sentinel)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gui-windows-x64

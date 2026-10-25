@@ -17,8 +17,9 @@
 //!   keys and configuration files (`check_secure_file_permission`).
 //!
 //! - [`pipe_server_user`]: who runs the server end of a named pipe (the
-//!   user of the server process's token), to verify an `ssh-agent` pipe
-//!   before a key is sent to it ([`agent_server_trusted`]).
+//!   user of the server process's token), and [`pipe_audit`] (its owner and
+//!   DACL), to verify an `ssh-agent` pipe before a key is sent to it
+//!   ([`agent_server_trusted`]).
 //! - [`program_data_dir`]: `%PROGRAMDATA%` from the known folder (never
 //!   from the environment variable, which any process can set).
 //! - [`disable_wer_heap_dumps`]: Windows Error Reporting leaves the heap
@@ -54,7 +55,8 @@ mod imp;
 
 #[cfg(windows)]
 pub use imp::{
-    audit, disable_wer_heap_dumps, pipe_server_user, program_data_dir, restrict_to_owner,
+    audit, disable_wer_heap_dumps, pipe_audit, pipe_server_user, program_data_dir,
+    restrict_to_owner,
 };
 
 /// Who a security identifier is, among the principals OpenSSH for Windows
@@ -85,6 +87,9 @@ impl Principal {
 }
 
 /// What [`audit`] found.
+// Four independent facts read from one security descriptor (not states of
+// one thing): an enum or bitflags would only hide them.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Audit {
     pub owner: Principal,
@@ -94,6 +99,12 @@ pub struct Audit {
     pub others_can_read: bool,
     /// … can write, delete or re-permission it.
     pub others_can_write: bool,
+    /// A named pipe: such a principal may create its own instance of it
+    /// (`FILE_CREATE_PIPE_INSTANCE`, or `WRITE_DAC`, `WRITE_OWNER`,
+    /// `GENERIC_WRITE`, `GENERIC_ALL`), and so receive the next client.
+    /// Not implied by `others_can_write`: the OpenSSH agent's pipe grants
+    /// `FILE_WRITE_DATA` to every authenticated user, not this right.
+    pub others_can_add_instance: bool,
     /// The DACL is protected (does not inherit from the parent).
     pub protected: bool,
 }
@@ -122,27 +133,38 @@ impl Audit {
 
 /// Whether the server end of an `ssh-agent` named pipe may receive keys.
 ///
-/// - `pipe_owner`: the owner of the pipe object, set from the token of the
-///   process that created it. Another unprivileged account cannot make it
+/// - `server_user`: the user of the server process's token
+///   ([`pipe_server_user`]), or `None` when that token cannot be opened (a
+///   process of another account, or a protected service).
+/// - `pipe`: the pipe's owner and DACL ([`pipe_audit`]), or `None` when
+///   they cannot be read. The owner is set from the token of the process
+///   that created the pipe: another unprivileged account cannot make it
 ///   anything but itself.
-/// - `server_user`: the user of the server process's token, or `None`
-///   when that token cannot be opened (a process of another account or a
-///   service: a standard user may not open a `SYSTEM` token).
 ///
-/// Accepted: the agent service (`SYSTEM`) and an agent run by the current
-/// user (1Password, `KeePassXC`…). When the server's token is unreadable,
-/// only a pipe owned by the machine (`SYSTEM`, `Administrators`) passes:
-/// another user's agent never does.
-pub fn agent_server_trusted(pipe_owner: Principal, server_user: Option<Principal>) -> bool {
-    let owner_ok = matches!(
-        pipe_owner,
-        Principal::CurrentUser | Principal::System | Principal::Administrators
-    );
-    let server_ok = match server_user {
-        Some(user) => matches!(user, Principal::CurrentUser | Principal::System),
-        None => matches!(pipe_owner, Principal::System | Principal::Administrators),
-    };
-    owner_ok && server_ok
+/// The server's token decides when it is readable: the agent service
+/// (`SYSTEM`) and an agent run by the current user (1Password,
+/// `KeePassXC`…) are accepted, whether the pipe can be read or not. A pipe
+/// that *is* read and owned by another account is still refused (a server
+/// handle passed on to one of our processes). When the token is
+/// unreadable, only a pipe that is read, owned by the machine (`SYSTEM`,
+/// `Administrators`) and on which no other account may add an instance
+/// passes; an unreadable pipe is then refused.
+pub fn agent_server_trusted(server_user: Option<Principal>, pipe: Option<&Audit>) -> bool {
+    match server_user {
+        Some(user) => {
+            matches!(user, Principal::CurrentUser | Principal::System)
+                && pipe.is_none_or(|pipe| {
+                    matches!(
+                        pipe.owner,
+                        Principal::CurrentUser | Principal::System | Principal::Administrators
+                    )
+                })
+        }
+        None => pipe.is_some_and(|pipe| {
+            matches!(pipe.owner, Principal::System | Principal::Administrators)
+                && !pipe.others_can_add_instance
+        }),
+    }
 }
 
 /// Access, share and flag bits for opening a handle that [`audit`] and
@@ -167,24 +189,59 @@ pub mod access {
 mod tests {
     use super::*;
 
+    fn pipe(owner: Principal, others_can_add_instance: bool) -> Audit {
+        Audit {
+            owner,
+            others_can_read: true,
+            others_can_write: true,
+            others_can_add_instance,
+            protected: false,
+        }
+    }
+
     #[test]
     fn agent_servers() {
         use Principal::{Administrators, CurrentUser, Other, System, TrustedInstaller};
-        // The Windows service, and an agent of this user.
-        assert!(agent_server_trusted(System, Some(System)));
-        assert!(agent_server_trusted(Administrators, Some(System)));
-        assert!(agent_server_trusted(CurrentUser, Some(CurrentUser)));
-        assert!(agent_server_trusted(Administrators, None));
-        assert!(agent_server_trusted(System, None));
+        let trusted = |owner: Option<Principal>, server| {
+            agent_server_trusted(server, owner.map(|o| pipe(o, false)).as_ref())
+        };
+        // The Windows service, and an agent of this user (elevated: the
+        // pipe is owned by `Administrators`).
+        assert!(trusted(Some(System), Some(System)));
+        assert!(trusted(Some(Administrators), Some(System)));
+        assert!(trusted(Some(CurrentUser), Some(CurrentUser)));
+        assert!(trusted(Some(Administrators), Some(CurrentUser)));
+        // A readable token decides, even when the pipe cannot be read.
+        assert!(trusted(None, Some(CurrentUser)));
+        assert!(trusted(None, Some(System)));
+        assert!(!trusted(None, Some(Other)));
+        assert!(!trusted(None, Some(Administrators)));
+        // Unreadable token: a machine-owned pipe only.
+        assert!(trusted(Some(Administrators), None));
+        assert!(trusted(Some(System), None));
+        assert!(!trusted(Some(CurrentUser), None));
+        assert!(!trusted(Some(Other), None));
+        assert!(!trusted(Some(TrustedInstaller), None));
+        assert!(!trusted(None, None));
         // Another account's pipe, whatever the server says.
-        assert!(!agent_server_trusted(Other, Some(CurrentUser)));
-        assert!(!agent_server_trusted(Other, None));
-        assert!(!agent_server_trusted(Other, Some(System)));
-        assert!(!agent_server_trusted(TrustedInstaller, Some(System)));
+        assert!(!trusted(Some(Other), Some(CurrentUser)));
+        assert!(!trusted(Some(Other), Some(System)));
+        assert!(!trusted(Some(TrustedInstaller), Some(System)));
         // A pipe of ours served by another account (handle passed on).
-        assert!(!agent_server_trusted(CurrentUser, Some(Other)));
-        assert!(!agent_server_trusted(CurrentUser, None));
-        assert!(!agent_server_trusted(System, Some(Other)));
+        assert!(!trusted(Some(CurrentUser), Some(Other)));
+        assert!(!trusted(Some(System), Some(Other)));
+    }
+
+    #[test]
+    fn agent_servers_refuse_a_machine_pipe_open_to_instances() {
+        use Principal::{CurrentUser, System};
+        assert!(!agent_server_trusted(None, Some(&pipe(System, true))));
+        assert!(agent_server_trusted(None, Some(&pipe(System, false))));
+        // The token decides when it is readable.
+        assert!(agent_server_trusted(
+            Some(CurrentUser),
+            Some(&pipe(CurrentUser, true))
+        ));
     }
 
     fn audit(owner: Principal, others_can_write: bool) -> Audit {
@@ -192,6 +249,7 @@ mod tests {
             owner,
             others_can_read: true,
             others_can_write,
+            others_can_add_instance: others_can_write,
             protected: false,
         }
     }
@@ -219,6 +277,7 @@ mod tests {
             owner: Principal::CurrentUser,
             others_can_read: false,
             others_can_write: false,
+            others_can_add_instance: false,
             protected: true,
         };
         assert!(private.is_private());

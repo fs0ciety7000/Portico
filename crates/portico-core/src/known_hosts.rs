@@ -627,11 +627,22 @@ mod tests {
     fn global_files_kept_on_unix_skipped_when_foreign_on_windows() {
         let dir = tempfile::tempdir().unwrap();
         let planted = dir.path().join("ssh_known_hosts");
+        // Windows: a file of this user's own (owner set to the user even
+        // when the test runs elevated, as on CI, where a plain new file is
+        // owned by `Administrators`, which is the machine and trusted).
+        #[cfg(windows)]
+        {
+            use std::io::Write as _;
+            let mut file = crate::winfs::private_new_file().open(&planted).unwrap();
+            crate::winfs::restrict_file(&file, &planted).unwrap();
+            file.write_all(b"example.com ssh-ed25519 AAAA\n").unwrap();
+        }
+        #[cfg(not(windows))]
         std::fs::write(&planted, "example.com ssh-ed25519 AAAA\n").unwrap();
         let missing = dir.path().join("ssh_known_hosts2");
         let (trusted, skipped) = trusted_global_files(vec![planted.clone(), missing.clone()]);
         if cfg!(windows) {
-            // Created by this user, not the machine: skipped, with a
+            // Owned by this user, not the machine: skipped, with a
             // reason; the missing one silently. (Under wine the ACLs are
             // not Windows': only the missing file is asserted.)
             assert!(!trusted.contains(&missing));

@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::{
     GENERIC_WRITE, HANDLE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
+    GetSecurityInfo, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -60,6 +60,15 @@ const WRITE_RIGHTS: u32 = FILE_WRITE_DATA
     | GENERIC_WRITE
     | GENERIC_ALL;
 const ESCALATION_RIGHTS: u32 = WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+/// `FILE_CREATE_PIPE_INSTANCE` (`winnt.h`, the bit of `FILE_APPEND_DATA`
+/// on a pipe).
+const FILE_CREATE_PIPE_INSTANCE: u32 = 0x0004;
+/// Rights that let a principal create its own instance of a named pipe
+/// (and so receive a client's connection), directly or by re-permissioning
+/// it. `FILE_WRITE_DATA` is not one: the OpenSSH agent's pipe grants it to
+/// every authenticated user (`(A;;0x12019b;;;AU)`).
+const INSTANCE_RIGHTS: u32 =
+    FILE_CREATE_PIPE_INSTANCE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
 
 /// A security identifier, copied into owned, `DWORD`-aligned memory (SIDs
 /// are `8 + 4 × n` bytes long, so the words hold it exactly). Equality is
@@ -226,9 +235,23 @@ fn token_user(process: HANDLE) -> io::Result<Sid> {
     // SAFETY: on success `buf` starts with an initialized, aligned
     // `TOKEN_USER` (plain old data).
     let user = unsafe { buf.as_ptr().cast::<TOKEN_USER>().read() };
-    // SAFETY: the SID it points to lies inside `buf`, alive and unchanged
-    // here; `len` bounds it.
-    unsafe { Sid::copy_from(user.User.Sid, usize::try_from(len).unwrap_or(0)) }
+    // The SID must lie inside `buf` (Windows places it right after the
+    // `TOKEN_USER`): its offset from the start, checked, bounds the copy
+    // to the bytes that remain.
+    let filled = usize::try_from(len).unwrap_or(0);
+    let offset = user
+        .User
+        .Sid
+        .addr()
+        .checked_sub(buf.as_ptr().addr())
+        .filter(|offset| *offset < filled)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "token SID outside its buffer")
+        })?;
+    // SAFETY: the SID pointer lies inside `buf` (checked above), alive and
+    // unchanged here, and `filled - offset` bytes of `buf` follow it, which
+    // bounds the copy.
+    unsafe { Sid::copy_from(user.User.Sid, filled.saturating_sub(offset)) }
 }
 
 /// `NT SERVICE\TrustedInstaller`, `S-1-5-80-956008885-3418522649-1831038044-
@@ -368,9 +391,15 @@ impl Drop for LocalDescriptor {
     }
 }
 
-/// Reads the owner and DACL of `object` (handle with `READ_CONTROL`).
-#[allow(unsafe_code)]
+/// Reads the owner and DACL of `object`, a file or a directory (handle
+/// with `READ_CONTROL`).
 pub fn audit(object: &impl AsHandle) -> io::Result<Audit> {
+    audit_object(object, SE_FILE_OBJECT)
+}
+
+/// [`audit`] of an object of the given kind.
+#[allow(unsafe_code)]
+fn audit_object(object: &impl AsHandle, kind: SE_OBJECT_TYPE) -> io::Result<Audit> {
     let trusted = Trusted::get()?;
     let handle = object.as_handle();
     let mut owner: PSID = null_mut();
@@ -382,7 +411,7 @@ pub fn audit(object: &impl AsHandle) -> io::Result<Audit> {
     let status = unsafe {
         GetSecurityInfo(
             handle.as_raw_handle(),
-            SE_FILE_OBJECT,
+            kind,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &raw mut owner,
             null_mut(),
@@ -411,6 +440,7 @@ pub fn audit(object: &impl AsHandle) -> io::Result<Audit> {
         owner: trusted.classify(&owner_sid),
         others_can_read: false,
         others_can_write: false,
+        others_can_add_instance: false,
         // SAFETY: `descriptor` was returned by `GetSecurityInfo` and is
         // kept alive by `guard`.
         protected: unsafe { protected(descriptor) },
@@ -419,6 +449,7 @@ pub fn audit(object: &impl AsHandle) -> io::Result<Audit> {
         // A NULL DACL grants everyone full access.
         audit.others_can_read = true;
         audit.others_can_write = true;
+        audit.others_can_add_instance = true;
         drop(guard);
         return Ok(audit);
     }
@@ -476,6 +507,7 @@ pub fn audit(object: &impl AsHandle) -> io::Result<Audit> {
         if foreign {
             audit.others_can_read |= mask & (READ_RIGHTS | ESCALATION_RIGHTS) != 0;
             audit.others_can_write |= mask & WRITE_RIGHTS != 0;
+            audit.others_can_add_instance |= mask & INSTANCE_RIGHTS != 0;
         }
     }
     drop(guard);
@@ -500,11 +532,24 @@ unsafe fn protected(descriptor: PSECURITY_DESCRIPTOR) -> bool {
     ok != 0 && control & SE_DACL_PROTECTED != 0
 }
 
+/// [`audit`] of the named pipe `pipe` (a client handle, opened with
+/// `GENERIC_READ`, which includes `READ_CONTROL`): its owner, and whether
+/// another account may add an instance of it
+/// ([`Audit::others_can_add_instance`]).
+///
+/// Read as a kernel object (`SE_KERNEL_OBJECT`, as tokio documents for
+/// pipes): the file-object path of [`audit`] (`SE_FILE_OBJECT`) is meant
+/// for files and directories. Combine with [`pipe_server_user`] through
+/// [`crate::agent_server_trusted`].
+pub fn pipe_audit(pipe: &impl AsHandle) -> io::Result<Audit> {
+    audit_object(pipe, SE_KERNEL_OBJECT)
+}
+
 /// Who runs the server end of the named pipe `pipe` (a client handle):
 /// the user of the server process's token, `None` when that token cannot
 /// be opened (another account's process, or a service: a standard user may
-/// not open a `SYSTEM` token). Combine with the pipe's owner ([`audit`])
-/// through [`crate::agent_server_trusted`].
+/// not open a `SYSTEM` token). Combine with the pipe's owner
+/// ([`pipe_owner`]) through [`crate::agent_server_trusted`].
 #[allow(unsafe_code)]
 pub fn pipe_server_user(pipe: &impl AsHandle) -> io::Result<Option<Principal>> {
     let trusted = Trusted::get()?;
@@ -692,14 +737,17 @@ mod tests {
             return; // no pipe security descriptor under wine
         }
         let user = pipe_server_user(&client).unwrap();
-        let owner = audit(&client).unwrap().owner;
         assert_eq!(user, Some(Principal::CurrentUser));
+        let pipe = pipe_audit(&client);
         // `Administrators` when the test runs elevated (CI).
         assert!(
-            matches!(owner, Principal::CurrentUser | Principal::Administrators),
-            "{owner:?}"
+            pipe.as_ref().is_ok_and(|a| matches!(
+                a.owner,
+                Principal::CurrentUser | Principal::Administrators
+            )),
+            "{pipe:?}"
         );
-        assert!(crate::agent_server_trusted(owner, user));
+        assert!(crate::agent_server_trusted(user, pipe.ok().as_ref()));
     }
 
     #[test]

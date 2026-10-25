@@ -857,11 +857,3 @@ pub fn start_silent_agent(_dir: &std::path::Path) -> PathBuf {
     });
     PathBuf::from(name)
 }
-
-/// Running under wine (whose named pipes carry no security descriptor):
-/// tests that need Windows' own answers only exercise the calls there.
-pub fn under_wine() -> bool {
-    cfg!(windows)
-        && (std::env::var_os("WINELOADER").is_some()
-            || std::path::Path::new(r"C:\windows\system32\winecfg.exe").exists())
-}
