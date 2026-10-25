@@ -269,8 +269,11 @@ pub(crate) async fn list_keys(engine: State<'_, Engine>) -> Result<Vec<LocalKeyD
 /// Async (and off the main thread): the host name may come from
 /// `/etc/hostname`, read in `spawn_blocking`.
 #[tauri::command]
-pub(crate) async fn key_defaults() -> Result<KeyDefaultsDto, ErrorSummary> {
-    tauri::async_runtime::spawn_blocking(key_defaults_blocking)
+pub(crate) async fn key_defaults(
+    engine: State<'_, Engine>,
+) -> Result<KeyDefaultsDto, ErrorSummary> {
+    let local_user = engine.config().local_user.clone();
+    tauri::async_runtime::spawn_blocking(move || key_defaults_blocking(&local_user))
         .await
         .map_err(|_| ErrorSummary {
             code: "key_defaults".into(),
@@ -279,10 +282,17 @@ pub(crate) async fn key_defaults() -> Result<KeyDefaultsDto, ErrorSummary> {
         })
 }
 
-fn key_defaults_blocking() -> KeyDefaultsDto {
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_default();
+/// `local_user`: the engine's (Windows: the name OpenSSH for Windows
+/// uses, lowercased, `domain\user` for a domain account, like
+/// `ssh-keygen`'s own default comment there).
+fn key_defaults_blocking(local_user: &str) -> KeyDefaultsDto {
+    let user = if cfg!(windows) {
+        local_user.to_owned()
+    } else {
+        std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_default()
+    };
     let host = local_hostname();
     let comment = match (user.is_empty(), host) {
         (false, Some(host)) => format!("{user}@{host}"),
@@ -295,11 +305,18 @@ fn key_defaults_blocking() -> KeyDefaultsDto {
     }
 }
 
-/// Short host name, when the system tells it without running a program.
+/// Short host name, when the system tells it without running a program:
+/// `%COMPUTERNAME%` (lowercased) on Windows, where `/etc/hostname` is never
+/// read (it would be a relative path on the current drive);
+/// `$HOSTNAME` then `/etc/hostname` on Unix.
 fn local_hostname() -> Option<String> {
-    let raw = std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())?;
+    let raw = if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()?.to_lowercase()
+    } else {
+        std::env::var("HOSTNAME")
+            .ok()
+            .or_else(|| std::fs::read_to_string("/etc/hostname").ok())?
+    };
     let short = raw.trim().split('.').next()?.to_owned();
     (!short.is_empty()).then_some(short)
 }
