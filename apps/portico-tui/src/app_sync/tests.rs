@@ -308,8 +308,13 @@ fn received_hosts_show_both_destinations_whole() {
     assert!(all.contains("Now on this device"), "{all}");
     assert!(all.contains("10.0.0.5"), "{all}");
     // Wrapped, never cut: the pieces put back together.
-    let joined: String = lines.iter().map(|l| l.replace([' ', '│'], "")).collect();
+    // (The `◂` mark of a changed value is not part of it.)
+    let joined: String = lines
+        .iter()
+        .map(|l| l.replace([' ', '│', '◂'], ""))
+        .collect();
     assert!(joined.contains(LONG_HOST), "{all}");
+    assert!(all.contains('◂'), "the changed value is marked: {all}");
     assert!(!all.contains("example-corp…"), "{all}");
     // No bulk confirmation: `y` confirms the item shown.
     assert!(all.contains("confirm"), "{all}");
