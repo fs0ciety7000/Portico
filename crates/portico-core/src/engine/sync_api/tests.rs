@@ -1623,11 +1623,17 @@ async fn received_host_never_overwrites_unsynced_local_host() {
         .await
         .expect("host");
     let text = std::fs::read_to_string(b.paths.managed_hosts()).expect("r");
+    // An absolute path outside the home directory on each platform.
+    let outside_key = if cfg!(windows) {
+        "C:/keys/id_web"
+    } else {
+        "/opt/keys/id_web"
+    };
     let outside = text
         .lines()
         .map(|line| {
             if line.trim_start().starts_with("IdentityFile") {
-                "    IdentityFile /opt/keys/id_web".to_owned()
+                format!("    IdentityFile {outside_key}")
             } else {
                 line.to_owned()
             }
