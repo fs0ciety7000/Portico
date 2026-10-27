@@ -56,6 +56,7 @@ pub(crate) struct SyncHandle {
     jobs: Mutex<Option<SyncSender<Job>>>,
     tuning: Mutex<SyncTuning>,
     status: Arc<Mutex<SyncStatus>>,
+    writers: crate::sync::runner::SnippetWriters,
     notify: Arc<Notify>,
     task: Mutex<Option<CancellationToken>>,
 }
@@ -66,6 +67,7 @@ impl Default for SyncHandle {
             jobs: Mutex::new(None),
             tuning: Mutex::new(SyncTuning::default()),
             status: Arc::new(Mutex::new(SyncStatus::Disabled)),
+            writers: Arc::default(),
             notify: Arc::new(Notify::new()),
             task: Mutex::new(None),
         }
@@ -116,6 +118,7 @@ impl Engine {
             self.inner.events.clone(),
             self.sync_tuning(),
             Arc::clone(&self.sync_handle().status),
+            Arc::clone(&self.sync_handle().writers),
         );
         let (jobs, queue) = std::sync::mpsc::sync_channel::<Job>(SYNC_QUEUE);
         std::thread::Builder::new()
@@ -537,7 +540,21 @@ impl Engine {
     pub async fn synced_snippets_unconfirmed(&self) -> Result<Vec<UnconfirmedSnippet>> {
         let paths = self.inner.config.paths.clone();
         let store = Arc::clone(&self.inner.snippets);
-        Self::blocking(move || crate::sync::apply::unconfirmed_snippets(&paths, &store)).await
+        let mut list =
+            Self::blocking(move || crate::sync::apply::unconfirmed_snippets(&paths, &store))
+                .await?;
+        let writers = self
+            .sync_handle()
+            .writers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for snippet in &mut list {
+            if let Some(devices) = writers.get(&snippet.id) {
+                snippet.devices.clone_from(devices);
+            }
+        }
+        Ok(list)
     }
 
     /// The user read the whole command of a snippet changed by sync and

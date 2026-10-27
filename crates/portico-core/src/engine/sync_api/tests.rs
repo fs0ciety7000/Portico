@@ -547,6 +547,13 @@ async fn synced_snippet_change_requires_confirmation_before_run() {
             .collect::<Vec<_>>(),
         [(saved.id.as_str(), "make deploy")]
     );
+    // B14 (S1c review): the review names the device that wrote it.
+    let devices = &unconfirmed.first().expect("one").devices;
+    assert_eq!(devices.len(), 1, "{devices:?}");
+    assert!(
+        devices.iter().all(|d| d.starts_with("Laptop (")),
+        "{devices:?}"
+    );
     let hash = unconfirmed.first().expect("one").hash.clone();
     let error = b
         .engine

@@ -199,6 +199,7 @@ fn snippets() -> Vec<UnconfirmedSnippet> {
             description: Some("Rolling restart of the payments API.".into()),
             run: true,
         },
+        devices: vec!["studio-mac (3f9c0ae1)".into()],
         hash: "hash-snippet".into(),
     }]
 }
@@ -420,6 +421,8 @@ fn received_snippets_show_the_whole_command() {
         "{all}"
     );
     assert!(all.contains("2 lines · 196 characters"), "{all}");
+    // B14: the device that wrote it.
+    assert!(all.contains("Changed by studio-mac (3f9c0ae1)."), "{all}");
 }
 
 /// A2 (S1c review): a tab of a received command is typed with the rest:

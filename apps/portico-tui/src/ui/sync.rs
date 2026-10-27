@@ -1579,6 +1579,17 @@ fn snippet_card(
         display_safe(&sn.snippet.name),
         s.title(),
     )));
+    // B14: who wrote it (the device ids as the core labels them).
+    let who = if sn.devices.is_empty() {
+        "another device".to_owned()
+    } else {
+        display_safe(&sn.devices.join(", "))
+    };
+    lines.extend(paragraph(
+        s.secondary(),
+        &format!("Changed by {who}. It runs only once you confirm this exact command here."),
+        w,
+    ));
     if let Some(d) = &sn.snippet.description {
         lines.extend(paragraph(s.secondary(), &display_safe(d), w));
     }

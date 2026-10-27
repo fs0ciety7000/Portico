@@ -61,6 +61,7 @@ pub(crate) fn unconfirmed(id: &str, command: &str, hash: &str) -> UnconfirmedSni
             description: None,
             run: true,
         },
+        devices: vec!["laptop (3f9c0ae1)".into()],
         hash: hash.into(),
     }
 }

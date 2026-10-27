@@ -275,6 +275,11 @@ pub struct UnconfirmedSnippet {
     pub id: String,
     /// What the user confirms, exactly as it will run.
     pub snippet: SyncSnippetValue,
+    /// Labels of the devices that wrote it (as in
+    /// [`PendingHostChange::devices`]). Known once a pass has read the
+    /// folder since launch; empty while sync is locked or off (the gate
+    /// stays, the UI says "another device").
+    pub devices: Vec<String>,
     /// Identifies the content shown: pass it back to
     /// [`crate::Engine::confirm_synced_snippet`]. Content changed since is
     /// refused with `sync_not_pending`.

@@ -174,12 +174,18 @@ pub(crate) struct SyncCore {
     joins: BTreeMap<String, PendingJoin>,
     report: Report,
     status: Arc<Mutex<SyncStatus>>,
+    writers: SnippetWriters,
     conflicts_count: usize,
     /// What awaits a confirmation (hosts: alias → destination hash;
     /// snippets: id → content hash) as of the last pass: a change of its
     /// **content**, not only of its size, is announced.
     pending_seen: Option<PendingSet>,
 }
+
+/// Snippet id → labels of the devices that wrote the gated content, as of
+/// the last pass (shared with the engine: the register needs the data key,
+/// the list of unconfirmed snippets does not).
+pub(crate) type SnippetWriters = Arc<Mutex<BTreeMap<String, Vec<String>>>>;
 
 /// Received changes awaiting a confirmation on this device.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -352,6 +358,7 @@ impl SyncCore {
         events: broadcast::Sender<EngineEvent>,
         tuning: SyncTuning,
         status: Arc<Mutex<SyncStatus>>,
+        writers: SnippetWriters,
     ) -> Self {
         Self {
             config,
@@ -362,6 +369,7 @@ impl SyncCore {
             joins: BTreeMap::new(),
             report: Report::default(),
             status,
+            writers,
             conflicts_count: 0,
             pending_seen: None,
         }
@@ -1380,6 +1388,8 @@ impl SyncCore {
                 .map(|u| (u.id, u.hash))
                 .collect(),
         };
+        let writers = Self::snippet_writers(&session, &pending.snippets);
+        *self.writers.lock().unwrap_or_else(PoisonError::into_inner) = writers;
         self.report = report;
         if count != self.conflicts_count {
             self.conflicts_count = count;
@@ -1431,6 +1441,48 @@ impl SyncCore {
         session
             .folder
             .write(&FolderFile::primary(&me), sealed.text.as_bytes())
+    }
+
+    /// Who wrote each gated snippet (`id → hash` as gated): the devices of
+    /// the register's side with that content (all sides when none matches),
+    /// this device left out (a "keep both" copy is its own write).
+    fn snippet_writers(
+        session: &Session,
+        gated: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, Vec<String>> {
+        let me = session.sync.device;
+        let roster = &session.bundle.roster;
+        gated
+            .iter()
+            .filter_map(|(id, hash)| {
+                let key = RecordKey::Snippet { id: id.clone() };
+                let Some(RegisterView::Known(siblings)) = session.replica.state.view(&key) else {
+                    return None;
+                };
+                let same = |sibling: &&TypedSibling| match &sibling.value {
+                    RecordValue::Snippet(value) => {
+                        let snippet = project::snippet_from(id, value);
+                        apply::snippet_hash(&snippet.command, snippet.run) == *hash
+                    }
+                    _ => false,
+                };
+                let matching: Vec<&TypedSibling> = siblings.iter().filter(same).collect();
+                let sides = if matching.is_empty() {
+                    siblings.iter().collect()
+                } else {
+                    matching
+                };
+                let devices: BTreeSet<DeviceId> = sides
+                    .iter()
+                    .flat_map(|s| s.dots.iter().map(|d| d.device))
+                    .filter(|d| *d != me)
+                    .collect();
+                (!devices.is_empty()).then(|| {
+                    let labels = devices.iter().map(|d| Self::label(roster, d)).collect();
+                    (id.clone(), labels)
+                })
+            })
+            .collect()
     }
 
     fn build_report(

@@ -119,7 +119,7 @@
     </div>
     <p class="note">Rejecting keeps it out of hosts.conf on this device only; a different destination later asks again.</p>
   {:else if view.kind === "snippet" && snippet}
-    <p>Changed by sync on another device. It runs only once you confirm this exact command on this device.</p>
+    <p>Changed by <span class="mono">{snippet.devices.join(", ") || "another device"}</span>. It runs only once you confirm this exact command on this device.</p>
     <div class="command-head">
       <span class="caption">Command</span>
       <span class="stats" data-testid="sync-snippet-stats">{commandStats(snippet.snippet.command)}</span>

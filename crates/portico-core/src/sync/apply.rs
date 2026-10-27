@@ -182,6 +182,8 @@ pub(crate) fn unconfirmed_snippets(
                     description: s.description,
                     run: s.run,
                 },
+                // Filled by the engine from the last pass (`SnippetWriters`).
+                devices: Vec::new(),
                 hash,
             })
         })

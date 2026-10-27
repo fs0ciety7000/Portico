@@ -787,6 +787,8 @@ export interface PendingHostChange {
 export interface UnconfirmedSnippet {
   id: string;
   snippet: SyncSnippetValue;
+  /** Labels of the devices that wrote it; empty while sync is locked or off. */
+  devices: string[];
   /** Sent back with the confirmation: identifies the content shown. */
   hash: string;
 }

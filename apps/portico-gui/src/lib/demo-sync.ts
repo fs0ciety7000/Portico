@@ -126,6 +126,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
           description: "Free space on every mounted filesystem",
           run: true,
         },
+        devices: [LAPTOP],
         hash: "s-disk-1",
       },
     ];
