@@ -350,6 +350,11 @@ pub struct JoinPreview {
     pub conflicts: usize,
     /// Records only a newer Portico reads.
     pub needs_newer: usize,
+    /// This device verified this bundle before (it joins again, S2a): only
+    /// [`JoinBulkChoice::ReviewEach`] is accepted, and every local record
+    /// that differs from the synced one waits for a decision
+    /// ([`crate::Engine::sync_revoked_values`], RR4).
+    pub rejoin: bool,
 }
 
 /// How to settle the conflicts found when joining. Neither bulk choice

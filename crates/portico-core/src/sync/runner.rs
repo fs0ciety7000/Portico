@@ -154,6 +154,9 @@ struct PendingJoin {
     device_name: DeviceName,
     remember_key: bool,
     expires: Instant,
+    /// This device verified this bundle before: no bulk choice, local
+    /// records of unknown origin (FAIBLE-5 of the S2a review).
+    rejoin: bool,
 }
 
 /// An alert raised by a pass.
@@ -587,6 +590,14 @@ impl SyncCore {
         }
     }
 
+    /// [`Self::restamp_keys`] from the `sync.toml` on disk (after a pass,
+    /// under `sync.lock`).
+    fn restamp_from_disk(&mut self) {
+        if let Ok(Some(sync)) = state::load_config(&self.config.paths) {
+            self.restamp_keys(&sync);
+        }
+    }
+
     /// Re-stamps after this process changed its own files (the keys it
     /// holds stay valid).
     fn restamp_keys(&mut self, sync: &SyncConfig) {
@@ -604,13 +615,18 @@ impl SyncCore {
     }
 
     /// The data key of `(bundle, epoch)`: cached, else the keychain
-    /// (cached then). An entry is only ever there when this device chose
-    /// to remember its key at that epoch ("don't remember" deletes it): a
-    /// rotation that switched the choice still finds the key it needs to
-    /// migrate the replica after a crash.
+    /// (cached then). The keys of the current epoch and of a transition
+    /// are read there only while this device remembers its key ("don't
+    /// remember" is honoured during a transition too, FAIBLE-1 of the S2a
+    /// review); an older epoch's entry (the replica not migrated yet after
+    /// a crash) is read whatever the choice: it exists only if it was
+    /// remembered then, and it is collected once migrated.
     fn epoch_key(&mut self, sync: &SyncConfig, epoch: u32) -> Option<DataKey> {
         if let Some(key) = self.keys.get(&sync.bundle_id, epoch) {
             return Some(key);
+        }
+        if epoch >= sync.epoch && !sync.remember_key {
+            return None;
         }
         let stored = self
             .config
@@ -1034,6 +1050,10 @@ impl SyncCore {
         self.retain_lineage(&mut session, main_won.then_some(main_text.as_str()))?;
         let mut roster = union_roster;
         let mut fix = Self::enforce_revoked(&mut session, &mut roster, &clock_conflicts, alerts);
+        // The merge filters of this pass use the corrected list, whether
+        // or not the corrective rewrite lands (FAIBLE-6 of the S2a review).
+        session.bundle.roster.revoked.clone_from(&roster.revoked);
+        session.bundle.roster.devices.clone_from(&roster.devices);
         fix |= Self::ratchet_policy(&mut session, alerts);
         if rewrite || fix || observed == BundleObservation::Diverged {
             session.roster_rewrite = Some(roster);
@@ -1048,6 +1068,9 @@ impl SyncCore {
                 error: SyncError::PassphraseChanged,
             });
         }
+        // The commitment and `sync.toml` this session may have written are
+        // this process's own (MOYEN-2 of the S2a review).
+        self.restamp_keys(&session.sync);
         Ok(session)
     }
 
@@ -1552,6 +1575,11 @@ impl SyncCore {
             return Ok(self.status());
         };
         let result = self.pass_locked();
+        // Still under `sync.lock`: whatever changed `sync.toml`,
+        // `rotation.toml` or `commitment.toml` during the pass was this
+        // process (a first commitment, a re-join): the keys it holds stay
+        // valid (a "don't remember" device must not lock itself).
+        self.restamp_from_disk();
         match result {
             Ok(status) => {
                 self.set_status(status.clone());
@@ -1722,12 +1750,23 @@ impl SyncCore {
                 received.push((device, opened));
             }
         }
+        // This device's own former ids (a re-join of unknown origin) are
+        // neither waited for nor "behind": their file is this device's past
+        // (FAIBLE-2 of the S2a review).
+        let superseded: BTreeSet<DeviceId> =
+            session.replica.local.superseded.iter().copied().collect();
+        stale_keys.retain(|device| !superseded.contains(device));
         // Devices whose newer snapshot others merged but which is not in
         // the folder (yet): withheld or still uploading.
         for withheld in guard::withheld(&present, seen_vectors.iter()) {
             // A device still on older keys is "needs the new keys", not
-            // withheld: its file is there, under the previous epoch.
-            if withheld.device == me || stale_keys.contains(&withheld.device) {
+            // withheld: its file is there, under the previous epoch. A
+            // forgotten (or retired) id is never waited for.
+            if withheld.device == me
+                || stale_keys.contains(&withheld.device)
+                || superseded.contains(&withheld.device)
+                || revoked.contains_key(&withheld.device)
+            {
                 continue;
             }
             let label = Self::label(&session.bundle.roster, &withheld.device);
@@ -1744,7 +1783,13 @@ impl SyncCore {
         }
         let mut verified = session.replica.high_water.verified_clocks();
         verified.insert(me, session.clock.counter());
+        // A former id of this device whose clock it no longer knows: what
+        // the others relay about it is accepted until it is retired.
+        for former in &superseded {
+            verified.insert(*former, u64::MAX);
+        }
         let mut accepted = Vec::new();
+        let mut deferred_any = false;
         for (device, opened) in received {
             let label = opened.content.device_name.label(&device);
             let context = opened.content.state.context();
@@ -1758,6 +1803,7 @@ impl SyncCore {
             match guard::check_context_claims(&device, context, &roster, &revoked, &verified) {
                 ClaimCheck::Accept => accepted.push((device, opened)),
                 ClaimCheck::Defer(claims) => {
+                    deferred_any = true;
                     // Writes of a forgotten device beyond its exact bound,
                     // relayed by `device` (§13.4.2).
                     for claim in claims.iter().filter(|claim| claim.revoked) {
@@ -1834,18 +1880,9 @@ impl SyncCore {
                 }
             }
         }
-        let passwords_on = session.bundle.roster.policy.include_passwords;
-        if !passwords_on {
-            session.replica.state.drop_kind(project::KIND_SECRET);
-        }
         for (device, opened) in accepted {
             let label = opened.content.device_name.label(&device);
-            match merge_with_policy(
-                &mut session.replica.state,
-                &opened.content.state,
-                &device,
-                passwords_on,
-            ) {
+            match merge_received(&mut session.replica.state, &opened.content.state, &device) {
                 Ok(report) => {
                     session
                         .replica
@@ -1884,6 +1921,17 @@ impl SyncCore {
                     error: e,
                 }),
             }
+        }
+        // Former ids retired once every current snapshot was merged: the
+        // bound is the highest clock the others relay for it, as a forget
+        // fixes it (§13.4.2).
+        if !superseded.is_empty() && !deferred_any && !partial {
+            for former in &superseded {
+                let clock = session.replica.state.context().get(former);
+                session.replica.local.retire.insert(*former, clock);
+            }
+            session.replica.local.superseded.clear();
+            self.ensure_in_roster(&mut session);
         }
         // ── Durable before anything is applied or published ──
         self.save_replica(&mut session)?;
@@ -2486,6 +2534,47 @@ impl SyncCore {
 
     /// Computes what joining brings, without writing anything (F14), and
     /// keeps the data key under a single-use token.
+    /// What joining would bring: records per kind, and how many differ
+    /// from this device's own.
+    fn count_preview(
+        preview: &mut JoinPreview,
+        projection: &super::model::Projection,
+        view: &LocalView,
+    ) {
+        for (key, siblings) in &projection.known {
+            let live: Vec<&TypedSibling> = siblings
+                .iter()
+                .filter(|s| !s.value.is_tombstone())
+                .collect();
+            if live.is_empty() {
+                continue;
+            }
+            match key {
+                RecordKey::Host { .. } => preview.hosts = preview.hosts.saturating_add(1),
+                RecordKey::HostMeta { .. } => {
+                    preview.host_meta = preview.host_meta.saturating_add(1);
+                }
+                RecordKey::Snippet { .. } => preview.snippets = preview.snippets.saturating_add(1),
+                RecordKey::Setting { .. } => preview.settings = preview.settings.saturating_add(1),
+                RecordKey::Secret { .. } => {}
+            }
+            if let Some(local) = view.records.get(key)
+                && (siblings.len() > 1 || live.iter().all(|s| s.value != *local))
+            {
+                preview.conflicts = preview.conflicts.saturating_add(1);
+            }
+        }
+    }
+
+    /// This device held `bundle_id` before (its history keeps a copy):
+    /// joining it again is a re-join (FAIBLE-5 of the S2a review).
+    fn held_before(&self, bundle_id: &[u8; crypto::ID_LEN]) -> bool {
+        state::load_history(&self.config.paths)
+            .unwrap_or_default()
+            .iter()
+            .any(|(_, _, text)| bundle::peek(text).is_ok_and(|c| c.bundle_id == *bundle_id))
+    }
+
     pub(crate) fn join_preview(
         &mut self,
         folder: PathBuf,
@@ -2549,30 +2638,9 @@ impl SyncCore {
             settings: 0,
             conflicts: 0,
             needs_newer: projection.held.len(),
+            rejoin: self.held_before(&opened.header.bundle_id),
         };
-        for (key, siblings) in &projection.known {
-            let live: Vec<&TypedSibling> = siblings
-                .iter()
-                .filter(|s| !s.value.is_tombstone())
-                .collect();
-            if live.is_empty() {
-                continue;
-            }
-            match key {
-                RecordKey::Host { .. } => preview.hosts = preview.hosts.saturating_add(1),
-                RecordKey::HostMeta { .. } => {
-                    preview.host_meta = preview.host_meta.saturating_add(1);
-                }
-                RecordKey::Snippet { .. } => preview.snippets = preview.snippets.saturating_add(1),
-                RecordKey::Setting { .. } => preview.settings = preview.settings.saturating_add(1),
-                RecordKey::Secret { .. } => {}
-            }
-            if let Some(local) = view.records.get(key)
-                && (siblings.len() > 1 || live.iter().all(|s| s.value != *local))
-            {
-                preview.conflicts = preview.conflicts.saturating_add(1);
-            }
-        }
+        Self::count_preview(&mut preview, &projection, &view);
         self.purge_expired_joins();
         let token = state::hex(&crypto::random_array::<16>()?);
         self.joins.insert(
@@ -2589,6 +2657,7 @@ impl SyncCore {
                 expires: Instant::now()
                     .checked_add(self.tuning.join_ttl)
                     .unwrap_or_else(Instant::now),
+                rejoin: preview.rejoin,
             },
         );
         preview.token = token;
@@ -2631,6 +2700,12 @@ impl SyncCore {
         if state::is_set_up(&self.config.paths) {
             return Err(SyncError::AlreadyEnabled.into());
         }
+        if join.rejoin && bulk != JoinBulkChoice::ReviewEach {
+            return Err(SyncError::Resolution {
+                reason: "a device that joins again reviews each difference",
+            }
+            .into());
+        }
         let device = DeviceId::generate()?;
         let sync = SyncConfig::new(
             join.folder.clone(),
@@ -2645,7 +2720,23 @@ impl SyncCore {
         }
         let set_up = (|| -> crate::Result<()> {
             let keys = crypto::derive_subkeys(&join.data_key, &join.bundle_id, join.epoch)?;
-            let replica = fresh_replica(join.device_name.clone(), join.keyset_generation);
+            let mut replica = fresh_replica(join.device_name.clone(), join.keyset_generation);
+            if join.rejoin {
+                // Every local record is of unknown origin until it matches
+                // the synced value or the user decides (RR4).
+                let view = project::observe(&self.config.paths, &self.snippets);
+                for key in view.records.keys() {
+                    if let Ok(wire) = WireKey::encode(key) {
+                        replica.local.held_values.push((
+                            wire,
+                            state::HeldValue {
+                                from: None,
+                                label: None,
+                            },
+                        ));
+                    }
+                }
+            }
             let binding = Binding {
                 bundle_id: join.bundle_id,
                 epoch: join.epoch,
@@ -2889,11 +2980,25 @@ impl SyncCore {
 
     pub(crate) fn set_remember(&mut self, remember: bool) -> crate::Result<SyncStatus> {
         let mut sync = state::load_config(&self.config.paths)?.ok_or(SyncError::Disabled)?;
+        // The current key and, during a transition, the next one.
+        let next = state::load_rotation(&self.config.paths)?
+            .filter(|r| r.bundle_id == sync.bundle_id)
+            .map(|r| r.next_epoch);
         if remember {
             let key = self.data_key_for(&sync)?;
             self.remember_key(&sync, &key)?;
+            if let Some(epoch) = next
+                && let Some(key) = self.keys.get(&sync.bundle_id, epoch)
+            {
+                self.remember_key_at(&sync.bundle_id, epoch, &key)?;
+            }
         } else {
             self.config.secrets.delete(&data_key_account(&sync))?;
+            if let Some(epoch) = next {
+                self.config
+                    .secrets
+                    .delete(&key_account(&sync.bundle_id, epoch))?;
+            }
         }
         sync.remember_key = remember;
         state::save_config(&self.config.paths, &sync)?;
@@ -2931,24 +3036,21 @@ impl SyncCore {
     }
 }
 
-/// Merges `incoming` (the state of `source`) under the bundle's password
-/// policy (§13.5.3, R8, RR3). Off: `secret` registers are dropped on both
-/// sides; every device purges, so none is ever "covered and absent" on one
-/// side only. On: they merge and are relayed **opaque**, whether or not
-/// this device consents (S2b): never decrypted, projected nor applied
-/// here, so a non-consenting device's context never makes the consenting
-/// ones drop a shared password.
-pub(crate) fn merge_with_policy(
+/// Merges `incoming` (the state of `source`). `secret` registers merge and
+/// are relayed **opaque** whatever the bundle's password policy and this
+/// device's consent (§13.5.3, RR3, and the S2a review's MOYEN on the
+/// filter): "passwords off" only ever means "never decrypted, projected
+/// nor applied here" (S2b). Dropping them at the merge while joining the
+/// source's causal context would leave this device's context covering
+/// dots it does not hold; any device it relays to would then read
+/// "covered and absent" and delete the shared passwords, whichever policy
+/// view (stale, or closed in doubt) each device has.
+pub(crate) fn merge_received(
     state: &mut SyncState,
     incoming: &SyncState,
     source: &DeviceId,
-    passwords_on: bool,
 ) -> Result<super::model::MergeReport, SyncError> {
-    if passwords_on {
-        return state.merge(incoming, source);
-    }
-    state.drop_kind(project::KIND_SECRET);
-    state.merge(&incoming.without_kind(project::KIND_SECRET), source)
+    state.merge(incoming, source)
 }
 
 /// `true` when the replica could not be read (an alert was pushed).
@@ -3014,7 +3116,7 @@ mod tests {
 
     use super::super::clock::{DeviceId, LocalClock};
     use super::super::model::{RecordKey, RecordValue, SealedValue, SyncState};
-    use super::merge_with_policy;
+    use super::merge_received;
 
     fn device(n: u8) -> DeviceId {
         DeviceId::from_bytes([n; 16])
@@ -3038,110 +3140,111 @@ mod tests {
         id: DeviceId,
         clock: LocalClock,
         state: SyncState,
+        /// This device's view of the policy (on, generation): it never
+        /// changes what the merge keeps.
+        policy: (bool, u64),
     }
 
     impl Node {
-        fn new(n: u8) -> Self {
+        fn new(n: u8, policy: (bool, u64)) -> Self {
             Self {
                 id: device(n),
                 clock: LocalClock::new(device(n), 0),
                 state: SyncState::default(),
+                policy,
             }
         }
 
         /// Merges `other` in; returns the values dropped without successor.
-        fn pull(&mut self, other: &Node, passwords_on: bool) -> usize {
-            merge_with_policy(&mut self.state, &other.state, &other.id, passwords_on)
+        fn pull(&mut self, other: &Node) -> usize {
+            merge_received(&mut self.state, &other.state, &other.id)
                 .expect("merge")
                 .dropped_live_without_successor
         }
+
+        /// Only a device whose own view says "on" writes a password (S2b).
+        fn write(&mut self, account: u8, value: u8) -> bool {
+            if !self.policy.0 {
+                return false;
+            }
+            self.state
+                .write_unvalidated(&mut self.clock, &secret_key(account), &sealed(value), 0)
+                .expect("write");
+            true
+        }
+    }
+
+    /// Writes by A or C, every exchange through B, then the last values
+    /// must be everywhere and no merge may drop one.
+    fn relay_through_b(
+        a: &mut Node,
+        b: &mut Node,
+        c: &mut Node,
+        writes: Vec<(bool, u8, u8)>,
+    ) -> Result<(), TestCaseError> {
+        let mut dropped = 0;
+        let mut last: std::collections::BTreeMap<u8, RecordValue> =
+            std::collections::BTreeMap::new();
+        for (by_a, account, value) in writes {
+            let wrote = if by_a {
+                a.write(account, value)
+            } else {
+                c.write(account, value)
+            };
+            if wrote {
+                last.insert(account, sealed(value));
+            }
+            if by_a {
+                dropped += b.pull(a);
+                dropped += c.pull(b);
+                dropped += b.pull(c);
+                dropped += a.pull(b);
+            } else {
+                dropped += b.pull(c);
+                dropped += a.pull(b);
+                dropped += b.pull(a);
+                dropped += c.pull(b);
+            }
+        }
+        prop_assert_eq!(dropped, 0);
+        for (account, value) in &last {
+            let key = secret_key(*account);
+            prop_assert_eq!(a.state.value(&key), Some(value.clone()));
+            prop_assert_eq!(c.state.value(&key), Some(value.clone()));
+            prop_assert_eq!(b.state.value(&key), Some(value.clone()), "relayed");
+        }
+        Ok(())
     }
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
-        /// RR3: policy on, B never consents (it never writes a password,
-        /// never applies one) but merges and relays the registers opaque.
-        /// A and C only ever talk through B: every password they wrote
-        /// survives on both, and no merge drops a value.
+        /// RR3: policy on, B never consents (never writes nor applies a
+        /// password) but relays the registers opaque. A and C only talk
+        /// through B: nothing is lost, nothing dropped.
         #[test]
         fn non_consenting_device_relays_secrets_and_drops_nothing(
             writes in proptest::collection::vec((any::<bool>(), 0u8..4, 0u8..8), 1..24)
         ) {
-            let mut a = Node::new(1);
-            let mut b = Node::new(2);
-            let mut c = Node::new(3);
-            let mut dropped = 0;
-            let mut last: std::collections::BTreeMap<u8, RecordValue> = std::collections::BTreeMap::new();
-            for (by_a, account, value) in writes {
-                let writer = if by_a { &mut a } else { &mut c };
-                let key = secret_key(account);
-                writer
-                    .state
-                    .write_unvalidated(&mut writer.clock, &key, &sealed(value), 0)
-                    .expect("write");
-                last.insert(account, sealed(value));
-                // Through B only, in both directions.
-                if by_a {
-                    dropped += b.pull(&a, true);
-                    dropped += c.pull(&b, true);
-                    dropped += b.pull(&c, true);
-                    dropped += a.pull(&b, true);
-                } else {
-                    dropped += b.pull(&c, true);
-                    dropped += a.pull(&b, true);
-                    dropped += b.pull(&a, true);
-                    dropped += c.pull(&b, true);
-                }
-            }
-            prop_assert_eq!(dropped, 0);
-            for (account, value) in &last {
-                let key = secret_key(*account);
-                prop_assert_eq!(a.state.value(&key), Some(value.clone()));
-                prop_assert_eq!(c.state.value(&key), Some(value.clone()));
-                prop_assert_eq!(b.state.value(&key), Some(value.clone()), "relayed");
-            }
+            let mut a = Node::new(1, (true, 1));
+            let mut b = Node::new(2, (true, 1));
+            let mut c = Node::new(3, (true, 1));
+            relay_through_b(&mut a, &mut b, &mut c, writes)?;
         }
-    }
 
-    /// R8: while the policy is off, every device drops the `secret`
-    /// registers on both sides of every merge; nothing else changes and no
-    /// value is dropped.
-    #[test]
-    fn disabled_policy_filters_secret_registers_everywhere() {
-        let mut a = Node::new(1);
-        let mut b = Node::new(2);
-        let host = RecordKey::Host {
-            alias: "web".into(),
-        };
-        let value = RecordValue::Host(super::super::model::HostValue {
-            hostname: "10.0.0.1".into(),
-            user: None,
-            port: None,
-            identity_file: None,
-            proxy_jump: None,
-            renamed_from: None,
-        });
-        a.state.write(&mut a.clock, &host, &value, 0).expect("host");
-        a.state
-            .write_unvalidated(&mut a.clock, &secret_key(1), &sealed(1), 0)
-            .expect("secret");
-        b.state
-            .write_unvalidated(&mut b.clock, &secret_key(2), &sealed(2), 0)
-            .expect("secret");
-        assert_eq!(b.pull(&a, false), 0);
-        assert_eq!(a.pull(&b, false), 0);
-        for node in [&a, &b] {
-            assert_eq!(node.state.value(&host), Some(value.clone()));
-            assert!(node.state.view(&secret_key(1)).is_none());
-            assert!(node.state.view(&secret_key(2)).is_none());
+        /// S2a review (MOYEN, S2b-only): B is stuck on another view of the
+        /// policy (older generation, or "off", or closed in doubt): where
+        /// the policy is on, no shared password is ever lost.
+        #[test]
+        fn stale_policy_view_never_deletes_shared_passwords(
+            writes in proptest::collection::vec((any::<bool>(), 0u8..4, 0u8..8), 1..24),
+            b_on in any::<bool>(),
+            b_generation in 0u64..3,
+        ) {
+            let mut a = Node::new(1, (true, 3));
+            let mut b = Node::new(2, (b_on, b_generation));
+            let mut c = Node::new(3, (true, 3));
+            relay_through_b(&mut a, &mut b, &mut c, writes)?;
         }
-        // Policy on again: only new writes travel (nothing was resurrected).
-        a.state
-            .write_unvalidated(&mut a.clock, &secret_key(3), &sealed(3), 0)
-            .expect("secret");
-        assert_eq!(b.pull(&a, true), 0);
-        assert_eq!(b.state.value(&secret_key(3)), Some(sealed(3)));
-        assert!(b.state.view(&secret_key(1)).is_none());
     }
 }

@@ -838,6 +838,8 @@ export interface JoinPreview {
   settings: number;
   conflicts: number;
   needs_newer: number;
+  /** This device held this bundle before: only "review_each" is accepted. */
+  rejoin: boolean;
 }
 
 export type JoinBulkChoice = "review_each" | "prefer_remote" | "prefer_local";

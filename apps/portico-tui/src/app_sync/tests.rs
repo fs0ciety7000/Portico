@@ -658,6 +658,7 @@ fn an_expired_review_asks_for_the_passphrase_again() {
             settings: 3,
             conflicts: 2,
             needs_newer: 1,
+            rejoin: false,
         },
         Instant::now(),
     );
@@ -985,6 +986,7 @@ fn sync_captures() {
                     settings: 3,
                     conflicts: 2,
                     needs_newer: 1,
+                    rejoin: false,
                 },
                 Instant::now(),
             );

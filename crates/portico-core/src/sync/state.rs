@@ -166,6 +166,10 @@ pub(crate) struct LocalReplica {
     pub(crate) retire: BTreeMap<DeviceId, u64>,
     /// `app_version` of each device's last verified snapshot (Q5).
     pub(crate) peer_versions: BTreeMap<DeviceId, String>,
+    /// Former ids of this device whose last clock it no longer knows (a
+    /// re-join of unknown origin, RR4): retired by the first pass that
+    /// merged every current snapshot, with the clock they relay for it.
+    pub(crate) superseded: Vec<DeviceId>,
 }
 
 /// One epoch of the lineage memory.

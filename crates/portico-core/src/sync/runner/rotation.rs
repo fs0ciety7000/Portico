@@ -195,6 +195,14 @@ pub(crate) fn unlock_decide(
     }
 }
 
+/// A conflict choice without a current conflict (FAIBLE-4).
+fn no_conflict() -> crate::Error {
+    SyncError::NotPending {
+        alias: "bundle.toml".to_owned(),
+    }
+    .into()
+}
+
 /// The passphrase opens one of the verified slots (RR1): at most one
 /// derivation per entry, stopping at the first that opens.
 fn reuses_history(history: &[String], passphrase: &SecretString, bounds: &KdfBounds) -> bool {
@@ -274,6 +282,8 @@ pub(crate) struct ConflictContext {
     history: Vec<String>,
     /// This device's own transition in conflict (replaced by the choice).
     pending: Option<u32>,
+    /// The local floor (R2): the other keys never take it lower.
+    floor: u32,
 }
 
 /// Opens and checks the other lineage (blocking: Argon2): the lineage
@@ -288,7 +298,7 @@ pub(crate) fn conflict_decide(
     if opened.header.bundle_id != context.sync.bundle_bytes()? {
         return Err(SyncError::BundleTampered);
     }
-    if opened.header.epoch < context.sync.epoch {
+    if opened.header.epoch < context.floor {
         return Err(SyncError::Rollback {
             what: "bundle.toml".to_owned(),
         });
@@ -590,7 +600,10 @@ impl SyncCore {
                 return Err(SyncError::BundleTampered.into());
             }
             Some(found) if found.epoch > next_clear.epoch => {
-                return Err(Self::judge_from_next(&next_text, key_next.as_ref(), found).into());
+                // Forged from this transition's own lineage: rewritten
+                // (§13.3.4); anything else stops here.
+                Self::judge_from_next(&next_text, key_next.as_ref(), found)?;
+                write_next = true;
             }
             Some(found) if found.epoch == next_clear.epoch && found.commit != next_clear.commit => {
                 // Another lineage at the same epoch: a concurrent rotation
@@ -669,18 +682,16 @@ impl SyncCore {
     }
 
     /// A folder file newer than the transition's target (§13.3.4, last
-    /// row): judged from the target's lineage.
+    /// row), judged from the target's lineage: `Ok` when it is forged from
+    /// that lineage (a link from its commitment with a false proof: the
+    /// caller rewrites it), else the error that stops the transition.
     fn judge_from_next(
         next_text: &str,
         key_next: Option<&DataKey>,
         found: &ClearHeader,
-    ) -> SyncError {
-        let Some(key) = key_next else {
-            return SyncError::Locked;
-        };
-        let Ok(next) = bundle::open_with_key(next_text, key) else {
-            return SyncError::BundleTampered;
-        };
+    ) -> Result<(), SyncError> {
+        let key = key_next.ok_or(SyncError::Locked)?;
+        let next = bundle::open_with_key(next_text, key).map_err(|_| SyncError::BundleTampered)?;
         match lineage::judge_newer(
             found,
             next.header.epoch,
@@ -688,12 +699,10 @@ impl SyncCore {
             Some(&next.keys.rotate),
             &Self::memory_of(&next),
         ) {
-            lineage::Verdict::RotatedElsewhere => SyncError::KeysRotated,
-            lineage::Verdict::OtherLineage => SyncError::RotationConflict,
-            // Never rewritten here: the transition finishes first.
-            lineage::Verdict::ForgedFromOurs | lineage::Verdict::Tampered => {
-                SyncError::BundleTampered
-            }
+            lineage::Verdict::RotatedElsewhere => Err(SyncError::KeysRotated),
+            lineage::Verdict::OtherLineage => Err(SyncError::RotationConflict),
+            lineage::Verdict::ForgedFromOurs => Ok(()),
+            lineage::Verdict::Tampered => Err(SyncError::BundleTampered),
         }
     }
 
@@ -734,21 +743,9 @@ impl SyncCore {
         });
         // Names of the devices of the old epoch (a forgotten device keeps
         // none in the new roster).
-        let old_names: BTreeMap<DeviceId, String> = self
+        let old_names = self
             .epoch_key(sync, epoch)
-            .zip(
-                state::load_bundle_copy(&paths, BundleCopy::Verified)
-                    .ok()
-                    .flatten(),
-            )
-            .and_then(|(key, text)| bundle::open_with_key(&text, &key).ok())
-            .map(|old| {
-                old.roster
-                    .devices
-                    .iter()
-                    .map(|d| (d.id, d.name.label(&d.id)))
-                    .collect()
-            })
+            .map(|key| Self::roster_names(&paths, &key))
             .unwrap_or_default();
         let Some((opened, commit, rotate)) = old else {
             // The replica does not open any more (a "don't remember"
@@ -758,19 +755,7 @@ impl SyncCore {
         };
         let mut content = opened.content;
         content.local.remember_epoch(epoch, &commit, rotate);
-        let revoked: BTreeMap<DeviceId, u64> = next
-            .roster
-            .revoked
-            .iter()
-            .map(|entry| (entry.id, entry.revoked_clock))
-            .collect();
-        let beyond: Vec<DeviceId> = content
-            .state
-            .context()
-            .iter()
-            .filter(|(device, counter)| revoked.get(device).is_some_and(|bound| **counter > *bound))
-            .map(|(device, _)| *device)
-            .collect();
+        let (revoked, beyond) = Self::beyond_bounds(&content, &next.roster);
         if !beyond.is_empty() {
             return self.rejoin_with_provenance(sync, next, content, &revoked, &beyond, &old_names);
         }
@@ -920,6 +905,8 @@ impl SyncCore {
             &next.commit,
             KeyBytes::of(&next.keys.rotate),
         );
+        // Its former id is retired once its clock is known (FAIBLE-2).
+        content.local.superseded.push(sync.device);
         self.carry_alerts.push(Alert {
             kind: AlertKind::Restored,
             device: None,
@@ -1152,6 +1139,62 @@ impl SyncCore {
         })
     }
 
+    /// This device's newest lineage: `bundle.next` of a pending
+    /// transition, else `bundle.verified`, opened with its key.
+    fn own_lineage(
+        &mut self,
+        sync: &SyncConfig,
+        pending: Option<u32>,
+    ) -> crate::Result<OpenedBundle> {
+        let paths = self.config.paths.clone();
+        let (copy, epoch) = match pending {
+            Some(epoch) => (BundleCopy::Next, epoch),
+            None => (BundleCopy::Verified, sync.epoch),
+        };
+        let text = state::load_bundle_copy(&paths, copy)?.ok_or(SyncError::Corrupt {
+            what: "bundle.verified",
+            reason: "missing",
+        })?;
+        let key = self.epoch_key(sync, epoch).ok_or(SyncError::Locked)?;
+        let mine = bundle::open_with_key(&text, &key)?;
+        if mine.header.epoch != epoch {
+            return Err(SyncError::Busy.into());
+        }
+        Ok(mine)
+    }
+
+    /// The folder's file is an authentic fork of `mine`'s lineage (§13.3.7):
+    /// another lineage at its epoch whose earlier link verifies under a
+    /// retained `K_rot`, or a newer epoch of another lineage.
+    fn is_conflict(
+        &self,
+        sync: &SyncConfig,
+        folder: &ClearHeader,
+        mine: &OpenedBundle,
+        pending: bool,
+    ) -> bool {
+        let mut memory = Self::memory_of(mine);
+        if !pending
+            && let Ok(keys) =
+                crypto::derive_subkeys(&mine.data_key, &mine.header.bundle_id, mine.header.epoch)
+        {
+            memory.extend(self.lineage_memory(sync, &mine.header.bundle_id, &keys));
+        }
+        let epoch = mine.header.epoch;
+        if folder.epoch == epoch && folder.commit != Some(mine.commit) {
+            return lineage::judge_other_lineage(folder, epoch, &memory)
+                == SyncError::RotationConflict;
+        }
+        folder.epoch > epoch
+            && lineage::judge_newer(
+                folder,
+                epoch,
+                &mine.commit,
+                Some(&mine.keys.rotate),
+                &memory,
+            ) == lineage::Verdict::OtherLineage
+    }
+
     /// "Keep this device's keys" after a conflict (§13.3.7): a rotation
     /// from this device's newest lineage, authorized by its data key:
     /// `bundle.verified`, or `bundle.next` when its own transition is the
@@ -1188,11 +1231,9 @@ impl SyncCore {
         let folder = self.open_folder(&sync)?;
         let folder_text = Self::read_bundle(folder.as_ref())?;
         let folder_clear = bundle::peek(&folder_text)?;
-        if folder_clear.commit == Some(mine.commit) {
-            return Err(SyncError::Resolution {
-                reason: "there is no key conflict",
-            }
-            .into());
+        // Only an authentic fork is a conflict to resolve (FAIBLE-4).
+        if !self.is_conflict(&sync, &folder_clear, &mine, pending.is_some()) {
+            return Err(no_conflict());
         }
         let me = sync.device;
         let roster = bundle::roster_v2(mine.roster.clone());
@@ -1402,8 +1443,19 @@ impl SyncCore {
         }
         let folder = self.open_folder(&sync)?;
         let folder_text = Self::read_bundle(folder.as_ref())?;
+        // Only an authentic fork is a conflict to resolve (FAIBLE-4).
+        let mine = self.own_lineage(&sync, pending)?;
+        if !self.is_conflict(
+            &sync,
+            &bundle::peek(&folder_text)?,
+            &mine,
+            pending.is_some(),
+        ) {
+            return Err(no_conflict());
+        }
         Ok(ConflictContext {
             history: self.history_of(&bundle_id),
+            floor: pending.unwrap_or(sync.epoch).max(sync.epoch),
             sync,
             folder_text,
             memory,
@@ -1463,21 +1515,43 @@ impl SyncCore {
             max_keyset_generation: u64::MAX,
             device: sync.device,
         };
-        if sync.remember_key {
-            self.remember_key_at(&sync.bundle_id, sync.epoch, &other.data_key)?;
-        }
+        let old_names = Self::roster_names(&paths, &mine);
+        let mut sync_next = sync.clone();
+        // The replica first: a crash before the keychain write leaves this
+        // device's own key there (worst case, a re-join), never the other.
         if let Some(opened) = state::load_replica(&paths, &keys, &expected)? {
             let mut content = opened.content;
+            // The bundle mark of this device's lineage means nothing for
+            // the other one (chosen by the user).
             content.high_water.bundle = None;
-            content.local.remember_epoch(
-                other.header.epoch,
-                &other.commit,
-                KeyBytes::of(&other.keys.rotate),
-            );
-            content.local.known_keyset_generation = other.header.keyset_generation;
-            content.local.published_state = None;
-            let seq = opened.binding.seq.saturating_add(1);
-            self.seal_replica(other, sync.device, seq, &content)?;
+            let (revoked, beyond) = Self::beyond_bounds(&content, &other.roster);
+            if beyond.is_empty() {
+                content.local.remember_epoch(
+                    other.header.epoch,
+                    &other.commit,
+                    KeyBytes::of(&other.keys.rotate),
+                );
+                content.local.known_keyset_generation = other.header.keyset_generation;
+                content.local.published_state = None;
+                let seq = opened.binding.seq.saturating_add(1);
+                self.seal_replica(other, sync.device, seq, &content)?;
+            } else {
+                // The other lineage forgot a device whose later writes this
+                // replica holds (MOYEN-1 of the S2a review): the same
+                // provenance re-join as an adoption (R3).
+                self.rejoin_with_provenance(
+                    &mut sync_next,
+                    other,
+                    content,
+                    &revoked,
+                    &beyond,
+                    &old_names,
+                )?;
+                state::save_config(&paths, &sync_next)?;
+            }
+        }
+        if sync.remember_key {
+            self.remember_key_at(&sync.bundle_id, sync.epoch, &other.data_key)?;
         }
         state::save_bundle_copy(&paths, BundleCopy::Verified, text)?;
         if let Some(slot) = other.slot_id() {
@@ -1487,8 +1561,47 @@ impl SyncCore {
         self.keys.clear();
         self.keys
             .put(&sync.bundle_id, other.header.epoch, &other.data_key);
-        self.restamp_keys(sync);
+        self.restamp_keys(&sync_next);
         Ok(())
+    }
+
+    /// Labels of the devices of the bundle `key` opens in
+    /// `bundle.verified` (a forgotten device keeps no name in a newer
+    /// roster).
+    fn roster_names(paths: &crate::store::Paths, key: &DataKey) -> BTreeMap<DeviceId, String> {
+        state::load_bundle_copy(paths, BundleCopy::Verified)
+            .ok()
+            .flatten()
+            .and_then(|text| bundle::open_with_key(&text, key).ok())
+            .map(|old| {
+                old.roster
+                    .devices
+                    .iter()
+                    .map(|d| (d.id, d.name.label(&d.id)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The forgotten devices of `roster` and those whose writes `content`
+    /// holds beyond their exact bound (§13.4.2).
+    fn beyond_bounds(
+        content: &ReplicaContent,
+        roster: &Roster,
+    ) -> (BTreeMap<DeviceId, u64>, Vec<DeviceId>) {
+        let revoked: BTreeMap<DeviceId, u64> = roster
+            .revoked
+            .iter()
+            .map(|entry| (entry.id, entry.revoked_clock))
+            .collect();
+        let beyond = content
+            .state
+            .context()
+            .iter()
+            .filter(|(device, counter)| revoked.get(device).is_some_and(|bound| **counter > *bound))
+            .map(|(device, _)| *device)
+            .collect();
+        (revoked, beyond)
     }
 
     /// "Restore the key file from this device" (§13.3.6): rewrites
@@ -1508,40 +1621,60 @@ impl SyncCore {
             let paths = self.config.paths.clone();
             let _lock = state::lock(&paths)?;
             let sync = state::load_config(&paths)?.ok_or(SyncError::Disabled)?;
-            if state::load_rotation(&paths)?.is_some() {
-                return Err(SyncError::Busy.into());
-            }
-            let text = state::load_bundle_copy(&paths, BundleCopy::Verified)?.ok_or(
-                SyncError::Corrupt {
-                    what: "bundle.verified",
-                    reason: "missing",
-                },
-            )?;
-            let key = self.data_key_for(&sync)?;
+            self.stamp_keys(&sync);
+            // During a transition, its own target is what this device
+            // restores (FAIBLE-3 of the S2a review).
+            let pending = state::load_rotation(&paths)?
+                .filter(|r| r.bundle_id == sync.bundle_id)
+                .map(|r| r.next_epoch);
+            let (copy, epoch) = match pending {
+                Some(epoch) => (BundleCopy::Next, epoch),
+                None => (BundleCopy::Verified, sync.epoch),
+            };
+            let text = state::load_bundle_copy(&paths, copy)?.ok_or(SyncError::Corrupt {
+                what: "bundle.verified",
+                reason: "missing",
+            })?;
+            let key = self.epoch_key(&sync, epoch).ok_or(SyncError::Locked)?;
             let mine = bundle::open_with_key(&text, &key)?;
-            if mine.header.epoch != sync.epoch || mine.header.bundle_id != sync.bundle_bytes()? {
+            if mine.header.epoch != epoch || mine.header.bundle_id != sync.bundle_bytes()? {
                 return Err(SyncError::BundleTampered.into());
+            }
+            let mut memory = Self::memory_of(&mine);
+            if pending.is_none() {
+                let keys = crypto::derive_subkeys(&key, &mine.header.bundle_id, epoch)?;
+                memory.extend(self.lineage_memory(&sync, &mine.header.bundle_id, &keys));
             }
             let folder = self.open_folder(&sync)?;
             let current = Self::read_bundle(folder.as_ref()).ok();
             if let Some(clear) = current.as_deref().and_then(|text| bundle::peek(text).ok()) {
-                if clear.epoch == sync.epoch && clear.commit.is_some_and(|c| c != mine.commit) {
-                    // Another lineage at this epoch: a conflict, not a
-                    // restore.
+                // Only an **authentic** fork or rotation is refused; a file
+                // nobody of this lineage could write is what a restore is
+                // for.
+                if clear.epoch == epoch
+                    && clear.commit != Some(mine.commit)
+                    && lineage::judge_other_lineage(&clear, epoch, &memory)
+                        == SyncError::RotationConflict
+                {
                     return Err(SyncError::RotationConflict.into());
                 }
-                if clear.epoch > sync.epoch
-                    && lineage::judge_newer(
+                if clear.epoch > epoch {
+                    match lineage::judge_newer(
                         &clear,
-                        sync.epoch,
+                        epoch,
                         &mine.commit,
                         Some(&mine.keys.rotate),
-                        &[],
-                    ) == lineage::Verdict::RotatedElsewhere
-                {
-                    // A genuine rotation of this lineage: adopt it, never
-                    // overwrite it.
-                    return Err(SyncError::KeysRotated.into());
+                        &memory,
+                    ) {
+                        // A genuine rotation of this lineage: adopt it.
+                        lineage::Verdict::RotatedElsewhere => {
+                            return Err(SyncError::KeysRotated.into());
+                        }
+                        lineage::Verdict::OtherLineage => {
+                            return Err(SyncError::RotationConflict.into());
+                        }
+                        lineage::Verdict::ForgedFromOurs | lineage::Verdict::Tampered => {}
+                    }
                 }
             }
             folder.write(&FolderFile::Bundle, text.as_bytes())?;

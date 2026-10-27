@@ -683,23 +683,6 @@ impl SyncState {
         self.records.len()
     }
 
-    /// Removes every register of `kind` (S2a: the password filter while
-    /// the bundle's policy is off, §13.5.3). Every device purges, so no
-    /// register is ever "covered and absent" on one side only; the
-    /// context is kept. Returns how many registers went.
-    pub(crate) fn drop_kind(&mut self, kind: &str) -> usize {
-        let before = self.records.len();
-        self.records.retain(|key, _| key.kind() != kind);
-        before.saturating_sub(self.records.len())
-    }
-
-    /// A copy without the registers of `kind` (see [`Self::drop_kind`]).
-    pub(crate) fn without_kind(&self, kind: &str) -> Self {
-        let mut copy = self.clone();
-        copy.drop_kind(kind);
-        copy
-    }
-
     /// The register of a typed key.
     pub(crate) fn register(&self, key: &RecordKey) -> Option<&MvRegister<WireValue>> {
         self.records.get(&WireKey::encode(key).ok()?)

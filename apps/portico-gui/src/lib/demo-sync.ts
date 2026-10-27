@@ -278,6 +278,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         settings: 3,
         conflicts: 2,
         needs_newer: 0,
+        rejoin: false,
       };
     },
     async syncJoinCommit(_token: string, _bulk: JoinBulkChoice) {
