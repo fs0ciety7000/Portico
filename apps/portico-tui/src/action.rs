@@ -14,6 +14,10 @@ use portico_core::recent::RecentHost;
 use portico_core::recording::RecordingEntry;
 use portico_core::settings::Settings;
 use portico_core::snippets::Snippet;
+use portico_core::sync::{
+    FolderProbe, GeneratedPassphrase, JoinPreview, PendingHostChange, SyncConflict, SyncDevice,
+    SyncIssue, SyncOverview, SyncStatus, UnconfirmedSnippet,
+};
 use portico_core::vault::VaultStatus;
 use portico_core::{AgentKey, CopyIdOutcome, EngineEvent, ErrorSummary};
 
@@ -260,4 +264,35 @@ pub(crate) enum Action {
     /// on or off; never in one key).
     ShowUpdateSettings,
     UpdateCheckSaved(Result<portico_core::update::UpdateStatus, ErrorSummary>),
+    // Encrypted folder sync (phase 11, S1c)
+    /// "Sync": the Sync panel (or the wizard when sync is off).
+    OpenSync,
+    SyncKey(KeyEvent),
+    SyncWizardKey(KeyEvent),
+    SyncOverview(Result<SyncOverview, ErrorSummary>),
+    SyncDevices(Result<Vec<SyncDevice>, ErrorSummary>),
+    SyncConflicts(Result<Vec<SyncConflict>, ErrorSummary>),
+    SyncIssues(Result<Vec<SyncIssue>, ErrorSummary>),
+    SyncPending(Result<Vec<PendingHostChange>, ErrorSummary>),
+    SyncSnippets(Result<Vec<UnconfirmedSnippet>, ErrorSummary>),
+    /// A panel operation came back (`Ok(None)`: nothing to show but done).
+    SyncDone {
+        op: crate::app_sync::SyncOp,
+        result: Result<Option<SyncStatus>, ErrorSummary>,
+    },
+    /// The wizard's folder probe.
+    SyncProbed {
+        folder: String,
+        result: Result<FolderProbe, ErrorSummary>,
+    },
+    /// Directory candidates for the wizard's folder (`Tab`).
+    SyncCompleted {
+        input: String,
+        candidates: Vec<String>,
+    },
+    /// A generated passphrase for the open form (wizard or panel).
+    SyncGenerated(Result<GeneratedPassphrase, ErrorSummary>),
+    SyncPreviewed(Result<JoinPreview, ErrorSummary>),
+    /// Create or join commit came back.
+    SyncSetUp(Result<SyncStatus, ErrorSummary>),
 }

@@ -106,6 +106,14 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     {
         right = badge.into_iter().chain(right).collect();
     }
+    // On the host list, the sync item: before the hints when it says
+    // something (a state, a count), after them when sync is just off.
+    let quiet_sync = with_sync(
+        app,
+        &mut right,
+        width,
+        lead + pinned.as_ref().map_or(0, need),
+    );
     let mut used = lead + pinned.as_ref().map_or(0, need) + width_of(&right);
     let mut shown: Vec<&(String, &str)> = Vec::new();
     for hint in &hints {
@@ -114,6 +122,9 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         }
         used += need(hint);
         shown.push(hint);
+    }
+    if !quiet_sync.is_empty() && used + width_of(&quiet_sync) <= width {
+        right = quiet_sync.into_iter().chain(right).collect();
     }
     shown.extend(pinned.iter());
     for (key, label) in shown {
@@ -162,6 +173,43 @@ fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>>
     }
     right.push(Span::raw(" "));
     right
+}
+
+/// Puts the sync item before `right` when it says something and fits
+/// (`used`: what the bar needs besides); returns it when sync is just off
+/// (shown only if room is left after the hints).
+fn with_sync(
+    app: &App,
+    right: &mut Vec<Span<'static>>,
+    width: usize,
+    used: usize,
+) -> Vec<Span<'static>> {
+    let width_of = |spans: &[Span<'static>]| spans.iter().map(Span::width).sum::<usize>();
+    let Some((sync, quiet)) = home_sync(app, width.saturating_sub(used + 12)) else {
+        return Vec::new();
+    };
+    if quiet {
+        return sync;
+    }
+    if used + width_of(&sync) + width_of(right) <= width {
+        let rest = std::mem::take(right);
+        *right = sync.into_iter().chain(rest).collect();
+    }
+    Vec::new()
+}
+
+/// The sync item, on the host list only (a terminal's bar is its
+/// session's). `(spans, quiet)`.
+fn home_sync(app: &App, max: usize) -> Option<(Vec<Span<'static>>, bool)> {
+    let home = app.active.is_none()
+        && app.overlay.is_none()
+        && app.dialogs.is_empty()
+        && !app.prefix
+        && matches!(app.focus, Focus::Hosts | Focus::Search);
+    if !home {
+        return None;
+    }
+    crate::ui::sync::status_spans(app, max.clamp(8, 40))
 }
 
 /// `0.3.1 available ` in the accent (a notice, not a status colour), when
@@ -400,6 +448,16 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 .map_or_else(|| vec![("Esc", "close")], |p| p.hints(&app.tunnels));
             return (" TUNNELS ", owned(hints));
         }
+        _ if app.overlay == Some(crate::app::Overlay::Sync) => {
+            let hints = app.sync_panel.as_ref().map_or_else(
+                || vec![("Esc", "close")],
+                |p| p.hints(&app.sync, std::time::Instant::now()),
+            );
+            return (" SYNC ", owned(hints));
+        }
+        _ if app.overlay == Some(crate::app::Overlay::SyncWizard) => {
+            return (" SYNC ", owned(vec![("Esc", "back")]));
+        }
         _ if app.overlay == Some(crate::app::Overlay::Recordings) => {
             let hints = app.recordings_panel.as_ref().map_or_else(
                 || vec![("Esc", "close")],
@@ -567,6 +625,7 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 "hosts.keys",
                 "hosts.snippets",
                 "hosts.recordings",
+                "hosts.sync",
                 "hosts.theme",
                 // Always last, and always shown (see `render`).
                 "hosts.quit",

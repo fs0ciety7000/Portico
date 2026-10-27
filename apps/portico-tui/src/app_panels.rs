@@ -742,7 +742,7 @@ impl App {
 
     // ── snippets ───────────────────────────────────────────────────────────
 
-    fn open_snippets(&mut self) {
+    pub(crate) fn open_snippets(&mut self) {
         self.prefix = false;
         self.tunnels_panel = None;
         self.keys_panel = None;
@@ -777,7 +777,7 @@ impl App {
         self.reload_snippets();
     }
 
-    fn reload_snippets(&self) {
+    pub(crate) fn reload_snippets(&self) {
         let engine = self.engine.clone();
         spawn(self, async move {
             Action::SnippetsLoaded(engine.snippets().await.map_err(|e| e.summary()))
@@ -891,9 +891,11 @@ impl App {
                             // the snippet must not also run it.
                             opened_at: std::time::Instant::now(),
                         };
+                    } else if error.code == "sync_snippet_unconfirmed" {
+                        // Changed by sync, not confirmed here (F8): its
+                        // review (the whole command), not a bare error.
+                        self.review_snippet(&id);
                     } else {
-                        // `sync_snippet_unconfirmed` included: its hint says
-                        // what to do (the review screen comes with S1c).
                         panel.notice = Some(Notice::error(error));
                     }
                 }

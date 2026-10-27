@@ -16,6 +16,7 @@ mod recordings;
 mod snippets;
 mod status;
 mod statusbar;
+mod sync;
 mod terminal;
 mod tunnels;
 
@@ -135,6 +136,8 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
                 | Overlay::HostForm
                 | Overlay::Debug
                 | Overlay::Recordings
+                | Overlay::Sync
+                | Overlay::SyncWizard
         )
     );
     let band = match &app.toast {
@@ -186,6 +189,8 @@ fn render_panels(app: &mut App, frame: &mut Frame<'_>, band: u16, panel_open: bo
         Some(Overlay::HostForm) => host_form::render(app, frame, band),
         Some(Overlay::Debug) => debug::render(app, frame, band),
         Some(Overlay::Recordings) => recordings::render(app, frame, band),
+        Some(Overlay::Sync) => sync::render_panel(app, frame, band),
+        Some(Overlay::SyncWizard) => sync::render_wizard(app, frame, band),
         _ => {}
     }
 }

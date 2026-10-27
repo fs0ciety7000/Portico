@@ -1193,6 +1193,7 @@ async fn search_bar_captures() {
 /// device is never typed: the TUI only gets snippet bytes from the core,
 /// which refuses it (F8). Real sync on a real folder, public API only.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario, two devices, end to end
 async fn run_snippet_refuses_unconfirmed_synced_snippet() {
     use portico_core::snippets::{Snippet, SnippetScope};
     use portico_core::sync::{
@@ -1256,40 +1257,55 @@ async fn run_snippet_refuses_unconfirmed_synced_snippet() {
     })
     .await;
     press(&mut lab.app, KeyCode::Enter, KeyModifiers::NONE);
+    // Refused by the core: its review opens (the whole command), over the
+    // snippets panel, which stays.
     lab.until(|app| {
-        app.snippets_panel
-            .as_ref()
-            .is_some_and(|p| p.notice.is_some())
+        app.overlay == Some(crate::app::Overlay::Sync)
+            && app
+                .sync_panel
+                .as_ref()
+                .is_some_and(|p| p.tab == crate::sync_panel::SyncTab::Snippets)
+            && app.sync.snippets.len() == 1
+            && !app.sync.stale()
     })
     .await;
-    let notice = lab
-        .app
-        .snippets_panel
-        .as_ref()
-        .and_then(|p| p.notice.as_ref())
-        .unwrap();
-    assert!(!notice.ok);
-    assert!(notice.message.contains("changed by sync"), "{notice:?}");
-    assert!(
-        notice
-            .hint
-            .as_deref()
-            .is_some_and(|h| h.contains("confirm")),
-        "{notice:?}"
-    );
-    // Still open, nothing typed on the remote.
     assert!(lab.app.snippets_panel.is_some());
+    let review = text(&screen(&mut lab.app, 80, 24));
+    assert!(review.contains("make deploy"), "{review}");
+    assert!(review.contains("Runs when sent"), "{review}");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!received(&lab.alpha).contains("make deploy"));
 
-    // Once confirmed (the review screen comes with S1c), it is typed.
-    let unconfirmed = lab.app.engine.synced_snippets_unconfirmed().await.unwrap();
-    let gate = unconfirmed.first().unwrap();
-    lab.app
-        .engine
-        .confirm_synced_snippet(gate.id.clone(), gate.hash.clone())
-        .await
-        .unwrap();
+    // `y` too soon (typed for something else) confirms nothing.
+    press(&mut lab.app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(
+        lab.app
+            .sync_panel
+            .as_ref()
+            .is_some_and(|p| p.busy.is_none())
+    );
+    // Then `y` confirms the hash shown, and the snippets panel is back.
+    tokio::time::sleep(crate::dialog::ARM_DELAY).await;
+    press(&mut lab.app, KeyCode::Char('y'), KeyModifiers::NONE);
+    lab.until(|app| app.overlay == Some(crate::app::Overlay::Snippets) && app.sync_panel.is_none())
+        .await;
+    assert!(
+        lab.app
+            .snippets_panel
+            .as_ref()
+            .and_then(|p| p.notice.as_ref())
+            .is_some_and(|n| n.ok && n.message.contains("confirmed")),
+        "{:?}",
+        lab.app.snippets_panel.as_ref().map(|p| &p.notice)
+    );
+    assert!(
+        lab.app
+            .engine
+            .synced_snippets_unconfirmed()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     press(&mut lab.app, KeyCode::Enter, KeyModifiers::NONE);
     lab.until(|app| app.snippets_panel.is_none()).await;
     let alpha = &lab.alpha;

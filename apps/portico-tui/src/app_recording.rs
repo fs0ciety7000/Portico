@@ -112,6 +112,11 @@ impl App {
                 // A `HostsChanged` may have been dropped with the rest.
                 self.on_hosts_changed();
                 self.resync_update();
+                // Sync events may be lost too (status, pending, snippets).
+                self.refresh_sync();
+                if self.snippets_panel.is_some() {
+                    self.reload_snippets();
+                }
             }
             Action::ToggleRecording => self.toggle_recording(),
             // Success says nothing (falls through): the badge waits for

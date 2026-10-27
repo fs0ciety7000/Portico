@@ -61,6 +61,10 @@ pub(crate) enum Overlay {
     /// "Add host…", "Edit host…", "Duplicate as Portico host…"
     /// (`App::host_form`).
     HostForm,
+    /// The Sync panel (`App::sync_panel`).
+    Sync,
+    /// "Set up sync" (`App::sync_wizard`).
+    SyncWizard,
 }
 
 /// Transient notification shown bottom-right, fades after `ttl` ticks.
@@ -224,6 +228,12 @@ pub(crate) struct App {
     /// Host to select once the inventory is reloaded (created, edited,
     /// or the neighbour of a deleted one).
     pub(crate) pending_select: Option<String>,
+    /// The folder sync as the host list and the status bar need it.
+    pub(crate) sync: crate::sync_panel::SyncData,
+    /// The Sync panel, while `overlay == Some(Overlay::Sync)`.
+    pub(crate) sync_panel: Option<Box<crate::sync_panel::SyncPanel>>,
+    /// The wizard, while `overlay == Some(Overlay::SyncWizard)`.
+    pub(crate) sync_wizard: Option<Box<crate::sync_wizard::SyncWizard>>,
     search: HostSearch,
     pub(crate) tx: mpsc::UnboundedSender<Action>,
     rx: mpsc::UnboundedReceiver<Action>,
@@ -320,6 +330,9 @@ impl App {
             include: crate::app_hosts::IncludeBanner::default(),
             update: crate::app_update::UpdateState::default(),
             pending_select: None,
+            sync: crate::sync_panel::SyncData::default(),
+            sync_panel: None,
+            sync_wizard: None,
             search: HostSearch::default(),
             tx,
             rx,
@@ -358,6 +371,8 @@ impl App {
         self.start_update_checks();
         self.refresh_vault(true);
         self.spawn_machine_name();
+        // The background sync (nothing while it is off) and its status.
+        self.start_sync();
 
         terminal.draw(|f| ui::render(&mut self, f))?;
         while self.running {
@@ -494,6 +509,7 @@ impl App {
                 .as_ref()
                 .is_some_and(crate::recordings::RecordingsPanel::busy)
             || self.host_form.as_ref().is_some_and(|f| f.busy || f.loading)
+            || self.sync_busy()
     }
 
     fn spawn_load_hosts(&self) {
@@ -740,6 +756,9 @@ impl App {
         self.host_form = None;
         // The playback ends with its panel (its reader thread stops).
         self.player = None;
+        // Dropping the sync screens wipes a typed passphrase.
+        self.sync_panel = None;
+        self.sync_wizard = None;
         self.help.over_panel = false;
     }
 
@@ -816,6 +835,10 @@ impl App {
                 if let Some(form) = &mut self.host_form {
                     form.paste(text);
                 }
+            }
+            // A password manager may paste the sync passphrase here.
+            None if matches!(self.overlay, Some(Overlay::Sync | Overlay::SyncWizard)) => {
+                self.sync_paste(text);
             }
             // Other panels, the recordings list and the player included,
             // take no paste: nothing reaches a terminal through them.
@@ -1198,6 +1221,11 @@ impl App {
                 }
             }
             EngineEvent::Update { status } => self.update_status_changed(status),
+            event @ (EngineEvent::Sync { .. }
+            | EngineEvent::SyncConflicts { .. }
+            | EngineEvent::SyncPendingChanged
+            | EngineEvent::SnippetsChanged
+            | EngineEvent::SettingsChanged { .. }) => self.on_sync_event(event),
             other => self.on_meta_event(other),
         }
     }

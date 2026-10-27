@@ -23,6 +23,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     let tick = app.tick;
     // Behind a dialog, the panel's keys do not work: no hints.
     let dialog_open = !app.dialogs.is_empty();
+    let unconfirmed: Vec<String> = app.sync.snippets.iter().map(|u| u.id.clone()).collect();
     let Some(panel) = &mut app.snippets_panel else {
         return;
     };
@@ -67,7 +68,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, band: u16) {
             let lines = edit_lines(f, s, tick, w);
             with_footer(frame, inner, lines, footer(s, Vec::new(), &hints, w, true));
         }
-        _ => browse(panel, s, tick, frame, inner, &hints),
+        _ => browse(panel, &unconfirmed, s, tick, frame, inner, &hints),
     }
 }
 
@@ -103,6 +104,7 @@ fn footer(
 
 fn browse(
     panel: &mut SnippetsPanel,
+    unconfirmed: &[String],
     s: Styles,
     tick: u64,
     frame: &mut Frame<'_>,
@@ -192,7 +194,10 @@ fn browse(
     let items: Vec<ListItem<'static>> = visible
         .iter()
         .enumerate()
-        .map(|(i, snippet)| snippet_item(snippet, selected == Some(i), s, w))
+        .map(|(i, snippet)| {
+            let unconfirmed = unconfirmed.contains(&snippet.id);
+            snippet_item(snippet, selected == Some(i), unconfirmed, s, w)
+        })
         .collect();
     frame.render_stateful_widget(List::new(items), list_area, &mut panel.list);
 }
@@ -251,6 +256,7 @@ fn list_state(
 fn snippet_item(
     snippet: &portico_core::snippets::Snippet,
     selected: bool,
+    unconfirmed: bool,
     s: Styles,
     w: usize,
 ) -> ListItem<'static> {
@@ -262,9 +268,12 @@ fn snippet_item(
     let scope = scope_label(&snippet.scope);
     let paste_note = if snippet.run { "" } else { "paste only · " };
     let right = format!("{paste_note}{}", fmt::truncate(&scope, 28));
-    let name_room = w.saturating_sub(right.chars().count() + 4);
+    // Changed by sync, not confirmed here (F8): `↵` opens its review.
+    let review = if unconfirmed { "⇅ to review · " } else { "" };
+    let right_width = right.chars().count() + review.chars().count();
+    let name_room = w.saturating_sub(right_width + 4);
     let name = fmt::truncate(&snippet.name, name_room);
-    let pad = w.saturating_sub(name.chars().count() + right.chars().count() + 2);
+    let pad = w.saturating_sub(name.chars().count() + right_width + 2);
     let mut command_lines = snippet.command.lines();
     let first = command_lines.next().unwrap_or_default();
     let extra = command_lines.count();
@@ -279,6 +288,7 @@ fn snippet_item(
             marker,
             Span::styled(format!(" {name}"), s.title()),
             Span::raw(" ".repeat(pad)),
+            Span::styled(review, s.status(s.theme.status.warning)),
             Span::styled(right, s.muted()),
         ]),
         Line::from(vec![
