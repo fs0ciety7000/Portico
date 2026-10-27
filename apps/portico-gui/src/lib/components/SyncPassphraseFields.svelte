@@ -139,7 +139,7 @@
       autocomplete="new-password"
       spellcheck="false"
       data-autofocus={autofocus ? "" : undefined}
-      aria-invalid={!!strength && !strength.acceptable && value.length > 0}
+      aria-invalid={refused && !!strength && !strength.acceptable && value.length > 0}
       aria-describedby="sync-meter"
     />
   </label>

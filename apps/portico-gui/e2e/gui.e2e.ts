@@ -887,24 +887,24 @@ test("sync: set up a folder with a generated passphrase, then turn it off (local
   const words = (await text("[data-testid=sync-generated] .words")).trim();
   assert.equal(words.split(/\s+/).length, 6, words);
   assert.match(await modal(), /Strong/);
+  // The recovery warning comes before the irreversible step: Create stays
+  // off until "I saved it" (S1c review Q1).
+  assert.match(await modal(), /Keep the passphrase safe/);
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal footer button.primary').disabled"), true, "Create waits for I saved it");
   // Not remembered: the test session has no keychain to rely on.
   await s.exec(
     `const boxes = [...document.querySelectorAll('.modal label.check')];
-     boxes.find((l) => l.innerText.includes('I wrote it down')).querySelector('input').click();
+     boxes.find((l) => l.innerText.includes('I saved it')).querySelector('input').click();
      boxes.find((l) => l.innerText.includes('Remember the key')).querySelector('input').click();`,
   );
   await capture("sync-create");
   await clickButton("Create sync");
-  await waitFor("recovery screen", async () => (await modal()).includes("Keep the passphrase safe"), 60_000);
-  await sleep(700);
+  // No final screen: the wizard closes and says so.
+  await waitFor("wizard closed", async () => !(await s.find(".modal")), 60_000);
+  await waitFor("Sync is on", async () => /Sync is on/.test(await text(".toast")));
   // The folder holds only sealed files: never the passphrase.
   const bundle = readFileSync(join(folder, "portico-sync/bundle.toml"), "utf8");
   for (const w of words.split(/\s+/)) assert.ok(!bundle.includes(w), "no passphrase word in bundle.toml");
-  // Done stays off until "I understand".
-  assert.equal(await s.exec<boolean>("return document.querySelector('.modal footer button.primary').disabled"), true);
-  await s.exec("document.querySelector('.modal label.check input').click()");
-  await clickButton("Done");
-  await noDialog();
   await waitFor("synced", async () => /Synced|Syncing/.test(await text("[data-testid=sync-status]")), 30_000);
   await waitFor("device file", () => readdirSync(join(folder, "portico-sync/devices")).some((f) => f.endsWith(".snap")), 30_000);
 
