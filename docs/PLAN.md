@@ -189,7 +189,7 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
 
 - **S0, repérage** : comportements réels des fournisseurs (renommages, copies en conflit, fichiers temporaires, placeholders)
   consignés dans `docs/SYNC.md`, fixtures du fournisseur simulé
-- **S1, sync sans secret**
+- **S1, sync sans secret** ✅ *(livrée en 0.6.0, testée par le propriétaire sur deux machines le 2026-10-27)*
   - **S1a, fondations pures** ✅ *(2026-10-27)* : `portico-core/src/sync/` sans E/S ni moteur : Argon2id à bornes propres,
     HKDF, XChaCha20-Poly1305, AAD canonique, MAC en temps constant, remplissage ; `bundle.toml` (créer, ouvrir, changer et
     réinitialiser la passphrase, roster scellé) ; instantanés et réplica scellés ; registres multi-valeurs à contexte global,
@@ -342,7 +342,7 @@ runner, test manuel concluant du propriétaire sous Windows 11 le 2026-10-27).
 | 8 Windows | ✅ | 780 + 95 GUI + interop (13 scénarios) + CI windows-latest + test manuel Windows 11 | ✅ (2 audits, voir ci-dessous) | GUI Windows : barre native, raccourcis WebView2 neutralisés |
 | 9 Confort du terminal, mises à jour | ✅ | 736 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 10 Thème clair Marble, Auto | ✅ | 760 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (4 thèmes, 80×24 / 880–1200 px) |
-| 11 Sync chiffrée par dossier | ⏳ S1a (fondations), S1b (moteur) et S1c (interfaces) livrés ; S2, S3 à venir | 141 cœur (S1a 93, dont 6 tests de propriétés ; S1b 46 ; revue S1c 2) + 27 TUI (S1c, dont 6 de la revue) + GUI | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue S1a ✅ ; revue S1b ✅ (15 constats corrigés) ; revues S1c ✅ (sécurité A1–A6, conception B1–B16) | — |
+| 11 Sync chiffrée par dossier | ⏳ S1 livrée en 0.6.0 (S1a fondations, S1b moteur, S1c interfaces ; test du propriétaire ✅) ; S2, S3 à venir | 141 cœur (S1a 93, dont 6 tests de propriétés ; S1b 46 ; revue S1c 2) + 27 TUI (S1c, dont 6 de la revue) + GUI | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue S1a ✅ ; revue S1b ✅ (15 constats corrigés) ; revues S1c ✅ (sécurité A1–A6, conception B1–B16) | — |
 
 ## Revues de la phase 8 (2026-10-25)
 
