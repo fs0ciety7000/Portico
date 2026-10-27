@@ -235,13 +235,20 @@ avec cette clé (E2E bureau).
 
 **Sortie** : vérifiée (E2E bureau 22/22, captures GUI démo + WebKitGTK, TUI 80×24).
 
-### Phase 8 : Windows ⏳ *(revue `agent-security` complète)*
-- Gestionnaire d'identifiants Windows (`keyring`), agent OpenSSH sur named pipe, WebView2, chemins `%USERPROFILE%\.ssh`
-- **Modèle de sécurité des fichiers refait avec des ACL** (équivalents de `0600`/`0700`, refus des liens), durcissement du
-  processus côté Windows
-- Distribution **Scoop** et **Winget**, installeur signé
+### Phase 8 : Windows ✅ *(revues `agent-security` ×2 et `agent-ssh-protocols` ; test manuel Windows 11 du propriétaire)*
+- Gestionnaire d'identifiants Windows (`keyring`, persistance *Local*, jamais itinérante), agent OpenSSH sur named pipe
+  (identité du serveur vérifiée : service SYSTEM ou l'utilisateur), WebView2, chemins `%USERPROFILE%\.ssh`,
+  données dans `%LOCALAPPDATA%`
+- **Modèle de sécurité des fichiers refait avec des DACL** (propriétaire seul, posées sur le handle avant écriture,
+  points d'analyse refusés) dans `crates/portico-winsec`, seul crate autorisé à `unsafe` ; `known_hosts` système de
+  ProgramData utilisé seulement s'il appartient à la machine ; noms Windows invalides refusés ; durcissement (rapports
+  WER sans tas, DLL chargées depuis System32)
+- Distribution : zip TUI et installeur NSIS par utilisateur **non signés** (signature reportée, ADR), Scoop (bucket du
+  propriétaire, PR automatique si le jeton existe) et manifestes winget rendus pour une PR manuelle
+- Parsing `ssh_config` aligné sur `argv_split` d'OpenSSH (guillemets et échappements), agent muet abandonné après 5 s
 
-**Sortie** : les 14 fonctionnalités du MVP sur Windows 11 dans les deux UIs ; audit sécurité Windows.
+**Sortie** : vérifiée (CI `windows-latest` verte, release à blanc avec installation/désinstallation testée sur le
+runner, test manuel concluant du propriétaire sous Windows 11 le 2026-10-27).
 
 ### À évaluer séparément (ADR et prototype avant toute décision)
 | Sujet | Question à trancher |
@@ -276,9 +283,18 @@ avec cette clé (E2E bureau).
 | 6 Split panes, asciicast | ✅ | 548 + 50 GUI + interop (13 scénarios) + E2E bureau 15/15 | ✅ (moteur + clôture, voir ci-dessous) | ✅ (panneaux + enregistrement, 2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 6b Hôtes Portico, import Termix | ✅ | 611 + 61 GUI + interop (13 scénarios) + E2E bureau 19/19 | ✅ (2 revues, voir ci-dessous) | ✅ (captures 3 thèmes, 80×24 / 880–1200 px, CLI) |
 | 7 Sync locale | ❌ abandonnée | | | |
-| 8 Windows | ⏳ | | | |
+| 8 Windows | ✅ | 780 + 95 GUI + interop (13 scénarios) + CI windows-latest + test manuel Windows 11 | ✅ (2 audits, voir ci-dessous) | GUI Windows : barre native, raccourcis WebView2 neutralisés |
 | 9 Confort du terminal, mises à jour | ✅ | 736 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 10 Thème clair Marble, Auto | ✅ | 760 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (4 thèmes, 80×24 / 880–1200 px) |
+
+## Revues de la phase 8 (2026-10-25)
+
+| Revue | Constats | Principales suites |
+|---|---|---|
+| `agent-security` audit Windows | 2 ÉLEVÉ, 1 MOYEN, 4 FAIBLE | Pipe d'agent squattable (clé privée envoyée à un autre compte) : identité du serveur vérifiée ; `known_hosts` système créable par tout compte : utilisé seulement s'il appartient à la machine, ProgramData par dossier connu ; secrets et données non itinérants ; noms de clés réservés, nom de machine, durcissement WER/DLL, COM0/LPT0 |
+| `agent-ssh-protocols` portage Windows | 2 IMPORTANT, 8 MINEUR | Délais bornés pour l'agent (repli sur clés et mot de passe), lexer `ssh_config` = `argv_split` d'OpenSSH, indications du service agent, `icacls` exact, utilisateur local en minuscules, `\\?\pipe\` accepté |
+| `agent-security` re-revue | 0 CRITIQUE/ÉLEVÉ, 4 FAIBLE | Repli du contrôle d'agent refusé si un autre compte peut créer une instance du pipe ; contrôle de désinstallation non vide ; filtrage cohérent des `known_hosts` globaux ; borne de copie du SID |
+| CI `windows-latest` | 4 échecs réels corrigés | Propriétaire Administrateurs quand le processus est élevé (le propriétaire est désormais l'utilisateur), lecture de la sécurité du pipe comme objet noyau, test de latence, test `known_hosts` |
 
 ## Revues de la phase 10 (2026-10-24)
 
