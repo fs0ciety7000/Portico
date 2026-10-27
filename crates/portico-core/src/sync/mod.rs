@@ -45,13 +45,17 @@
 // (S1b) is the only caller of these crate-internal modules. Remove these
 // `allow`s with S1b; the tests exercise every item meanwhile.
 #[allow(dead_code)]
+pub(crate) mod bundle;
+#[allow(dead_code)]
 pub(crate) mod clock;
 #[allow(dead_code)]
 pub(crate) mod crypto;
 #[allow(dead_code)]
 pub(crate) mod model;
+pub mod passphrase;
 
 pub use clock::DeviceId;
+pub use passphrase::{PassphraseStrength, assess_passphrase, generate_passphrase};
 
 /// Errors of the sync foundations. Messages name the file kind, the field
 /// or the device (by id), never a value, a key or a passphrase.
