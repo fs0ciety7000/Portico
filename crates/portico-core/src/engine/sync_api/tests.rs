@@ -1862,3 +1862,4 @@ async fn resolve_refuses_a_stale_sides_hash() {
     assert!(a.engine.sync_conflicts().await.expect("c").is_empty());
 }
 
+mod s2;
