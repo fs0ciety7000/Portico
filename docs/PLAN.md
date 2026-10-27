@@ -232,6 +232,20 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
 - **S2, rotation puis mots de passe** : rotation des clés et « oublier un appareil » **d'abord** ; ensuite mots de passe
   **liés** seulement (jamais les non liés), opt-in au niveau du bundle et décoché par défaut, envoyés sur B seulement si B
   vérifie la même clé hôte
+  - **S2a, rotation et oubli d'un appareil (moteur)** ✅ *(2026-10-27, revue `agent-security` S2a à faire)* : `bundle.toml`
+    v2 (engagement d'époque, filiation chaînée sous la sous-clé `rotate`, roster v2 avec appareils oubliés et politique des
+    mots de passe), cliquet sur la version lue, plancher local d'époque, rotation sûre en cas de crash et vers l'avant
+    seulement (`rotation.toml`, `bundle.next`, `bundle.verified`, historique des 8 derniers emplacements), adoption par la
+    nouvelle passphrase (chaîne entière, historique, cas « ne pas mémoriser »), arrêt sur en-tête d'époque supérieure avec
+    sortie explicite, conflits de rotation sans guerre de réécriture (« garder mes clés », « utiliser les leurs » refusé
+    s'il ramène un appareil oublié, E2), oubli d'un appareil (`revoked_clock` exact et immuable, fichiers supprimés,
+    provenance au nouveau rattachement), `leave_roster`, filtre des registres `secret` quand la politique est désactivée et
+    relais opaque sinon, `IndexedSecretStore` sur tous les chemins, collecte des anciennes clés, `C_E` retenu dès un v1
+    (E1). API `Engine::sync_rotate_keys`, `sync_forget_device`, `sync_unlock` étendue, `sync_resolve_rotation_conflict`,
+    `sync_restore_bundle`, `sync_discard_newer_file`, clés orphelines, valeurs retenues. Exercice d'appareil perdu sans
+    mots de passe vert ; écarts en `docs/SYNC.md` §13.12. Les UIs (S2c-1) restent à faire
+  - **S2c-1, interfaces de rotation et d'oubli** : à faire (`docs/SYNC.md` §13.8 et §13.12)
+  - **S2b, mots de passe liés (moteur)** puis **S2c-2 (interfaces)** : à faire
 - **S3, plus tard** : emplacements de clé par appareil (rotation sans ressaisir la passphrase), signatures Ed25519, exclusions
   par réglage, options à décider
 
