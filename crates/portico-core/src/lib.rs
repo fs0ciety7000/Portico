@@ -45,6 +45,7 @@ pub mod snippets;
 mod socks;
 pub mod ssh_config;
 pub mod store;
+pub mod sync;
 pub mod update;
 pub mod vault;
 #[cfg(windows)]
