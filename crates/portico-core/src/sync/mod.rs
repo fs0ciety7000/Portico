@@ -48,6 +48,8 @@
 pub(crate) mod clock;
 #[allow(dead_code)]
 pub(crate) mod crypto;
+#[allow(dead_code)]
+pub(crate) mod model;
 
 pub use clock::DeviceId;
 
