@@ -325,11 +325,19 @@ pub fn expand_home(raw: &str, home: &Path) -> PathBuf {
     expand_tilde(&expand_env(raw), Some(home))
 }
 
-/// Expands a leading `~` or `~/` with `home`. `~otheruser` is left untouched.
+/// Expands a leading `~` or `~/` with `home` (also `~\` on Windows, like
+/// OpenSSH for Windows). `~otheruser` is left untouched.
 pub(crate) fn expand_tilde(raw: &str, home: Option<&Path>) -> PathBuf {
+    expand_tilde_for(raw, home, cfg!(windows))
+}
+
+/// [`expand_tilde`] for a given platform (testable everywhere).
+fn expand_tilde_for(raw: &str, home: Option<&Path>, windows: bool) -> PathBuf {
     match (raw, home) {
         ("~", Some(h)) => h.to_path_buf(),
-        (r, Some(h)) if r.starts_with("~/") => h.join(r.get(2..).unwrap_or_default()),
+        (r, Some(h)) if r.starts_with("~/") || (windows && r.starts_with("~\\")) => {
+            h.join(r.get(2..).unwrap_or_default())
+        }
         (r, _) => PathBuf::from(r),
     }
 }
@@ -427,5 +435,37 @@ fn parse_port(p: &str) -> Result<u16, String> {
     match p.parse::<u16>() {
         Ok(port) if port != 0 => Ok(port),
         _ => Err(format!("invalid port `{p}`")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tilde_forms_per_platform() {
+        let home = Path::new("/h");
+        assert_eq!(
+            expand_tilde_for("~", Some(home), false),
+            PathBuf::from("/h")
+        );
+        assert_eq!(
+            expand_tilde_for("~/.ssh/id", Some(home), false),
+            home.join(".ssh/id")
+        );
+        // `~\` is a home prefix only on Windows; `~bob/` never.
+        assert_eq!(
+            expand_tilde_for("~\\.ssh\\id", Some(home), false),
+            PathBuf::from("~\\.ssh\\id")
+        );
+        assert_eq!(
+            expand_tilde_for("~\\.ssh\\id", Some(home), true),
+            home.join(".ssh\\id")
+        );
+        assert_eq!(
+            expand_tilde_for("~bob/x", Some(home), true),
+            PathBuf::from("~bob/x")
+        );
+        assert_eq!(expand_tilde_for("~/x", None, true), PathBuf::from("~/x"));
     }
 }

@@ -26,13 +26,18 @@ use crate::error::{Error, Result};
 /// Resolved directories used by the engine.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// `~/.ssh`
+    /// `~/.ssh` (`%USERPROFILE%\.ssh` on Windows, like OpenSSH for Windows)
     pub ssh_dir: PathBuf,
-    /// User home (for `~` and `%d` expansion).
+    /// User home (for `~` and `%d` expansion; `%USERPROFILE%` on Windows).
     pub home: PathBuf,
-    /// `$XDG_CONFIG_HOME/portico` or `~/Library/Application Support/dev.Portico.portico`.
+    /// `$XDG_CONFIG_HOME/portico`, `~/Library/Application Support/dev.Portico.portico`
+    /// or `%APPDATA%\Portico\portico\config`.
     pub config_dir: PathBuf,
-    /// Recent sessions, logs, vault.
+    /// Recent sessions, logs, vault, recordings: `%LOCALAPPDATA%\Portico\
+    /// portico\data` on Windows, **local** (never copied to a roaming domain
+    /// profile: the vault and recordings stay on this machine); the same
+    /// folder as before on Linux and macOS (`data_local_dir` = `data_dir`
+    /// there).
     pub data_dir: PathBuf,
     /// System-wide `known_hosts` files (read-only).
     pub global_known_hosts: Vec<PathBuf>,
@@ -48,11 +53,8 @@ impl Paths {
             ssh_dir: base.home_dir().join(".ssh"),
             home: base.home_dir().to_path_buf(),
             config_dir: project.config_dir().to_path_buf(),
-            data_dir: project.data_dir().to_path_buf(),
-            global_known_hosts: vec![
-                PathBuf::from("/etc/ssh/ssh_known_hosts"),
-                PathBuf::from("/etc/ssh/ssh_known_hosts2"),
-            ],
+            data_dir: project.data_local_dir().to_path_buf(),
+            global_known_hosts: global_known_hosts(),
         })
     }
 
@@ -124,6 +126,77 @@ impl Paths {
             .map(|n| self.ssh_dir.join(n))
             .collect()
     }
+}
+
+/// The system-wide `known_hosts` files OpenSSH reads: `/etc/ssh/…` on
+/// Unix, `%PROGRAMDATA%\ssh\…` with OpenSSH for Windows. On Windows the
+/// folder comes from the known folder `FOLDERID_ProgramData`, never from
+/// the `PROGRAMDATA` variable (set by whoever starts the process), and the
+/// files are only used when the machine owns them
+/// (`known_hosts::trusted_global_files`).
+fn global_known_hosts() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    let dir = portico_winsec::program_data_dir()
+        .unwrap_or_else(|_| PathBuf::from(r"C:\ProgramData"))
+        .join("ssh");
+    #[cfg(not(windows))]
+    let dir = PathBuf::from("/etc/ssh");
+    vec![dir.join("ssh_known_hosts"), dir.join("ssh_known_hosts2")]
+}
+
+/// A relative path with `/` separators on every platform (what Portico
+/// writes in an `ssh_config` after `~/`: OpenSSH for Windows reads `/`, and
+/// a `\` would be an escape for OpenSSH's argument splitting).
+pub(crate) fn slash_relative(rest: &Path) -> String {
+    let parts: Vec<String> = rest
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.join("/")
+}
+
+/// Whether `name` (one path component) is unusable or dangerous as a
+/// Windows file name, whatever the platform it is checked on:
+///
+/// - `<>:"|?*` or a control character: `:` alone is a security issue,
+///   `C:x` makes `dir.join` *replace* the folder (drive-relative path) and
+///   `a:b` writes an NTFS alternate data stream of `a`;
+/// - a trailing dot or space (silently stripped by Win32: `a.` is `a`);
+/// - a reserved device name, with or without extension, any case, trailing
+///   spaces before the dot ignored: `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`,
+///   `LPT0`–`LPT9` (`0` is listed reserved by current Microsoft docs), the superscript `COM¹²³`/`LPT¹²³`, `CONIN$`, `CONOUT$`.
+pub(crate) fn windows_name_problem(name: &str) -> bool {
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return true;
+    }
+    if name.ends_with(['.', ' ']) {
+        return true;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|n| {
+            let mut chars = n.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '¹' | '²' | '³'), None)
+            )
+        })
+    };
+    numbered("COM") || numbered("LPT")
 }
 
 /// `true` when `a` and `b` name the same file: equal paths, or equal once
@@ -307,7 +380,8 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
 }
 
 /// Writes a TOML file atomically (temp file in the same dir + rename), with
-/// `0600` permissions on Unix.
+/// `0600` permissions on Unix and an owner-only DACL on Windows (the
+/// rename, `MoveFileExW(REPLACE_EXISTING)`, keeps the temp file's DACL).
 pub fn save_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let text = toml::to_string_pretty(value).map_err(|e| Error::Serde {
         what: "toml",
@@ -346,12 +420,35 @@ pub(crate) enum WriteNewError {
     Other(Error),
 }
 
+/// Windows: the steps behind Portico's private files, for the apps' own
+/// private files (the TUI log): open options able to rewrite the DACL, and
+/// the owner-only DACL itself (see `winfs`, ADR "Phase 8 — ACL Windows").
+#[cfg(windows)]
+pub mod windows {
+    use std::fs::{File, OpenOptions};
+    use std::path::Path;
+
+    /// Adds `READ_CONTROL | WRITE_DAC` (with read and write) to `opts`.
+    pub fn with_dacl_rights(opts: &mut OpenOptions) {
+        crate::winfs::with_dacl_rights(opts);
+    }
+
+    /// Owner-only protected DACL on `file` (opened with
+    /// [`with_dacl_rights`]); skipped on a volume without ACLs.
+    pub fn restrict_file(file: &File, path: &Path) -> std::io::Result<()> {
+        crate::winfs::restrict_file(file, path)
+    }
+}
+
 /// Attempts at finding a free temp file name before giving up.
 const TEMP_NAME_ATTEMPTS: u32 = 8;
 
-/// Creates `dir` and its missing parents, private (`0700` on Unix: only
-/// directories created here get that mode, existing ones are left alone).
-pub(crate) fn create_private_dir_all(dir: &Path) -> Result<()> {
+/// Creates `dir` and its missing parents, private (`0700` on Unix, an
+/// owner-only DACL on Windows: only directories created here get it,
+/// existing ones are left alone).
+pub fn create_private_dir_all(dir: &Path) -> Result<()> {
+    #[cfg(windows)]
+    create_missing_private_dirs(dir)?;
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -360,6 +457,26 @@ pub(crate) fn create_private_dir_all(dir: &Path) -> Result<()> {
         builder.mode(0o700);
     }
     builder.create(dir).map_err(|e| Error::io(dir, e))
+}
+
+/// Windows: creates the missing ancestors of `dir` (and `dir`) one by one,
+/// each restricted to the user right after its creation, so exactly the
+/// directories created here are made private. One created concurrently by
+/// someone else (`AlreadyExists`) is left alone, like on Unix.
+#[cfg(windows)]
+fn create_missing_private_dirs(dir: &Path) -> Result<()> {
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|p| !p.as_os_str().is_empty() && std::fs::symlink_metadata(p).is_err())
+        .collect();
+    for path in missing.into_iter().rev() {
+        match std::fs::create_dir(path) {
+            Ok(()) => crate::winfs::restrict_dir(path).map_err(|e| Error::io(path, e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(Error::io(path, e)),
+        }
+    }
+    Ok(())
 }
 
 /// Opens (creating it `0600` if needed) the lock file `path` and takes an
@@ -377,7 +494,16 @@ pub(crate) fn lock_exclusive(path: &Path) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
+    #[cfg(windows)]
+    crate::winfs::with_dacl_rights(&mut opts);
+    #[cfg(windows)]
+    let created = std::fs::symlink_metadata(path).is_err();
     let file = opts.open(path).map_err(|e| Error::io(path, e))?;
+    // Windows: a lock file created here is made private (the `0600` above).
+    #[cfg(windows)]
+    if created {
+        crate::winfs::restrict_file(&file, path).map_err(|e| Error::io(path, e))?;
+    }
     file.lock().map_err(|e| Error::io(path, e))?;
     Ok(file)
 }
@@ -409,13 +535,17 @@ fn write_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     let (tmp, mut file) = loop {
         let suffix = random_suffix().map_err(|e| Error::io(dir, e))?;
         let tmp = dir.join(format!(".{file_name}.tmp-{suffix:016x}"));
+        #[cfg(not(windows))]
         let mut opts = std::fs::OpenOptions::new();
+        #[cfg(not(windows))]
         opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
+        #[cfg(windows)]
+        let opts = crate::winfs::private_new_file();
         match opts.open(&tmp) {
             Ok(file) => break (tmp, file),
             Err(e)
@@ -427,6 +557,13 @@ fn write_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
             Err(e) => return Err(Error::io(&tmp, e)),
         }
     };
+    // Windows: private before the first byte is written (the `0600` above).
+    #[cfg(windows)]
+    if let Err(e) = crate::winfs::restrict_file(&file, &tmp) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::io(&tmp, e));
+    }
     let written = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
@@ -462,6 +599,60 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn windows_file_names() {
+        for bad in [
+            "C:x",
+            "a:b",
+            "file::$DATA",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "tab\tname",
+            "trailing.",
+            "trailing ",
+            "CON",
+            "con",
+            "Con.txt",
+            "nul.tar.gz",
+            "NUL .txt",
+            "aux",
+            "prn.log",
+            "COM1",
+            "com9.txt",
+            "LPT3",
+            "lpt1.cfg",
+            "COM\u{b9}",
+            "lpt\u{b2}.txt",
+            "COM\u{b3}",
+            "CONIN$",
+            "conout$.x",
+            "COM0",
+            "lpt0.txt",
+        ] {
+            assert!(windows_name_problem(bad), "{bad:?}");
+        }
+        for ok in [
+            "report.pdf",
+            ".bashrc",
+            "console",
+            "CON-2026.cast",
+            "nul_device",
+            "COM10",
+            "COM00",
+            "LPT",
+            "com1x",
+            "été 2026.txt",
+            "a.b.c",
+            "x.con",
+        ] {
+            assert!(!windows_name_problem(ok), "{ok:?}");
         }
     }
 

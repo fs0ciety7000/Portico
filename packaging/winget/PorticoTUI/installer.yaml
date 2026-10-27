@@ -1,0 +1,19 @@
+# Template of the winget installer manifest of the terminal UI (the release
+# zip, installed as a portable command). Rendered by packaging/winget/render.sh.
+
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: @PACKAGE_ID@
+PackageVersion: @VERSION@
+MinimumOSVersion: 10.0.17763.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: portico-@VERSION@-x86_64-pc-windows-msvc\portico.exe
+    PortableCommandAlias: portico
+ReleaseDate: @RELEASE_DATE@
+Installers:
+  - Architecture: x64
+    InstallerUrl: @REPO_URL@/releases/download/v@VERSION@/portico-@VERSION@-x86_64-pc-windows-msvc.zip
+    InstallerSha256: @SHA_ZIP@
+ManifestType: installer
+ManifestVersion: 1.9.0

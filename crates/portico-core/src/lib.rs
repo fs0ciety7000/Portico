@@ -19,6 +19,7 @@
 //! [`secrecy`] types and never logged.
 
 mod agent;
+pub mod agent_socket;
 mod copy_id;
 pub mod effective;
 pub mod engine;
@@ -46,6 +47,8 @@ pub mod ssh_config;
 pub mod store;
 pub mod update;
 pub mod vault;
+#[cfg(windows)]
+mod winfs;
 
 pub use agent::{AgentCertificate, AgentKey};
 pub use copy_id::CopyIdOutcome;

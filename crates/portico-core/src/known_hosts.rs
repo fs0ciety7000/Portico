@@ -79,6 +79,47 @@ pub struct KnownHosts {
     pub warnings: Vec<String>,
 }
 
+/// Keeps the system-wide `known_hosts` files that can be trusted, and says
+/// why the others were skipped (one line each, for the connection log).
+/// Blocking (reads security descriptors).
+///
+/// - **Unix**: all of them (`/etc/ssh` is root's).
+/// - **Windows**: any local account can create folders and files in
+///   `%PROGRAMDATA%`, so a `ssh\ssh_known_hosts` planted there before
+///   OpenSSH is installed would make Portico trust any key it lists, for
+///   every host: a silent man-in-the-middle. A global file is used only when
+///   it **and** its folder are owned by the machine (`SYSTEM`,
+///   `Administrators`, `TrustedInstaller`) and no other account can change
+///   them (`Audit::machine_owned_and_locked`); a missing one is skipped
+///   silently, an unverifiable one (no ACLs) is skipped with a warning.
+pub(crate) fn trusted_global_files(files: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let mut trusted = Vec::new();
+        let mut skipped = Vec::new();
+        for file in files {
+            match crate::winfs::machine_file_trusted(&file) {
+                Ok(Some(true)) => trusted.push(file),
+                Ok(Some(false)) => skipped.push(format!(
+                    "{}: skipped (not owned by the system, or writable by other accounts)",
+                    file.display()
+                )),
+                Ok(None) => skipped.push(format!(
+                    "{}: skipped (no file permissions to verify on this volume)",
+                    file.display()
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => skipped.push(format!("{}: skipped ({e})", file.display())),
+            }
+        }
+        (trusted, skipped)
+    }
+    #[cfg(not(windows))]
+    {
+        (files, Vec::new())
+    }
+}
+
 /// The name OpenSSH matches entries against: `host` or `[host]:port`.
 pub fn host_field(host: &str, port: u16) -> String {
     if port == 22 {
@@ -421,6 +462,15 @@ mod tests {
     use russh::keys::ssh_key::certificate::Builder;
     use russh::keys::{Algorithm, PrivateKey};
 
+    #[cfg(windows)]
+    fn under_wine() -> bool {
+        crate::winfs::tests::under_wine()
+    }
+    #[cfg(not(windows))]
+    fn under_wine() -> bool {
+        false
+    }
+
     fn key() -> PrivateKey {
         PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap()
     }
@@ -571,6 +621,39 @@ mod tests {
             }
         );
         assert_eq!(kh.known_algorithms("example.com", 22).len(), 1);
+    }
+
+    #[test]
+    fn global_files_kept_on_unix_skipped_when_foreign_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("ssh_known_hosts");
+        // Windows: a file of this user's own (owner set to the user even
+        // when the test runs elevated, as on CI, where a plain new file is
+        // owned by `Administrators`, which is the machine and trusted).
+        #[cfg(windows)]
+        {
+            use std::io::Write as _;
+            let mut file = crate::winfs::private_new_file().open(&planted).unwrap();
+            crate::winfs::restrict_file(&file, &planted).unwrap();
+            file.write_all(b"example.com ssh-ed25519 AAAA\n").unwrap();
+        }
+        #[cfg(not(windows))]
+        std::fs::write(&planted, "example.com ssh-ed25519 AAAA\n").unwrap();
+        let missing = dir.path().join("ssh_known_hosts2");
+        let (trusted, skipped) = trusted_global_files(vec![planted.clone(), missing.clone()]);
+        if cfg!(windows) {
+            // Owned by this user, not the machine: skipped, with a
+            // reason; the missing one silently. (Under wine the ACLs are
+            // not Windows': only the missing file is asserted.)
+            assert!(!trusted.contains(&missing));
+            if !under_wine() {
+                assert!(trusted.is_empty(), "{trusted:?}");
+                assert_eq!(skipped.len(), 1, "{skipped:?}");
+            }
+        } else {
+            assert_eq!(trusted, vec![planted, missing]);
+            assert!(skipped.is_empty());
+        }
     }
 
     #[test]

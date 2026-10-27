@@ -490,12 +490,15 @@ impl Lab {
 
 /// Writes `bytes` as a recording file (private, like the engine's).
 fn plant(dir: &Path, name: &str, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 // One story, start to end (record, badge, stop, list, play): split up, the
@@ -948,6 +951,10 @@ async fn the_status_bar_keeps_status_and_rec_at_80_columns() {
             .is_some_and(|p| p.state() == PlayerState::Playing)
     })
     .await;
+    // The engine's own keepalive may have reported a real loopback RTT
+    // (`<1 ms`) while the events were pumped (timing-dependent: seen on
+    // Windows): pin the latency again so the assertion stays about layout.
+    measured(&mut lab.app);
     for state in ["▶ Playing", "❚❚ Paused"] {
         let lines = screen(&mut lab.app, 80, 24);
         let all = text(&lines);

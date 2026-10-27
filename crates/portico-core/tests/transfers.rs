@@ -674,6 +674,7 @@ async fn hostile_names_never_reach_the_listing() {
     assert_eq!(names, ["ok.txt"]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn modes_are_carried_across() {
     use std::os::unix::fs::PermissionsExt;

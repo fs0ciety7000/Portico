@@ -10,19 +10,30 @@ use std::sync::OnceLock;
 
 use time::{OffsetDateTime, UtcOffset};
 
-/// `/home/me/.ssh/x` → `~/.ssh/x` (display only). Only a whole `$HOME`
-/// component is replaced (`/home/me2` stays as is).
+/// The user's home: `$HOME`, or `%USERPROFILE%` on Windows (like
+/// OpenSSH for Windows); `None` when unset or empty.
+pub(crate) fn home_dir() -> Option<String> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(var).ok().filter(|h| !h.is_empty())
+}
+
+/// `/home/me/.ssh/x` → `~/.ssh/x` (display only; `C:\Users\me\x` →
+/// `~\x` on Windows). Only a whole home component is replaced
+/// (`/home/me2` stays as is).
 pub(crate) fn display_path(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => home_relative(path, &home),
-        _ => path.to_owned(),
+    match home_dir() {
+        Some(home) => home_relative(path, &home, SEPARATORS),
+        None => path.to_owned(),
     }
 }
 
-fn home_relative(path: &str, home: &str) -> String {
-    let home = home.trim_end_matches('/');
+/// Path separators of this platform.
+const SEPARATORS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+
+fn home_relative(path: &str, home: &str, separators: &[char]) -> String {
+    let home = home.trim_end_matches(separators);
     match path.strip_prefix(home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with(separators)) => {
             format!("~{rest}")
         }
         _ => path.to_owned(),
@@ -191,10 +202,27 @@ mod tests {
 
     #[test]
     fn home_is_a_whole_component() {
-        assert_eq!(home_relative("/home/me/.ssh/x", "/home/me"), "~/.ssh/x");
-        assert_eq!(home_relative("/home/me", "/home/me/"), "~");
-        assert_eq!(home_relative("/home/me2/x", "/home/me"), "/home/me2/x");
-        assert_eq!(home_relative("/srv/x", "/home/me"), "/srv/x");
+        let unix: &[char] = &['/'];
+        assert_eq!(
+            home_relative("/home/me/.ssh/x", "/home/me", unix),
+            "~/.ssh/x"
+        );
+        assert_eq!(home_relative("/home/me", "/home/me/", unix), "~");
+        assert_eq!(
+            home_relative("/home/me2/x", "/home/me", unix),
+            "/home/me2/x"
+        );
+        assert_eq!(home_relative("/srv/x", "/home/me", unix), "/srv/x");
+        let windows: &[char] = &['/', '\\'];
+        assert_eq!(
+            home_relative(r"C:\Users\me\.ssh\x", r"C:\Users\me", windows),
+            r"~\.ssh\x"
+        );
+        assert_eq!(home_relative(r"C:\Users\me", r"C:\Users\me\", windows), "~");
+        assert_eq!(
+            home_relative(r"C:\Users\me2\x", r"C:\Users\me", windows),
+            r"C:\Users\me2\x"
+        );
     }
 
     #[test]

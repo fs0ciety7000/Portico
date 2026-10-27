@@ -2,7 +2,9 @@
 //!
 //! Backends, in order of preference:
 //! 1. [`KeyringStore`]: macOS Keychain / Linux Secret Service (GNOME Keyring,
-//!    `KWallet` via Secret Service) through the `keyring` crate.
+//!    `KWallet` via Secret Service) / Windows Credential Manager (generic
+//!    credentials, target `<account>.dev.portico`, the crate's default
+//!    `Enterprise` persistence) through the `keyring` crate.
 //! 2. [`VaultStore`]: local file encrypted with XChaCha20-Poly1305, key
 //!    derived from a master passphrase with Argon2id (see [`crate::vault`]).
 //!    Used when no system keyring is available (headless Linux, SSH
@@ -110,8 +112,25 @@ impl KeyringStore {
         keyring::Entry::store_status().is_ok()
     }
 
+    #[cfg(not(windows))]
     fn entry(key: &SecretKey) -> Result<keyring::Entry> {
         keyring::Entry::new(SERVICE, &key.account()).map_err(keyring_err)
+    }
+
+    /// Windows: the Credential Manager entry with persistence `Local`
+    /// (`CRED_PERSIST_LOCAL_MACHINE`): never copied to a roaming domain
+    /// profile, unlike the crate's default (`Enterprise`). The persistence
+    /// applies when an entry is written.
+    #[cfg(windows)]
+    fn entry(key: &SecretKey) -> Result<keyring::Entry> {
+        // Initialises the default (Windows) store, as `Entry::new` does.
+        if keyring::Entry::store_status().is_err() {
+            return Err(keyring_err(keyring::Error::NoDefaultStore));
+        }
+        let modifiers = std::collections::HashMap::from([("persistence", "Local")]);
+        keyring_core::Entry::new_with_modifiers(SERVICE, &key.account(), &modifiers)
+            .map(|inner| keyring::Entry { inner })
+            .map_err(keyring_err)
     }
 }
 
@@ -189,6 +208,34 @@ fn keyring_err(e: keyring::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Credential Manager entries are written `Local` (never roaming).
+    /// Wine's Credential Manager is not Windows': skipped there.
+    #[cfg(windows)]
+    #[test]
+    fn keyring_entries_are_local() {
+        if crate::winfs::tests::under_wine() {
+            return;
+        }
+        let key = SecretKey::KeyPassphrase {
+            fingerprint: format!("SHA256:portico-test-{:016x}", rand::random::<u64>()),
+        };
+        let store = KeyringStore;
+        store
+            .set(&key, &SecretString::from("s3cret".to_owned()))
+            .unwrap();
+        let attributes = KeyringStore::entry(&key)
+            .unwrap()
+            .inner
+            .get_attributes()
+            .unwrap();
+        store.delete(&key).unwrap();
+        assert_eq!(
+            attributes.get("persistence").map(String::as_str),
+            Some("Local"),
+            "{attributes:?}"
+        );
+    }
 
     #[test]
     fn account_names_are_stable() {

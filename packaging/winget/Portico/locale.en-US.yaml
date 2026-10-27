@@ -1,0 +1,31 @@
+# Template of the winget default locale manifest of the desktop app.
+# Rendered by packaging/winget/render.sh.
+
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: @PACKAGE_ID@
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Portico contributors
+PublisherUrl: @REPO_URL@
+PublisherSupportUrl: @REPO_URL@/issues
+PackageName: Portico
+PackageUrl: @REPO_URL@
+License: MIT OR Apache-2.0
+LicenseUrl: @REPO_URL@/blob/v@VERSION@/LICENSE-MIT
+Copyright: Copyright (c) 2026 Portico contributors
+ShortDescription: Local-first, keyboard-first SSH workspace.
+Description: |-
+  Portico is a fast, keyboard-first SSH session manager. It reads the OpenSSH
+  configuration, known_hosts, the ssh-agent and local keys as the source of
+  truth, works offline without an account, keeps secrets in the Windows
+  Credential Manager, and offers terminals, SFTP, port forwarding, key
+  management and snippets.
+Tags:
+  - ssh
+  - sftp
+  - terminal
+  - ssh-client
+  - port-forwarding
+ReleaseNotesUrl: @REPO_URL@/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

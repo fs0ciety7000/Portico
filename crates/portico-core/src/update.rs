@@ -493,6 +493,13 @@ pub enum InstallMethod {
     Pacman,
     Deb,
     MacApp,
+    /// Windows: an app of the Scoop bucket (`scoop\apps\portico…\`).
+    Scoop,
+    /// Windows: the per-user NSIS installer, also what winget installs
+    /// (`%LOCALAPPDATA%\Portico\`).
+    WindowsInstaller,
+    /// Windows: `portico.exe` unpacked from the release `.zip` (TUI).
+    WindowsZip,
     Other,
 }
 
@@ -508,6 +515,8 @@ pub struct UpdateInstruction {
 
 /// Facts about this install, gathered by [`InstallProbe::detect`] (pure
 /// input of [`install_method`], so it is tested without a real system).
+// Independent yes/no facts gathered from the system, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallProbe {
     /// The executable (canonical when possible).
@@ -520,6 +529,10 @@ pub struct InstallProbe {
     pub dpkg_lists_exe: bool,
     /// A Homebrew `Caskroom/portico` exists.
     pub homebrew_cask: bool,
+    /// Running on Windows.
+    pub windows: bool,
+    /// `%LOCALAPPDATA%` (Windows only).
+    pub local_app_data: Option<PathBuf>,
 }
 
 /// Homebrew prefixes (macOS Apple silicon, Intel, Linux).
@@ -554,6 +567,14 @@ impl InstallProbe {
             dpkg_lists_exe,
             homebrew_cask: CASKROOMS.iter().any(|d| Path::new(d).is_dir()),
             exe,
+            windows: cfg!(windows),
+            local_app_data: if cfg!(windows) {
+                std::env::var_os("LOCALAPPDATA")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+            } else {
+                None
+            },
         }
     }
 }
@@ -581,8 +602,39 @@ fn dpkg_lists(exe: &Path) -> bool {
         })
 }
 
+/// A Windows path compared case-insensitively, `/` separators, no `\\?\`
+/// prefix (what `canonicalize` adds).
+fn windows_key(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    text.strip_prefix("//?/").map(str::to_owned).unwrap_or(text)
+}
+
+/// Windows installs (pure: see [`InstallProbe`]).
+fn windows_install_method(probe: &InstallProbe) -> InstallMethod {
+    let exe = windows_key(&probe.exe);
+    if ["/scoop/apps/portico/", "/scoop/apps/portico-gui/"]
+        .iter()
+        .any(|p| exe.contains(p))
+    {
+        return InstallMethod::Scoop;
+    }
+    if let Some(local) = &probe.local_app_data {
+        let prefix = format!("{}/portico/", windows_key(local).trim_end_matches('/'));
+        if exe.starts_with(&prefix) {
+            return InstallMethod::WindowsInstaller;
+        }
+    }
+    if exe.ends_with("/portico.exe") {
+        return InstallMethod::WindowsZip;
+    }
+    InstallMethod::Other
+}
+
 /// How this copy was installed (pure: see [`InstallProbe`]).
 pub fn install_method(probe: &InstallProbe, frontend: Frontend) -> InstallMethod {
+    if probe.windows {
+        return windows_install_method(probe);
+    }
     let exe = probe.exe.to_string_lossy();
     if probe.appimage {
         return InstallMethod::AppImage;
@@ -638,6 +690,21 @@ pub fn instruction(method: InstallMethod, frontend: Frontend, version: &str) -> 
         ),
         InstallMethod::MacApp => (
             "Download the new .dmg from the release page.".to_owned(),
+            None,
+        ),
+        InstallMethod::Scoop => (
+            "Update with Scoop:".to_owned(),
+            Some(match frontend {
+                Frontend::Tui => "scoop update portico",
+                Frontend::Gui => "scoop update portico-gui",
+            }),
+        ),
+        InstallMethod::WindowsInstaller => (
+            "Download the new installer from the release page, or with winget:".to_owned(),
+            Some("winget upgrade fs0ciety7000.Portico"),
+        ),
+        InstallMethod::WindowsZip => (
+            "Download the new .zip from the release page and replace portico.exe.".to_owned(),
             None,
         ),
         InstallMethod::Other => ("Download it from the release page.".to_owned(), None),

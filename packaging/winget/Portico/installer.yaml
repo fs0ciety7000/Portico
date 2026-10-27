@@ -1,0 +1,22 @@
+# Template of the winget installer manifest of the desktop app (the Tauri
+# NSIS installer, per-user). Rendered by packaging/winget/render.sh.
+
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: @PACKAGE_ID@
+PackageVersion: @VERSION@
+MinimumOSVersion: 10.0.17763.0
+InstallerType: nullsoft
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+# The NSIS installer registers HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Portico.
+ProductCode: Portico
+ReleaseDate: @RELEASE_DATE@
+Installers:
+  - Architecture: x64
+    InstallerUrl: @REPO_URL@/releases/download/v@VERSION@/Portico_@VERSION@_x64-setup.exe
+    InstallerSha256: @SHA_SETUP@
+ManifestType: installer
+ManifestVersion: 1.9.0

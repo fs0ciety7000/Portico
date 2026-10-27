@@ -400,11 +400,14 @@ pub(crate) fn key_file_name(alias: &str) -> String {
     if name.starts_with(['.', '-']) || name.is_empty() {
         name = format!("key_{name}");
     }
-    if crate::keys::validate_name(&name).is_ok() {
-        name
-    } else {
-        format!("{name}_key")
-    }
+    // The first valid of: the name, `<name>_key` (a name OpenSSH reserves,
+    // `config`), `key_<name>` (a Windows device stem: `aux.example.com_key`
+    // still starts with `aux.`), then `key`.
+    let candidates = [name.clone(), format!("{name}_key"), format!("key_{name}")];
+    candidates
+        .into_iter()
+        .find(|candidate| crate::keys::validate_name(candidate).is_ok())
+        .unwrap_or_else(|| "key".to_owned())
 }
 
 /// `~/.ssh/portico`, created `0700` when missing; refused when it is a
@@ -699,6 +702,23 @@ mod tests {
             ("config", "config_key"),
             ("known_hosts", "known_hosts_key"),
             (".hidden", "key_.hidden"),
+            // Windows device stems (`aux.`, `con.`): refused there only.
+            (
+                "aux.example.com",
+                if cfg!(windows) {
+                    "key_aux.example.com"
+                } else {
+                    "aux.example.com"
+                },
+            ),
+            (
+                "con.lan",
+                if cfg!(windows) {
+                    "key_con.lan"
+                } else {
+                    "con.lan"
+                },
+            ),
         ] {
             let name = key_file_name(alias);
             assert_eq!(name, expected, "{alias}");

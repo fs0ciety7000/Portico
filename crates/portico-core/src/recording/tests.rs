@@ -535,6 +535,7 @@ fn a_symlinked_recordings_folder_is_refused() {
     );
 }
 
+#[cfg(unix)]
 fn write_file(dir: &Path, name: &str, text: &str) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join(name), text).unwrap();

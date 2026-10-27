@@ -313,6 +313,14 @@ fn mode_lines(panel: &KeysPanel, s: Styles, width: usize, lines: &mut Vec<Line<'
                 spans.push(Span::raw("  "));
             }
             lines.push(Line::from(spans));
+            // The Windows agent stores keys (registry, DPAPI) until they
+            // are removed, across restarts, and may refuse a lifetime.
+            if cfg!(windows) {
+                lines.push(Line::from(Span::styled(
+                    "The Windows agent keeps keys, across restarts, until they are removed.",
+                    s.secondary(),
+                )));
+            }
         }
         _ => {}
     }

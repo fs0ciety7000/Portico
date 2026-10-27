@@ -56,6 +56,17 @@ pub enum KeyError {
     UnsafeDir { path: PathBuf },
     #[error("no ssh-agent is reachable{}", socket.as_ref().map(|s| format!(" at {}", s.display())).unwrap_or_default())]
     AgentUnavailable { socket: Option<PathBuf> },
+    /// Windows: the agent pipe is served by another account; nothing was
+    /// sent to it.
+    #[error("the ssh-agent at {} is not trusted: {reason}", socket.display())]
+    AgentUntrusted {
+        socket: PathBuf,
+        reason: &'static str,
+    },
+    /// The agent endpoint is of a kind this platform cannot use (Windows:
+    /// a socket file, e.g. the `SSH_AUTH_SOCK` of Git Bash / MSYS).
+    #[error("{} is not a named pipe: Portico cannot use this ssh-agent", socket.display())]
+    AgentEndpointUnsupported { socket: PathBuf },
     #[error("ssh-agent refused the request: {0}")]
     AgentRefused(String),
     #[error("{} is encrypted", path.display())]
@@ -69,6 +80,21 @@ pub enum KeyError {
 }
 
 impl KeyError {
+    /// A hint that needs this error's context (the static one otherwise).
+    /// Windows: the exact `icacls` command for an unsafe folder, with the
+    /// real path and account (no `%VAR%`, which PowerShell does not
+    /// expand).
+    pub(crate) fn hint_override(&self) -> Option<String> {
+        match self {
+            #[cfg(windows)]
+            Self::UnsafeDir { path } => Some(format!(
+                "Make it yours and private: {}",
+                crate::winfs::icacls_private(path, true)
+            )),
+            _ => None,
+        }
+    }
+
     pub(crate) fn code_and_hint(&self) -> (&'static str, Option<&'static str>) {
         match self {
             Self::Exists { .. } => (
@@ -92,18 +118,14 @@ impl KeyError {
                 "copy_id_failed",
                 Some("Check that the account has a writable home and a POSIX shell."),
             ),
-            Self::UnsafeDir { .. } => (
-                "key_unsafe_dir",
-                Some("Make it yours and private: chmod 700 ~/.ssh."),
+            Self::UnsafeDir { .. } => ("key_unsafe_dir", Some(UNSAFE_DIR_HINT)),
+            Self::AgentUnavailable { .. } => ("agent_unavailable", Some(AGENT_UNAVAILABLE_HINT)),
+            Self::AgentUntrusted { .. } => ("agent_untrusted", Some(AGENT_UNTRUSTED_HINT)),
+            Self::AgentEndpointUnsupported { .. } => (
+                "agent_endpoint_unsupported",
+                Some("Unset SSH_AUTH_SOCK to use the Windows agent, or point it to a named pipe."),
             ),
-            Self::AgentUnavailable { .. } => (
-                "agent_unavailable",
-                Some("Start ssh-agent (eval $(ssh-agent)) or set IdentityAgent / SSH_AUTH_SOCK."),
-            ),
-            Self::AgentRefused(_) => (
-                "agent_refused",
-                Some("The agent may be locked (ssh-add -X) or not accept this key type."),
-            ),
+            Self::AgentRefused(_) => ("agent_refused", Some(AGENT_REFUSED_HINT)),
             Self::NeedsPassphrase { .. } => ("key_needs_passphrase", None),
             Self::WrongPassphrase { .. } => ("key_wrong_passphrase", Some("Try again.")),
             Self::BadPrivateKey { .. } => (
@@ -263,6 +285,9 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     {
         Some("only letters, digits, dot, dash and underscore")
+    } else if cfg!(windows) && crate::store::windows_name_problem(name) {
+        // `nul`, `com1.key`, `x.`: a device or a name Win32 rewrites.
+        Some("a name Windows reserves (CON, NUL, COM1…) or ending in a dot")
     } else if [".pub", "-cert", "-cert.pub"]
         .iter()
         .any(|s| name.ends_with(s))
@@ -307,6 +332,40 @@ fn validate_comment(comment: &str) -> Result<()> {
     }
 }
 
+/// How to make a key directory private again.
+#[cfg(not(windows))]
+const UNSAFE_DIR_HINT: &str = "Make it yours and private: chmod 700 ~/.ssh.";
+/// Windows: the general advice; [`KeyError::hint_override`] gives the exact
+/// `icacls` command for the folder.
+#[cfg(windows)]
+const UNSAFE_DIR_HINT: &str = "Make it yours and private with icacls (/inheritance:r, \
+     then /grant:r your account full control).";
+
+/// What to do when no agent answers (the agent is started differently on
+/// Windows: a service, not a shell command).
+#[cfg(not(windows))]
+const AGENT_UNAVAILABLE_HINT: &str =
+    "Start ssh-agent (eval $(ssh-agent)) or set IdentityAgent / SSH_AUTH_SOCK.";
+#[cfg(windows)]
+const AGENT_UNAVAILABLE_HINT: &str = "Enable and start the \"OpenSSH Authentication Agent\" \
+     service (admin PowerShell: Get-Service ssh-agent | Set-Service -StartupType Automatic; \
+     Start-Service ssh-agent), or set SSH_AUTH_SOCK to a named pipe \
+     (in ssh_config: IdentityAgent //./pipe/<name>).";
+
+/// What to do when the agent pipe is served by another account.
+const AGENT_UNTRUSTED_HINT: &str = "Another account may be impersonating the agent: \
+     start the \"OpenSSH Authentication Agent\" service, or point IdentityAgent / \
+     SSH_AUTH_SOCK to your own agent's pipe.";
+
+/// What an agent refusal may mean. The Windows agent has no lock
+/// (`ssh-add -x` is not supported there).
+#[cfg(not(windows))]
+const AGENT_REFUSED_HINT: &str =
+    "The agent may be locked (ssh-add -X) or not accept this key type.";
+#[cfg(windows)]
+const AGENT_REFUSED_HINT: &str = "The Windows agent keeps keys until they are removed and \
+     may refuse a lifetime: add the key without one. It may also not accept this key type.";
+
 /// Bidirectional overrides and isolates: they can make a comment display
 /// as something else (`evil\u{202E}moc.liame`).
 pub(crate) fn is_bidi_control(c: char) -> bool {
@@ -336,13 +395,31 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
                 .into());
             }
         }
+        // Windows: a trusted owner (the user, SYSTEM, Administrators) and
+        // nobody else able to write — the OpenSSH for Windows rule. Like the
+        // `metadata` above (and Unix), a junction or symlink is followed:
+        // what is checked is the directory it leads to.
+        #[cfg(windows)]
+        if !crate::winfs::dir_is_safe_following(dir).map_err(|e| Error::io(dir, e))? {
+            return Err(KeyError::UnsafeDir {
+                path: dir.to_path_buf(),
+            }
+            .into());
+        }
         return Ok(());
     }
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir).map_err(|e| Error::io(dir, e))
+    #[cfg(windows)]
+    {
+        crate::store::create_private_dir_all(dir)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir).map_err(|e| Error::io(dir, e))
+    }
 }
 
 /// The uid of this process: the owner of a file it creates (no `unsafe`
@@ -366,14 +443,19 @@ fn current_uid() -> Result<u32> {
     created.map(|m| m.uid()).map_err(|e| Error::io(&dir, e))
 }
 
-/// Creates `path` exclusively (never follows or replaces anything).
+/// Creates `path` exclusively (never follows or replaces anything). On
+/// Windows a private `mode` (no group/other bit: `0600`) becomes an
+/// owner-only DACL, set before any byte is written; other modes keep the
+/// inherited DACL (a `.pub`, `0644`).
 pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    #[cfg(not(windows))]
     let mut opts = std::fs::OpenOptions::new();
+    #[cfg(not(windows))]
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
-    #[cfg(not(unix))]
-    let _ = mode;
+    #[cfg(windows)]
+    let opts = crate::winfs::private_new_file();
     let mut file = opts.open(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => KeyError::Exists {
             path: path.to_path_buf(),
@@ -381,6 +463,18 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .into(),
         _ => Error::io(path, e),
     })?;
+    // No group/other bit: the Unix mode bits read better than `trailing_zeros`.
+    #[cfg(windows)]
+    #[allow(clippy::verbose_bit_mask)]
+    if mode & 0o077 == 0
+        && let Err(e) = crate::winfs::restrict_file(&file, path)
+    {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(Error::io(path, e));
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = mode;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     if let Err(e) = written {
         drop(file);
@@ -538,6 +632,49 @@ fn read_certificate(path: &Path) -> Option<CertificateInfo> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn agent_error_summaries() {
+        let socket = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
+        let summary = |e: KeyError| crate::Error::from(e).summary();
+        let untrusted = summary(KeyError::AgentUntrusted {
+            socket: socket.clone(),
+            reason: "the pipe is served by another account",
+        });
+        assert_eq!(untrusted.code, "agent_untrusted");
+        assert!(
+            untrusted.message.contains("openssh-ssh-agent"),
+            "{untrusted:?}"
+        );
+        assert!(untrusted.hint.is_some_and(|h| h.contains("service")));
+        let unsupported = summary(KeyError::AgentEndpointUnsupported {
+            socket: PathBuf::from("/tmp/ssh-x/agent.1"),
+        });
+        assert_eq!(unsupported.code, "agent_endpoint_unsupported");
+        assert!(
+            unsupported
+                .hint
+                .is_some_and(|h| h.contains("Unset SSH_AUTH_SOCK"))
+        );
+        let unavailable = summary(KeyError::AgentUnavailable {
+            socket: Some(socket),
+        });
+        assert_eq!(unavailable.code, "agent_unavailable");
+        let hint = unavailable.hint.unwrap_or_default();
+        if cfg!(windows) {
+            assert!(
+                hint.contains("Set-Service -StartupType Automatic"),
+                "{hint}"
+            );
+        } else {
+            assert!(hint.contains("ssh-agent"), "{hint}");
+        }
+        let refused = summary(KeyError::AgentRefused("no".into()));
+        assert_eq!(refused.code, "agent_refused");
+        let hint = refused.hint.unwrap_or_default();
+        // The Windows agent has no lock: never suggest one there.
+        assert_eq!(hint.contains("locked"), !cfg!(windows), "{hint}");
+    }
+
     // Throwaway test key (public half only).
     const ED25519_PUB: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFPhl4hO0pS1bxgFwR0cIGijellPogqzFcdSn+al5ZRJ user@example.com";
 
@@ -664,7 +801,23 @@ mod tests {
         std::fs::write(dir.path().join("id_half.pub"), "keep me").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("/nonexistent", dir.path().join("id_link")).unwrap();
-        for name in ["id_taken", "id_half", "id_link"] {
+        // Windows: a dangling symlink needs Developer Mode or an elevated
+        // token (CI); without one the case is skipped.
+        // Wine maps it to a Unix symlink that `CREATE_NEW` follows: not
+        // Windows' behaviour, skipped too.
+        #[cfg(windows)]
+        let linked =
+            std::os::windows::fs::symlink_file(r"C:\nonexistent", dir.path().join("id_link"))
+                .is_ok()
+                && !crate::winfs::tests::under_wine();
+        #[cfg(not(windows))]
+        let linked = true;
+        let names: &[&str] = if linked {
+            &["id_taken", "id_half", "id_link"]
+        } else {
+            &["id_taken", "id_half"]
+        };
+        for &name in names {
             let err =
                 generate(dir.path(), &request(name, KeyAlgorithm::Ed25519, None)).unwrap_err();
             assert_eq!(err.summary().code, "key_exists", "{name}");

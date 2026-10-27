@@ -44,6 +44,12 @@ use crate::secrets::SecretKey;
 
 /// Password / keyboard-interactive attempts (`NumberOfPasswordPrompts`).
 const PASSWORD_ATTEMPTS: u32 = 3;
+/// Opening the agent's socket or pipe. A hung agent must not eat the whole
+/// authentication deadline: past this, the agent is skipped and the other
+/// methods (identity files, password…) are tried, like `ssh`.
+const AGENT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Listing the agent's identities (a local request).
+const AGENT_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Guard against servers looping keyboard-interactive info requests.
 const MAX_INFO_ROUNDS: u32 = 16;
 
@@ -272,21 +278,33 @@ impl Auth<'_> {
             return Ok(None);
         }
         let identities = self.file_identities().await;
-        let mut agent = self.connect_agent().await;
-        let agent_ids: Vec<AgentIdentity> = match agent.as_mut() {
-            Some(a) => match a.request_identities().await {
-                Ok(ids) => ids,
-                Err(e) => {
+        let mut agent = None;
+        let mut agent_ids: Vec<AgentIdentity> = Vec::new();
+        if let Some((mut a, socket)) = self.connect_agent().await {
+            match tokio::time::timeout(AGENT_LIST_TIMEOUT, a.request_identities()).await {
+                Ok(Ok(ids)) => {
+                    agent_ids = ids;
+                    agent = Some(a);
+                }
+                Ok(Err(e)) => {
                     self.ctx.log(
                         LogLevel::Warn,
                         "agent",
                         format!("cannot list identities: {e}"),
                     );
-                    Vec::new()
+                    agent = Some(a);
                 }
-            },
-            None => Vec::new(),
-        };
+                Err(_) => {
+                    // The stream may still deliver a late answer: never
+                    // reuse it.
+                    self.ctx.log(
+                        LogLevel::Warn,
+                        "agent",
+                        format!("ssh-agent at {} did not answer: skipped", socket.display()),
+                    );
+                }
+            }
+        }
         let identities_only = self.hop.resolved.identities_only;
         let mut attempts = plan_attempts(&identities, &agent_ids, identities_only);
         if self.hop.pubkey_only {
@@ -327,7 +345,7 @@ impl Auth<'_> {
                 .log(LogLevel::Info, "auth", format!("trying {label}"));
             self.mark("publickey");
             let Some(result) = self
-                .run_attempt(attempt, agent.as_mut(), rsa_hash, &label)
+                .run_attempt(attempt, &mut agent, rsa_hash, &label)
                 .await
             else {
                 continue;
@@ -354,16 +372,19 @@ impl Auth<'_> {
         Ok(None)
     }
 
-    /// Runs one publickey attempt; `None` when it needs an absent agent.
+    /// Runs one publickey attempt; `None` when it needs an absent agent. An
+    /// agent that did not answer a signature in time is dropped (`agent`
+    /// becomes `None`): its stream may still deliver the late answer.
     async fn run_attempt(
         &mut self,
         attempt: Attempt<'_>,
-        agent: Option<&mut Agent>,
+        agent: &mut Option<Agent>,
         rsa_hash: Option<HashAlg>,
         label: &str,
     ) -> Option<std::result::Result<AuthResult, SignError>> {
         let user = self.hop.user.clone();
-        let result = match (attempt, agent) {
+        let mut agent_timed_out = false;
+        let result = match (attempt, agent.as_mut()) {
             (Attempt::AgentKey(key), Some(a)) => {
                 let hash = hash_for(&key, rsa_hash);
                 let mut signer = KeySigner::agent(a, self.ctx);
@@ -372,6 +393,7 @@ impl Auth<'_> {
                     .authenticate_publickey_with(user, key, hash, &mut signer)
                     .await;
                 self.note_outcome(&signer, label);
+                agent_timed_out = signer.outcome() == Outcome::AgentTimedOut;
                 r
             }
             (Attempt::AgentCert(cert), Some(a)) => {
@@ -382,6 +404,7 @@ impl Auth<'_> {
                     .authenticate_certificate_with(user, cert, hash, &mut signer)
                     .await;
                 self.note_outcome(&signer, label);
+                agent_timed_out = signer.outcome() == Outcome::AgentTimedOut;
                 r
             }
             (Attempt::AgentKey(_) | Attempt::AgentCert(_), None) => return None,
@@ -406,6 +429,9 @@ impl Auth<'_> {
                 r
             }
         };
+        if agent_timed_out {
+            *agent = None;
+        }
         Some(result)
     }
 
@@ -418,7 +444,7 @@ impl Auth<'_> {
                     format!("{label}: not accepted by the server"),
                 );
             }
-            Outcome::Skipped => {
+            Outcome::Skipped | Outcome::AgentTimedOut => {
                 self.ctx
                     .log(LogLevel::Info, "auth", format!("{label}: skipped"));
             }
@@ -426,14 +452,18 @@ impl Auth<'_> {
         }
     }
 
-    async fn connect_agent(&self) -> Option<Agent> {
-        let socket = match self.hop.resolved.identity_agent.as_deref() {
+    /// The agent of this hop and its endpoint (for the log), when one is
+    /// configured and answers.
+    async fn connect_agent(&self) -> Option<(Agent, PathBuf)> {
+        let (socket, explicit) = match self.hop.resolved.identity_agent.as_deref() {
             Some(v) if v.eq_ignore_ascii_case("none") => return None,
             // Already `~`/`${VAR}`/token-expanded by the config resolver.
-            Some(v) if v != "SSH_AUTH_SOCK" => Some(PathBuf::from(v)),
-            _ => self.ctx.engine.config().agent_socket.clone(),
-        }?;
-        connect_agent_at(self.ctx, &socket).await
+            Some(v) if v != "SSH_AUTH_SOCK" => (Some(PathBuf::from(v)), true),
+            _ => (self.ctx.engine.config().agent_socket.clone(), false),
+        };
+        let socket = socket?;
+        let agent = connect_agent_at(self.ctx, &socket, explicit).await?;
+        Some((agent, socket))
     }
 
     async fn file_identities(&self) -> Vec<FileIdentity> {
@@ -449,8 +479,8 @@ impl Auth<'_> {
             tokio::task::spawn_blocking(move || load_identities(&paths, &cert_files, explicit))
                 .await
                 .unwrap_or_default();
-        for note in notes {
-            self.ctx.log(LogLevel::Info, "auth", note);
+        for (level, note) in notes {
+            self.ctx.log(level, "auth", note);
         }
         let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
         let mut out = Vec::with_capacity(loaded.len());
@@ -1051,12 +1081,13 @@ fn plan_attempts<'a>(
 /// Reads public halves (and certificates) without decrypting anything.
 /// Accepts `IdentityFile k`, `IdentityFile k.pub`, and a missing `k` whose
 /// `k.pub` exists (agent-only identity), like OpenSSH.
-/// Returns the usable identities and diagnostic notes for the session log.
+/// Returns the usable identities and diagnostic notes for the session log
+/// (with their level).
 fn load_identities(
     paths: &[PathBuf],
     cert_files: &[PathBuf],
     explicit: bool,
-) -> (Vec<FileIdentity>, Vec<String>) {
+) -> (Vec<FileIdentity>, Vec<(LogLevel, String)>) {
     let certs: Vec<Certificate> = cert_files
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
@@ -1064,6 +1095,8 @@ fn load_identities(
         .collect();
     let mut identities = Vec::new();
     let mut notes = Vec::new();
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut warnings: Vec<String> = Vec::new();
     for configured in paths {
         let (private, public) = match locate(configured) {
             Located::Private(p) => {
@@ -1104,6 +1137,18 @@ fn load_identities(
                     .and_then(|t| Certificate::from_openssh(t.trim()).ok())
                     .filter(|c| c.public_key() == public.key_data())
             });
+        // Windows: OpenSSH refuses a private key other accounts can read;
+        // Portico warns (its Unix behaviour does not refuse loose modes).
+        #[cfg(windows)]
+        if let Some(key) = private.as_deref()
+            && crate::winfs::readable_by_others(key)
+        {
+            warnings.push(format!(
+                "{} is readable by other accounts (OpenSSH would refuse it): {}",
+                key.display(),
+                crate::winfs::icacls_private(key, false)
+            ));
+        }
         identities.push(FileIdentity {
             has_private: private.is_some(),
             path: private.unwrap_or(base),
@@ -1111,6 +1156,11 @@ fn load_identities(
             cert,
         });
     }
+    let notes = notes
+        .into_iter()
+        .map(|note| (LogLevel::Info, note))
+        .chain(warnings.into_iter().map(|w| (LogLevel::Warn, w)))
+        .collect();
     (identities, notes)
 }
 
@@ -1159,31 +1209,49 @@ fn public_half(path: &Path) -> Option<PublicKey> {
         .map(|k| k.public_key().clone())
 }
 
-async fn connect_agent_at(ctx: &SessionCtx, socket: &Path) -> Option<Agent> {
-    #[cfg(unix)]
-    {
-        match russh::keys::agent::client::AgentClient::connect_uds(socket).await {
-            Ok(agent) => {
-                ctx.log(
-                    LogLevel::Debug,
-                    "agent",
-                    format!("connected to {}", socket.display()),
-                );
-                Some(agent.dynamic())
-            }
-            Err(e) => {
-                ctx.log(
-                    LogLevel::Warn,
-                    "agent",
-                    format!("cannot reach ssh-agent at {}: {e}", socket.display()),
-                );
-                None
-            }
+/// Connects to the agent at `socket`, bounded by [`AGENT_CONNECT_TIMEOUT`].
+/// Every failure is logged and means "no agent". `explicit`: the endpoint
+/// was named by `IdentityAgent`; the implicit Windows service pipe missing
+/// is the normal case (service disabled by default), logged at `Debug`.
+async fn connect_agent_at(ctx: &SessionCtx, socket: &Path, explicit: bool) -> Option<Agent> {
+    let connected =
+        tokio::time::timeout(AGENT_CONNECT_TIMEOUT, crate::agent_socket::connect(socket)).await;
+    let Ok(result) = connected else {
+        ctx.log(
+            LogLevel::Warn,
+            "agent",
+            format!("ssh-agent at {} did not answer: skipped", socket.display()),
+        );
+        return None;
+    };
+    match result {
+        Ok(agent) => {
+            ctx.log(
+                LogLevel::Debug,
+                "agent",
+                format!("connected to {}", socket.display()),
+            );
+            Some(agent)
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (ctx, socket);
-        None
+        Err(e)
+            if e.is_not_found()
+                && !explicit
+                && crate::agent_socket::is_implicit_default(socket) =>
+        {
+            ctx.log(
+                LogLevel::Debug,
+                "agent",
+                "no ssh-agent (service not running)",
+            );
+            None
+        }
+        Err(e) => {
+            ctx.log(
+                LogLevel::Warn,
+                "agent",
+                format!("cannot reach ssh-agent at {}: {e}", socket.display()),
+            );
+            None
+        }
     }
 }

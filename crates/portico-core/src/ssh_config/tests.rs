@@ -241,9 +241,10 @@ fn proxy_command_and_proxy_jump_first_wins() {
 fn identity_agent_expansion() {
     let cfg =
         parse("Host a\n  IdentityAgent ~/.1password/agent.sock\nHost b\n  IdentityAgent none\n");
+    // Compared as paths: Windows joins with `\` (same components).
     assert_eq!(
-        cfg.resolve("a", &ctx()).identity_agent.as_deref(),
-        Some("/home/alice/.1password/agent.sock")
+        cfg.resolve("a", &ctx()).identity_agent.map(PathBuf::from),
+        Some(PathBuf::from("/home/alice/.1password/agent.sock"))
     );
     assert_eq!(
         cfg.resolve("b", &ctx()).identity_agent.as_deref(),
@@ -296,4 +297,97 @@ fn block_index_keeps_file_order_and_case() {
     let db = config.resolve("db", &ctx());
     assert_eq!(db.user, None, "`Host * !db` does not apply to db");
     assert!(db.options.contains_key("compression"));
+}
+
+/// Windows-style configurations (Phase 8): what OpenSSH for Windows users
+/// write. The parser keeps backslashes (only `\"` inside quotes is an
+/// escape), so drive paths and pipe names survive untouched.
+#[cfg(windows)]
+mod windows_paths {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn win_ctx(home: &Path) -> ResolveContext {
+        ResolveContext {
+            local_user: "alice".into(),
+            home: home.to_path_buf(),
+            user_override: None,
+        }
+    }
+
+    #[test]
+    fn drive_paths_tilde_backslash_and_pipes() {
+        let home = Path::new(r"C:\Users\alice");
+        let cfg = SshConfig::parse_str(
+            "Host a\n  IdentityFile C:\\Users\\alice\\.ssh\\id_work\n  IdentityFile ~\\.ssh\\id_ed25519\n  IdentityAgent //./pipe/openssh-ssh-agent\n  UserKnownHostsFile \"C:\\Users\\alice\\My Files\\known_hosts\"\n",
+            &home.join(r".ssh\config"),
+            &home.join(".ssh"),
+        )
+        .expect("valid");
+        let h = cfg.resolve("a", &win_ctx(home));
+        assert_eq!(
+            h.identity_files,
+            [
+                PathBuf::from(r"C:\Users\alice\.ssh\id_work"),
+                PathBuf::from(r"C:\Users\alice\.ssh\id_ed25519"),
+            ]
+        );
+        // The `/` form is the one to write (no escape for OpenSSH).
+        assert_eq!(
+            h.identity_agent.as_deref(),
+            Some("//./pipe/openssh-ssh-agent")
+        );
+        assert!(crate::agent_socket::is_named_pipe(Path::new(
+            h.identity_agent.as_deref().unwrap_or_default()
+        )));
+        // `\\.\pipe\…` loses a backslash to OpenSSH's escaping (`\\` is
+        // `\`), like with `ssh`: not a pipe any more. Doubled, it is one.
+        for (written, pipe) in [
+            (r"\\.\pipe\openssh-ssh-agent", false),
+            (r"\\\\.\pipe\openssh-ssh-agent", true),
+        ] {
+            let cfg = SshConfig::parse_str(
+                &format!("Host b\n  IdentityAgent {written}\n"),
+                &home.join(r".ssh\config"),
+                &home.join(".ssh"),
+            )
+            .expect("valid");
+            let agent = cfg.resolve("b", &win_ctx(home)).identity_agent;
+            assert_eq!(
+                crate::agent_socket::is_named_pipe(Path::new(agent.as_deref().unwrap_or_default())),
+                pipe,
+                "{written} -> {agent:?}"
+            );
+        }
+        assert_eq!(
+            h.user_known_hosts_files,
+            [PathBuf::from(r"C:\Users\alice\My Files\known_hosts")]
+        );
+    }
+
+    #[test]
+    fn relative_include_resolves_under_the_ssh_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("conf.d")).expect("mkdir");
+        std::fs::write(
+            ssh.join(r"conf.d\work.conf"),
+            "Host w\n  HostName w.example\n",
+        )
+        .expect("w");
+        std::fs::write(ssh.join("abs.conf"), "Host x\n  HostName x.example\n").expect("w");
+        let absolute = ssh.join("abs.conf");
+        std::fs::write(
+            ssh.join("config"),
+            format!(
+                "Include conf.d\\*.conf\nInclude \"{}\"\n",
+                absolute.display()
+            ),
+        )
+        .expect("w");
+        let cfg = SshConfig::load(&ssh.join("config"), &ssh).expect("load");
+        let names: Vec<_> = cfg.host_aliases().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["w", "x"]);
+        assert_eq!(cfg.resolve("w", &win_ctx(dir.path())).hostname, "w.example");
+    }
 }

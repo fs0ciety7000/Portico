@@ -214,10 +214,7 @@ impl SftpError {
             ),
             Self::UnknownTransfer(_) => ("unknown_transfer", None),
             Self::NotAFile { .. } => ("not_a_file", None),
-            Self::UnsafeName { .. } => (
-                "unsafe_remote_name",
-                Some("The server sent a name that could write outside the chosen folder."),
-            ),
+            Self::UnsafeName { .. } => ("unsafe_remote_name", Some(UNSAFE_NAME_HINT)),
             Self::SizeMismatch { .. } => (
                 "size_mismatch",
                 Some("The remote file kept growing far beyond its announced size."),
@@ -311,18 +308,41 @@ pub fn display_safe(text: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+#[cfg(not(windows))]
+const UNSAFE_NAME_HINT: &str = "The server sent a name that could write outside the chosen folder.";
+#[cfg(windows)]
+const UNSAFE_NAME_HINT: &str = "The name could write outside the chosen folder, or Windows cannot \
+     hold it (`:`, `<>\"|?*`, NUL, COM1, a trailing dot…): rename it on the server first.";
+
 /// A remote file name that is safe to use as a single local path component:
 /// no separator, no NUL or control character, not `.`/`..`, not empty, not
 /// absurdly long. A hostile server can send any bytes as a name (the class of
 /// CVE-2019-6111); never join an unchecked one to a local directory.
+///
+/// On Windows also none of the names Windows cannot hold or reads as
+/// something else (`C:x` is drive-relative and would replace the folder,
+/// `a:b` an alternate data stream, `NUL`, `COM1.txt`, a trailing dot…):
+/// see `store::windows_name_problem`.
 pub fn safe_local_name(name: &str) -> Option<&str> {
-    let ok = !name.is_empty()
+    safe_local_name_for(name, cfg!(windows))
+}
+
+/// [`safe_local_name`] for a given platform (testable everywhere).
+fn safe_local_name_for(name: &str, windows: bool) -> Option<&str> {
+    let ok = safe_remote_name(name) && !(windows && crate::store::windows_name_problem(name));
+    ok.then_some(name)
+}
+
+/// The platform-independent part of [`safe_local_name`]: what a listing
+/// keeps. A Unix name Windows cannot hold (`12:00.log`) stays visible on
+/// Windows; downloading it is refused by [`local_destination`].
+fn safe_remote_name(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\', '\0'])
-        && !name.chars().any(char::is_control);
-    ok.then_some(name)
+        && !name.chars().any(char::is_control)
 }
 
 /// The only way to build a download destination from a server-provided name.
@@ -493,7 +513,7 @@ impl SftpClient {
             .filter_map(|e| {
                 // Hostile names (`../x`, `/abs`, NUL…) never reach the UIs.
                 let name = e.file_name();
-                safe_local_name(&name)?;
+                safe_remote_name(&name).then_some(())?;
                 Some(entry_from(
                     name.clone(),
                     join_remote(path, &name),
@@ -1174,6 +1194,35 @@ mod tests {
             PathBuf::from("/dl/a.txt")
         );
         assert!(safe_local_name(&"x".repeat(5000)).is_none());
+    }
+
+    #[test]
+    fn windows_download_names() {
+        for bad in [
+            "C:x",
+            "a:b",
+            "x::$DATA",
+            "NUL",
+            "com1.txt",
+            "LPT\u{b9}",
+            "a?",
+            "end.",
+            "end ",
+        ] {
+            assert_eq!(safe_local_name_for(bad, true), None, "{bad:?}");
+            // Kept on Unix (and in every listing): only a download is refused.
+            assert_eq!(safe_local_name_for(bad, false), Some(bad), "{bad:?}");
+            assert!(safe_remote_name(bad), "{bad:?}");
+        }
+        assert_eq!(safe_local_name_for("report.pdf", true), Some("report.pdf"));
+        #[cfg(windows)]
+        {
+            let dl = Path::new(r"C:\Users\me\Downloads");
+            for bad in ["C:x", "D:evil.exe", "a:b", "con.txt"] {
+                assert!(local_destination(dl, bad).is_err(), "{bad:?}");
+            }
+            assert_eq!(local_destination(dl, "a.txt").unwrap(), dl.join("a.txt"));
+        }
     }
 
     #[test]

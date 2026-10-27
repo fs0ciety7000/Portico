@@ -386,6 +386,13 @@ pub(crate) fn check_identity_file(
     let text = raw
         .to_str()
         .ok_or_else(|| invalid("the path is not UTF-8"))?;
+    // Windows: `C:\Users\me\.ssh\id` is checked (and resolved) with `/`
+    // separators, the form Portico writes; a backslash stays refused
+    // elsewhere (it is an escape for OpenSSH).
+    #[cfg(windows)]
+    let normalized = text.replace('\\', "/");
+    #[cfg(windows)]
+    let text = normalized.as_str();
     check_path_chars(text).map_err(invalid)?;
     let path = match text.strip_prefix("~/") {
         Some(rest) => home.join(rest),
@@ -400,9 +407,12 @@ pub(crate) fn check_identity_file(
     {
         return Err(invalid("the path holds `.` or `..`"));
     }
-    if path.strip_prefix(home).is_err() {
+    // Windows: paths are case-insensitive (`c:/users/alice` is the home
+    // `C:\Users\Alice`): rebased on `home` so it is written `~/…`.
+    let Some(rest) = strip_home(&path, home) else {
         return Err(invalid("the key must be under your home directory"));
-    }
+    };
+    let path = home.join(rest);
     if path.extension().is_some_and(|e| e == "pub") {
         return Err(invalid("this is a public key: pick the private key"));
     }
@@ -422,10 +432,29 @@ pub(crate) fn check_identity_file(
     Ok(path)
 }
 
-/// `~/…` under the home directory, double-quoted when it holds a space.
+/// `path` relative to `home`, component by component: exact on Unix,
+/// case-insensitive on Windows (like the file system there; the final
+/// canonical check compares the paths as the system spells them).
+fn strip_home(path: &Path, home: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return path.strip_prefix(home).ok().map(Path::to_path_buf);
+    }
+    let fold = |c: Component<'_>| c.as_os_str().to_string_lossy().to_lowercase();
+    let mut components = path.components();
+    for expected in home.components() {
+        let actual = components.next()?;
+        if fold(actual) != fold(expected) {
+            return None;
+        }
+    }
+    Some(components.as_path().to_path_buf())
+}
+
+/// `~/…` under the home directory (`/` separators on every platform),
+/// double-quoted when it holds a space.
 fn identity_value(home: &Path, path: &Path) -> String {
     let shown = match path.strip_prefix(home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", crate::store::slash_relative(rest)),
         Err(_) => path.display().to_string(),
     };
     if shown.contains(' ') {
@@ -810,8 +839,13 @@ struct PasswordTarget {
     /// `known_hosts` name.
     host: String,
     port: u16,
-    /// `known_hosts` files holding the keys the password may be bound to.
+    /// The user's `known_hosts` files holding the keys the password may be
+    /// bound to.
     known_hosts_files: Vec<PathBuf>,
+    /// The global ones, read only when trusted, like a session does
+    /// ([`crate::known_hosts::trusted_global_files`]: on Windows, owned by
+    /// the machine).
+    global_known_hosts_files: Vec<PathBuf>,
     /// `hosts.toml`, whose index lists the keys passwords were bound to.
     meta_path: PathBuf,
 }
@@ -819,6 +853,16 @@ struct PasswordTarget {
 impl PasswordTarget {
     fn same_account(&self, other: &Self) -> bool {
         self.user == other.user && self.host == other.host && self.port == other.port
+    }
+
+    /// The `known_hosts` entries a session to this account would trust.
+    /// Blocking.
+    fn known_hosts(&self) -> Result<KnownHosts> {
+        let (trusted, _skipped) =
+            crate::known_hosts::trusted_global_files(self.global_known_hosts_files.clone());
+        let mut files = self.known_hosts_files.clone();
+        files.extend(trusted);
+        KnownHosts::load(&files)
     }
 
     fn unbound_key(&self) -> SecretKey {
@@ -837,7 +881,8 @@ impl PasswordTarget {
         if secrets.contains(&self.unbound_key()).unwrap_or(false) {
             return true;
         }
-        let mut fingerprints = KnownHosts::load(&self.known_hosts_files)
+        let mut fingerprints = self
+            .known_hosts()
             .map(|known| known.fingerprints(&self.host, self.port))
             .unwrap_or_default();
         fingerprints.extend(
@@ -876,7 +921,7 @@ impl PasswordTarget {
     /// through a host certificate, or to a key whose `known_hosts` line is
     /// gone). Blocking.
     fn forget_bound(&self, secrets: &dyn SecretStore) -> Result<()> {
-        let known = KnownHosts::load(&self.known_hosts_files)?;
+        let known = self.known_hosts()?;
         let mut fingerprints = known.fingerprints(&self.host, self.port);
         fingerprints.extend(crate::hosts::bound_password_fingerprints(
             &self.meta_path,
@@ -1042,7 +1087,6 @@ impl<'a> Editor<'a> {
         if known_hosts_files.is_empty() {
             known_hosts_files = vec![paths.known_hosts(), paths.ssh_dir.join("known_hosts2")];
         }
-        known_hosts_files.extend(paths.global_known_hosts.iter().cloned());
         PasswordTarget {
             user: resolved
                 .user
@@ -1051,6 +1095,7 @@ impl<'a> Editor<'a> {
             host,
             port,
             known_hosts_files,
+            global_known_hosts_files: paths.global_known_hosts.clone(),
             meta_path: paths.hosts_meta(),
         }
     }

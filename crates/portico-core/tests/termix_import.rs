@@ -357,6 +357,9 @@ async fn some_keys_are_written_private_and_never_overwrite() {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::os::unix::fs::symlink("/nonexistent", dir.join("legacy-rsa")).unwrap();
     }
+    // Windows: a symlink needs a privilege; a plain file takes the name.
+    #[cfg(not(unix))]
+    std::fs::write(dir.join("legacy-rsa"), "keep me too").unwrap();
     std::fs::write(dir.join("hbd"), "keep me").unwrap();
 
     let plan = env

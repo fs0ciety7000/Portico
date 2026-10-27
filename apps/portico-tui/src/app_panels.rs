@@ -65,8 +65,9 @@ pub(crate) fn base64(data: &[u8]) -> String {
     out
 }
 
-/// This machine's name: `$HOSTNAME`, `/etc/hostname`, then `uname -n`.
-/// Blocking (file read, subprocess): called from `spawn_blocking`.
+/// This machine's name: `$HOSTNAME`, `/etc/hostname`, then `uname -n`
+/// (`%COMPUTERNAME%` on Windows). Blocking (file read, subprocess): called
+/// from `spawn_blocking`.
 fn machine_name() -> Option<String> {
     let clean = |s: &str| {
         let name: String = s
@@ -78,6 +79,11 @@ fn machine_name() -> Option<String> {
         let short = name.split('.').next().unwrap_or_default().to_owned();
         (!short.is_empty()).then_some(short)
     };
+    if cfg!(windows) {
+        return std::env::var("COMPUTERNAME")
+            .ok()
+            .and_then(|h| clean(&h.to_ascii_lowercase()));
+    }
     std::env::var("HOSTNAME")
         .ok()
         .and_then(|h| clean(&h))

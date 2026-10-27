@@ -342,10 +342,14 @@ impl Error {
             // ── 0.3.0 ──
             Self::Update(e) => e.code_and_hint(),
         };
+        let hint_override = match self {
+            Self::Key(e) => e.hint_override(),
+            _ => None,
+        };
         ErrorSummary {
             code: code.to_owned(),
             message: without_os_codes(&self.to_string()),
-            hint: hint.map(str::to_owned),
+            hint: hint_override.or_else(|| hint.map(str::to_owned)),
         }
     }
 }

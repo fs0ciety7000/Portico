@@ -230,7 +230,7 @@ export interface UpdateStatus {
 
 /** Mirrors `portico_core::update::UpdateInstruction`: how to update this install. */
 export interface UpdateInstruction {
-  method: "homebrew" | "app_image" | "pacman" | "deb" | "mac_app" | "other";
+  method: "homebrew" | "app_image" | "pacman" | "deb" | "mac_app" | "scoop" | "windows_installer" | "windows_zip" | "other";
   text: string;
   /** A command to copy (Homebrew), else `null`. */
   command: string | null;
@@ -780,11 +780,40 @@ let home: string | null = null;
 
 /** Called once at startup; `displayPath` then shortens home paths to `~`. */
 export function setHome(dir: string | null) {
-  home = dir ? dir.replace(/\/+$/, "") : null;
+  home = normalizeHome(dir);
 }
 
 export function displayPath(path: string): string {
-  return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
+  return shortenHome(path, home);
+}
+
+/** A home directory as received from `home_dir`, without trailing separators. */
+export function normalizeHome(dir: string | null): string | null {
+  if (!dir) return null;
+  const trimmed = dir.replace(windowsHome(dir) ? /[\\/]+$/ : /\/+$/, "");
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * `~/…` for a path under `home`. On Windows (a home such as `C:\Users\me`)
+ * either separator follows the home and the rest is shown with `/`, the
+ * spelling of `ssh_config` and of the Rust side: `~/.ssh/id_ed25519`. On
+ * Unix a backslash is an ordinary file name character and is kept.
+ */
+export function shortenHome(path: string, home: string | null): string {
+  if (!home) return path;
+  if (path === home) return "~";
+  const windows = windowsHome(home);
+  const next = path.charAt(home.length);
+  const under = path.startsWith(home) && (next === "/" || (windows && next === "\\"));
+  if (!under) return path;
+  const rest = path.slice(home.length);
+  return `~${windows ? rest.replace(/\\/g, "/") : rest}`;
+}
+
+/** `C:\…` or `\\server\…`: a Windows home (`USERPROFILE`). */
+function windowsHome(dir: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(dir) || dir.startsWith("\\\\");
 }
 
 export function durationMs(d: Duration): number {
