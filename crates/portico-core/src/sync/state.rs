@@ -4,8 +4,8 @@
 //! | File | Content | Protection |
 //! |---|---|---|
 //! | `sync.toml` | folder (as chosen and canonical), bundle id, epoch, device id, "remember the key", skipped records | plain TOML, `0600`, **no secret** |
-//! | `replica.snap` | name, dot counter, publish sequence, merged state, high-water marks, last applied projection, confirmations | sealed under the local subkey, one atomic file (F5) |
-//! | `confirm.toml` | snippets changed by sync and not yet confirmed (id → hash of the received command) | plain TOML: the engine refuses to run them (F8) even while sync is locked |
+//! | `replica.snap` | name, dot counter, publish sequence, merged state, high-water marks, last applied projection, host confirmations, deferred deletions | sealed under the local subkey, one atomic file (F5) |
+//! | `confirm.toml` | snippets changed by sync and not yet confirmed (id → hash of the received command) | plain TOML: the engine refuses to run them (F8) even while sync is locked **or disabled**. An execution gate, not sync state: written **before** the snippet it guards, never removed by "disable"; an entry leaves only through a confirmation of that exact content or the deletion of the snippet |
 //! | `sync.lock` | inter-process lock, from projection to publication (§4.9) | — |
 //!
 //! The data dir is local (`%LOCALAPPDATA%` on Windows): the sync identity
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::SyncError;
-use super::clock::{DeviceId, VersionVector};
+use super::clock::{DeviceId, Dot, VersionVector};
 use super::container::{self, Binding, Expected, MAX_CONTAINER_FILE_BYTES, ReplicaContent};
 use super::crypto::{ID_LEN, Subkeys};
 use super::model::{WireKey, WireValue};
@@ -117,6 +117,21 @@ pub(crate) struct LocalReplica {
     /// Keyset generation this device made or acknowledged: a higher one
     /// is an alert ("passphrase changed or reset elsewhere").
     pub(crate) known_keyset_generation: u64,
+    /// Received deletions this device could not apply yet (its file is
+    /// suspended, or its own entry cannot be synced). The other devices
+    /// may collect the tombstone meanwhile (their stable context only says
+    /// this device **saw** it): kept here, applied once the file is
+    /// readable, unless the key holds a value again by then.
+    pub(crate) deferred_deletions: Vec<DeferredDeletion>,
+}
+
+/// A received deletion not applied yet on this device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeferredDeletion {
+    pub(crate) key: WireKey,
+    /// The tombstone's dots (never empty) and display stamp.
+    pub(crate) dots: Vec<Dot>,
+    pub(crate) at: i64,
 }
 
 impl LocalReplica {
@@ -195,10 +210,12 @@ pub(crate) fn save_replica(
     store::write_atomic_capped(&replica_path(paths), sealed.text.as_bytes(), max)
 }
 
-/// Forgets this device's sync state (disable): `sync.toml`, the replica
-/// and the confirmations. Local hosts, snippets and settings are kept.
+/// Forgets this device's sync state (disable): `sync.toml` and the
+/// replica. Local hosts, snippets and settings are kept, and so is
+/// `confirm.toml`: a received snippet never confirmed stays blocked after
+/// sync is disabled (F8).
 pub(crate) fn remove_local_state(paths: &Paths) -> Result<()> {
-    for path in [replica_path(paths), config_path(paths), confirm_path(paths)] {
+    for path in [replica_path(paths), config_path(paths)] {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -250,6 +267,17 @@ pub(crate) fn edit_confirmations<T>(
         store::write_atomic_capped(&path, text.as_bytes(), MAX_SMALL_FILE_BYTES)?;
     }
     Ok(out)
+}
+
+/// Drops the confirmation gate of a deleted snippet (best effort: a gate
+/// left behind only blocks that exact content under that id).
+pub(crate) fn forget_confirmation(paths: &Paths, id: &str) {
+    let gated = load_confirmations(paths).is_ok_and(|c| c.snippets.contains_key(id));
+    if gated {
+        let _ = edit_confirmations(paths, |c| {
+            c.snippets.remove(id);
+        });
+    }
 }
 
 /// Hash (hex SHA-256) identifying the content a confirmation is about.

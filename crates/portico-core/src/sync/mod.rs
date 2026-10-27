@@ -70,7 +70,7 @@ pub use api::{
     AlertKind, ConflictSide, DisableOptions, FolderProbe, FolderReason, JoinBulkChoice,
     JoinPreview, PendingHostChange, SyncConflict, SyncCreate, SyncDevice, SyncHostValue, SyncIssue,
     SyncJoin, SyncOptions, SyncOverview, SyncResolution, SyncSnippetValue, SyncStatus, SyncSubject,
-    SyncValue, WaitReason,
+    SyncValue, UnconfirmedSnippet, WaitReason,
 };
 pub use clock::DeviceId;
 pub use passphrase::{
@@ -266,8 +266,22 @@ pub enum SyncError {
     #[error("synced host {alias} was not removed: it is the jump host of {by}")]
     HostInUse { alias: String, by: String },
 
+    /// Nothing awaits confirmation under that name, or what awaits is no
+    /// longer what the user was shown (the hash differs): the UI reloads
+    /// the list and shows the new content.
     #[error("no synced change of {alias} awaits confirmation")]
     NotPending { alias: String },
+
+    /// A received host whose alias this device holds in a form that cannot
+    /// be synced (an identity file outside the home directory…): the local
+    /// host is kept, never overwritten nor deleted by sync.
+    #[error("synced host {alias} was not applied: this device's own {alias} cannot be synced")]
+    LocalHostUnsynced { alias: String },
+
+    /// The same for host metadata, a snippet or a setting held here in a
+    /// form that cannot be synced.
+    #[error("a synced {kind} entry was not applied: this device's own value cannot be synced")]
+    LocalRecordUnsynced { kind: &'static str },
 
     /// F8: a snippet changed by sync runs only once confirmed here.
     #[error("snippet {id} was changed by sync: review and confirm it before running it")]
@@ -502,6 +516,18 @@ impl SyncError {
                 "sync_not_pending",
                 Some("Reload the list of synced changes awaiting confirmation."),
             ),
+            Self::LocalHostUnsynced { .. } => (
+                "sync_local_host_unsynced",
+                Some(
+                    "This device's own version of the host cannot be synced (for example its key is outside your home folder): it is kept. Edit or rename it here to receive the synced one, or skip it on this device.",
+                ),
+            ),
+            Self::LocalRecordUnsynced { .. } => (
+                "sync_local_unsynced",
+                Some(
+                    "This device's own value cannot be synced and is kept: edit it here to receive the synced one, or skip it on this device.",
+                ),
+            ),
             Self::SnippetUnconfirmed { .. } => (
                 "sync_snippet_unconfirmed",
                 Some(
@@ -643,6 +669,8 @@ mod tests {
                 by: "b".into(),
             },
             SyncError::NotPending { alias: "a".into() },
+            SyncError::LocalHostUnsynced { alias: "a".into() },
+            SyncError::LocalRecordUnsynced { kind: "host_meta" },
             SyncError::SnippetUnconfirmed { id: "a".into() },
             SyncError::PassphraseChanged,
             SyncError::KeysRotated,

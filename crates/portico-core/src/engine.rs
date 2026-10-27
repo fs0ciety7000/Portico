@@ -922,12 +922,20 @@ impl Engine {
         saved
     }
 
+    /// Deletes a snippet. Its sync confirmation gate (F8), if any, goes
+    /// with it: a gate only ever leaves with a confirmation or the
+    /// snippet itself.
     pub async fn delete_snippet(&self, id: &str) -> Result<()> {
         let store = Arc::clone(&self.inner.snippets);
+        let paths = self.inner.config.paths.clone();
         let id = id.to_owned();
-        let deleted = tokio::task::spawn_blocking(move || store.delete(&id))
-            .await
-            .map_err(|_| Error::EngineClosed)?;
+        let deleted = tokio::task::spawn_blocking(move || {
+            store.delete(&id)?;
+            crate::sync::state::forget_confirmation(&paths, &id);
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?;
         self.sync_touch();
         deleted
     }

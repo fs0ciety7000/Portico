@@ -147,6 +147,14 @@ pub(crate) enum Action {
         name: String,
         result: Result<(), ErrorSummary>,
     },
+    /// The core's bytes for snippet `id` (or why it refuses: placeholder,
+    /// paste mode, `sync_snippet_unconfirmed`), to type into `target`.
+    SnippetInput {
+        target: TerminalId,
+        id: String,
+        values: Vec<(String, String)>,
+        result: Result<Vec<u8>, ErrorSummary>,
+    },
     // Host metadata (phase 4)
     ToggleFavorite,
     EditHost,

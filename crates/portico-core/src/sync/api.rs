@@ -255,6 +255,25 @@ pub struct PendingHostChange {
     pub renamed_from: Option<String>,
     /// Labels of the devices that wrote it.
     pub devices: Vec<String>,
+    /// Identifies the `incoming` destination shown to the user: pass it
+    /// back to [`crate::Engine::sync_confirm_hosts`] /
+    /// [`crate::Engine::sync_reject_hosts`]. A destination changed since
+    /// (another device published again) is refused with
+    /// `sync_not_pending`: the UI reloads and shows the new one.
+    pub destination_hash: String,
+}
+
+/// A snippet changed by sync that this device has not confirmed yet (F8):
+/// the UI shows the whole command before offering to confirm it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnconfirmedSnippet {
+    pub id: String,
+    /// What the user confirms, exactly as it will run.
+    pub snippet: SyncSnippetValue,
+    /// Identifies the content shown: pass it back to
+    /// [`crate::Engine::confirm_synced_snippet`]. Content changed since is
+    /// refused with `sync_not_pending`.
+    pub hash: String,
 }
 
 /// What a folder holds, before create or join.

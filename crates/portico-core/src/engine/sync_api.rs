@@ -15,8 +15,13 @@
 //!   or settings; hand edits are caught by the polling). On shutdown, a
 //!   last pass publishes pending local changes.
 //! - **Events**: [`EngineEvent::Sync`], [`EngineEvent::SyncConflicts`],
-//!   [`EngineEvent::SnippetsChanged`], [`EngineEvent::SettingsChanged`],
-//!   plus `HostsChanged` / `HostMeta` after an application.
+//!   [`EngineEvent::SyncPendingChanged`] (what awaits a confirmation
+//!   changed, even at the same count), [`EngineEvent::SnippetsChanged`],
+//!   [`EngineEvent::SettingsChanged`], plus `HostsChanged` / `HostMeta`
+//!   after an application.
+//! - **Timeout**: after `sync_folder_timeout` the operation may still
+//!   complete in the background: UIs re-read the status, the pending
+//!   confirmations and the conflicts (`docs/SYNC.md` §10).
 //! - No network call, ever.
 
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -32,7 +37,7 @@ use crate::events::EngineEvent;
 use crate::sync::api::{
     DisableOptions, FolderProbe, FolderReason, JoinBulkChoice, JoinPreview, PendingHostChange,
     SyncConflict, SyncCreate, SyncDevice, SyncIssue, SyncJoin, SyncOptions, SyncOverview,
-    SyncResolution, SyncStatus,
+    SyncResolution, SyncStatus, UnconfirmedSnippet,
 };
 use crate::sync::bundle::{self, RosterDevice};
 use crate::sync::clock::{DeviceId, DeviceName};
@@ -135,6 +140,9 @@ impl Engine {
         let timeout = self.sync_tuning().op_timeout;
         let (reply, answer) = oneshot::channel();
         let job: Job = Box::new(move |core| {
+            // An expired join token (and its data key) never outlives the
+            // next operation, whatever it is.
+            core.purge_expired_joins();
             let _ = reply.send(op(core));
         });
         jobs.try_send(job).map_err(|e| match e {
@@ -213,7 +221,7 @@ impl Engine {
             tokio::select! {
                 biased;
                 () = token.cancelled() => {
-                    if first_change.is_some() && state::is_set_up(&self.inner.config.paths) {
+                    if first_change.is_some() && self.sync_is_set_up().await {
                         let _ = self.on_sync(SyncCore::pass).await;
                     }
                     break;
@@ -232,6 +240,14 @@ impl Engine {
             let now = tokio::time::Instant::now();
             deadline = now.checked_add(tuning.poll).unwrap_or(now);
         }
+    }
+
+    /// `sync.toml` exists (a file stat, off the runtime threads).
+    async fn sync_is_set_up(&self) -> bool {
+        let paths = self.inner.config.paths.clone();
+        Self::blocking(move || Ok(state::is_set_up(&paths)))
+            .await
+            .unwrap_or(false)
     }
 
     // ── Status and reports ──────────────────────────────────────────────
@@ -278,6 +294,7 @@ impl Engine {
     }
 
     /// Received hosts waiting for a confirmation on this device (F1).
+    /// [`EngineEvent::SyncPendingChanged`] says when to call it again.
     pub async fn sync_pending_hosts(&self) -> Result<Vec<PendingHostChange>> {
         self.on_sync(|core| Ok(core.pending())).await
     }
@@ -398,16 +415,22 @@ impl Engine {
     }
 
     /// Confirms received host destinations on this device (F1): they are
-    /// written to `hosts.conf` by the pass that follows.
-    pub async fn sync_confirm_hosts(&self, aliases: Vec<String>) -> Result<SyncStatus> {
-        self.on_sync(move |core| core.decide_hosts(&aliases, true))
+    /// written to `hosts.conf` by the pass that follows. Each decision is
+    /// `(alias, destination_hash)` as shown
+    /// ([`PendingHostChange::destination_hash`]): a destination that
+    /// changed since is refused with `sync_not_pending` and nothing is
+    /// recorded. A confirmation is used once: written, or overtaken by a
+    /// local edit of the host, it is forgotten.
+    pub async fn sync_confirm_hosts(&self, decisions: Vec<(String, String)>) -> Result<SyncStatus> {
+        self.on_sync(move |core| core.decide_hosts(&decisions, true))
             .await
     }
 
-    /// Refuses received host destinations on this device: kept out of
-    /// `hosts.conf` until another destination arrives.
-    pub async fn sync_reject_hosts(&self, aliases: Vec<String>) -> Result<SyncStatus> {
-        self.on_sync(move |core| core.decide_hosts(&aliases, false))
+    /// Refuses received host destinations on this device (same
+    /// `(alias, destination_hash)` decisions): kept out of `hosts.conf`
+    /// until another destination arrives.
+    pub async fn sync_reject_hosts(&self, decisions: Vec<(String, String)>) -> Result<SyncStatus> {
+        self.on_sync(move |core| core.decide_hosts(&decisions, false))
             .await
     }
 
@@ -499,36 +522,40 @@ impl Engine {
 
     // ── Snippets changed by sync (F8) ───────────────────────────────────
 
-    /// Ids of the snippets changed by sync that this device has not
-    /// confirmed yet (badge; the full command must be shown first).
-    pub async fn synced_snippets_unconfirmed(&self) -> Result<Vec<String>> {
+    /// The snippets changed by sync that this device has not confirmed
+    /// yet, with the content to show in full and its hash (badge, review
+    /// screen). Works while sync is locked or disabled (the gate stays).
+    /// [`EngineEvent::SyncPendingChanged`] says when to call it again.
+    pub async fn synced_snippets_unconfirmed(&self) -> Result<Vec<UnconfirmedSnippet>> {
         let paths = self.inner.config.paths.clone();
         let store = Arc::clone(&self.inner.snippets);
-        Self::blocking(move || {
-            let confirmations = state::load_confirmations(&paths)?;
-            Ok(store
-                .list()?
-                .into_iter()
-                .filter(|s| {
-                    confirmations.snippets.get(&s.id)
-                        == Some(&crate::sync::apply::snippet_hash(&s.command, s.run))
-                })
-                .map(|s| s.id)
-                .collect())
-        })
-        .await
+        Self::blocking(move || crate::sync::apply::unconfirmed_snippets(&paths, &store)).await
     }
 
     /// The user read the whole command of a snippet changed by sync and
-    /// confirmed it: it runs from now on.
-    pub async fn confirm_synced_snippet(&self, id: String) -> Result<()> {
+    /// confirmed it: it runs from now on. `hash` is
+    /// [`UnconfirmedSnippet::hash`] as shown: content received since (a
+    /// new hash) is refused with `sync_not_pending` and stays blocked.
+    pub async fn confirm_synced_snippet(&self, id: String, hash: String) -> Result<()> {
         let paths = self.inner.config.paths.clone();
         Self::blocking(move || {
-            state::edit_confirmations(&paths, |c| {
-                c.snippets.remove(&id);
-            })
+            let confirmed = state::edit_confirmations(&paths, |c| {
+                if c.snippets.get(&id) == Some(&hash) {
+                    c.snippets.remove(&id);
+                    true
+                } else {
+                    false
+                }
+            })?;
+            if confirmed {
+                Ok(())
+            } else {
+                Err(SyncError::NotPending { alias: id }.into())
+            }
         })
-        .await
+        .await?;
+        self.emit(EngineEvent::SyncPendingChanged);
+        Ok(())
     }
 
     /// The bytes to type for snippet `id` (rendered with `values`; `run`

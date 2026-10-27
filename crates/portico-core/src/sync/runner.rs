@@ -18,7 +18,8 @@
 //!    ties go to the smallest fingerprint; the bundle high-water mark
 //!    refuses an older one (F4); a [`BundleObservation::Diverged`] bundle
 //!    (same triple, other content) is rewritten with the union of the
-//!    rosters (revision + 1) so every device converges on one file.
+//!    rosters (revision + 1) so every device converges on one file —
+//!    only once step 4 checked this device's own file.
 //! 4. The replica (sealed, F5); **this device's own file** is opened and
 //!    checked ([`guard::check_own_file`], `LocalClock::observe_own_*`)
 //!    before any write: ahead of the replica (or forked) means a restored
@@ -156,6 +157,10 @@ struct Session {
     listing: Listing,
     /// Bytes left to read in this pass (F15).
     budget: u64,
+    /// `bundle.toml` to rewrite (a provider copy won, rosters differ, or a
+    /// diverged bundle): done by the pass **after** this device's own file
+    /// was checked (§5.1: nothing is written before).
+    roster_rewrite: Option<Roster>,
 }
 
 /// The sync state machine (one per engine, on the sync thread).
@@ -170,6 +175,17 @@ pub(crate) struct SyncCore {
     report: Report,
     status: Arc<Mutex<SyncStatus>>,
     conflicts_count: usize,
+    /// What awaits a confirmation (hosts: alias → destination hash;
+    /// snippets: id → content hash) as of the last pass: a change of its
+    /// **content**, not only of its size, is announced.
+    pending_seen: Option<PendingSet>,
+}
+
+/// Received changes awaiting a confirmation on this device.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PendingSet {
+    hosts: BTreeMap<String, String>,
+    snippets: BTreeMap<String, String>,
 }
 
 fn now() -> i64 {
@@ -347,7 +363,15 @@ impl SyncCore {
             report: Report::default(),
             status,
             conflicts_count: 0,
+            pending_seen: None,
         }
+    }
+
+    /// Drops the join tokens past their lifetime, with their data key
+    /// (zeroized on drop). Run before every operation of the sync thread.
+    pub(crate) fn purge_expired_joins(&mut self) {
+        let now = Instant::now();
+        self.joins.retain(|_, join| join.expires > now);
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -556,6 +580,7 @@ impl SyncCore {
             clock,
             listing,
             budget: PASS_BYTE_BUDGET,
+            roster_rewrite: None,
         };
         if unreadable {
             self.rejoin(&mut session)?;
@@ -573,7 +598,7 @@ impl SyncCore {
             .high_water
             .ratchet_format("bundle.toml", bundle::BUNDLE_VERSION)?;
         if rewrite || observed == BundleObservation::Diverged {
-            Self::write_roster(&mut session, union_roster);
+            session.roster_rewrite = Some(union_roster);
         }
         let known = session.replica.local.known_keyset_generation;
         if known == 0 {
@@ -642,6 +667,129 @@ impl SyncCore {
             let roster = session.bundle.roster.clone();
             Self::write_roster(session, roster);
         }
+    }
+
+    /// The non-revoked devices of the roster.
+    fn active_roster(session: &Session) -> BTreeSet<DeviceId> {
+        session
+            .bundle
+            .roster
+            .devices
+            .iter()
+            .filter(|d| !d.revoked)
+            .map(|d| d.id)
+            .collect()
+    }
+
+    /// Merges what this device's **former** identity published (its data
+    /// dir was restored or cloned), before it re-joins under a new id. Like
+    /// any device's snapshot: its context claims are checked first (claims
+    /// on other devices not backed by their own files: deferred, merged by
+    /// a later pass as the former id's file), and a refused merge is an
+    /// alert. Both name the former id.
+    fn merge_former_self(
+        session: &mut Session,
+        opened: &Opened<SnapshotContent>,
+        alerts: &mut Vec<Alert>,
+        issues: &mut Vec<Issue>,
+        waiting: &mut Option<(WaitReason, Option<String>)>,
+    ) {
+        let former = session.sync.device;
+        let label = opened.content.device_name.label(&former);
+        let roster = Self::active_roster(session);
+        let verified = session.replica.high_water.verified_clocks();
+        let context = opened.content.state.context();
+        match guard::check_context_claims(&former, context, &roster, &verified) {
+            ClaimCheck::Accept => {
+                if let Err(error) = session.replica.state.merge(&opened.content.state, &former) {
+                    alerts.push(Alert {
+                        kind: AlertKind::MergeRefused,
+                        device: Some(label),
+                        error,
+                    });
+                }
+            }
+            ClaimCheck::Defer(_) => {
+                issues.push(Issue {
+                    key: format!("device:{former}"),
+                    record: None,
+                    error: SyncError::Deferred {
+                        device: label.clone(),
+                    },
+                    warning: true,
+                    skippable: false,
+                });
+                waiting.get_or_insert((WaitReason::Deferred, Some(label)));
+            }
+        }
+    }
+
+    /// A deferred deletion (state doc) whose tombstone is gone from the
+    /// state (collected by the other devices) and whose key is readable
+    /// again is applied like a received tombstone; a key that holds a
+    /// register again (a value written since) is left to it.
+    fn inject_deferred_deletions(
+        session: &Session,
+        view: &LocalView,
+        projection: &mut super::model::Projection,
+    ) {
+        for deferred in &session.replica.local.deferred_deletions {
+            let Some(key) = deferred.key.decode() else {
+                continue;
+            };
+            if view.is_suspended(&key)
+                || view.unsynced.contains(&key)
+                || session.replica.state.view(&key).is_some()
+                || deferred.dots.is_empty()
+            {
+                continue;
+            }
+            projection.known.insert(
+                key,
+                vec![TypedSibling {
+                    value: RecordValue::Tombstone,
+                    dots: deferred.dots.clone(),
+                    at: deferred.at,
+                }],
+            );
+        }
+    }
+
+    /// Records the deletions this pass could not apply (suspended kind,
+    /// unsynced key) and forgets those whose key was readable in it.
+    fn track_deferred_deletions(
+        session: &mut Session,
+        after: &LocalView,
+        projection: &super::model::Projection,
+    ) {
+        let blocked = |key: &RecordKey| after.is_suspended(key) || after.unsynced.contains(key);
+        let mut deferred: BTreeMap<WireKey, state::DeferredDeletion> = session
+            .replica
+            .local
+            .deferred_deletions
+            .drain(..)
+            .filter(|d| d.key.decode().is_some_and(|key| blocked(&key)))
+            .map(|d| (d.key.clone(), d))
+            .collect();
+        for (key, siblings) in &projection.known {
+            let ([sibling], true) = (siblings.as_slice(), blocked(key)) else {
+                continue;
+            };
+            if !sibling.value.is_tombstone() {
+                continue;
+            }
+            if let Ok(wire) = WireKey::encode(key) {
+                deferred.insert(
+                    wire.clone(),
+                    state::DeferredDeletion {
+                        key: wire,
+                        dots: sibling.dots.clone(),
+                        at: sibling.at,
+                    },
+                );
+            }
+        }
+        session.replica.local.deferred_deletions = deferred.into_values().collect();
     }
 
     /// Re-joins under a new device id (restored or cloned data dir, F5):
@@ -836,6 +984,7 @@ impl SyncCore {
             }
             Ok(verdict)
         });
+        let mut waiting: Option<(WaitReason, Option<String>)> = None;
         match own_check {
             Ok(OwnFile::InSync) => {}
             Ok(OwnFile::Behind) => force_publish = true,
@@ -845,15 +994,23 @@ impl SyncCore {
                     device: None,
                     error: e,
                 });
-                // What our old identity published is merged like any
-                // device's snapshot (it is authenticated).
                 if let Some((_, opened)) = &own {
-                    let _ = session.replica.state.merge(&opened.content.state, &me);
+                    Self::merge_former_self(
+                        &mut session,
+                        opened,
+                        &mut alerts,
+                        &mut issues,
+                        &mut waiting,
+                    );
                 }
                 self.rejoin(&mut session)?;
                 force_publish = true;
             }
             Err(e) => return Err(e.into()),
+        }
+        // Only now (own file checked, §5.1) may `bundle.toml` be written.
+        if let Some(union_roster) = session.roster_rewrite.take() {
+            Self::write_roster(&mut session, union_roster);
         }
         let me = session.sync.device;
         // Our own provider copies, verified and older: removed (only ever
@@ -878,14 +1035,7 @@ impl SyncCore {
         Self::ensure_in_roster(&mut session);
 
         // ── Every other device, observed before any context is judged ──
-        let roster: BTreeSet<DeviceId> = session
-            .bundle
-            .roster
-            .devices
-            .iter()
-            .filter(|d| !d.revoked)
-            .map(|d| d.id)
-            .collect();
+        let roster = Self::active_roster(&session);
         let others: Vec<DeviceId> = session
             .listing
             .devices
@@ -940,7 +1090,6 @@ impl SyncCore {
         }
         // Devices whose newer snapshot others merged but which is not in
         // the folder (yet): withheld or still uploading.
-        let mut waiting: Option<(WaitReason, Option<String>)> = None;
         for withheld in guard::withheld(&present, seen_vectors.iter()) {
             if withheld.device == me {
                 continue;
@@ -1001,7 +1150,6 @@ impl SyncCore {
         let applied_before = session.replica.local.applied_map();
         let changes = project::local_changes(&view, &applied_before);
         let mut failed: BTreeSet<RecordKey> = BTreeSet::new();
-        let mut edited_snippets: Vec<String> = Vec::new();
         for change in changes {
             let result = match &change.value {
                 Some(value) => session
@@ -1017,8 +1165,11 @@ impl SyncCore {
             };
             match result {
                 Ok(()) => {
-                    if let RecordKey::Snippet { id } = &change.key {
-                        edited_snippets.push(id.clone());
+                    // A local change of a host ends any confirmation or
+                    // refusal recorded for it (single use, F1).
+                    if let RecordKey::Host { alias } = &change.key {
+                        session.replica.local.confirmed.remove(alias);
+                        session.replica.local.rejected.remove(alias);
                     }
                 }
                 Err(e @ SyncError::RestoredState { .. }) => return Err(e.into()),
@@ -1080,7 +1231,8 @@ impl SyncCore {
         self.save_replica(&mut session)?;
 
         // ── Validated application ──
-        let projection = session.replica.state.project();
+        let mut projection = session.replica.state.project();
+        Self::inject_deferred_deletions(&session, &view, &mut projection);
         let outcome = apply::apply(&ApplyInput {
             config: &self.config,
             snippets: &self.snippets,
@@ -1090,6 +1242,11 @@ impl SyncCore {
             confirmed: &session.replica.local.confirmed,
             rejected: &session.replica.local.rejected,
         });
+        // A confirmation is used up once its destination is written (F1):
+        // the same destination arriving again later asks again.
+        for alias in &outcome.written_hosts {
+            session.replica.local.confirmed.remove(alias);
+        }
         let after = project::observe(&self.config.paths, &self.snippets);
         let mut applied = settle_applied(&view, &after, &projection, &applied_before);
         for key in &failed {
@@ -1105,6 +1262,7 @@ impl SyncCore {
             }
         }
         session.replica.local.set_applied(applied);
+        Self::track_deferred_deletions(&mut session, &after, &projection);
         // Tombstone collection on the stable context of the roster, once the
         // deletions were applied here.
         let stale_devices: BTreeSet<DeviceId> = session
@@ -1127,7 +1285,9 @@ impl SyncCore {
         if complete && !contexts.is_empty() {
             let stable = VersionVector::meet(contexts);
             // A deletion still present in the local files (not applied
-            // yet: refused, conflict elsewhere) keeps its tombstone.
+            // yet: refused, conflict elsewhere), or whose kind or key cannot
+            // be read here (suspended file, unsynced entry), keeps its
+            // tombstone: it is applied once the file is readable again.
             let present: BTreeSet<WireKey> = after
                 .records
                 .keys()
@@ -1136,20 +1296,14 @@ impl SyncCore {
             session
                 .replica
                 .state
-                .collect_tombstones_except(&stable, |key| present.contains(key));
+                .collect_tombstones_except(&stable, |wire| {
+                    present.contains(wire)
+                        || wire.decode().is_none_or(|key| {
+                            after.is_suspended(&key) || after.unsynced.contains(&key)
+                        })
+                });
         }
 
-        if !outcome.received_snippets.is_empty() || !edited_snippets.is_empty() {
-            let received = outcome.received_snippets.clone();
-            state::edit_confirmations(&self.config.paths, |c| {
-                for id in &edited_snippets {
-                    c.snippets.remove(id);
-                }
-                for (id, hash) in received {
-                    c.snippets.insert(id, hash);
-                }
-            })?;
-        }
         issues.extend(outcome.issues.iter().cloned());
         self.save_replica(&mut session)?;
 
@@ -1214,10 +1368,30 @@ impl SyncCore {
         let report = Self::build_report(&session, issues, alerts, &outcome.pending, waiting, at);
         let status = Self::status_of(&report, at);
         let count = report.conflicts.len();
+        let pending = PendingSet {
+            hosts: report
+                .pending
+                .iter()
+                .map(|p| (p.alias.clone(), p.destination_hash.clone()))
+                .collect(),
+            snippets: apply::unconfirmed_snippets(&self.config.paths, &self.snippets)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| (u.id, u.hash))
+                .collect(),
+        };
         self.report = report;
         if count != self.conflicts_count {
             self.conflicts_count = count;
             self.emit(EngineEvent::SyncConflicts { count });
+        }
+        let announced = match &self.pending_seen {
+            Some(seen) => *seen != pending,
+            None => pending != PendingSet::default(),
+        };
+        self.pending_seen = Some(pending);
+        if announced {
+            self.emit(EngineEvent::SyncPendingChanged);
         }
         Ok(status)
     }
@@ -1304,6 +1478,7 @@ impl SyncCore {
                 incoming: host_dto(&p.incoming),
                 renamed_from: p.incoming.renamed_from.clone(),
                 devices: labels(&p.dots),
+                destination_hash: p.hash.clone(),
             })
             .collect();
         let stale: BTreeSet<DeviceId> = session
@@ -1476,24 +1651,39 @@ impl SyncCore {
         if remember_key {
             self.remember_key(&sync, &opened.data_key)?;
         }
-        let io = self.tuning.opener.open(root);
-        io.init()?;
-        io.create(&FolderFile::Bundle, text.as_bytes())?;
-        crate::store::create_private_dir_all(&self.config.paths.sync_dir())?;
-        let name = opened
-            .roster
-            .devices
-            .iter()
-            .find(|d| d.id == device)
-            .map(|d| d.name.clone())
-            .ok_or(SyncError::Corrupt {
-                what: "bundle.toml",
-                reason: "the first device is missing from the roster",
-            })?;
-        self.write_fresh_replica(&sync, opened, name)?;
-        state::save_config(&self.config.paths, &sync)?;
+        let set_up = (|| -> crate::Result<()> {
+            let io = self.tuning.opener.open(root);
+            io.init()?;
+            io.create(&FolderFile::Bundle, text.as_bytes())?;
+            crate::store::create_private_dir_all(&self.config.paths.sync_dir())?;
+            let name = opened
+                .roster
+                .devices
+                .iter()
+                .find(|d| d.id == device)
+                .map(|d| d.name.clone())
+                .ok_or(SyncError::Corrupt {
+                    what: "bundle.toml",
+                    reason: "the first device is missing from the roster",
+                })?;
+            self.write_fresh_replica(&sync, opened, name)?;
+            state::save_config(&self.config.paths, &sync)
+        })();
+        if let Err(e) = set_up {
+            self.forget_orphan_key(&sync, remember_key);
+            return Err(e);
+        }
         self.data_key = Some(DataKey::from_bytes(opened.data_key.bytes())?);
         self.pass()
+    }
+
+    /// Removes a data key stored in the keychain for a create or join that
+    /// failed before `sync.toml` was written (nothing else would ever
+    /// forget it: "disable" needs `sync.toml` to name the entry).
+    fn forget_orphan_key(&self, sync: &SyncConfig, remembered: bool) {
+        if remembered {
+            let _ = self.config.secrets.delete(&data_key_account(sync));
+        }
     }
 
     fn write_fresh_replica(
@@ -1630,7 +1820,7 @@ impl SyncCore {
                 preview.conflicts = preview.conflicts.saturating_add(1);
             }
         }
-        self.joins.retain(|_, join| join.expires > Instant::now());
+        self.purge_expired_joins();
         let token = state::hex(&crypto::random_array::<16>()?);
         self.joins.insert(
             token.clone(),
@@ -1680,18 +1870,24 @@ impl SyncCore {
         if join.remember_key {
             self.remember_key(&sync, &join.data_key)?;
         }
-        let keys = crypto::derive_subkeys(&join.data_key, &join.bundle_id, join.epoch)?;
-        let replica = fresh_replica(join.device_name.clone(), join.keyset_generation);
-        let binding = Binding {
-            bundle_id: join.bundle_id,
-            epoch: join.epoch,
-            keyset_generation: join.keyset_generation,
-            device,
-            seq: 1,
-        };
-        crate::store::create_private_dir_all(&self.config.paths.sync_dir())?;
-        state::save_replica(&self.config.paths, &keys, &binding, &replica)?;
-        state::save_config(&self.config.paths, &sync)?;
+        let set_up = (|| -> crate::Result<()> {
+            let keys = crypto::derive_subkeys(&join.data_key, &join.bundle_id, join.epoch)?;
+            let replica = fresh_replica(join.device_name.clone(), join.keyset_generation);
+            let binding = Binding {
+                bundle_id: join.bundle_id,
+                epoch: join.epoch,
+                keyset_generation: join.keyset_generation,
+                device,
+                seq: 1,
+            };
+            crate::store::create_private_dir_all(&self.config.paths.sync_dir())?;
+            state::save_replica(&self.config.paths, &keys, &binding, &replica)?;
+            state::save_config(&self.config.paths, &sync)
+        })();
+        if let Err(e) = set_up {
+            self.forget_orphan_key(&sync, join.remember_key);
+            return Err(e);
+        }
         self.data_key = Some(join.data_key);
         let status = self.pass()?;
         if bulk == JoinBulkChoice::ReviewEach {
@@ -1761,6 +1957,7 @@ impl SyncCore {
             reason: "no such conflict",
         })?;
         let snippets = Arc::clone(&self.snippets);
+        let paths = self.config.paths.clone();
         self.with_session(|session| {
             let at = now();
             let model = match resolution {
@@ -1781,7 +1978,10 @@ impl SyncCore {
                         .into());
                     };
                     // The other sides become new local snippets (synced as
-                    // such by the next pass).
+                    // such by the next pass). A side no dot of this device
+                    // wrote was received: its copy is gated (F8) before it
+                    // is written, like any received snippet.
+                    let me = session.sync.device;
                     for (index, sibling) in siblings.iter().enumerate() {
                         if index == *keep {
                             continue;
@@ -1789,7 +1989,18 @@ impl SyncCore {
                         if let RecordValue::Snippet(value) = &sibling.value {
                             let mut copy = project::snippet_from("", value);
                             copy.name = format!("{} ({})", value.name, index.saturating_add(1));
-                            snippets.save(copy)?;
+                            let received = !sibling.dots.iter().any(|dot| dot.device == me);
+                            snippets.save_guarded(copy, |stored| {
+                                if received {
+                                    state::edit_confirmations(&paths, |c| {
+                                        c.snippets.insert(
+                                            stored.id.clone(),
+                                            apply::snippet_hash(&stored.command, stored.run),
+                                        );
+                                    })?;
+                                }
+                                Ok(())
+                            })?;
                         }
                     }
                     let _ = id;
@@ -1814,15 +2025,21 @@ impl SyncCore {
     }
 
     /// Confirms (or refuses) received host destinations on this device.
+    /// Each decision names the destination the user was shown (its hash):
+    /// one that changed since — another device published again and a pass
+    /// merged it — is refused (`NotPending`) and nothing is recorded.
     pub(crate) fn decide_hosts(
         &mut self,
-        aliases: &[String],
+        decisions: &[(String, String)],
         accept: bool,
     ) -> crate::Result<SyncStatus> {
         let pending = self.report.pending.clone();
         self.with_session(|session| {
-            for alias in aliases {
-                if !pending.iter().any(|p| &p.alias == alias) {
+            for (alias, shown) in decisions {
+                if !pending
+                    .iter()
+                    .any(|p| &p.alias == alias && &p.destination_hash == shown)
+                {
                     return Err(SyncError::NotPending {
                         alias: alias.clone(),
                     }
@@ -1838,6 +2055,12 @@ impl SyncCore {
                     .into());
                 };
                 let hash = destination_hash(&value);
+                if &hash != shown {
+                    return Err(SyncError::NotPending {
+                        alias: alias.clone(),
+                    }
+                    .into());
+                }
                 let local = &mut session.replica.local;
                 if accept {
                     local.rejected.remove(alias);

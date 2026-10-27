@@ -26,8 +26,14 @@
 //!   are left alone. `~/.ssh/config` is never written.
 //!
 //! Snippets (F8): a snippet written from sync is recorded in
-//! `confirm.toml` until the user confirms it; the engine refuses to type
-//! it before that.
+//! `confirm.toml` **before** it is written to `snippets.toml` (a failure
+//! there writes nothing) and stays there until the user confirms that
+//! exact content; the engine refuses to type it before that.
+//!
+//! A key this device holds in a form that cannot be synced (`unsynced`:
+//! an identity file outside the home directory, a value its own file
+//! accepts but sync does not) is never overwritten nor deleted by a
+//! received value: `sync_local_host_unsynced` / `sync_local_unsynced`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,7 +47,7 @@ use super::project::{
     KIND_HOST, KIND_META, KIND_SETTING, KIND_SNIPPET, LocalView, destination, managed_host,
     snippet_from,
 };
-use super::state::content_hash;
+use super::state::{content_hash, edit_confirmations};
 use crate::engine::EngineConfig;
 use crate::hosts::{HostMeta, MetaChange};
 use crate::managed_hosts::{SyncHostRefusal, SyncedHosts};
@@ -67,6 +73,8 @@ pub(crate) struct PendingHost {
     pub(crate) alias: String,
     pub(crate) current: Option<HostValue>,
     pub(crate) incoming: HostValue,
+    /// [`destination_hash`] of `incoming`: what a confirmation is about.
+    pub(crate) hash: String,
     pub(crate) dots: Vec<Dot>,
 }
 
@@ -78,8 +86,9 @@ pub(crate) struct ApplyOutcome {
     pub(crate) hosts_changed: bool,
     pub(crate) meta_changed: Vec<(String, HostMeta)>,
     pub(crate) snippets_changed: bool,
-    /// Snippets written from sync: id → hash of the received command.
-    pub(crate) received_snippets: Vec<(String, String)>,
+    /// Aliases whose received destination was written to `hosts.conf`
+    /// (their confirmation is used up, F1).
+    pub(crate) written_hosts: Vec<String>,
     pub(crate) settings_changed: Option<crate::settings::Settings>,
 }
 
@@ -128,6 +137,36 @@ pub(crate) fn snippet_hash(command: &str, run: bool) -> String {
         "portico-sync/1 snippet",
         &format!("{}\0{command}", u8::from(run)),
     )
+}
+
+/// The snippets whose current content is gated in `confirm.toml` (changed
+/// by sync, not confirmed on this device, F8). Blocking.
+pub(crate) fn unconfirmed_snippets(
+    paths: &crate::store::Paths,
+    store: &SnippetStore,
+) -> crate::Result<Vec<super::api::UnconfirmedSnippet>> {
+    let confirmations = super::state::load_confirmations(paths)?;
+    if confirmations.snippets.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(store
+        .list()?
+        .into_iter()
+        .filter_map(|s| {
+            let hash = snippet_hash(&s.command, s.run);
+            let gated = confirmations.snippets.get(&s.id) == Some(&hash);
+            gated.then_some(super::api::UnconfirmedSnippet {
+                id: s.id,
+                snippet: super::api::SyncSnippetValue {
+                    name: s.name,
+                    command: s.command,
+                    description: s.description,
+                    run: s.run,
+                },
+                hash,
+            })
+        })
+        .collect())
 }
 
 fn issue(key: &RecordKey, error: SyncError) -> Issue {
@@ -197,6 +236,21 @@ fn warn_missing_keys(written: &[crate::managed_hosts::ManagedHost], out: &mut Ap
     }
 }
 
+/// A host this device holds in a form sync cannot represent: never
+/// overwritten (nor called "new"), never deleted.
+fn local_unsyncable(
+    input: &ApplyInput<'_>,
+    synced: &SyncedHosts<'_>,
+    key: &RecordKey,
+    alias: &str,
+) -> bool {
+    input.view.unsynced.contains(key)
+        || synced.hosts().iter().any(|h| {
+            h.alias.eq_ignore_ascii_case(alias)
+                && super::project::host_value(&input.config.paths.home, h).is_none()
+        })
+}
+
 /// Applies the hosts. Blocking.
 fn apply_hosts(input: &ApplyInput<'_>, out: &mut ApplyOutcome) -> crate::Result<()> {
     if input.view.suspended.contains(KIND_HOST) {
@@ -229,6 +283,15 @@ fn apply_hosts(input: &ApplyInput<'_>, out: &mut ApplyOutcome) -> crate::Result<
     let mut upserts = Vec::new();
     let mut deletes = Vec::new();
     for (key, alias, sibling) in wanted {
+        if local_unsyncable(input, &synced, key, alias) {
+            out.issues.push(issue(
+                key,
+                SyncError::LocalHostUnsynced {
+                    alias: alias.to_owned(),
+                },
+            ));
+            continue;
+        }
         let current = current_of(alias);
         let incoming = match &sibling.value {
             RecordValue::Tombstone => {
@@ -269,15 +332,18 @@ fn apply_hosts(input: &ApplyInput<'_>, out: &mut ApplyOutcome) -> crate::Result<
                 alias: alias.to_owned(),
                 current,
                 incoming: incoming.clone(),
+                hash,
                 dots: sibling.dots.clone(),
             });
             continue;
         }
         upserts.push(host);
     }
-    let written: Vec<_> = upserts.clone();
+    let mut written: Vec<_> = upserts.clone();
     let (changed, refused) = synced.apply(upserts, &deletes)?;
     out.hosts_changed = changed;
+    written.retain(|host| !refused.iter().any(|(alias, _)| *alias == host.alias));
+    out.written_hosts = written.iter().map(|h| h.alias.clone()).collect();
     for (alias, refusal) in refused {
         let key = RecordKey::Host {
             alias: alias.clone(),
@@ -341,6 +407,13 @@ fn apply_meta(input: &ApplyInput<'_>, out: &mut ApplyOutcome) {
         if input.excluded.contains(&issue_key(key)) {
             continue;
         }
+        if input.view.unsynced.contains(key) {
+            out.issues.push(issue(
+                key,
+                SyncError::LocalRecordUnsynced { kind: KIND_META },
+            ));
+            continue;
+        }
         let current = input.view.records.get(key);
         let unchanged = match &sibling.value {
             RecordValue::Tombstone => current.is_none(),
@@ -388,7 +461,14 @@ fn apply_snippets(input: &ApplyInput<'_>, out: &mut ApplyOutcome) {
         let Some(sibling) = single(siblings) else {
             continue;
         };
-        if input.excluded.contains(&issue_key(key)) || input.view.unsynced.contains(key) {
+        if input.excluded.contains(&issue_key(key)) {
+            continue;
+        }
+        if input.view.unsynced.contains(key) {
+            out.issues.push(issue(
+                key,
+                SyncError::LocalRecordUnsynced { kind: KIND_SNIPPET },
+            ));
             continue;
         }
         let current = input.view.records.get(key);
@@ -396,7 +476,10 @@ fn apply_snippets(input: &ApplyInput<'_>, out: &mut ApplyOutcome) {
             RecordValue::Tombstone => {
                 if current.is_some() {
                     match input.snippets.delete(id) {
-                        Ok(()) => out.snippets_changed = true,
+                        Ok(()) => {
+                            out.snippets_changed = true;
+                            super::state::forget_confirmation(&input.config.paths, id);
+                        }
                         Err(e) => out.issues.push(issue(
                             key,
                             SyncError::FolderIo {
@@ -429,12 +512,17 @@ fn apply_snippets(input: &ApplyInput<'_>, out: &mut ApplyOutcome) {
                     ));
                     continue;
                 }
-                match input.snippets.save(snippet) {
-                    Ok(_) => {
-                        out.snippets_changed = true;
-                        out.received_snippets
-                            .push((id.clone(), snippet_hash(&value.command, value.run)));
-                    }
+                // F8: the gate first, then the snippet (a failure to
+                // record the gate writes nothing).
+                let paths = &input.config.paths;
+                let gate = |stored: &crate::snippets::Snippet| {
+                    edit_confirmations(paths, |c| {
+                        c.snippets
+                            .insert(stored.id.clone(), snippet_hash(&stored.command, stored.run));
+                    })
+                };
+                match input.snippets.save_guarded(snippet, gate) {
+                    Ok(_) => out.snippets_changed = true,
                     Err(e) => out.issues.push(issue(
                         key,
                         SyncError::FolderIo {
@@ -470,6 +558,13 @@ fn apply_settings(input: &ApplyInput<'_>, out: &mut ApplyOutcome) {
             continue;
         };
         if input.excluded.contains(&issue_key(key)) {
+            continue;
+        }
+        if input.view.unsynced.contains(key) {
+            out.issues.push(issue(
+                key,
+                SyncError::LocalRecordUnsynced { kind: KIND_SETTING },
+            ));
             continue;
         }
         let current = input.view.records.get(key);

@@ -427,10 +427,13 @@ KeysRotatedElsewhere | PassphraseChangedTwice | PassphraseReset).
 `sync_create(SyncCreate) -> SyncStatus`, `sync_join_preview(SyncJoin) -> JoinPreview`,
 `sync_join_commit(token, JoinBulkChoice) -> SyncStatus`, `sync_unlock(SecretString)`, `sync_now()`, `sync_conflicts()`,
 `sync_resolve(id, SyncResolution::{Pick, Union, KeepBoth})`, `sync_issues()`, `sync_skip_on_this_device(key)`,
-`sync_pending_hosts()`, `sync_confirm_hosts(aliases)`, `sync_reject_hosts(aliases)`, `sync_acknowledge_alerts()`,
+`sync_pending_hosts()`, `sync_confirm_hosts(Vec<(alias, destination_hash)>)`,
+`sync_reject_hosts(Vec<(alias, destination_hash)>)`, `sync_acknowledge_alerts()`,
 `sync_change_passphrase(old, NewPassphrase)`, `sync_reset_passphrase(NewPassphrase)`, `sync_devices()`,
 `sync_rename_device(name)`, `sync_set_options(SyncOptions)`, `sync_disable(DisableOptions)` ; snippets (F8) :
-`synced_snippets_unconfirmed()`, `confirm_synced_snippet(id)`, `snippet_input_for(id, valeurs, run, bracketed_paste)`.
+`synced_snippets_unconfirmed() -> Vec<UnconfirmedSnippet { id, snippet, hash }>`, `confirm_synced_snippet(id, hash)`,
+`snippet_input_for(id, valeurs, run, bracketed_paste)` (seule source publique des octets d'un snippet :
+`snippets::snippet_input` est `pub(crate)`).
 `SyncStatus` : Disabled, Locked, Idle { last_pass, devices, conflicts, issues, pending_confirmations }, Syncing,
 Waiting { PartialSync | Placeholder | Deferred | Busy, device }, FolderUnavailable { Missing | NotMounted | PermissionDenied |
 BundleMissing | Unsafe | TooManyEntries }, Alert { Rollback | Fork | Restored | BundleTampered | KeysRotatedElsewhere |
@@ -444,12 +447,15 @@ S1b ajoute ceux des E/S et de l'application (`sync_folder_missing`, `sync_folder
 `sync_bundle_exists`, `sync_folder_unsafe`, `sync_folder_too_many`, `sync_folder_timeout`, `sync_folder_io`, `sync_disabled`,
 `sync_already_enabled`, `sync_join_expired`, `sync_busy`, `sync_host_in_use`, `sync_not_pending`, `sync_snippet_unconfirmed`,
 `sync_passphrase_changed`, `sync_keys_rotated`, `sync_divergent`, `sync_dropped_values`, `sync_deferred`, `sync_pending`,
-`sync_third_party_claim`, `sync_merge_refused`, `sync_record_needs_newer`. Chacun a un indice. Aucun message ne contient de
+`sync_third_party_claim`, `sync_merge_refused`, `sync_record_needs_newer`, `sync_local_host_unsynced`,
+`sync_local_unsynced`. Chacun a un indice. Aucun message ne contient de
 valeur ni de secret.
 
 ### 5.3 Événements
-Nouveaux : `EngineEvent::Sync { status }`, `SyncConflicts { count }`, `SnippetsChanged`, `SettingsChanged { settings }` ;
-existants : `HostsChanged`, `HostMeta`. Après `Lagged`, les UIs relisent `sync_status` / `sync_conflicts`.
+Nouveaux : `EngineEvent::Sync { status }`, `SyncConflicts { count }`, `SyncPendingChanged` (ce qui attend une
+confirmation a changé, **contenu compris** à nombre égal), `SnippetsChanged`, `SettingsChanged { settings }` ; existants :
+`HostsChanged`, `HostMeta`. Après `Lagged`, les UIs relisent `sync_status` / `sync_conflicts` / `sync_pending_hosts` /
+`synced_snippets_unconfirmed`.
 
 ### 5.4 Ordonnancement
 Sondage toutes les 30 s (`stat` de `bundle.toml` + listage de `devices/`), passe immédiate au démarrage, sur `sync_now` et au
@@ -633,13 +639,21 @@ sont en `#[cfg(test)]`).
 |---|---|
 | Modules `runner.rs` (passe et opérations), `api.rs` (types publics) et `engine/sync_api.rs` (méthodes du moteur, thread, tâche) au lieu de `state.rs` / `task.rs` seuls | `SyncCore` tient l'état en mémoire (clé, rapport, jetons) sur un seul thread ; les méthodes du moteur doivent voir ses champs privés |
 | Le thread `portico-sync` exécute la **passe entière** (dossier, fichiers locaux, trousseau), pas seulement les E/S du dossier ; délai de 60 s par opération | Une passe est une séquence ordonnée sous `sync.lock` : la couper entre threads ajouterait des états intermédiaires. Argon2 reste sur `spawn_blocking` |
-| Fichiers temporaires `devices/.<id>.snap.tmp-<aléa>` (ceux de `store::write_atomic`) au lieu de `~<id>.snap.tmp` | Même garantie (`create_new`, `0600` / DACL, `fsync`, `rename`) ; le listage ignore tout nom commençant par `.` |
+| Fichiers temporaires `devices/.<id>.snap.tmp-<aléa>` au lieu de `~<id>.snap.tmp` | Même garantie (`O_EXCL`, `0600` / DACL, `fsync`, `rename`) ; le listage ignore tout nom commençant par `.`. Unix (revue S1b, 9) : écriture ancrée sur descripteurs (`portico-sync/` puis `devices/` ouverts `O_DIRECTORY | O_NOFOLLOW`, `openat(O_CREAT | O_EXCL | O_NOFOLLOW)`, `renameat` / `linkat` dans le même descripteur) |
 | Publication : passe 5 s après la dernière modification locale (au plus `poll` après la première), sans espacement minimal de 30 s entre publications ; passe finale à l'arrêt seulement si une modification locale attend | Le délai de 5 s regroupe déjà les rafales ; un état inchangé n'est jamais republié (empreinte de l'état publié) |
 | Passe de fond **sautée** quand l'autre processus tient `sync.lock` ; une commande de l'utilisateur (`sync_now`, résolutions) **attend** le verrou | §4.9 ; une commande ne doit pas répondre avec un statut périmé |
 | Renommage détecté à la projection (un hôte disparaît, un autre de même destination apparaît) → `renamed_from` ; le nouvel alias reste un **nouvel hôte** qui demande confirmation ailleurs | F1 strict : un nouvel alias est un nouvel hôte |
 | Suppression reçue d'un hôte : retiré de `hosts.conf` (refusée tant qu'un autre hôte rebondit par lui, `sync_host_in_use`), **métadonnées et mot de passe mémorisé laissés** | Les métadonnées ont leurs propres pierres tombales ; un appareil compromis ne doit pas pouvoir effacer des secrets locaux |
 | « Refuser » une destination la garde hors de `hosts.conf` sur cet appareil (empreinte locale), sans écriture propagée ; une autre destination redemande | Le refus est une décision locale ; « garder le mien partout » = modifier l'hôte localement (écriture ordinaire) |
-| Collecte des pierres tombales **après** l'application, en gardant celles dont la suppression n'est pas encore appliquée localement | Sinon une pierre tombale déjà stable était collectée avant d'être appliquée et l'hôte restait (trouvé par `deletions_propagate_as_tombstones`) |
+| Collecte des pierres tombales **après** l'application, en gardant celles dont la suppression n'est pas encore appliquée localement, et celles d'un genre suspendu ou d'une clé non synchronisable (revue S1b, 8) | Sinon une pierre tombale déjà stable était collectée avant d'être appliquée et l'hôte restait (trouvé par `deletions_propagate_as_tombstones`) |
+| Suppressions reçues **différées** (`LocalReplica::deferred_deletions`) : une suppression que cet appareil ne peut pas appliquer (fichier suspendu, clé non synchronisable) est retenue localement et appliquée quand le fichier redevient lisible, sauf si la clé a reçu une valeur entre-temps | Le contexte stable des autres appareils dit seulement que cet appareil a **vu** la pierre tombale : ils la collectent, et la fusion la retire ici aussi. Sans cette trace, l'hôte restait pour toujours sur l'appareil suspendu (trouvé par `tombstone_kept_while_hosts_file_unmanaged`) |
+| Une clé locale non synchronisable (`unsynced` : `IdentityFile` hors du dossier personnel, valeur refusée par la sync) n'est jamais écrasée ni supprimée par une valeur reçue : issue `sync_local_host_unsynced` (hôtes) ou `sync_local_unsynced` (métadonnées, snippets, réglages), ignorable | Revue S1b, 5 : l'hôte local était remplacé et présenté comme « nouveau » |
+| Confirmations d'hôte liées au contenu montré et **à usage unique** : `(alias, destination_hash)` ; consommée quand la destination est écrite ou qu'une modification locale de l'hôte est projetée ; un refus tombe aussi à la modification locale | Revue S1b, 1 et 7 |
+| `confirm.toml` est une **barrière d'exécution**, pas un état de sync : écrite **avant** le snippet reçu (échec → rien d'écrit), jamais effacée par « désactiver », une entrée ne part que par confirmation de ce contenu exact ou suppression du snippet ; une copie « garder les deux » d'un côté reçu y est inscrite aussi | Revue S1b, 2, 3 et 4 |
+| Clé de données inscrite au trousseau avant la fin de create / join : supprimée si la mise en place échoue avant `sync.toml`. Une entrée orpheline laissée par un crash à cet instant n'est **pas** retrouvable par « désactiver » (qui lit l'id du bundle dans `sync.toml`) : elle ne déchiffre que ce bundle, déjà déchiffrable par la passphrase ; S2 (« oublier un appareil ») pourra la lister | Revue S1b, 12 |
+| Jetons de rattachement expirés (et leur DK) purgés au début de **chaque** opération du thread `portico-sync` | Revue S1b, 11 |
+| `bundle.toml` réécrit (copie gagnante, roster divergent) seulement **après** le contrôle du fichier propre de l'appareil (§5.1) | Revue S1b, 14 |
+| Fichier propre en avance (restauration) : ce que l'ancien id a publié passe par `check_context_claims` avant fusion (différé sinon, puis fusionné plus tard comme le fichier d'un autre appareil) ; un `MergeRefused` est une alerte nommant l'ancien id | Revue S1b, 10 |
 | Fichier d'appareil non authentifié **ou** malformé = « en attente » (`PartialSync`), sans compteur « stable sur deux passes » | Il ne supprime jamais rien (fusion par état) ; un fichier qui reste illisible reste visible comme attente |
 | Alerte bloquante de réinitialisation (#8) : toute `keyset_generation` plus haute que celle connue ou faite par cet appareil donne `PassphraseChanged`, à acquitter (`sync_acknowledge_alerts`) | Le roster scellé (`deny_unknown_fields`) ne peut pas porter de marqueur « réinitialisée » sans nouveau format ; l'alerte couvre changement et réinitialisation, ce qui est plus sûr |
 | `bundle.toml` divergent (même triplet, autre contenu) : gagnant = plus haut (époque, génération, révision) parmi `bundle.toml` et les copies du fournisseur, égalité → plus petite empreinte ; rosters réunis et `bundle.toml` réécrit (révision + 1) ; copies jamais supprimées ; l'appareil se rajoute au roster s'il en manque | Convergence sans perte d'appareil quand deux appareils rejoignent en même temps |
@@ -648,16 +662,20 @@ sont en `#[cfg(test)]`).
 | Réplica illisible (non authentifié ou malformé) → nouveau rattachement sous un nouvel id avec un état vide (alerte `Restored`) | Aucun point de l'ancien id ne peut être réutilisé ; l'état revient des autres appareils |
 | Fichier propre forké (même séquence, autre contenu) traité comme une restauration : nouvel id | Même remède que §2.7 « si c'est cet appareil » |
 | Appareil retenu (`guard::withheld`) signalé tout de suite comme avertissement `sync_pending`, sans délai de 24 h | Avertissement non bloquant ; l'ancienneté reste mesurée sur l'heure locale (F17) |
-| Windows : points d'analyse refusés par `FileType::is_symlink` (lien, jonction) **et** comparaison du chemin canonique ; placeholders cloud acceptés ; lecture sans `FILE_FLAG_OPEN_REPARSE_POINT` | Ce drapeau empêcherait l'hydratation d'un fichier OneDrive ; la fenêtre résiduelle entre contrôle et `rename` est documentée dans `folder.rs` (un processus qui écrit dans le dossier peut déjà tout y remplacer, et ce qui est écrit est chiffré) |
-| F8 appliqué par le cœur via `Engine::snippet_input_for` (la GUI y passe) ; la TUI construit encore ses octets elle-même | Aucune UI ne peut activer la sync avant S1c : aucun snippet reçu ne peut atteindre la TUI d'ici là ; S1c la fait passer par le cœur |
+| Windows : points d'analyse refusés par `FileType::is_symlink` (lien, jonction) **et** comparaison du chemin canonique ; placeholders cloud acceptés ; lecture sans `FILE_FLAG_OPEN_REPARSE_POINT` | Ce drapeau empêcherait l'hydratation d'un fichier OneDrive ; la fenêtre résiduelle entre contrôle et `rename` (Windows seulement depuis la revue S1b) est documentée dans `folder.rs` (un processus qui écrit dans le dossier peut déjà tout y remplacer, et ce qui est écrit est chiffré) |
+| F8 appliqué par le cœur via `Engine::snippet_input_for`, **seule** source publique des octets d'un snippet (`snippets::snippet_input` est `pub(crate)`) ; la GUI et la TUI y passent (revue S1b, 6) | La TUI affiche le refus `sync_snippet_unconfirmed` (message et indice) ; l'écran de confirmation vient avec S1c |
 | `SyncStatus::Error { summary }` ajouté ; `sync_status` rend `SyncOverview` (statut, dossier, appareil, mémorisation) et `Syncing` avant la première passe du processus | Les UIs ont besoin du dossier et d'un état d'échec générique |
 
 ### Ce que S1c attend de S1b
 - **Démarrage** : `Engine::start_sync()` au lancement (puis rien : la tâche fait une passe immédiate, toutes les 30 s et 5 s
   après chaque modification locale) ; `sync_status()` pour la barre ; s'abonner à `EngineEvent::Sync { status }`,
-  `SyncConflicts { count }`, `SnippetsChanged` (recharger), `SettingsChanged { settings }` (thème et keymaps en direct ;
-  la GUI valide les keymaps reçues comme la TUI, F18), `HostsChanged` / `HostMeta`. Après `Lagged` : `sync_status()` et
-  `sync_conflicts()`.
+  `SyncConflicts { count }`, `SyncPendingChanged` (recharger les hôtes reçus et les snippets à confirmer, et **fermer tout
+  écran de confirmation montrant l'ancien contenu**), `SnippetsChanged` (recharger), `SettingsChanged { settings }` (thème
+  et keymaps en direct ; la GUI valide les keymaps reçues comme la TUI, F18), `HostsChanged` / `HostMeta`. Après `Lagged` :
+  `sync_status()`, `sync_conflicts()`, `sync_pending_hosts()` et `synced_snippets_unconfirmed()`.
+- **Délai dépassé** : une opération qui rend `sync_folder_timeout` (60 s) peut **se terminer quand même** en arrière-plan
+  sur le thread `portico-sync`. L'UI ne suppose ni succès ni échec : elle relit `sync_status()`, `sync_pending_hosts()`,
+  `synced_snippets_unconfirmed()` et `sync_conflicts()` (et attend les événements) avant de proposer de recommencer.
 - **Assistant** : `sync_probe_folder` (Usable | ExistingBundle | Incomplete | Missing | Refused), `sync_generate_passphrase`
   (montrée une fois), jauge par `assess_passphrase` / `NewPassphrase::strength`, `sync_create(SyncCreate { folder,
   passphrase: NewPassphrase, device_name, remember_key: true par défaut })` ; rejoindre : `sync_join_preview` (rien
@@ -670,10 +688,15 @@ sont en `#[cfg(test)]`).
 - **Conflits** : `sync_conflicts` (côtés avec appareils, `local`, valeur) et `sync_resolve(id, Pick { index } | Union |
   KeepBoth { keep })` — Union présélectionnée pour les tags, KeepBoth pour les snippets.
 - **Issues** : `sync_issues` (code, message, indice ; `warning`, `skippable`) et `sync_skip_on_this_device(key)`.
-- **Hôtes reçus (F1)** : `sync_pending_hosts` (nouveau ou non, destination actuelle et reçue, appareils, `renamed_from`),
-  `sync_confirm_hosts` / `sync_reject_hosts` ; badge dans la liste des hôtes ; aucun choix groupé ne vaut confirmation.
-- **Snippets (F8)** : badge via `synced_snippets_unconfirmed`, corps complet puis `confirm_synced_snippet` ; **la TUI doit
-  envoyer ses snippets par `snippet_input_for`** (refus `sync_snippet_unconfirmed`), comme la GUI désormais.
+- **Hôtes reçus (F1)** : `sync_pending_hosts` (nouveau ou non, destination actuelle et reçue, appareils, `renamed_from`,
+  `destination_hash`), `sync_confirm_hosts` / `sync_reject_hosts` avec `(alias, destination_hash)` **tel que montré** :
+  `sync_not_pending` si la destination a changé depuis (recharger, remontrer). Une confirmation sert une fois. Badge dans
+  la liste des hôtes ; aucun choix groupé ne vaut confirmation. `sync_local_host_unsynced` : l'hôte local de même alias
+  n'est pas synchronisable et reste tel quel (issue ignorable).
+- **Snippets (F8)** : badge et écran via `synced_snippets_unconfirmed` (`UnconfirmedSnippet { id, snippet: { name,
+  command, description, run }, hash }`), commande complète puis `confirm_synced_snippet(id, hash)` (`sync_not_pending`
+  si le contenu a changé). Les snippets restent bloqués après « désactiver ». La TUI envoie déjà par `snippet_input_for`
+  (refus affiché en notice avec l'indice) ; S1c ajoute l'écran de revue et de confirmation.
 - GUI : DTO dans `src/lib/api.ts` (types de `crate::sync::api`), commandes Tauri, capability `dialog:allow-open` (dossiers
   seulement). `docs/KEYBINDINGS.md`, palette « Sync… ». Contrat `CLAUDE.md` §2/§4 (module `sync/`) et `SECURITY.md` à la
   clôture.
@@ -707,7 +730,7 @@ sont en `#[cfg(test)]`).
 | F5 | MOYEN | Lire son propre fichier au démarrage et à chaque passe ; s'il est en avance → nouvel id ; horloge, séquence, génération dans le réplica scellé, un seul fichier atomique | ✅ S1a (primitives) ; ✅ S1b (câblage) |
 | F6 | MOYEN | Contexte causal global jamais collecté ; un enregistrement absent couvert par le contexte est supprimé, pas ressuscité | ✅ S1a |
 | F7 | MOYEN | La projection garde l'état non appliqué des clés retenues / en quarantaine / masquées / exclues ; seule la suppression d'une valeur réellement écrite donne une pierre tombale | ✅ S1b |
-| F8 | MOYEN | Snippet modifié par la sync : badge, corps complet et confirmation au premier lancement | ✅ S1b (refus par le cœur, GUI branchée) ; UI et TUI S1c |
+| F8 | MOYEN | Snippet modifié par la sync : badge, corps complet et confirmation au premier lancement | ✅ S1b (refus par le cœur, GUI et TUI branchées, barrière liée au contenu) ; écran de confirmation S1c |
 | F9 | MOYEN | Racine canonisée ; contrôle `symlink_metadata` à chaque passe ; points d'analyse Windows ; exclusion de `~/.ssh`, config, données | ✅ S1b |
 | F10 | MOYEN | IdentityFile : composantes normales seulement sous `~` | ✅ S1a |
 | F11 | MOYEN | Détection de changement de secret par compteur de génération d'index ; HMAC(K_cmp, compte ‖ secret) dans l'enregistrement scellé | S2 (K_cmp dérivée en S1a) |
@@ -718,6 +741,28 @@ sont en `#[cfg(test)]`).
 | F16 | FAIBLE | Nom d'appareil validé (pas de contrôle / bidi / invisible), toujours affiché avec le préfixe d'id | ✅ S1a |
 | F17 | FAIBLE | Ancienneté mesurée sur l'heure locale d'observation de la dernière nouvelle séquence, jamais `published_at` | ✅ S1a |
 | F18 | FAIBLE | `copy_on_select` non synchronisé ; la GUI valide les keymaps reçues comme la TUI ; force de passphrase imposée dans le cœur (`sync_passphrase_weak`) à la création, au changement et à la réinitialisation | ✅ S1a (cœur) ; GUI S1c |
+
+### Revue de sécurité de l'implémentation S1b (agent-security, 2026-10-27)
+
+Aucun constat CRITIQUE ni ÉLEVÉ. Tous corrigés avant S1c.
+
+| # | Gravité | Constat | Correctif | État |
+|---|---|---|---|---|
+| 1 | MOYEN | Confirmations non liées au contenu montré (F1/F8) : une destination publiée entre l'affichage et le clic était écrite | `PendingHostChange::destination_hash`, `UnconfirmedSnippet::hash` ; `sync_confirm_hosts` / `sync_reject_hosts` / `confirm_synced_snippet` exigent le hash montré (`sync_not_pending` sinon) ; `SyncPendingChanged` au changement de **contenu** | ✅ |
+| 2 | MOYEN | « Désactiver » effaçait `confirm.toml` : les snippets reçus non confirmés devenaient exécutables | `confirm.toml` = barrière d'exécution, jamais effacée par « désactiver » ; une entrée part par confirmation ou suppression du snippet | ✅ |
+| 3 | MOYEN | Crash ou échec entre `snippets.toml` et `confirm.toml` : contournement de F8, puis republication comme modification locale | Barrière écrite **avant** le snippet (`SnippetStore::save_guarded`), échec → rien d'écrit ; plus d'effacement de barrière à la projection d'une modification locale | ✅ |
+| 4 | MOYEN | « Garder les deux » créait la copie du côté reçu comme snippet local sans confirmation | Copie d'un côté sans point de cet appareil inscrite dans `confirm.toml` avant écriture | ✅ |
+| 5 | MOYEN | Un hôte local non synchronisable était écrasé et présenté comme « nouveau » | Clé `unsynced` (ou hôte sans valeur synchronisable) jamais écrasée ni supprimée : `sync_local_host_unsynced` ; même garde pour métadonnées, snippets, réglages (`sync_local_unsynced`) | ✅ |
+| 6 | MOYEN | La TUI construisait les octets d'un snippet hors du cœur | TUI branchée sur `Engine::snippet_input_for` ; `snippets::snippet_input` passé en `pub(crate)` | ✅ |
+| 7 | FAIBLE | Confirmation d'hôte jamais consommée | Retirée à l'écriture de la destination et à toute modification locale projetée de l'hôte (refus aussi) | ✅ |
+| 8 | FAIBLE | Pierres tombales collectées pendant la suspension d'un genre | Gardées pour un genre suspendu ou une clé non synchronisable ; suppressions différées pour celles que les autres appareils collectent (§10) | ✅ |
+| 9 | FAIBLE | Écritures du dossier par chemin (fenêtre d'échange de répertoire) | Unix : descripteurs `O_DIRECTORY | O_NOFOLLOW`, `openat(O_EXCL | O_NOFOLLOW)`, `renameat` / `linkat` ; Windows : fenêtre résiduelle documentée | ✅ |
+| 10 | FAIBLE | Fusion du fichier de l'ancien id sans contrôle des contextes, `MergeRefused` ignoré | `check_context_claims` d'abord (différé sinon) ; `MergeRefused` en alerte nommant l'ancien id | ✅ |
+| 11 | FAIBLE | Jetons de rattachement expirés (et DK) gardés jusqu'au prochain aperçu | Purge au début de chaque opération du thread | ✅ |
+| 12 | FAIBLE | DK au trousseau avant la réussite de create / join | Supprimée si la mise en place échoue avant `sync.toml` ; orphelin après crash documenté (§10) | ✅ |
+| 13 | FAIBLE | `is_set_up` (stat) dans une tâche async | `spawn_blocking` | ✅ |
+| 14 | FAIBLE | `bundle.toml` pouvait être réécrit avant le contrôle du fichier propre | Réécriture après ce contrôle (§5.1) | ✅ |
+| 15 | FAIBLE | Délai de 60 s : l'opération continue en arrière-plan | Documenté dans « Ce que S1c attend de S1b » : relire statut, hôtes en attente, snippets, conflits | ✅ |
 
 ### Revue de sécurité de l'implémentation S1a (agent-security, 2026-10-27)
 

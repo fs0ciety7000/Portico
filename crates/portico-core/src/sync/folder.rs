@@ -39,11 +39,19 @@
 //! Every function is blocking: the engine runs them on the dedicated sync
 //! thread (`docs/SYNC.md` §5.4).
 //!
-//! Residual (documented): between the directory check and the rename, a
-//! process that can write to the folder could swap `devices/` for a link;
-//! the write then lands where the link points. That process can already
-//! delete or replace every file of the folder, and what is written is
-//! ciphertext.
+//! Unix writes are anchored on directory descriptors: the root, then
+//! `portico-sync/`, then `devices/` are opened `O_DIRECTORY | O_NOFOLLOW`
+//! one below the other, the temp file is created in the last one with
+//! `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` (`0600`) and moved over the
+//! target with `renameat` (or `linkat` for a create) inside that same
+//! descriptor: a directory swapped for a link after the checks is never
+//! followed.
+//!
+//! Residual (documented, Windows only): between the directory check and
+//! the rename, a process that can write to the folder could swap
+//! `devices/` for a junction; the write then lands where it points. That
+//! process can already delete or replace every file of the folder, and
+//! what is written is ciphertext.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -414,6 +422,136 @@ fn read_no_follow(path: &Path, max: usize) -> Result<Option<Vec<u8>>, SyncError>
     Ok(Some(bytes))
 }
 
+/// Writes anchored on directory descriptors (module doc).
+#[cfg(unix)]
+mod at {
+    use std::io::Write;
+    use std::os::fd::OwnedFd;
+    use std::path::Path;
+
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use rustix::io::Errno;
+
+    use super::{SyncError, io_error};
+
+    /// Temp names tried before giving up.
+    const TEMP_ATTEMPTS: usize = 8;
+
+    fn errno(op: &'static str, e: Errno) -> SyncError {
+        if e == Errno::LOOP || e == Errno::NOTDIR {
+            SyncError::FolderUnsafe {
+                reason: "a link inside the sync folder",
+            }
+        } else {
+            io_error(op, &std::io::Error::from(e))
+        }
+    }
+
+    /// `root`, then each of `dirs` below it, opened as real directories
+    /// (a link anywhere fails with `ELOOP` / `ENOTDIR`).
+    pub(super) fn open_dirs(root: &Path, dirs: &[&str]) -> Result<OwnedFd, SyncError> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut fd = rustix::fs::open(root, flags, Mode::empty()).map_err(|e| errno("open", e))?;
+        for dir in dirs {
+            fd = rustix::fs::openat(&fd, *dir, flags, Mode::empty())
+                .map_err(|e| errno("open", e))?;
+        }
+        Ok(fd)
+    }
+
+    /// An existing `name` in `dir` must be a regular file (a link there is
+    /// never replaced).
+    fn check_target(dir: &OwnedFd, name: &str) -> Result<(), SyncError> {
+        match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => Ok(()),
+            Ok(_) => Err(SyncError::FolderUnsafe {
+                reason: "a sync file is a link or not a regular file",
+            }),
+            Err(Errno::NOENT) => Ok(()),
+            Err(e) => Err(errno("write", e)),
+        }
+    }
+
+    /// A fresh `0600` temp file in `dir` holding `bytes` (synced).
+    fn temp_in(dir: &OwnedFd, name: &str, bytes: &[u8]) -> Result<String, SyncError> {
+        let flags =
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        for _ in 0..TEMP_ATTEMPTS {
+            let suffix = super::super::crypto::random_array::<8>()?;
+            let tmp = format!(".{name}.tmp-{}", super::super::state::hex(&suffix));
+            match rustix::fs::openat(dir, tmp.as_str(), flags, Mode::RUSR | Mode::WUSR) {
+                Ok(fd) => {
+                    let mut file = std::fs::File::from(fd);
+                    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+                    if let Err(e) = written {
+                        let _ = rustix::fs::unlinkat(dir, tmp.as_str(), AtFlags::empty());
+                        return Err(io_error("write", &e));
+                    }
+                    return Ok(tmp);
+                }
+                Err(Errno::EXIST) => {}
+                Err(e) => return Err(errno("write", e)),
+            }
+        }
+        Err(SyncError::FolderIo {
+            op: "write",
+            kind: "no free temp file name".to_owned(),
+        })
+    }
+
+    /// Replaces `dirs/name` under `root` atomically.
+    pub(super) fn replace(
+        root: &Path,
+        dirs: &[&str],
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
+        let dir = open_dirs(root, dirs)?;
+        check_target(&dir, name)?;
+        let tmp = temp_in(&dir, name, bytes)?;
+        if let Err(e) = rustix::fs::renameat(&dir, tmp.as_str(), &dir, name) {
+            let _ = rustix::fs::unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+            return Err(errno("write", e));
+        }
+        let _ = rustix::fs::fsync(&dir);
+        Ok(())
+    }
+
+    /// Creates `dirs/name` under `root`, never replacing an existing entry
+    /// (`BundleExists`).
+    pub(super) fn create(
+        root: &Path,
+        dirs: &[&str],
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
+        let dir = open_dirs(root, dirs)?;
+        let tmp = temp_in(&dir, name, bytes)?;
+        let linked = rustix::fs::linkat(&dir, tmp.as_str(), &dir, name, AtFlags::empty());
+        let _ = rustix::fs::unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+        match linked {
+            Ok(()) => {
+                let _ = rustix::fs::fsync(&dir);
+                Ok(())
+            }
+            Err(Errno::EXIST) => Err(SyncError::BundleExists),
+            Err(e) => Err(errno("create", e)),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl StdFolder {
+    /// The directories (below the root) and the name of `file`.
+    fn location(file: &FolderFile) -> (Vec<&'static str>, String) {
+        match file {
+            FolderFile::Bundle => (vec![SYNC_DIR_NAME], BUNDLE_FILE.to_owned()),
+            FolderFile::BundleCopy(name) => (vec![SYNC_DIR_NAME], name.clone()),
+            FolderFile::Device(name) => (vec![SYNC_DIR_NAME, DEVICES_DIR], name.clone()),
+        }
+    }
+}
+
 impl FolderIo for StdFolder {
     fn check(&self) -> Result<(), SyncError> {
         self.check_root_dir()?;
@@ -515,12 +653,35 @@ impl FolderIo for StdFolder {
         if matches!(file, FolderFile::Device(_)) {
             self.ensure_devices_dir()?;
         }
-        let max = u64::try_from(crate::sync::container::MAX_CONTAINER_FILE_BYTES).unwrap_or(0);
-        crate::store::write_atomic_capped(&path, bytes, max).map_err(|e| from_store("write", e))
+        let max = crate::sync::container::MAX_CONTAINER_FILE_BYTES;
+        if bytes.len() > max {
+            return Err(SyncError::TooLarge {
+                what: "sync file",
+                max,
+            });
+        }
+        #[cfg(unix)]
+        {
+            let _ = path;
+            let (dirs, name) = Self::location(file);
+            at::replace(&self.root, &dirs, &name, bytes)
+        }
+        #[cfg(not(unix))]
+        {
+            let max = u64::try_from(max).unwrap_or(0);
+            crate::store::write_atomic_capped(&path, bytes, max).map_err(|e| from_store("write", e))
+        }
     }
 
     fn create(&self, file: &FolderFile, bytes: &[u8]) -> Result<(), SyncError> {
         let path = self.path_of(file)?;
+        #[cfg(unix)]
+        {
+            let _ = path;
+            let (dirs, name) = Self::location(file);
+            at::create(&self.root, &dirs, &name, bytes)
+        }
+        #[cfg(not(unix))]
         match crate::store::write_new(&path, bytes) {
             Ok(()) => Ok(()),
             Err(crate::store::WriteNewError::Exists) => Err(SyncError::BundleExists),
@@ -891,6 +1052,44 @@ mod tests {
             Err(SyncError::FolderUnsafe { .. })
         ));
         assert!(!dir.path().join("moved/bundle.toml").exists());
+    }
+
+    /// The directory is swapped for a link **after** the checks (the race
+    /// the descriptors close): the anchored write fails, nothing lands
+    /// where the link points.
+    #[cfg(unix)]
+    #[test]
+    fn anchored_write_never_follows_a_directory_swapped_after_the_checks() {
+        let (dir, _paths, root) = rooted();
+        let folder = StdFolder::new(root.clone());
+        folder.init().expect("init");
+        let id = DeviceId::from_hex(ID).expect("id");
+        let devices = root.join("portico-sync/devices");
+        std::fs::remove_dir(&devices).expect("rmdir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        std::os::unix::fs::symlink(&elsewhere, &devices).expect("symlink");
+        let (dirs, name) = StdFolder::location(&FolderFile::primary(&id));
+        assert!(matches!(
+            at::replace(&root, &dirs, &name, b"x"),
+            Err(SyncError::FolderUnsafe { .. })
+        ));
+        assert!(matches!(
+            at::create(&root, &dirs, &name, b"x"),
+            Err(SyncError::FolderUnsafe { .. })
+        ));
+        assert_eq!(std::fs::read_dir(&elsewhere).expect("dir").count(), 0);
+        // A real directory again: the anchored write lands, no temp left.
+        std::fs::remove_file(&devices).expect("rm link");
+        std::fs::create_dir(&devices).expect("mkdir");
+        at::replace(&root, &dirs, &name, b"one").expect("write");
+        at::replace(&root, &dirs, &name, b"two").expect("rewrite");
+        assert_eq!(std::fs::read(devices.join(&name)).expect("r"), b"two");
+        assert_eq!(
+            at::create(&root, &dirs, &name, b"x"),
+            Err(SyncError::BundleExists)
+        );
+        assert_eq!(std::fs::read_dir(&devices).expect("dir").count(), 1);
     }
 
     #[cfg(unix)]

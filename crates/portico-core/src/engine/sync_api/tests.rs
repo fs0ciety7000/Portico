@@ -148,6 +148,36 @@ async fn sync(device: &Device) -> SyncStatus {
     device.engine.sync_now().await.expect("sync")
 }
 
+/// The destination hash of `alias`'s pending change, as a UI shows it.
+async fn shown_hash(device: &Device, alias: &str) -> String {
+    device
+        .engine
+        .sync_pending_hosts()
+        .await
+        .expect("pending")
+        .into_iter()
+        .find(|p| p.alias == alias)
+        .map(|p| p.destination_hash)
+        .unwrap_or_default()
+}
+
+/// Confirms the destination of `alias` the UI shows now.
+async fn confirm(device: &Device, alias: &str) -> crate::Result<SyncStatus> {
+    let hash = shown_hash(device, alias).await;
+    device
+        .engine
+        .sync_confirm_hosts(vec![(alias.to_owned(), hash)])
+        .await
+}
+
+async fn reject(device: &Device, alias: &str) -> crate::Result<SyncStatus> {
+    let hash = shown_hash(device, alias).await;
+    device
+        .engine
+        .sync_reject_hosts(vec![(alias.to_owned(), hash)])
+        .await
+}
+
 fn issue_codes(issues: &[crate::sync::SyncIssue]) -> Vec<String> {
     issues.iter().map(|i| i.summary.code.clone()).collect()
 }
@@ -228,10 +258,7 @@ async fn two_engines_converge_including_an_offline_conflict() {
     );
     assert!(seen.iter().any(|e| matches!(e, EngineEvent::Sync { .. })));
 
-    b.engine
-        .sync_confirm_hosts(vec!["web".into()])
-        .await
-        .expect("confirm");
+    confirm(&b, "web").await.expect("confirm");
     assert_eq!(hosts(&b), vec![("web".to_owned(), "10.0.0.1".to_owned())]);
     let meta = b.engine.load_hosts().await.expect("inventory");
     assert!(
@@ -308,10 +335,7 @@ async fn sync_destination_change_held_until_confirmed() {
         .expect("host");
     create(&a, &folder).await;
     join(&b, &folder, JoinBulkChoice::ReviewEach).await;
-    b.engine
-        .sync_confirm_hosts(vec!["db".into()])
-        .await
-        .expect("confirm");
+    confirm(&b, "db").await.expect("confirm");
     assert_eq!(hosts(&b), vec![("db".to_owned(), "10.0.0.1".to_owned())]);
 
     // A redirects `db`: B keeps the old destination until it confirms.
@@ -347,10 +371,7 @@ async fn sync_destination_change_held_until_confirmed() {
     assert_eq!(hosts(&a), vec![("db".to_owned(), "203.0.113.9".to_owned())]);
 
     // Refused: kept out. A new destination asks again; confirmed: written.
-    b.engine
-        .sync_reject_hosts(vec!["db".into()])
-        .await
-        .expect("reject");
+    reject(&b, "db").await.expect("reject");
     assert!(b.engine.sync_pending_hosts().await.expect("p").is_empty());
     assert_eq!(hosts(&b), vec![("db".to_owned(), "10.0.0.1".to_owned())]);
     a.engine
@@ -360,10 +381,7 @@ async fn sync_destination_change_held_until_confirmed() {
     sync(&a).await;
     sync(&b).await;
     assert_eq!(b.engine.sync_pending_hosts().await.expect("p").len(), 1);
-    b.engine
-        .sync_confirm_hosts(vec!["db".into()])
-        .await
-        .expect("confirm");
+    confirm(&b, "db").await.expect("confirm");
     assert_eq!(
         hosts(&b),
         vec![("db".to_owned(), "203.0.113.10".to_owned())]
@@ -371,7 +389,7 @@ async fn sync_destination_change_held_until_confirmed() {
     // Unknown alias: not pending.
     let error = b
         .engine
-        .sync_confirm_hosts(vec!["nope".into()])
+        .sync_confirm_hosts(vec![("nope".into(), "00".repeat(32))])
         .await
         .expect_err("not pending");
     assert_eq!(error.summary().code, "sync_not_pending");
@@ -522,10 +540,15 @@ async fn synced_snippet_change_requires_confirmation_before_run() {
         .await
         .expect("own snippet");
     // On B it was received: refused until confirmed.
+    let unconfirmed = b.engine.synced_snippets_unconfirmed().await.expect("u");
     assert_eq!(
-        b.engine.synced_snippets_unconfirmed().await.expect("u"),
-        vec![saved.id.clone()]
+        unconfirmed
+            .iter()
+            .map(|u| (u.id.as_str(), u.snippet.command.as_str()))
+            .collect::<Vec<_>>(),
+        [(saved.id.as_str(), "make deploy")]
     );
+    let hash = unconfirmed.first().expect("one").hash.clone();
     let error = b
         .engine
         .snippet_input_for(saved.id.clone(), Vec::new(), None, false)
@@ -533,7 +556,7 @@ async fn synced_snippet_change_requires_confirmation_before_run() {
         .expect_err("unconfirmed");
     assert_eq!(error.summary().code, "sync_snippet_unconfirmed");
     b.engine
-        .confirm_synced_snippet(saved.id.clone())
+        .confirm_synced_snippet(saved.id.clone(), hash)
         .await
         .expect("confirm");
     assert_eq!(
@@ -594,10 +617,7 @@ async fn deletions_propagate_as_tombstones() {
         .expect("group");
     create(&a, &folder).await;
     join(&b, &folder, JoinBulkChoice::ReviewEach).await;
-    b.engine
-        .sync_confirm_hosts(vec!["web".into()])
-        .await
-        .expect("confirm");
+    confirm(&b, "web").await.expect("confirm");
     assert_eq!(hosts(&b).len(), 1);
     a.engine.delete_snippet(&saved.id).await.expect("delete");
     a.engine.set_group("web", None).await.expect("clear");
@@ -1215,10 +1235,7 @@ async fn held_records_from_a_newer_portico_are_kept_and_never_applied() {
         .expect("host");
     create(&a, &folder).await;
     join(&b, &folder, JoinBulkChoice::ReviewEach).await;
-    b.engine
-        .sync_confirm_hosts(vec!["web".into()])
-        .await
-        .expect("confirm");
+    confirm(&b, "web").await.expect("confirm");
     let newer = crate::sync::DeviceId::from_hex("ffffffffffffffffffffffffffffffff").expect("id");
     let dot = format!(r#"{{"d":"{newer}","c":1}}"#);
     forge_snapshot(
@@ -1314,4 +1331,426 @@ async fn inflated_third_party_context_is_deferred_and_reported() {
     assert_eq!(b.engine.sync_pending_hosts().await.expect("p").len(), 1);
     let codes = issue_codes(&b.engine.sync_issues().await.expect("issues"));
     assert!(codes.contains(&"sync_deferred".to_owned()), "{codes:?}");
+}
+
+// ── Security review of S1b: confirmations, gates, unsynced hosts ───────────
+
+fn drained(events: &mut tokio::sync::broadcast::Receiver<EngineEvent>) -> Vec<EngineEvent> {
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    seen
+}
+
+#[tokio::test]
+async fn confirm_host_refuses_a_destination_changed_since_display() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    a.engine
+        .create_host(draft("db", "10.0.0.1"))
+        .await
+        .expect("host");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    // B's UI shows the first destination …
+    let shown = shown_hash(&b, "db").await;
+    assert!(!shown.is_empty());
+    // … A publishes another one, a (background) pass merges it.
+    a.engine
+        .update_host("db", draft("db", "203.0.113.9"))
+        .await
+        .expect("update");
+    sync(&a).await;
+    let mut events = b.engine.subscribe();
+    sync(&b).await;
+    assert!(
+        drained(&mut events)
+            .iter()
+            .any(|e| matches!(e, EngineEvent::SyncPendingChanged)),
+        "same count, new content: announced"
+    );
+    // The confirmation of what was shown never writes what was not.
+    for refused in [
+        b.engine
+            .sync_confirm_hosts(vec![("db".into(), shown.clone())])
+            .await,
+        b.engine
+            .sync_reject_hosts(vec![("db".into(), shown.clone())])
+            .await,
+    ] {
+        assert_eq!(
+            refused.expect_err("stale").summary().code,
+            "sync_not_pending"
+        );
+    }
+    sync(&b).await;
+    assert!(hosts(&b).is_empty());
+    let pending = b.engine.sync_pending_hosts().await.expect("pending");
+    let change = pending.first().expect("still pending");
+    assert_eq!(change.incoming.hostname, "203.0.113.9");
+    assert_ne!(change.destination_hash, shown);
+    confirm(&b, "db").await.expect("confirm what is shown now");
+    assert_eq!(hosts(&b), vec![("db".to_owned(), "203.0.113.9".to_owned())]);
+}
+
+#[tokio::test]
+async fn confirm_snippet_with_stale_hash_is_refused() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    let saved = a
+        .engine
+        .save_snippet(snippet("Deploy", "make deploy"))
+        .await
+        .expect("snippet");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    let shown = b.engine.synced_snippets_unconfirmed().await.expect("u");
+    let first = shown.first().expect("one").hash.clone();
+    a.engine
+        .save_snippet(Snippet {
+            command: "make deploy && curl evil".into(),
+            ..saved.clone()
+        })
+        .await
+        .expect("edit");
+    sync(&a).await;
+    sync(&b).await;
+    let error = b
+        .engine
+        .confirm_synced_snippet(saved.id.clone(), first)
+        .await
+        .expect_err("stale");
+    assert_eq!(error.summary().code, "sync_not_pending");
+    assert_eq!(
+        b.engine
+            .snippet_input_for(saved.id.clone(), Vec::new(), None, false)
+            .await
+            .expect_err("still blocked")
+            .summary()
+            .code,
+        "sync_snippet_unconfirmed"
+    );
+    let now = b.engine.synced_snippets_unconfirmed().await.expect("u");
+    let current = now.first().expect("one");
+    assert_eq!(current.snippet.command, "make deploy && curl evil");
+    let mut events = b.engine.subscribe();
+    b.engine
+        .confirm_synced_snippet(saved.id.clone(), current.hash.clone())
+        .await
+        .expect("confirm");
+    assert!(
+        drained(&mut events)
+            .iter()
+            .any(|e| matches!(e, EngineEvent::SyncPendingChanged))
+    );
+    assert_eq!(
+        b.engine
+            .snippet_input_for(saved.id, Vec::new(), None, false)
+            .await
+            .expect("confirmed"),
+        b"make deploy && curl evil\r"
+    );
+}
+
+#[tokio::test]
+async fn disable_keeps_unconfirmed_snippets_blocked() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    let saved = a
+        .engine
+        .save_snippet(snippet("Deploy", "make deploy"))
+        .await
+        .expect("snippet");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    b.engine
+        .sync_disable(DisableOptions::default())
+        .await
+        .expect("disable");
+    assert!(b.paths.sync_dir().join("confirm.toml").exists());
+    assert_eq!(
+        b.engine
+            .snippet_input_for(saved.id.clone(), Vec::new(), None, false)
+            .await
+            .expect_err("still blocked")
+            .summary()
+            .code,
+        "sync_snippet_unconfirmed"
+    );
+    let unconfirmed = b.engine.synced_snippets_unconfirmed().await.expect("u");
+    assert_eq!(unconfirmed.len(), 1, "still listed for review");
+    // Deleting the snippet drops its gate.
+    b.engine.delete_snippet(&saved.id).await.expect("delete");
+    let gates = crate::sync::state::load_confirmations(&b.paths).expect("gates");
+    assert!(gates.snippets.is_empty());
+}
+
+#[tokio::test]
+async fn snippet_written_without_confirmation_record_stays_blocked() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    let saved = a
+        .engine
+        .save_snippet(snippet("Deploy", "make deploy"))
+        .await
+        .expect("snippet");
+    create(&a, &folder).await;
+    // B cannot record the gate: the snippet is not written at all.
+    let gate = b.paths.sync_dir().join("confirm.toml");
+    std::fs::create_dir_all(&gate).expect("mkdir");
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    assert!(b.engine.snippets().await.expect("s").is_empty());
+    let issues = b.engine.sync_issues().await.expect("issues");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.key == format!("snippet:{}", saved.id)),
+        "{issues:?}"
+    );
+    // The replica as it was before the snippet was written (a crash after
+    // `snippets.toml`, before the replica): kept aside to put back.
+    let backup = tempfile::tempdir().expect("tempdir");
+    for file in ["sync.toml", "replica.snap"] {
+        std::fs::copy(b.paths.sync_dir().join(file), backup.path().join(file)).expect("cp");
+    }
+    std::fs::remove_dir(&gate).expect("rmdir");
+    sync(&b).await;
+    assert_eq!(b.engine.snippets().await.expect("s").len(), 1);
+    for file in ["sync.toml", "replica.snap"] {
+        std::fs::copy(backup.path().join(file), b.paths.sync_dir().join(file)).expect("cp");
+    }
+    // The next pass sees the written snippet as a local change: it is
+    // published, and its gate stays.
+    sync(&b).await;
+    assert_eq!(
+        b.engine
+            .snippet_input_for(saved.id, Vec::new(), None, false)
+            .await
+            .expect_err("blocked")
+            .summary()
+            .code,
+        "sync_snippet_unconfirmed"
+    );
+}
+
+#[tokio::test]
+async fn keep_both_copy_of_remote_side_requires_confirmation() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    let saved = a
+        .engine
+        .save_snippet(snippet("Deploy", "make deploy"))
+        .await
+        .expect("snippet");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    // Offline edits on both sides: a conflict.
+    for (device, command) in [(&a, "make deploy-a"), (&b, "make deploy-b")] {
+        device
+            .engine
+            .save_snippet(Snippet {
+                command: command.into(),
+                ..saved.clone()
+            })
+            .await
+            .expect("edit");
+    }
+    sync(&a).await;
+    sync(&b).await;
+    let conflicts = b.engine.sync_conflicts().await.expect("c");
+    let conflict = conflicts.first().expect("conflict");
+    let local = conflict.sides.iter().find(|s| s.local).expect("local");
+    b.engine
+        .sync_resolve(
+            conflict.id.clone(),
+            SyncResolution::KeepBoth { keep: local.index },
+        )
+        .await
+        .expect("resolve");
+    let snippets = b.engine.snippets().await.expect("s");
+    let copy = snippets
+        .iter()
+        .find(|s| s.command == "make deploy-a")
+        .expect("copy of A's side");
+    assert_ne!(copy.id, saved.id);
+    assert_eq!(
+        b.engine
+            .snippet_input_for(copy.id.clone(), Vec::new(), None, false)
+            .await
+            .expect_err("received: gated")
+            .summary()
+            .code,
+        "sync_snippet_unconfirmed"
+    );
+    // B's own side stays runnable.
+    b.engine
+        .snippet_input_for(saved.id, Vec::new(), None, false)
+        .await
+        .expect("own side");
+}
+
+#[tokio::test]
+async fn received_host_never_overwrites_unsynced_local_host() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    a.engine
+        .create_host(draft("web", "10.0.0.1"))
+        .await
+        .expect("host");
+    create(&a, &folder).await;
+    // B's own `web` uses a key outside the home directory: it cannot be
+    // synced (hosts.conf accepts it).
+    std::fs::write(b.paths.ssh_dir.join("id_web"), "key").expect("key");
+    b.engine
+        .create_host(HostDraft {
+            identity_file: Some(b.paths.ssh_dir.join("id_web")),
+            ..draft("web", "10.9.9.9")
+        })
+        .await
+        .expect("host");
+    let text = std::fs::read_to_string(b.paths.managed_hosts()).expect("r");
+    let outside = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("IdentityFile") {
+                "    IdentityFile /opt/keys/id_web".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(b.paths.managed_hosts(), &outside).expect("w");
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    for _ in 0..2 {
+        sync(&b).await;
+        sync(&a).await;
+    }
+    assert!(
+        b.engine.sync_pending_hosts().await.expect("p").is_empty(),
+        "never offered as new"
+    );
+    let codes = issue_codes(&b.engine.sync_issues().await.expect("issues"));
+    assert!(
+        codes.contains(&"sync_local_host_unsynced".to_owned()),
+        "{codes:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.paths.managed_hosts()).expect("r"),
+        outside
+    );
+    // A received deletion leaves it alone too.
+    a.engine.delete_host("web").await.expect("delete");
+    sync(&a).await;
+    sync(&b).await;
+    assert_eq!(
+        std::fs::read_to_string(b.paths.managed_hosts()).expect("r"),
+        outside
+    );
+}
+
+#[tokio::test]
+async fn confirmation_is_single_use() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    a.engine
+        .create_host(draft("web", "10.0.0.1"))
+        .await
+        .expect("host");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    confirm(&b, "web").await.expect("confirm");
+    assert_eq!(hosts(&b), vec![("web".to_owned(), "10.0.0.1".to_owned())]);
+    // B moves it; A, having seen that, goes elsewhere then back to the
+    // destination B once confirmed.
+    b.engine
+        .update_host("web", draft("web", "10.0.0.3"))
+        .await
+        .expect("local edit");
+    sync(&b).await;
+    sync(&a).await;
+    for hostname in ["10.0.0.4", "10.0.0.1"] {
+        a.engine
+            .update_host("web", draft("web", hostname))
+            .await
+            .expect("update");
+        sync(&a).await;
+    }
+    sync(&b).await;
+    // The old confirmation was used: asked again, nothing written.
+    assert_eq!(hosts(&b), vec![("web".to_owned(), "10.0.0.3".to_owned())]);
+    let pending = b.engine.sync_pending_hosts().await.expect("pending");
+    assert_eq!(
+        pending.first().map(|p| p.incoming.hostname.as_str()),
+        Some("10.0.0.1")
+    );
+}
+
+#[tokio::test]
+async fn tombstone_kept_while_hosts_file_unmanaged() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    a.engine
+        .create_host(draft("web", "10.0.0.1"))
+        .await
+        .expect("host");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    confirm(&b, "web").await.expect("confirm");
+    let managed = std::fs::read_to_string(b.paths.managed_hosts()).expect("r");
+    // B's hosts.conf is edited by hand: hosts are suspended there.
+    std::fs::write(
+        b.paths.managed_hosts(),
+        format!("{managed}\nHost mine\n  HostName 10.2.2.2\n  ForwardAgent yes\n"),
+    )
+    .expect("w");
+    a.engine.delete_host("web").await.expect("delete");
+    for _ in 0..3 {
+        sync(&a).await;
+        sync(&b).await;
+    }
+    // Fixed: the deletion is still there to apply.
+    std::fs::write(b.paths.managed_hosts(), &managed).expect("w");
+    sync(&b).await;
+    assert!(hosts(&b).is_empty(), "{:?}", hosts(&b));
+}
+
+#[tokio::test]
+async fn failed_join_forgets_the_key_it_stored() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    create(&a, &folder).await;
+    let bundle = crate::sync::state::load_config(&a.paths)
+        .expect("c")
+        .expect("set up")
+        .bundle_id;
+    let account = SecretKey::SyncDataKey { bundle, epoch: 1 };
+    // B's sync dir cannot be created: the join fails after the keychain.
+    std::fs::write(b.paths.sync_dir(), b"not a dir").expect("w");
+    let preview = b
+        .engine
+        .sync_join_preview(SyncJoin {
+            folder: folder.clone(),
+            passphrase: SecretString::from(STRONG.to_owned()),
+            device_name: "Desktop".into(),
+            remember_key: true,
+        })
+        .await
+        .expect("preview");
+    b.engine
+        .sync_join_commit(preview.token, JoinBulkChoice::ReviewEach)
+        .await
+        .expect_err("cannot write the local state");
+    assert!(b.secrets.get(&account).expect("get").is_none(), "no orphan");
 }
