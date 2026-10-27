@@ -49,7 +49,11 @@ pub(crate) mod bundle;
 #[allow(dead_code)]
 pub(crate) mod clock;
 #[allow(dead_code)]
+pub(crate) mod container;
+#[allow(dead_code)]
 pub(crate) mod crypto;
+#[allow(dead_code)]
+pub(crate) mod guard;
 #[allow(dead_code)]
 pub(crate) mod model;
 pub mod passphrase;
