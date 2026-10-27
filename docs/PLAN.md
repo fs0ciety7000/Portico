@@ -209,7 +209,21 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
     suppressions différées pendant une suspension, écritures du dossier ancrées sur descripteurs (Unix), TUI branchée
     sur `snippet_input_for`. 46 tests de plus (139 au total pour la sync), dont 29 scénarios multi-moteurs sur un
     fournisseur simulé, plus un test TUI de bout en bout
-  - **S1c, interfaces** : assistant, barre de statut, panneau Sync, conflits, issues, badges, dans la TUI et la GUI
+  - **S1c, interfaces** ✅ *(2026-10-27)* : assistant, barre de statut, panneau Sync, conflits, issues, badges, dans la
+    TUI et la GUI. **TUI** (`apps/portico-tui/src/sync_panel.rs`, `sync_wizard.rs`, `app_sync.rs`, `ui/sync.rs`) :
+    `S` sur la liste et `Ctrl-Space y` (pas de palette dans la TUI) ; panneau à cinq onglets (Overview, Conflicts,
+    Issues, Received hosts, Received snippets) ; décisions liées à l'empreinte affichée, armées 400 ms et suspendues
+    pendant un rechargement `SyncPendingChanged` ; assistant avec complétion de dossier, sonde, jauge, passphrase
+    générée montrée une fois, revue de rattachement, avertissement de récupération **avant** l'étape qui écrit ;
+    élément de barre de statut, badge `⇅` et ligne « changed by » sur l'hôte, bandeau « Sync », badge des snippets
+    non confirmés (leur envoi ouvre la revue). 21 tests de plus, dont un rattachement réel par les touches de
+    l'assistant puis la confirmation d'un hôte reçu ; captures 80×24 et 120×36, Obsidian et Marble. **GUI**
+    (`apps/portico-gui/src-tauri/src/sync.rs`, `src/lib/state/sync.svelte.ts`, `Sync*.svelte`) : « Sync… » dans la
+    palette, élément de statut cliquable ; sélecteur de dossier côté Rust (aucune permission de dialogue dans la
+    webview, capabilities inchangées) ; passphrase générée gardée côté Rust sous un jeton à usage unique et montrée une
+    fois ; l'avertissement de récupération est l'écran final, après la réussite de la création ou du rattachement ;
+    un scénario E2E bureau couvre la mise en place et la désactivation. « Recréer le bundle depuis cet appareil » n'est
+    proposé dans aucune UI (le cœur ne le fournit pas encore)
 - **S2, rotation puis mots de passe** : rotation des clés et « oublier un appareil » **d'abord** ; ensuite mots de passe
   **liés** seulement (jamais les non liés), opt-in au niveau du bundle et décoché par défaut, envoyés sur B seulement si B
   vérifie la même clé hôte
@@ -323,7 +337,7 @@ runner, test manuel concluant du propriétaire sous Windows 11 le 2026-10-27).
 | 8 Windows | ✅ | 780 + 95 GUI + interop (13 scénarios) + CI windows-latest + test manuel Windows 11 | ✅ (2 audits, voir ci-dessous) | GUI Windows : barre native, raccourcis WebView2 neutralisés |
 | 9 Confort du terminal, mises à jour | ✅ | 736 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 10 Thème clair Marble, Auto | ✅ | 760 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (4 thèmes, 80×24 / 880–1200 px) |
-| 11 Sync chiffrée par dossier | ⏳ S1a (fondations) et S1b (moteur) livrés ; S1c, S2, S3 à venir | 139 (S1a 93, dont 6 tests de propriétés ; S1b 46) | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue S1a ✅ ; revue S1b ✅ (15 constats corrigés) | — |
+| 11 Sync chiffrée par dossier | ⏳ S1a (fondations), S1b (moteur) et S1c (interfaces) livrés ; S2, S3 à venir | 139 cœur (S1a 93, dont 6 tests de propriétés ; S1b 46) + 21 TUI (S1c) + GUI | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue S1a ✅ ; revue S1b ✅ (15 constats corrigés) | — |
 
 ## Revues de la phase 8 (2026-10-25)
 

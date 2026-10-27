@@ -97,6 +97,7 @@ Sans recherche, la liste est organisée en sections : « Recent » (5 derniers h
 | Onglet précédent | `[`, `Shift-Tab` | `hosts.prev_tab` |
 | Recharger `~/.ssh/config` | `r` | `hosts.reload` |
 | Thème suivant : Obsidian, Basalt, Travertine Night, Marble, puis Auto (enregistré dans `settings.toml`) | `t` | `hosts.theme` |
+| « Sync » : synchronisation chiffrée par dossier (état, appareils, conflits, hôtes et snippets reçus à confirmer ; l'assistant quand elle est désactivée) | `S` | `hosts.sync` |
 | « Update » : la version disponible (notes de version, commande de mise à jour copiable en OSC 52), ou l'état de la vérification quotidienne | `u` | `hosts.update` |
 | « Updates » : état de la vérification quotidienne des nouvelles versions, `y` l'active ou la désactive (contacte github.com seulement si activée ; `[updates] check` dans `settings.toml`) | `U` | `hosts.update_check` |
 | Aide | `?` | `hosts.help` |
@@ -151,6 +152,7 @@ Dans un terminal, toutes les touches partent vers l'hôte distant, y compris `Ct
 | Panneau debug (présélectionne la session de l'onglet) | `l` | `prefix.debug` |
 | « Record session » : enregistrer le panneau actif (asciicast v2 ; confirmation, seul `y` démarre) ; s'il est déjà enregistré, « Stop recording » l'arrête sans confirmation | `R` | `prefix.record` |
 | « Recordings » : enregistrements de sessions (relire, supprimer) | `v` | `prefix.recordings` |
+| « Sync » : le panneau de synchronisation chiffrée par dossier | `y` | `prefix.sync` |
 | Rechercher un hôte (dans un panneau terminal, la même touche cherche dans son historique : `terminal.search`) | `/` | `prefix.search` |
 | Aide | `?` | `prefix.help` |
 | Onglet n | `1`-`9` | (fixe) |
@@ -352,6 +354,31 @@ Au premier lancement, tant que `[updates] check` est absent de `settings.toml`, 
 | Fermer la vue | `Esc`, `n` |
 
 Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version) puis « Portico never downloads or installs anything itself. »
+
+### TUI : synchronisation chiffrée par dossier
+
+« Sync » : `S` depuis la liste, `Ctrl-Space y` partout (la TUI n'a pas de palette : c'est l'équivalent de « Sync… »). Le panneau a cinq onglets : Overview (état, dossier, mémorisation de la clé, appareils avec leur préfixe d'id, dernière publication, « this device », « inactive »), Conflicts, Issues, Received hosts, Received snippets ; les nombres en couleur d'avertissement. Quand la synchronisation est désactivée, Overview l'explique (seuls des fichiers chiffrés quittent la machine ; clés privées et `known_hosts` jamais synchronisés ; Portico n'envoie rien sur le réseau) et `↵` ouvre l'assistant. Les snippets reçus non confirmés restent consultables et confirmables même désactivée. Toutes les décisions sur un hôte ou un snippet reçu portent sur l'élément affiché (son empreinte) ; elles sont armées : touches ignorées 400 ms après un changement de sélection ou de contenu, et tant qu'un rechargement (`SyncPendingChanged`) est en cours. Aucune confirmation groupée.
+
+| Action | Touches |
+|---|---|
+| Onglet suivant / précédent ; onglet n | `Tab` / `Shift-Tab`, `→` / `←` ; `1`-`5` |
+| Se déplacer ; faire défiler un texte long (commande, détails) | `j` / `k`, `↓` / `↑` ; `PgDn` / `PgUp`, `J` / `K` |
+| Overview : synchroniser maintenant | `s` |
+| Overview : changer la passphrase (« Changing the passphrase does not protect against one that already leaked… », F2) | `c` |
+| Overview : réinitialiser la passphrase depuis cet appareil (puis confirmation armée : seul `y` réinitialise ; les autres appareils affichent une alerte à acquitter) | `R` |
+| Overview : renommer cet appareil | `r` |
+| Overview : mémoriser ou oublier la clé sur cet appareil | `m` |
+| Overview : désactiver (« Forget the key on this device » coché, « Remove this device's file from the sync folder » non coché ; `Espace` coche, `↵` désactive ; les données locales restent) | `D` |
+| Overview : déverrouiller (état « Sync locked ») | `↵` ou `u` |
+| Overview : acquitter l'alerte « passphrase changed or reset on <appareil> » | `a` |
+| Conflicts : choisir (Union présélectionnée pour les tags, « Keep both » pour les snippets ; les champs qui diffèrent en texte principal) ; appliquer ; conflit suivant / précédent | `j` / `k` ; `↵` ; `]` / `[` |
+| Issues : « Skip on this device » quand c'est possible (confirmation armée, seul `y`) | `x` |
+| Received hosts : confirmer / refuser la destination affichée (actuelle et reçue côte à côte : HostName, User, Port, IdentityFile, ProxyJump, valeurs entières) | `y` / `n` |
+| Received snippets : confirmer la commande affichée en entier | `y` |
+| Formulaires (passphrase, nom) : champ suivant ; générer une passphrase (6 mots EFF, montrée une fois) ; la copier (OSC 52) ; une autre ; revenir à la saisie | `Tab` ; `Ctrl-G` ; `c` ; `g` ; `Backspace` |
+| Fermer (un formulaire : revenir) | `Esc`, `q`, `Ctrl-C` |
+
+Assistant « Set up sync » : explication, dossier (saisie, `Tab` complète les dossiers, `↵` demande au moteur ce qu'il contient : « No Portico sync here yet. », « A Portico sync with N devices. », incomplet, absent, refusé avec son indice), puis premier appareil (passphrase et confirmation, jauge de force du moteur, `Ctrl-G` génère, « I wrote it down » à cocher pour une passphrase générée, nom de l'appareil, « Remember the key on this device » coché) ou rejoindre (passphrase, puis revue : hôtes, détails, snippets, réglages, conflits, « nécessite une version plus récente » ; choix Review each / Prefer the folder's / Prefer this device's, qui ne confirment jamais un hôte reçu ; jeton valable 10 min, une fois). Avant l'étape qui écrit, l'avertissement de récupération exige « I understand » (`Espace`). Un refus du moteur s'affiche sous le champ concerné (code et indice). La barre de statut de la liste montre `⇅` et l'état (« Synced 2 min ago », « Syncing… », « Waiting for <appareil> », « Sync folder unavailable », « Sync locked », « Sync off » quand il y a la place), puis conflits et éléments à revoir en couleur d'avertissement, `▲` en couleur d'erreur pour une alerte. Un hôte dont la destination reçue attend porte `⇅` dans la liste ; ses détails disent « changed by <appareil> » ; un bandeau « Sync » sous les détails compte ce qui attend. Un snippet non confirmé porte « ⇅ to review » ; l'envoyer ouvre sa revue (commande entière) au lieu d'une erreur, puis revient aux snippets.
 <!-- END GENERATED: tui -->
 
 ### Panneaux de la TUI, en pratique
@@ -547,6 +574,15 @@ détail affiche « Optional: for ssh, scp and git to see these hosts too, add th
 la ligne `Include …` et « Copy » (aussi dans la palette) ; le bandeau se ferme et ne revient pas pour la même ligne.
 Sur un hôte de `~/.ssh/config` ou importé, la vue en lecture seule (aussi ouverte par « Delete host », titrée
 « <alias> can't be deleted here ») propose `D` (dupliquer) et `t` (tags et notes), comme la TUI.
+
+## Synchronisation chiffrée par dossier (GUI) : principe
+
+« Sync… » dans la palette (`⌘K` / `Ctrl-K`) ouvre le panneau Sync, ou l'assistant quand la synchronisation est
+désactivée ; l'élément de la barre de statut (glyphe et état) est cliquable et ouvre le même panneau. Pas de raccourci
+global par défaut : palette seulement (la TUI a `S` sur la liste et `Ctrl-Space y`). Dans le panneau, `1`–`5`
+changent de section et `s` lance « Sync now ». Dans la revue d'un hôte ou d'un snippet reçu, `c` confirme l'élément
+affiché, `r` le refuse (hôtes seulement) et `Esc` revient. Comme dans la TUI, une décision porte sur le contenu
+affiché (son empreinte) et aucune confirmation groupée n'existe.
 
 <!-- BEGIN GENERATED: gui -->
 <!-- Généré par `pnpm gen:keybindings` (apps/portico-gui/src/lib/shortcuts.ts et keybindings-doc.ts) : ne pas modifier à la main. -->

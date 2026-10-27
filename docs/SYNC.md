@@ -701,6 +701,34 @@ sont en `#[cfg(test)]`).
   seulement). `docs/KEYBINDINGS.md`, palette « Sync… ». Contrat `CLAUDE.md` §2/§4 (module `sync/`) et `SECURITY.md` à la
   clôture.
 
+### Livraison S1c (2026-10-27)
+
+Les deux UIs couvrent tous les parcours de §6 et ce que la liste ci-dessus attend.
+
+- **TUI** (`apps/portico-tui/src/sync_panel.rs`, `sync_wizard.rs`, `app_sync.rs`, `ui/sync.rs`) : `S` sur la liste des
+  hôtes et `Ctrl-Space y` partout (la TUI n'a pas de palette : c'est son « Sync… ») ; panneau à cinq onglets
+  (Overview, Conflicts, Issues, Received hosts, Received snippets), assistant, élément de barre de statut (glyphe `⇅`
+  monochrome et libellé, comptes en couleurs de statut), badge `⇅` et ligne « changed by <appareil> » sur l'hôte,
+  bandeau « Sync » sous les détails, badge des snippets non confirmés. `start_sync` au lancement ; événements
+  appliqués (`SettingsChanged` passe par les mêmes contrôles que `settings.toml`, F18) ; relecture complète après
+  `Lagged`, après `sync_folder_timeout` (dit « peut encore aboutir ») et après chaque opération.
+- **GUI** (`apps/portico-gui/src-tauri/src/sync.rs`, `src/lib/state/sync.svelte.ts`, `Sync*.svelte`) : « Sync… » dans
+  la palette (pas de raccourci global par défaut), élément de statut cliquable ; le sélecteur de dossier tourne côté
+  Rust (aucune permission de dialogue dans la webview, capabilities inchangées) ; une passphrase générée reste côté
+  Rust sous un jeton à usage unique et n'est montrée qu'une fois ; un scénario E2E bureau couvre la mise en place et
+  la désactivation ; mode démo `?sync=…` et `?syncfolder=…` (`docs/TESTING.md`).
+- **F1 / F8** : chaque décision porte sur l'empreinte affichée, un élément à la fois (aucune confirmation groupée) ;
+  `sync_not_pending` recharge et demande de revoir. TUI : touches ignorées 400 ms après un changement de sélection ou
+  de contenu, et tant que le rechargement d'un `SyncPendingChanged` n'est pas revenu. L'envoi d'un snippet refusé par
+  `sync_snippet_unconfirmed` ouvre sa revue (commande entière), puis revient aux snippets.
+
+| Écart S1c | Raison |
+|---|---|
+| Avertissement de récupération : TUI **avant** l'étape qui écrit (création, validation du rattachement) ; GUI en écran final, après la réussite | TUI : « J'ai compris » conditionne l'action irréversible. Les deux disent la même chose ; à aligner si l'on préfère un seul ordre |
+| Raccourci : TUI `S` / `Ctrl-Space y` ; GUI palette seulement | La TUI n'a pas de palette |
+| « Recréer le bundle depuis cet appareil » (§5.5) proposé nulle part | Le cœur ne le fournit pas encore (`FolderUnavailable { BundleMissing }` est expliqué, sans action) |
+| Acquittement proposé pour `PassphraseChanged` seulement | C'est la seule alerte que `sync_acknowledge_alerts` efface ; les autres sont expliquées avec leur indice |
+
 ## 11. Décisions du propriétaire (2026-10-27)
 1. KDF fort : m=256 Mio, t=3, plancher 128 Mio (plafond ramené à 512 Mio / t=6 par F13).
 2. DK mémorisée par défaut (trousseau), option « ne pas mémoriser » pour les machines partagées.
@@ -723,14 +751,14 @@ sont en `#[cfg(test)]`).
 
 | # | Gravité | Exigence | État |
 |---|---|---|---|
-| F1 | ÉLEVÉ | Hôtes reçus soumis aux contrôles de masquage de l'import (quarantaine `sync_alias_shadowed`) ; nouvel hôte et changement de HostName/Port/User/ProxyJump/IdentityFile retenus jusqu'à confirmation sur l'appareil ; PreferRemote/PreferLocal ne confirment jamais | ✅ S1b (UI S1c) |
-| F2 | ÉLEVÉ | En S1, « abandonner ce bundle et en créer un nouveau » est le seul remède ; l'UI de changement dit qu'il ne protège pas d'une passphrase déjà fuitée ; rotation + oubli d'appareil en S2 avant les mots de passe ; recommander de changer les mots de passe serveurs déjà synchronisés après rotation | limite testée en S1a ; UI S1c ; rotation S2 |
+| F1 | ÉLEVÉ | Hôtes reçus soumis aux contrôles de masquage de l'import (quarantaine `sync_alias_shadowed`) ; nouvel hôte et changement de HostName/Port/User/ProxyJump/IdentityFile retenus jusqu'à confirmation sur l'appareil ; PreferRemote/PreferLocal ne confirment jamais | ✅ S1b ; ✅ UI S1c |
+| F2 | ÉLEVÉ | En S1, « abandonner ce bundle et en créer un nouveau » est le seul remède ; l'UI de changement dit qu'il ne protège pas d'une passphrase déjà fuitée ; rotation + oubli d'appareil en S2 avant les mots de passe ; recommander de changer les mots de passe serveurs déjà synchronisés après rotation | limite testée en S1a ; ✅ UI S1c ; rotation S2 |
 | F3 | ÉLEVÉ | Jamais de mot de passe non lié ; liés seulement, envoyés par B seulement si sa clé vérifiée = l'empreinte liée ; mention en lecture seule à l'invite TOFU | S2 (genre `Secret` réservé en S1a, jamais écrit) |
 | F4 | MOYEN | Marque haute locale du bundle, refus des rétrogradations ; keyset_generation dans l'AAD de l'emplacement ; cliquet de format | ✅ S1a |
 | F5 | MOYEN | Lire son propre fichier au démarrage et à chaque passe ; s'il est en avance → nouvel id ; horloge, séquence, génération dans le réplica scellé, un seul fichier atomique | ✅ S1a (primitives) ; ✅ S1b (câblage) |
 | F6 | MOYEN | Contexte causal global jamais collecté ; un enregistrement absent couvert par le contexte est supprimé, pas ressuscité | ✅ S1a |
 | F7 | MOYEN | La projection garde l'état non appliqué des clés retenues / en quarantaine / masquées / exclues ; seule la suppression d'une valeur réellement écrite donne une pierre tombale | ✅ S1b |
-| F8 | MOYEN | Snippet modifié par la sync : badge, corps complet et confirmation au premier lancement | ✅ S1b (refus par le cœur, GUI et TUI branchées, barrière liée au contenu) ; écran de confirmation S1c |
+| F8 | MOYEN | Snippet modifié par la sync : badge, corps complet et confirmation au premier lancement | ✅ S1b (refus par le cœur, GUI et TUI branchées, barrière liée au contenu) ; ✅ écran de confirmation S1c |
 | F9 | MOYEN | Racine canonisée ; contrôle `symlink_metadata` à chaque passe ; points d'analyse Windows ; exclusion de `~/.ssh`, config, données | ✅ S1b |
 | F10 | MOYEN | IdentityFile : composantes normales seulement sous `~` | ✅ S1a |
 | F11 | MOYEN | Détection de changement de secret par compteur de génération d'index ; HMAC(K_cmp, compte ‖ secret) dans l'enregistrement scellé | S2 (K_cmp dérivée en S1a) |
@@ -740,7 +768,7 @@ sont en `#[cfg(test)]`).
 | F15 | FAIBLE | ≤ 8 candidats par appareil, budget d'octets par passe, pause sans suppression au-delà de la limite de listage ; ~~passage opaque plafonné (256 Kio) + « purger »~~ remplacé par les registres génériques (§4.10), bornés par les plafonds d'enregistrements et de taille | ✅ S1a (registres) ; ✅ S1b (dossier) |
 | F16 | FAIBLE | Nom d'appareil validé (pas de contrôle / bidi / invisible), toujours affiché avec le préfixe d'id | ✅ S1a |
 | F17 | FAIBLE | Ancienneté mesurée sur l'heure locale d'observation de la dernière nouvelle séquence, jamais `published_at` | ✅ S1a |
-| F18 | FAIBLE | `copy_on_select` non synchronisé ; la GUI valide les keymaps reçues comme la TUI ; force de passphrase imposée dans le cœur (`sync_passphrase_weak`) à la création, au changement et à la réinitialisation | ✅ S1a (cœur) ; GUI S1c |
+| F18 | FAIBLE | `copy_on_select` non synchronisé ; la GUI valide les keymaps reçues comme la TUI ; force de passphrase imposée dans le cœur (`sync_passphrase_weak`) à la création, au changement et à la réinitialisation | ✅ S1a (cœur) ; ✅ GUI S1c |
 
 ### Revue de sécurité de l'implémentation S1b (agent-security, 2026-10-27)
 
