@@ -1,26 +1,32 @@
 //! Sync passphrase: generator and enforced strength minimum (S1a, owner
-//! decision #11, security review F18).
+//! decision #11, security review F18 and S1a review finding 5).
 //!
 //! The sync folder is exposed to offline attackers by construction, so the
 //! core refuses weak passphrases ([`super::SyncError::PassphraseWeak`]) at
 //! creation, change and reset, whatever the UI did.
 //!
-//! - **Generator**: [`GENERATED_WORDS`] words drawn uniformly (rejection
-//!   sampling over the OS random generator) from the EFF large wordlist
-//!   (7776 words, ≈12.9 bits each, so ≈77.5 bits), separated by spaces.
-//!   The list is embedded (`eff_large_wordlist.txt`, 62 KB, words only;
-//!   © Electronic Frontier Foundation, CC BY 3.0 US,
-//!   <https://www.eff.org/dice>); a test pins its SHA-256.
-//! - **Estimate**: when every word is from the list, the diceware model
-//!   `distinct words × log2(7776)` (the attacker knows the list: a
-//!   general-purpose estimator would overrate four list words); otherwise
-//!   the `zxcvbn` estimate on the first [`ESTIMATE_MAX_CHARS`] characters
-//!   (which bounds its cost).
-//! - **Minimum**: [`MIN_ESTIMATED_BITS`] bits, which [`MIN_DICEWARE_WORDS`]
-//!   distinct list words reach on their own.
+//! - **Generator**: [`GENERATED_WORDS`] **distinct** words drawn uniformly
+//!   (rejection sampling over the OS random generator) from the EFF large
+//!   wordlist (7776 words, ≈12.9 bits each, so ≈77.5 bits), separated by
+//!   spaces. The list is embedded (`eff_large_wordlist.txt`, 62 KB, words
+//!   only; © Electronic Frontier Foundation, CC BY 3.0 US,
+//!   <https://www.eff.org/dice>); a test pins its SHA-256. The result is a
+//!   [`GeneratedPassphrase`], which only the generator can construct.
+//! - **Estimate of a generated passphrase**: the diceware model
+//!   `distinct words × log2(7776)`. It is only valid because the words were
+//!   drawn uniformly, so only a [`GeneratedPassphrase`] gets it.
+//! - **Estimate of a typed passphrase**: the `zxcvbn` estimate on the
+//!   first [`ESTIMATE_MAX_CHARS`] characters (which bounds its cost). When
+//!   every word is a list word, the minimum of that and a sequence-aware
+//!   word model (the first word counts `log2(7776)`, each next one
+//!   `log2(1 + distance in the list to the previous word)`): a person
+//!   typing list words did not draw them at random, and "abacus abdomen
+//!   abdominal abide abiding" (the first five words) must stay weak.
+//! - **Minimum**: [`MIN_ESTIMATED_BITS`] bits, for both kinds. A generated
+//!   passphrase reaches it with [`MIN_DICEWARE_WORDS`] distinct words.
 //!
 //! Nothing here logs or returns the passphrase; [`PassphraseStrength`]
-//! holds numbers only.
+//! holds numbers only and [`GeneratedPassphrase`] has a redacted `Debug`.
 
 use std::sync::LazyLock;
 
@@ -32,7 +38,7 @@ use super::SyncError;
 pub const GENERATED_WORDS: usize = 6;
 /// Minimum estimated strength of a sync passphrase, in bits.
 pub const MIN_ESTIMATED_BITS: u32 = 60;
-/// Distinct wordlist words that are always enough (5 × 12.9 ≈ 64.6 bits).
+/// Distinct generated words that are always enough (5 × 12.9 ≈ 64.6 bits).
 pub const MIN_DICEWARE_WORDS: usize = 5;
 /// `zxcvbn` only looks at this many characters (its cost grows fast).
 pub const ESTIMATE_MAX_CHARS: usize = 100;
@@ -42,6 +48,9 @@ const WORDLIST_TEXT: &str = include_str!("eff_large_wordlist.txt");
 const BITS_PER_WORD: f64 = 12.924_812_503_605_78;
 /// log2(10): zxcvbn reports log10 of the guesses.
 const BITS_PER_DECIMAL_DIGIT: f64 = std::f64::consts::LOG2_10;
+/// Draws before the generator gives up finding distinct words (never
+/// reached in practice: a repeat has a probability below 1/500).
+const MAX_GENERATION_DRAWS: usize = 64;
 
 /// The EFF large wordlist, sorted (byte order), one word per entry.
 static WORDLIST: LazyLock<Vec<&'static str>> = LazyLock::new(|| WORDLIST_TEXT.lines().collect());
@@ -52,14 +61,53 @@ pub struct PassphraseStrength {
     /// Estimated entropy, in bits (rounded down).
     pub estimated_bits: u32,
     /// Distinct EFF wordlist words, when the passphrase is made only of
-    /// them (separated by whitespace); 0 otherwise.
+    /// them (separated by whitespace); 0 otherwise. Informative for a
+    /// typed passphrase: only a generated one gets the diceware credit.
     pub diceware_words: usize,
     /// Meets the minimum: the core accepts it.
     pub acceptable: bool,
 }
 
-/// A fresh passphrase of [`GENERATED_WORDS`] random words.
-pub fn generate_passphrase() -> crate::Result<SecretString> {
+/// A passphrase produced by [`generate_passphrase`]: the only input that
+/// gets the diceware estimate. Not `Clone`, zeroized on drop, `Debug`
+/// redacted; it cannot be built from text.
+#[derive(Debug)]
+pub struct GeneratedPassphrase(SecretString);
+
+impl GeneratedPassphrase {
+    /// The text, to show it to the user once (and nowhere else).
+    pub fn as_secret(&self) -> &SecretString {
+        &self.0
+    }
+}
+
+/// A new sync passphrase (create, change, reset): generated by Portico, or
+/// typed by the user.
+#[derive(Debug)]
+pub enum NewPassphrase {
+    Generated(GeneratedPassphrase),
+    Typed(SecretString),
+}
+
+impl NewPassphrase {
+    pub(crate) fn secret(&self) -> &SecretString {
+        match self {
+            Self::Generated(generated) => &generated.0,
+            Self::Typed(typed) => typed,
+        }
+    }
+
+    /// The strength the core enforces for this input.
+    pub fn strength(&self) -> PassphraseStrength {
+        match self {
+            Self::Generated(generated) => assess_generated(&generated.0),
+            Self::Typed(typed) => assess_passphrase(typed),
+        }
+    }
+}
+
+/// A fresh passphrase of [`GENERATED_WORDS`] distinct random words.
+pub fn generate_passphrase() -> crate::Result<GeneratedPassphrase> {
     Ok(generate_with(&mut os_u32)?)
 }
 
@@ -71,22 +119,35 @@ fn os_u32() -> Result<u32, SyncError> {
 
 fn generate_with(
     next: &mut impl FnMut() -> Result<u32, SyncError>,
-) -> Result<SecretString, SyncError> {
+) -> Result<GeneratedPassphrase, SyncError> {
+    let mut indices: Vec<usize> = Vec::with_capacity(GENERATED_WORDS);
+    let mut draws: usize = 0;
+    while indices.len() < GENERATED_WORDS {
+        draws = draws.saturating_add(1);
+        if draws > MAX_GENERATION_DRAWS {
+            return Err(SyncError::Crypto("passphrase generation failed"));
+        }
+        let index = uniform_index(WORDLIST.len(), next)?;
+        // Distinct words: a repeat is drawn again (uniform over the
+        // sequences of distinct words).
+        if !indices.contains(&index) {
+            indices.push(index);
+        }
+    }
     let longest = WORDLIST.iter().map(|w| w.len()).max().unwrap_or(0);
     // Sized up front: no reallocation leaves a partial copy behind.
     let mut phrase =
         String::with_capacity(GENERATED_WORDS.saturating_mul(longest.saturating_add(1)));
-    for i in 0..GENERATED_WORDS {
-        let index = uniform_index(WORDLIST.len(), next)?;
+    for (i, index) in indices.iter().enumerate() {
         let word = WORDLIST
-            .get(index)
+            .get(*index)
             .ok_or(SyncError::Crypto("wordlist index"))?;
         if i > 0 {
             phrase.push(' ');
         }
         phrase.push_str(word);
     }
-    Ok(SecretString::from(phrase))
+    Ok(GeneratedPassphrase(SecretString::from(phrase)))
 }
 
 /// A uniform index in `0..n` by rejection sampling over 32-bit draws (no
@@ -109,37 +170,47 @@ fn uniform_index(
     }
 }
 
-/// Distinct list words when `passphrase` is only list words, else 0.
-fn diceware_words(passphrase: &str) -> usize {
-    let mut seen: Vec<&str> = Vec::new();
-    for token in passphrase.split_whitespace() {
-        if WORDLIST.binary_search(&token).is_err() {
-            return 0;
-        }
-        if !seen.contains(&token) {
-            seen.push(token);
-        }
-    }
-    seen.len()
+/// List indices of the words when `passphrase` is only list words.
+fn list_indices(passphrase: &str) -> Option<Vec<usize>> {
+    let indices: Option<Vec<usize>> = passphrase
+        .split_whitespace()
+        .map(|token| WORDLIST.binary_search(&token).ok())
+        .collect();
+    indices.filter(|indices| !indices.is_empty())
 }
 
-/// Estimates the strength of `passphrase` (see the module doc).
-pub fn assess_passphrase(passphrase: &SecretString) -> PassphraseStrength {
-    let text = passphrase.expose_secret();
-    let prefix_end = text
-        .char_indices()
-        .nth(ESTIMATE_MAX_CHARS)
-        .map_or(text.len(), |(index, _)| index);
-    let prefix = text.get(..prefix_end).unwrap_or(text);
-    let words = diceware_words(text);
-    let bits = if words > 0 {
-        // Word counts are tiny: the conversion is exact.
-        f64::from(u32::try_from(words).unwrap_or(u32::MAX)) * BITS_PER_WORD
-    } else if prefix.is_empty() {
-        0.0
-    } else {
-        zxcvbn::zxcvbn(prefix, &[]).guesses_log10() * BITS_PER_DECIMAL_DIGIT
-    };
+/// Distinct list words when `passphrase` is only list words, else 0.
+fn diceware_words(passphrase: &str) -> usize {
+    list_indices(passphrase).map_or(0, |mut indices| {
+        indices.sort_unstable();
+        indices.dedup();
+        indices.len()
+    })
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    // Word counts and list distances are below 2^32: exact.
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+/// Sequence-aware model of typed list words (see the module doc).
+fn typed_word_model_bits(indices: &[usize]) -> f64 {
+    let mut bits = 0.0;
+    let mut previous: Option<usize> = None;
+    for &index in indices {
+        bits += match previous {
+            None => BITS_PER_WORD,
+            Some(previous) => {
+                let distance = usize_to_f64(index.abs_diff(previous));
+                (1.0 + distance).log2().min(BITS_PER_WORD)
+            }
+        };
+        previous = Some(index);
+    }
+    bits
+}
+
+fn strength_from_bits(bits: f64, diceware_words: usize) -> PassphraseStrength {
     // Clamped to [0, 1024] first, so the cast cannot truncate or wrap.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let estimated_bits = if bits.is_finite() {
@@ -149,14 +220,44 @@ pub fn assess_passphrase(passphrase: &SecretString) -> PassphraseStrength {
     };
     PassphraseStrength {
         estimated_bits,
-        diceware_words: words,
-        acceptable: estimated_bits >= MIN_ESTIMATED_BITS || words >= MIN_DICEWARE_WORDS,
+        diceware_words,
+        acceptable: estimated_bits >= MIN_ESTIMATED_BITS,
     }
 }
 
+/// Diceware estimate, for generated passphrases only.
+fn assess_generated(passphrase: &SecretString) -> PassphraseStrength {
+    let words = diceware_words(passphrase.expose_secret());
+    let mut strength = strength_from_bits(usize_to_f64(words) * BITS_PER_WORD, words);
+    // 5 distinct drawn words (64.6 bits) are enough by rule.
+    strength.acceptable = strength.acceptable || words >= MIN_DICEWARE_WORDS;
+    strength
+}
+
+/// Estimates the strength of a **typed** passphrase (see the module doc):
+/// the meter the UIs show while the user types.
+pub fn assess_passphrase(passphrase: &SecretString) -> PassphraseStrength {
+    let text = passphrase.expose_secret();
+    let prefix_end = text
+        .char_indices()
+        .nth(ESTIMATE_MAX_CHARS)
+        .map_or(text.len(), |(index, _)| index);
+    let prefix = text.get(..prefix_end).unwrap_or(text);
+    let zxcvbn_bits = if prefix.is_empty() {
+        0.0
+    } else {
+        zxcvbn::zxcvbn(prefix, &[]).guesses_log10() * BITS_PER_DECIMAL_DIGIT
+    };
+    let bits = match list_indices(text) {
+        Some(indices) => zxcvbn_bits.min(typed_word_model_bits(&indices)),
+        None => zxcvbn_bits,
+    };
+    strength_from_bits(bits, diceware_words(text))
+}
+
 /// Refuses a passphrase below the minimum (create, change, reset).
-pub(crate) fn enforce(passphrase: &SecretString) -> Result<(), SyncError> {
-    let strength = assess_passphrase(passphrase);
+pub(crate) fn enforce(passphrase: &NewPassphrase) -> Result<(), SyncError> {
+    let strength = passphrase.strength();
     if strength.acceptable {
         return Ok(());
     }
@@ -174,10 +275,18 @@ pub(crate) mod tests {
     /// A fixed, acceptable passphrase for tests (six list words).
     const WORDLIST_LEN: usize = 7776;
 
-    pub(crate) const STRONG: &str = "abacus abdomen abdominal abide abiding ability";
+    /// A typed passphrase the core accepts (zxcvbn ≥ 60 bits).
+    pub(crate) const STRONG: &str = "vT9#qLm2!xR7&wZp4@Kd8^";
+    /// Another one (passphrase changes).
+    pub(crate) const STRONG_2: &str = "Lq7$mW2#zP9!rT4&nB8^cX";
 
     fn pass(text: &str) -> SecretString {
         SecretString::from(text.to_owned())
+    }
+
+    /// A typed new passphrase.
+    pub(crate) fn typed(text: &str) -> NewPassphrase {
+        NewPassphrase::Typed(pass(text))
     }
 
     #[test]
@@ -203,22 +312,73 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn generated_passphrases_have_six_list_words_and_pass_the_minimum() {
+    fn generated_passphrases_have_six_distinct_list_words_and_pass_the_minimum() {
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..50 {
             let phrase = generate_passphrase().expect("generate");
-            let text = phrase.expose_secret();
+            let text = phrase.as_secret().expose_secret().to_owned();
             let words: Vec<&str> = text.split(' ').collect();
             assert_eq!(words.len(), GENERATED_WORDS);
             assert!(words.iter().all(|w| WORDLIST.binary_search(w).is_ok()));
-            let strength = assess_passphrase(&phrase);
-            // Repeated words are rare but possible: still ≥ 5 distinct
-            // almost always; the bits estimate covers the rest.
+            let distinct: std::collections::BTreeSet<&&str> = words.iter().collect();
+            assert_eq!(distinct.len(), GENERATED_WORDS, "distinct words");
+            let generated = NewPassphrase::Generated(phrase);
+            let strength = generated.strength();
+            assert_eq!(strength.diceware_words, GENERATED_WORDS);
+            assert_eq!(strength.estimated_bits, 77);
             assert!(strength.acceptable, "{strength:?}");
-            enforce(&phrase).expect("acceptable");
-            seen.insert(text.to_owned());
+            enforce(&generated).expect("acceptable");
+            assert!(!format!("{generated:?}").contains(words[0]), "redacted");
+            seen.insert(text);
         }
         assert_eq!(seen.len(), 50, "no repeats");
+    }
+
+    #[test]
+    fn generator_redraws_repeated_words() {
+        // Index 1 three times, then 2, 3, 4, 5, 6: one word each.
+        let mut draws = vec![1u32, 1, 1, 2, 3, 4, 5, 6].into_iter();
+        let mut next = || draws.next().ok_or(SyncError::Crypto("exhausted"));
+        let phrase = generate_with(&mut next).expect("generate");
+        assert_eq!(
+            phrase.as_secret().expose_secret(),
+            "abdomen abdominal abide abiding ability ablaze"
+        );
+        // A generator stuck on one word gives up instead of looping.
+        let mut stuck = || Ok(1u32);
+        assert!(generate_with(&mut stuck).is_err());
+    }
+
+    #[test]
+    fn typed_list_words_in_list_order_are_weak() {
+        // The first five list words: the diceware credit would accept
+        // them (5 words), zxcvbn alone too (≈64 bits). Typed, they are
+        // weak.
+        let first_five = "abacus abdomen abdominal abide abiding";
+        let strength = assess_passphrase(&pass(first_five));
+        assert!(!strength.acceptable, "{strength:?}");
+        assert!(matches!(
+            enforce(&typed(first_five)),
+            Err(SyncError::PassphraseWeak { .. })
+        ));
+        for weak in [
+            "zoom zoology zoologist zookeeper zoning zone",
+            "abacus abdomen abdominal abide abiding ability",
+        ] {
+            assert!(enforce(&typed(weak)).is_err(), "{weak}");
+        }
+        // A generated phrase passes on the diceware estimate; the same
+        // words typed are judged by zxcvbn (never above it, never the
+        // diceware credit).
+        let generated = generate_passphrase().expect("generate");
+        let text = generated.as_secret().expose_secret().to_owned();
+        let generated = NewPassphrase::Generated(generated);
+        enforce(&generated).expect("generated passes");
+        let typed_strength = typed(&text).strength();
+        let zxcvbn_bits = zxcvbn::zxcvbn(&text, &[]).guesses_log10() * BITS_PER_DECIMAL_DIGIT;
+        assert!(f64::from(typed_strength.estimated_bits) <= zxcvbn_bits.floor());
+        assert!(typed_strength.estimated_bits < generated.strength().estimated_bits);
+        assert_eq!(typed_strength.diceware_words, GENERATED_WORDS);
     }
 
     #[test]
@@ -287,7 +447,7 @@ pub(crate) mod tests {
         ] {
             let strength = assess_passphrase(&pass(weak));
             assert!(!strength.acceptable, "{weak:?} → {strength:?}");
-            let error = enforce(&pass(weak)).expect_err("weak");
+            let error = enforce(&typed(weak)).expect_err("weak");
             assert!(matches!(
                 error,
                 SyncError::PassphraseWeak {
@@ -297,12 +457,8 @@ pub(crate) mod tests {
             ));
             assert!(!error.to_string().contains(weak) || weak.is_empty());
         }
-        // Five distinct list words are enough by rule.
-        let five = assess_passphrase(&pass("abacus abdomen abdominal abide abiding"));
-        assert_eq!(five.diceware_words, 5);
-        assert!(five.acceptable);
-        assert!(five.estimated_bits >= 64);
         assert!(assess_passphrase(&pass(STRONG)).acceptable);
+        assert!(assess_passphrase(&pass(STRONG_2)).acceptable);
         // A long random-looking passphrase passes on the zxcvbn estimate.
         let random = assess_passphrase(&pass("vT9#qLm2!xR7&wZp4@Kd8^"));
         assert_eq!(random.diceware_words, 0);

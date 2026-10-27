@@ -23,7 +23,7 @@
 //! | [`bundle`] | `bundle.toml`: KDF parameters, passphrase key slot, sealed roster, header MAC; create / open / change passphrase |
 //! | [`container`] | Sealed device snapshots (`devices/<id>.snap`) and the sealed local replica |
 //! | [`clock`] | Device ids, dots, version vectors, multi-value registers, the local dot issuer |
-//! | [`model`] | Record keys and values, the synced state and its merge, conflicts, tombstone GC, opaque passthrough |
+//! | [`model`] | Record keys and values, the synced state (generic keyed registers of canonical JSON) and its transactional merge, typed projection, conflicts, tombstone GC |
 //! | [`guard`] | Rollback, fork, downgrade and restored-state detection (high-water marks) |
 //! | [`passphrase`] | Diceware generator (EFF large wordlist) and the enforced strength minimum |
 //!
@@ -59,7 +59,9 @@ pub(crate) mod model;
 pub mod passphrase;
 
 pub use clock::DeviceId;
-pub use passphrase::{PassphraseStrength, assess_passphrase, generate_passphrase};
+pub use passphrase::{
+    GeneratedPassphrase, NewPassphrase, PassphraseStrength, assess_passphrase, generate_passphrase,
+};
 
 /// Errors of the sync foundations. Messages name the file kind, the field
 /// or the device (by id), never a value, a key or a passphrase.
@@ -139,6 +141,21 @@ pub enum SyncError {
     #[error("the local sync state of device {device} is older than what it already published")]
     RestoredState { device: String },
 
+    /// Another device's snapshot claims to know dots of this device that
+    /// this device never issued (S1a review finding 3). Only evidence in
+    /// this device's own files can mean "restored"; a third-party claim is
+    /// an alert naming the claimant, never an automatic re-join.
+    #[error("sync device {claimant} claims changes of this device ({device}) that it never made")]
+    ThirdPartyClaim { device: String, claimant: String },
+
+    /// Merging a device's snapshot would break the limits of the state
+    /// (S1a review finding 2): nothing was merged.
+    #[error("sync snapshot of device {device} was not merged: {reason}")]
+    MergeRefused {
+        device: String,
+        reason: &'static str,
+    },
+
     #[error("sync {what} is larger than {max} bytes")]
     TooLarge { what: &'static str, max: usize },
 
@@ -152,6 +169,11 @@ pub enum SyncError {
         reason: &'static str,
     },
 
+    /// A newer Portico wrote this record: this version keeps and relays
+    /// it but cannot change it (S1a review finding 4).
+    #[error("this sync {kind} entry was written by a newer Portico")]
+    RecordHeld { kind: &'static str },
+
     #[error("cannot resolve this sync conflict: {reason}")]
     Resolution { reason: &'static str },
 
@@ -160,6 +182,9 @@ pub enum SyncError {
 }
 
 impl SyncError {
+    // One arm per variant, each with its hint: splitting it would only
+    // scatter a flat table.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn code_and_hint(&self) -> (&'static str, Option<&'static str>) {
         match self {
             Self::WrongPassphrase => (
@@ -230,6 +255,18 @@ impl SyncError {
                     "This device's sync state was restored from a backup: Portico re-joins the sync under a new device identity.",
                 ),
             ),
+            Self::ThirdPartyClaim { .. } => (
+                "sync_third_party_claim",
+                Some(
+                    "Another device's sync file claims changes this device never made. Nothing was merged from it; check that device.",
+                ),
+            ),
+            Self::MergeRefused { .. } => (
+                "sync_merge_refused",
+                Some(
+                    "That device's data would exceed the sync limits: nothing was merged from it. Check that device.",
+                ),
+            ),
             Self::TooLarge { .. } => (
                 "sync_too_large",
                 Some("Too much data to sync: remove unused hosts or snippets."),
@@ -242,6 +279,12 @@ impl SyncError {
                 "sync_record_invalid",
                 Some(
                     "A synced entry was refused on this device and kept aside; edit it on the device that created it.",
+                ),
+            ),
+            Self::RecordHeld { .. } => (
+                "sync_record_needs_newer",
+                Some(
+                    "Another device runs a newer Portico and wrote this entry: update Portico on this device to change it.",
                 ),
             ),
             Self::Resolution { .. } => ("sync_resolution_invalid", None),
@@ -296,6 +339,14 @@ mod tests {
             SyncError::RestoredState {
                 device: "ab".into(),
             },
+            SyncError::ThirdPartyClaim {
+                device: "ab".into(),
+                claimant: "cd".into(),
+            },
+            SyncError::MergeRefused {
+                device: "ab".into(),
+                reason: "x",
+            },
             SyncError::TooLarge {
                 what: "snapshot",
                 max: 1,
@@ -306,6 +357,7 @@ mod tests {
                 field: "alias",
                 reason: "x",
             },
+            SyncError::RecordHeld { kind: "host" },
             SyncError::Resolution { reason: "x" },
             SyncError::Crypto("x"),
         ];

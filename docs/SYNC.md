@@ -23,8 +23,8 @@
   appareil, jamais l'horloge murale). Des écritures concurrentes de valeurs différentes deviennent des **frères** montrés comme
   conflits, jamais résolus en silence ; des valeurs égales fusionnent ; une suppression est une **pierre tombale**, donc
   « édition contre suppression » est aussi un conflit visible.
-- **Retour arrière / rejeu** : chaque appareil garde, dans son état local scellé, la plus haute séquence et l'empreinte vues par
-  appareil et pour `bundle.toml`. Plus bas = retour arrière ; même séquence, autre contenu = fourche. Un attaquant du dossier
+- **Retour arrière / rejeu** : chaque appareil garde, dans son état local scellé, la plus haute séquence et l'empreinte du
+  contenu authentifié vues par appareil et pour `bundle.toml`. Plus bas = retour arrière ; même séquence, autre contenu = fourche. Un attaquant du dossier
   peut **geler** ou **retenir**, mais ni injecter, ni modifier, ni réordonner, ni revenir en arrière sans être détecté par un
   appareil qui a déjà synchronisé.
 - **Contenu** : synchronisés : hôtes de `hosts.conf`, métadonnées de `hosts.toml`, snippets, une liste blanche de réglages et
@@ -112,6 +112,11 @@ Chaque sous-clé a un seul usage (F14). La passphrase n'enveloppe que la DK :
   p=4**. Jamais `vault::KdfBounds::PRODUCTION`.
 - Mémoire Argon2 réservée par `try_reserve_exact` puis `hash_password_into_with_memory` : un manque de mémoire est une erreur
   (`sync_kdf_memory`), jamais un abandon ; elle est remise à zéro après usage.
+- **Limite** (revue S1a, constat 6) : sous Linux avec surallocation (*overcommit*), la réservation réussit presque toujours et
+  les pages ne sont engagées qu'au remplissage ; une machine à court de mémoire peut alors échanger (*swap*) ou rencontrer
+  l'OOM killer au lieu de recevoir `sync_kdf_memory`. Ce qui borne le dommage est le plafond vérifié avant toute allocation
+  (512 Mio au total, quel que soit p) : un `bundle.toml` hostile ne peut pas demander plus. Pas de sonde de mémoire libre à
+  l'exécution (racée et propre à chaque plateforme).
 - Sel de 16 octets, renouvelé à chaque changement de passphrase. L'appareil retient l'empreinte du bundle vérifié (marque
   haute) : des paramètres ou un sel modifiés sans génération ni révision supérieures apparaissent comme une divergence (même
   triplet, autre empreinte) et ne remplacent pas silencieusement le bundle connu.
@@ -140,8 +145,15 @@ roster : 1 Kio minimum). Secrets internes (S2) complétés à 64 octets (≤ 1 K
 
 ### 2.7 Retour arrière et rejeu
 Chaque instantané porte `seq` (strictement croissante), `clock` (compteur de points de l'appareil) et `seen` (séquences
-fusionnées par appareil). Localement, **dans le réplica scellé** (F5), l'appareil garde par appareil (seq max, SHA-256 du
-fichier, heure locale d'observation) et pour le bundle (époque, keyset_generation, révision, SHA-256).
+fusionnées par appareil). Localement, **dans le réplica scellé** (F5), l'appareil garde par appareil (seq max, horloge publiée
+par l'appareil lui-même, empreinte, heure locale d'observation) et pour le bundle (époque, keyset_generation, révision,
+empreinte).
+
+**Empreinte** (revue S1a, constat 1) : SHA-256 du **contenu authentifié** seulement, jamais des octets du fichier. Instantané
+et réplica : AAD, nonce et chiffré décodés (`container::Sealed` / `Opened`) ; `bundle.toml` : entrée canonique du MAC et MAC.
+Un commentaire, des blancs, l'ordre des clés ou des fins de ligne CRLF ajoutés par le fournisseur (ou par un attaquant sans la
+clé) ne changent rien : ils ne peuvent ni simuler une fourche (et forcer un nouveau rattachement) ni une divergence du bundle.
+Un rescellement du même contenu (nonce neuf) change l'empreinte (test `fingerprint_ignores_unauthenticated_formatting`).
 
 | Observation | Verdict | Action |
 |---|---|---|
@@ -151,6 +163,8 @@ fichier, heure locale d'observation) et pour le bundle (époque, keyset_generati
 | même triplet, autre contenu | réécritures concurrentes | choix déterministe du gagnant parmi les copies (S1b) |
 | format plus ancien qu'un format déjà vu | rétrogradation | refusé (cliquet de version) |
 | un `seen[d]` > la `seq` présente pour d | retenu ou pas encore synchronisé | « en attente », avertissement après 24 h |
+| le contexte publié par A affirme `context[d]` > l'horloge que d a publiée lui-même (d ≠ A), ou d absent du roster | contexte gonflé (A5) ou instantané de d pas encore arrivé (revue S1a, constat 3) | instantané de A **différé**, pas fusionné (`guard::check_context_claims`) ; alerte nommant A s'il persiste |
+| un autre appareil affirme des points de **cet** appareil au-delà de son compteur | affirmation d'un tiers | alerte `sync_third_party_claim` nommant l'auteur ; **jamais** de nouveau rattachement automatique (seuls les fichiers propres de l'appareil prouvent une restauration) |
 | **mon propre fichier en avance sur mon état local** | état local restauré (F5) | rejoindre sous un **nouvel id** avant toute écriture |
 | mon propre fichier en retard | perdu ou remis en arrière | republier depuis l'état local |
 | retour arrière cohérent de tout le dossier vu par un appareil qui n'a jamais synchronisé ; gel total | non détectable | limite documentée |
@@ -243,7 +257,10 @@ Corps déchiffré (JSON) : `{format, bundle_id, epoch, keyset_generation, device
 `device_name` (validé, F16), `app_version`, `published_at` (affichage), `clock`, `seen`, `state` (contexte causal global +
 enregistrements). Contenu du réplica (`data_dir/sync/replica.snap`, sous K_local) : nom, `clock`, `publish_seq`, état et
 marques hautes, **dans un seul fichier atomique** (F5). Champs inconnus du corps ignorés (ajouts dans la v1) ; enregistrements
-non compris conservés tels quels (§4).
+d'un genre ou d'une forme non compris : registres génériques fusionnés et relayés causalement, jamais appliqués (§4.10). Un
+conteneur scellé sous une `keyset_generation` supérieure à celle du bundle vérifié est refusé (`sync_corrupt`, revue S1a,
+constat 6). Le JSON du corps (et du roster) est écrit directement dans un tampon `Zeroizing` dimensionné d'avance pour son seau
+et l'étiquette : aucune réallocation ne laisse de fragment de clair en mémoire libérée.
 
 ---
 
@@ -264,6 +281,16 @@ non compris conservés tels quels (§4).
   tags), jamais automatique.
 - Un même point reçu avec une autre valeur (impossible pour un appareil honnête) est **signalé** (`divergent_dots`), la valeur
   déjà vérifiée est gardée.
+- Une valeur **vivante** retirée parce que le contexte de l'autre côté la couvre alors que l'autre côté n'a **aucune** entrée
+  pour la clé est comptée (`dropped_live_without_successor`, revue S1a, constat 3). Hors collecte d'une pierre tombale stable
+  (ou après l'horizon d'ancienneté), seul un contexte gonflé la produit.
+- **Fusion transactionnelle** (revue S1a, constat 2) : `SyncState::merge` calcule sur une copie, vérifie les invariants (20 000
+  enregistrements, 1024 appareils de contexte, 64 valeurs par registre) et la taille encodée (≤ seau maximal moins une marge pour
+  le reste de l'instantané) ; en cas d'échec, `sync_merge_refused` nomme l'appareil source et l'état local n'est pas touché. Un
+  instantané valide d'un appareil compromis ne peut donc pas rendre le nôtre impubliable ou illisible.
+- **Restauration** : `LocalClock` ne conclut à un état restauré (`sync_restored`) que sur les fichiers **propres** de l'appareil
+  (son instantané dans le dossier, son réplica) ; un contexte publié par un tiers est vérifié par `check_claim`, qui alerte sans
+  rien changer (constat 3).
 
 ### 4.2 Clés d'enregistrement
 | Clé | Valeur | Granularité |
@@ -275,7 +302,11 @@ non compris conservés tels quels (§4).
 | `Secret { account }` | secret scellé — **réservé à S2**, mots de passe **liés** seulement (F3) | tout l'enregistrement |
 
 `identity_file` : chemin `~/…` à séparateurs `/` dont toutes les composantes sont normales (pas de `..`, `.`, racine, lecteur,
-`:`, `\`, UNC, caractère de contrôle) (F10). Un chemin hors du dossier personnel n'est pas synchronisé (issue).
+`:`, `\`, UNC, caractère de contrôle) (F10), au moins aussi strict que ce que Portico écrit dans `hosts.conf`
+(`managed_hosts::check_path_chars` : ni guillemet, ni `%`, `$`, `#`, `=`, accent grave, barre oblique inverse) et sans
+composante que Windows réserve ou réécrit (`store::windows_name_problem` : `CON`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`…, point ou
+espace final, `<>:"|?*`), sur toutes les plateformes (revue S1a, constat 6). S1b passe **chaque valeur reçue** par
+`validate_record` avant de l'appliquer. Un chemin hors du dossier personnel n'est pas synchronisé (issue).
 
 ### 4.3 Réglages synchronisés
 | Réglage | Synchronisé ? | Pourquoi |
@@ -293,6 +324,8 @@ non compris conservés tels quels (§4).
 - **Contexte global** (F6) : un enregistrement absent d'un côté dont les points sont couverts par le contexte de ce côté est
   supprimé, pas ressuscité, même s'il revient par un vieil instantané (test
   `gc_tombstone_not_resurrected_by_new_joiner_on_rolled_back_folder`).
+- **Règle** : un registre qui disparaît par couverture ne donne **jamais** de suppression locale. Seule une valeur `Tombstone`
+  explicite supprime un enregistrement local (S1b applique des pierres tombales, jamais des absences).
 - Horizon de repli : **180 jours** (décision #9), mesuré sur l'heure **locale** de la dernière nouvelle séquence observée, jamais
   sur `published_at` (F17). Un appareil revenu après l'horizon passe par une fusion de retour : ce qu'il est seul à détenir est
   listé (« restaurer ou abandonner »), jamais republié en silence.
@@ -333,6 +366,22 @@ impossible (vault verrouillé) → en attente, scellé, `sync_secrets_pending(n)
 ### 4.9 Deux processus Portico (TUI + GUI)
 Verrou exclusif `data_dir/sync/sync.lock` de la projection à la publication ; ordre : `sync.lock` puis les verrous par fichier.
 
+### 4.10 Compatibilité ascendante (revue S1a, constat 4)
+- La couche de fusion ne voit que des **registres génériques** : clé = JSON canonique (compact, clés triées) d'un objet doté d'un
+  `kind` ; valeur = JSON canonique quelconque. Tous les genres, connus ou non de cette version, fusionnent avec les mêmes points
+  et contextes. Les valeurs typées ne sont décodées qu'à la projection (`SyncState::project`).
+- Un registre dont la clé ou une valeur ne se décode pas exactement (genre inconnu, clé de réglage inconnue, champ inconnu :
+  le décodage typé garde `deny_unknown_fields`) est **retenu** (`RegisterView::Held`) : conservé, fusionné et relayé
+  causalement (un enregistrement inconnu modifié deux fois n'est relayé qu'une fois, à sa dernière valeur), signalé « nécessite
+  un Portico plus récent », jamais appliqué, jamais source d'une suppression ou d'un écrasement local ; une écriture locale
+  par-dessus est refusée (`sync_record_needs_newer`).
+- **Ajouter un champ à un genre de valeur existant est donc sûr** : les versions plus anciennes gardent l'enregistrement comme
+  « nécessite plus récent » au lieu de perdre le champ en silence.
+- Deux enregistrements de même clé dans un instantané (écrivain plus récent, clé écrite sous deux formes équivalentes) voient
+  leurs entrées **fusionnées** (toujours sous les plafonds) ; un même point avec deux valeurs est refusé.
+- Seul un JSON sans la **forme générique** d'enregistrement (`{key: {kind, …}, entries: [{dot, at, value}]}`, champ inconnu à ces
+  niveaux, clé sans `kind`) rend l'état illisible (`sync_corrupt`) : changer cette forme exige un nouveau format de corps.
+
 ---
 
 ## 5. Intégration au moteur (S1b)
@@ -345,7 +394,7 @@ Verrou exclusif `data_dir/sync/sync.lock` de la projection à la publication ; o
 | `bundle.rs` | `bundle.toml` : créer, ouvrir (passphrase ou DK), changer / réinitialiser la passphrase, roster | ✅ S1a |
 | `container.rs` | instantanés et réplica scellés | ✅ S1a |
 | `clock.rs` | `DeviceId`, `DeviceName`, points, vecteurs, registres, `LocalClock` | ✅ S1a |
-| `model.rs` | clés, valeurs, `SyncState`, fusion, conflits, collecte, passage opaque | ✅ S1a |
+| `model.rs` | clés, valeurs, `SyncState` (registres génériques), fusion transactionnelle, projection typée, conflits, collecte | ✅ S1a |
 | `guard.rs` | marques hautes, retour arrière, fourche, rétrogradation, restauration, retenues | ✅ S1a |
 | `passphrase.rs` | générateur EFF, estimation, minimum imposé | ✅ S1a |
 | `folder.rs` | `trait FolderIo` + `StdFolder`, candidats, placeholders, racine sûre (F9) | S1b |
@@ -422,7 +471,7 @@ Charger `ui-design-premium`, `tui-patterns` et `gui-tauri-patterns` avant. La pa
 
 ## 7. Stratégie de test
 
-**Livré en S1a (81 tests unitaires et de propriétés dans `sync::`)** :
+**Livré en S1a (93 tests unitaires et de propriétés dans `sync::`, dont ceux des correctifs de la revue S1a)** :
 - `crypto` : vecteurs RFC 5869 (HKDF), RFC 4231 (HMAC) et draft XChaCha ; bornes KDF refusées **sans aucune dérivation**
   (compteur) en dessous du plancher et au-dessus du plafond ; refus d'Argon2 → erreur ; sous-clés distinctes et liées au bundle
   et à l'époque ; encodage canonique non ambigu ; 10⁴ nonces uniques ; chaque octet altéré refusé ; seaux de remplissage ;
@@ -434,17 +483,22 @@ Charger `ui-design-premium`, `tui-patterns` et `gui-tauri-patterns` avant. La pa
   réinitialisation avec la DK ; roster (révision + 1, doublons, plafond) ; emplacements S3 conservés et authentifiés.
 - `container` : aller-retour ; chaque champ de l'AAD lié (séquence, génération, appareil, époque, bundle, clés, longueur
   complétée, type de conteneur) ; échange d'appareil refusé ; octets altérés ; remplissage ; plafonds ; contenu authentifié mais
-  incohérent refusé ; réplica sous sa propre clé.
+  incohérent refusé ; réplica sous sa propre clé ; génération de clés au-delà de celle du bundle refusée.
 - `clock` / `model` : frères concurrents, valeurs égales fusionnées, pierre tombale contre édition = conflit, Union, résolutions
   vérifiées, collecte seulement stable et jamais d'un conflit, `gc_tombstone_not_resurrected_by_new_joiner_on_rolled_back_folder`,
   `restored_data_dir_never_reuses_a_dot`, point divergent signalé, liste blanche des réglages, validation des écritures,
-  `synced_identity_file_rejects_parent_and_unc`, passage opaque plafonné, invariants structurels ; **proptest** : commutativité,
+  `synced_identity_file_rejects_parent_and_unc`, `synced_identity_file_rejects_expansion_chars_and_trailing_dots`,
+  `merge_that_would_break_invariants_is_refused_and_leaves_state_intact`, fusion trop volumineuse refusée,
+  `inflated_third_party_context_is_deferred_not_merged`, `unknown_kind_edited_twice_relays_only_the_latest_and_stays_readable`,
+  champ plus récent sur un genre connu retenu et relayé intact, affirmation d'un tiers sans restauration, invariants
+  structurels ; **proptest** : commutativité,
   associativité, idempotence, convergence quel que soit l'ordre (avec doublons), aucune écriture perdue sauf écrasée, conflit ⇔
   écritures concurrentes de valeurs différentes.
 - `guard` : retour arrière et fourche par appareil, `older_bundle_toml_is_refused_after_passphrase_change`, cliquet de format,
-  état local restauré, mises à jour retenues, ancienneté sur l'heure locale.
-- `passphrase` : liste EFF (7776 mots, triée, SHA-256 épinglé), générateur (6 mots, uniforme, χ² sur 16 classes), rejet de la
-  zone biaisée, seuil de force, coût borné sur entrée longue.
+  état local restauré, mises à jour retenues, ancienneté sur l'heure locale, `fingerprint_ignores_unauthenticated_formatting`,
+  horloges vérifiées et affirmations de contexte.
+- `passphrase` : liste EFF (7776 mots, triée, SHA-256 épinglé), générateur (6 mots distincts, uniforme, χ² sur 16 classes),
+  rejet de la zone biaisée, seuil de force, `typed_list_words_in_list_order_are_weak`, coût borné sur entrée longue.
 
 **À venir** : S1b — `project`/`apply` sur `Paths::rooted` (édition à la main, `hosts.conf` non géré, alias masqué, rebond
 manquant, IdentityFile, snippet avec ESC en quarantaine, `updates.check` jamais synchronisé) et les tests nommés par la revue :
@@ -498,21 +552,31 @@ renommages non atomiques, si le partage sélectif est demandé, ou si la rotatio
 | Écart | Raison |
 |---|---|
 | Champ `revision` ajouté à `bundle.toml` (+1 à chaque écriture), la marque haute du bundle compare (époque, keyset_generation, révision) | `keyset_generation` est lié à l'AAD de l'emplacement (F4) : une mise à jour du roster faite avec la seule DK ne peut pas l'incrémenter sans la passphrase. Sans compteur propre, une ancienne version du roster serait indétectable |
-| `keyset_generation` aussi lié à l'AAD des instantanés et du réplica | Demandé par la liste de liaison de S1a ; la politique (≤ génération courante) se décide en S1b |
+| `keyset_generation` aussi lié à l'AAD des instantanés et du réplica | Demandé par la liste de liaison de S1a ; un conteneur au-delà de la génération courante du bundle est refusé à l'ouverture (revue S1a, constat 6) |
 | Registres stockés par point (pas de contexte par registre), avec un seul contexte global | Le contexte global (F6) rend le contexte par registre redondant ; le regroupement des valeurs égales garde tous les points, ce qui préserve les lois de fusion (une fusion qui jetait des points rendait la fusion non associative) |
-| Passage opaque : tout enregistrement non lu exactement (genre inconnu, clé de réglage inconnue, forme de valeur inconnue, chemin d'identité invalide) est conservé tel quel ; union d'octets plafonnée à 256 Kio, dépassement compté, action « purger » | Simple, sûr (jamais appliqué) et commutatif ; les versions remplacées s'accumulent jusqu'au plafond, une version plus récente de Portico les fusionne |
+| ~~Passage opaque (union d'octets plafonnée à 256 Kio, « purger »)~~ → **registres génériques** (§4.10) : tout enregistrement non lu exactement est retenu, fusionné et relayé causalement ; plus de plafond propre (les plafonds d'enregistrements et de taille s'appliquent), plus d'action « purger » | Revue S1a, constat 4 : l'union d'octets n'avait pas de causalité (versions remplacées accumulées, clé en double fatale chez une version plus récente). « Purger » un registre couvert par notre contexte le supprimerait chez les autres (F6) : action retirée |
 | Alias gardés tels qu'écrits dans les clés | Les collisions à la casse près se contrôlent à l'application avec les règles existantes de `managed_hosts` (S1b) |
-| Estimation : modèle diceware (`mots distincts × log2 7776`) quand tous les mots sont de la liste, `zxcvbn` sinon | `zxcvbn` surestime quatre mots de la liste (≈64 bits contre 51,7 réels) |
+| Estimation : modèle diceware (`mots distincts × log2 7776`) **pour une passphrase générée seulement** (`GeneratedPassphrase`, constructible par le seul générateur, mots distincts) ; passphrase tapée : `zxcvbn`, et si tous les mots sont de la liste, le minimum avec un modèle de séquence (premier mot `log2 7776`, puis `log2(1 + distance dans la liste)`) ; minimum de 60 bits pour les deux | Revue S1a, constat 5 : le crédit diceware s'appliquait à toute suite de mots de la liste (« abacus abdomen abdominal abide abiding », les cinq premiers, passait) ; `zxcvbn` plafonne vers 64 bits et accepte aussi ces mots |
+| Empreintes des marques hautes sur le contenu authentifié, pas sur les octets du fichier | Revue S1a, constat 1 (§2.7) |
+| Fusion transactionnelle, contextes de tiers différés, restauration sur preuve propre seulement | Revue S1a, constats 2 et 3 (§2.7, §4.1) |
+| Conteneur refusé au-delà de la `keyset_generation` du bundle | Revue S1a, constat 6 (la politique « ≤ génération courante » prévue pour S1b est faite dans `container::open`) |
 | Code `sync_snapshot_invalid` pour un instantané non authentifié, distinct de `sync_corrupt` | Un fichier en cours d'envoi ou tronqué (E2) doit pouvoir être traité comme « en attente » par S1b |
 | Plafond KDF 512 Mio / t=6 (au lieu de 1 Gio / t=10) | F13 |
 | Roster limité à 64 appareils | Tenir dans le plafond de 64 Kio de `bundle.toml` avec des noms de 64 caractères |
 
 ### Ce que S1b attend de S1a
-`bundle::{create, open, open_with_key, rewrap, change_passphrase, with_roster}`, `OpenedBundle { header, roster, data_key, keys,
-fingerprint }` ; `container::{seal_snapshot, open_snapshot, seal_replica, open_replica, Binding, SnapshotContent,
-ReplicaContent}` ; `model::{SyncState, RecordKey, RecordValue, validate_record, Resolution, MergeReport}` ;
-`clock::{DeviceId, DeviceName, LocalClock, VersionVector}` ; `guard::{HighWater, check_own_file, withheld, STALE_HORIZON_SECS}` ;
-`passphrase::{generate_passphrase, assess_passphrase}` (publics, pour les jauges des UIs). Les `#[allow(dead_code)]` de
+`bundle::{create, open, open_with_key, rewrap, change_passphrase, with_roster}` (nouvelle passphrase en `&NewPassphrase`),
+`OpenedBundle { header, roster, data_key, keys, fingerprint }` ; `container::{seal_snapshot, open_snapshot, seal_replica,
+open_replica, Binding, Expected, Sealed, SnapshotContent, ReplicaContent}` (`Expected` porte `max_keyset_generation` ; `seal_*`
+rend `Sealed { text, fingerprint }`, l'empreinte à garder pour `check_own_file`) ; `model::{SyncState, RecordKey, RecordValue,
+WireKey, WireValue, RegisterView, Projection, HeldRecord, Conflict, TypedSibling, validate_record, Resolution, MergeReport}`
+(`merge(&other, &source)` faillible, `project()` à appliquer, `held` jamais appliqué ni supprimé) ; `clock::{DeviceId,
+DeviceName, LocalClock, VersionVector}` (`observe_own_context` / `observe_own_counter` sur les fichiers propres seulement,
+`check_claim` pour les tiers) ; `guard::{HighWater, check_own_file, withheld, check_context_claims, ClaimCheck, ContextClaim,
+STALE_HORIZON_SECS}` (`observe_snapshot(device, seq, clock, empreinte, maintenant)`, `verified_clocks()` complété par le
+compteur local et les horloges des instantanés tout juste vérifiés : lire **tous** les instantanés d'une passe avant de juger
+les contextes) ; `passphrase::{generate_passphrase, assess_passphrase, NewPassphrase, GeneratedPassphrase}` (publics, pour les
+jauges des UIs ; `assess_passphrase` juge une saisie, `NewPassphrase::strength` ce que le cœur imposera). Les `#[allow(dead_code)]` de
 `sync/mod.rs` tombent avec S1b.
 
 ---
@@ -553,7 +617,18 @@ ReplicaContent}` ; `model::{SyncState, RecordKey, RecordValue, validate_record, 
 | F12 | MOYEN | « Inclure les mots de passe » est un réglage du bundle, présenté comme tel | S2 |
 | F13 | FAIBLE | Bornes KDF propres (défaut 256 Mio t=3 p=1, plancher 128 Mio, plafond 512 Mio t=6 p=4) ; `try_reserve` + `hash_password_into_with_memory` ; (paramètres, sel) retenus localement | ✅ S1a |
 | F14 | FAIBLE | Sous-clés K_roster et K_local distinctes ; MAC sur encodage canonique préfixé ; comparaison en temps constant ; aucune écriture conditionnée au déballage avant vérification du MAC ; jeton de rattachement à usage unique avec expiration, DK en `Zeroizing` ; DK mémorisée en base64 `Zeroizing`, élément macOS non synchronisable ; « Désactiver » oublie la DK par défaut | ✅ S1a (crypto) ; reste S1b |
-| F15 | FAIBLE | ≤ 8 candidats par appareil, budget d'octets par passe, pause sans suppression au-delà de la limite de listage ; passage opaque plafonné (256 Kio) + « purger » | ✅ S1a (opaque) ; dossier S1b |
+| F15 | FAIBLE | ≤ 8 candidats par appareil, budget d'octets par passe, pause sans suppression au-delà de la limite de listage ; ~~passage opaque plafonné (256 Kio) + « purger »~~ remplacé par les registres génériques (§4.10), bornés par les plafonds d'enregistrements et de taille | ✅ S1a (registres) ; dossier S1b |
 | F16 | FAIBLE | Nom d'appareil validé (pas de contrôle / bidi / invisible), toujours affiché avec le préfixe d'id | ✅ S1a |
 | F17 | FAIBLE | Ancienneté mesurée sur l'heure locale d'observation de la dernière nouvelle séquence, jamais `published_at` | ✅ S1a |
 | F18 | FAIBLE | `copy_on_select` non synchronisé ; la GUI valide les keymaps reçues comme la TUI ; force de passphrase imposée dans le cœur (`sync_passphrase_weak`) à la création, au changement et à la réinitialisation | ✅ S1a (cœur) ; GUI S1c |
+
+### Revue de sécurité de l'implémentation S1a (agent-security, 2026-10-27)
+
+| # | Gravité | Constat | Correctif | État |
+|---|---|---|---|---|
+| 1 | ÉLEVÉ | Empreintes des marques hautes sur les octets bruts : un commentaire ou des CRLF ajoutés forgeaient une fourche ou une divergence sans la DK | Empreinte du contenu authentifié (AAD ‖ nonce ‖ chiffré ; entrée du MAC ‖ MAC), rendue par `seal_*` et `open_*` ; `guard::fingerprint(octets)` retiré | ✅ S1a |
+| 2 | MOYEN | La fusion n'imposait aucun plafond : un instantané valide d'un appareil compromis empoisonnait l'état local | `SyncState::merge` faillible et transactionnelle (copie, invariants, taille), `sync_merge_refused` nommant la source | ✅ S1a |
+| 3 | MOYEN | Contexte causal d'un tiers non borné : suppression silencieuse et nouveau rattachement forcé | `guard::check_context_claims` (instantané différé) ; `dropped_live_without_successor` ; `LocalClock` : restauration sur preuve propre seulement, `sync_third_party_claim` sinon | ✅ S1a (API) ; décision de différer et alertes en S1b |
+| 4 | MOYEN | Passage opaque sans causalité : la compatibilité ascendante promise ne tenait pas | Registres génériques de JSON canonique, décodage typé à la projection, registres retenus jamais appliqués, clés en double fusionnées (§4.10) | ✅ S1a |
+| 5 | MOYEN | Estimation diceware contournable par des mots de la liste tapés | `GeneratedPassphrase` (seule à recevoir le crédit diceware), `NewPassphrase::{Generated, Typed}` ; saisie jugée par `zxcvbn` et un modèle de séquence | ✅ S1a |
+| 6 | FAIBLE | `HomeRelPath` plus laxiste que `managed_hosts` ; génération de clés non bornée à l'ouverture ; limite Argon2 sous surallocation ; clair JSON réalloué | `check_path_chars` + `windows_name_problem` ; `Expected::max_keyset_generation` ; limite documentée (§2.3) ; `serde_json::to_writer` dans un tampon `Zeroizing` pré-dimensionné | ✅ S1a |

@@ -275,6 +275,14 @@ pub(crate) fn derive_kek(
     // Inside the bounds but refused by Argon2 (memory < 8 × lanes).
     .map_err(|_| SyncError::Crypto("invalid key derivation parameters"))?;
     let block_count = argon_params.block_count();
+    // Memory limit (S1a review finding 6): `try_reserve_exact` only fails
+    // when the allocator refuses. Under Linux overcommit it usually
+    // succeeds and the pages are committed while Argon2 fills them, so a
+    // machine short of memory may swap or meet the OOM killer instead of
+    // getting `KdfMemory`. What bounds the damage is the ceiling checked
+    // above (512 MiB in total, whatever the lanes): a hostile
+    // `bundle.toml` cannot ask for more. No runtime probing of free memory
+    // (racy and platform specific).
     let mut memory: Zeroizing<Vec<Block>> = Zeroizing::new(Vec::new());
     memory
         .try_reserve_exact(block_count)
@@ -423,9 +431,70 @@ pub(crate) fn verify_mac(key: &Subkey, message: &[u8], tag: &[u8]) -> Result<boo
     Ok(tag.len() == MAC_LEN && bool::from(expected.as_slice().ct_eq(tag)))
 }
 
-/// SHA-256 fingerprint of a file's bytes (high-water marks).
+/// SHA-256 of bytes (wordlist pin, tests).
 pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+/// Fingerprint of **authenticated** content for the high-water marks
+/// (S1a review finding 1): SHA-256 over `domain` and `parts`, each
+/// prefixed by its length (`u64be`), so two inputs never hash alike. The
+/// callers pass only what the AEAD tag or the MAC covers (decoded fields),
+/// never the file bytes: a comment, whitespace, key order or CRLF in the
+/// TOML envelope must not change it.
+pub(crate) fn content_fingerprint(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for part in std::iter::once(domain.as_bytes()).chain(parts.iter().copied()) {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
+/// Counts the bytes a serializer writes, without storing them.
+struct CountingWriter(usize);
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Exact length of the JSON encoding of `value` (nothing is allocated).
+pub(crate) fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, SyncError> {
+    let mut counter = CountingWriter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|_| SyncError::Crypto("encoding failed"))?;
+    Ok(counter.0)
+}
+
+/// JSON of `value` written straight into a zeroizing buffer sized up front
+/// for its padding bucket and the AEAD tag (S1a review finding 6): the
+/// buffer never reallocates, so no plaintext fragment is left behind in
+/// freed memory. Padded with spaces like [`padded`].
+pub(crate) fn padded_json<T: serde::Serialize + ?Sized>(
+    value: &T,
+    min_bucket: usize,
+    what: &'static str,
+) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+    let len = json_len(value)?;
+    let bucket = bucket_len(len, min_bucket).ok_or(SyncError::TooLarge {
+        what,
+        max: MAX_BUCKET,
+    })?;
+    let mut buffer = Zeroizing::new(Vec::with_capacity(bucket.saturating_add(TAG_LEN)));
+    serde_json::to_writer(&mut *buffer, value).map_err(|_| SyncError::Crypto("encoding failed"))?;
+    // A serializer that is not deterministic would have outgrown the
+    // reserved capacity: refuse rather than seal.
+    if buffer.len() != len {
+        return Err(SyncError::Crypto("encoding is not deterministic"));
+    }
+    buffer.resize(bucket, b' ');
+    Ok(buffer)
 }
 
 /// Fills `out` from the operating system's random generator.

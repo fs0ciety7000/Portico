@@ -1,7 +1,11 @@
 //! The synced state and its merge (S1a).
 //!
 //! A [`SyncState`] is a global causal context ([`VersionVector`]) plus one
-//! multi-value register per [`RecordKey`]:
+//! **generic** multi-value register per key. The merge layer only sees
+//! canonical JSON ([`WireKey`]: an object with a `kind`; [`WireValue`]: any
+//! JSON), so every kind, known to this version or not, merges with the
+//! same dots and contexts (S1a review finding 4). The typed records below
+//! are decoded at projection time ([`SyncState::project`]):
 //!
 //! | Key | Value | Granularity |
 //! |---|---|---|
@@ -19,25 +23,38 @@
 //! - **Global context, never collected** (F6): a record absent from one
 //!   state whose dots that state's context covers was deleted (and its
 //!   tombstone collected) there. The merge drops it instead of
-//!   resurrecting it, even when it comes back from an old snapshot.
+//!   resurrecting it, even when it comes back from an old snapshot. Such a
+//!   disappearance by coverage **never** yields a local deletion: only an
+//!   explicit tombstone value does (S1b applies tombstones, never absences).
+//! - **Transactional merge** (finding 2): [`SyncState::merge`] computes on
+//!   a copy and refuses a result that breaks the caps (records, context
+//!   devices, values per register, encoded size), naming the source device
+//!   and leaving the state untouched.
 //! - **Conflicts** (more than one distinct value) are never resolved
 //!   automatically; [`SyncState::resolve`] is an explicit user decision
 //!   written as a new dot. Concurrent tag edits are conflicts too, with
 //!   [`Resolution::Union`] as an offered choice (owner decision #10).
 //! - **Tombstone collection** only drops a register whose every value is a
 //!   tombstone covered by the causally stable context ([`SyncState::collect_tombstones`]).
-//! - **Opaque passthrough** (F15): a record this version does not
-//!   understand (unknown kind, unknown setting key, unknown value shape) is
-//!   kept verbatim and re-published, up to [`MAX_OPAQUE_BYTES`] in total;
-//!   it is never applied locally.
+//! - **Forward compatibility** (finding 4, replaces the opaque passthrough
+//!   of F15): a register whose key or value this version cannot decode
+//!   exactly (unknown kind, unknown setting key, unknown field: typed
+//!   decoding keeps `deny_unknown_fields`) is [`RegisterView::Held`]: kept,
+//!   merged and relayed causally (an unknown record edited twice is relayed
+//!   once, at its latest value), reported as "needs a newer Portico", never
+//!   applied, never a local deletion or overwrite, and a local write over
+//!   it is refused ([`SyncError::RecordHeld`]). Adding a field to an
+//!   existing value kind is therefore safe. Only JSON without the generic
+//!   record shape makes a state unreadable.
 //! - **Settings whitelist** (F18): `theme`, `dark_theme`, `keymap.tui.*`,
 //!   `keymap.gui.*`. `gui.copy_on_select` and `updates.check` (a network
 //!   consent) are never synced.
 //!
 //! Values are checked structurally here ([`validate_record`]: lengths,
-//! character classes, home-relative identity paths F10). The semantic
-//! checks against the local files (shadowed aliases, `ProxyJump`, snippet
-//! safety rules) run at apply time (S1b) with the existing validators.
+//! character classes, home-relative identity paths F10). S1b runs
+//! [`validate_record`] on **every received value** before applying it,
+//! then the semantic checks against the local files (shadowed aliases,
+//! `ProxyJump`, snippet safety rules) with the existing validators.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,7 +63,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 use super::SyncError;
-use super::clock::{Dot, Entry, LocalClock, MvRegister, VersionVector};
+use super::clock::{DeviceId, Dot, Entry, LocalClock, MvRegister, VersionVector};
+use super::crypto::{self, MAX_BUCKET};
 
 /// Most records in one state (hosts + metadata fields + snippets + settings).
 pub(crate) const MAX_RECORDS: usize = 20_000;
@@ -54,8 +72,12 @@ pub(crate) const MAX_RECORDS: usize = 20_000;
 pub(crate) const MAX_ENTRIES_PER_REGISTER: usize = 64;
 /// Most devices in a context.
 pub(crate) const MAX_CONTEXT_DEVICES: usize = 1024;
-/// Total size of opaque (not understood) records kept for passthrough.
-pub(crate) const MAX_OPAQUE_BYTES: usize = 256 * 1024;
+/// Room left in the largest snapshot bucket for everything but the state
+/// (device name, versions, `seen` vector of up to 1024 devices).
+const SNAPSHOT_HEADROOM_BYTES: usize = 256 * 1024;
+/// Largest encoded state a merge may produce: it must still fit in a
+/// snapshot this device can seal.
+pub(crate) const MAX_STATE_BYTES: usize = MAX_BUCKET - SNAPSHOT_HEADROOM_BYTES;
 
 const MAX_HOSTNAME_CHARS: usize = 255;
 const MAX_USER_CHARS: usize = 255;
@@ -162,7 +184,13 @@ impl RecordKey {
 
 /// A `~/…` identity path with `/` separators and only normal components
 /// (F10): no `..`, `.`, root, drive, `:`, `\`, UNC or control character.
-/// Portable between `/home/a`, `/Users/a` and `C:\Users\a`.
+/// Portable between `/home/a`, `/Users/a` and `C:\Users\a`, so it is at
+/// least as strict as what Portico writes into `hosts.conf`
+/// (`managed_hosts::check_path_chars`: no quote, `%`, `$`, `#`, `=`,
+/// backtick, backslash, control or invisible character) and refuses every
+/// component Windows reserves or rewrites (`store::windows_name_problem`:
+/// `CON`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`…, a trailing dot or space,
+/// `:` and `<>"|?*`) on every platform.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub(crate) struct HomeRelPath(String);
@@ -177,6 +205,9 @@ impl HomeRelPath {
         if text.len() > crate::managed_hosts::MAX_IDENTITY_PATH_BYTES {
             return Err(invalid("is too long"));
         }
+        crate::managed_hosts::check_path_chars(text).map_err(|_| {
+            invalid("contains a quote, `%`, `$`, `#`, `=`, a backslash or a control character")
+        })?;
         let rest = text
             .strip_prefix("~/")
             .ok_or_else(|| invalid("must start with ~/"))?;
@@ -187,11 +218,13 @@ impl HomeRelPath {
             match component {
                 "" => return Err(invalid("has an empty component")),
                 "." | ".." => return Err(invalid("has a . or .. component")),
-                _ if component.contains([':', '\\']) => {
-                    return Err(invalid("contains : or \\"));
-                }
                 _ if component.chars().any(forbidden_char) => {
                     return Err(invalid("contains a control or invisible character"));
+                }
+                _ if crate::store::windows_name_problem(component) => {
+                    return Err(invalid(
+                        "has a name Windows reserves or rewrites (CON, NUL, COM1, `:`, a trailing dot or space)",
+                    ));
                 }
                 _ => {}
             }
@@ -453,37 +486,191 @@ pub(crate) fn validate_record(key: &RecordKey, value: &RecordValue) -> Result<()
 /// A user decision on a conflict, written as a new dot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Resolution {
-    /// Keep the sibling at this index of [`MvRegister::siblings`].
+    /// Keep the sibling at this index of [`Conflict::siblings`] (the
+    /// order of [`SyncState::view`]).
     Pick(usize),
     /// Tags only: the union of every sibling's tags (tombstones count as
     /// no tag). Offered, preselected, never applied automatically.
     Union,
 }
 
+// ── Generic registers: canonical JSON keys and values ───────────────────
+
+/// Canonical JSON (compact, object keys sorted: `serde_json` is built
+/// without `preserve_order`) of any JSON value.
+fn canonical_json(value: &serde_json::Value) -> String {
+    value.to_string()
+}
+
+/// The key of a register as the merge sees it: the canonical JSON of an
+/// object with a non-empty string `kind` (the generic record shape). Every
+/// kind, known to this version or not, merges the same way.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct WireKey(String);
+
+impl WireKey {
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let kind = value.as_object()?.get("kind")?.as_str()?;
+        (!kind.is_empty()).then(|| Self(canonical_json(value)))
+    }
+
+    /// The wire key of a typed key.
+    pub(crate) fn encode(key: &RecordKey) -> Result<Self, SyncError> {
+        let value = serde_json::to_value(key).map_err(|_| SyncError::Crypto("encoding failed"))?;
+        Self::from_json(&value).ok_or(SyncError::Crypto("encoding failed"))
+    }
+
+    /// The typed key, when this version knows the kind and every field,
+    /// and the key is in its canonical form (one typed key ⇔ one wire key).
+    pub(crate) fn decode(&self) -> Option<RecordKey> {
+        let key: RecordKey = serde_json::from_str(&self.0).ok()?;
+        (Self::encode(&key).ok().as_ref() == Some(self)).then_some(key)
+    }
+
+    /// The `kind` field (for "needs a newer Portico" reports).
+    pub(crate) fn kind(&self) -> String {
+        serde_json::from_str::<serde_json::Value>(&self.0)
+            .ok()
+            .and_then(|value| value.get("kind")?.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A register value as the merge sees it: canonical JSON, whatever it
+/// holds. Typed decoding happens at projection time only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WireValue(String);
+
+/// Canonical JSON of [`RecordValue::Tombstone`]: the one value shape every
+/// version understands (deletions and tombstone collection of any kind).
+const TOMBSTONE_JSON: &str = r#"{"type":"tombstone"}"#;
+
+impl WireValue {
+    fn from_json(value: &serde_json::Value) -> Self {
+        Self(canonical_json(value))
+    }
+
+    pub(crate) fn encode(value: &RecordValue) -> Result<Self, SyncError> {
+        let value =
+            serde_json::to_value(value).map_err(|_| SyncError::Crypto("encoding failed"))?;
+        Ok(Self::from_json(&value))
+    }
+
+    /// The typed value; `None` when this version cannot read it exactly
+    /// (unknown type, unknown field: `deny_unknown_fields`, invalid field).
+    pub(crate) fn decode(&self) -> Option<RecordValue> {
+        serde_json::from_str(&self.0).ok()
+    }
+
+    pub(crate) fn is_tombstone(&self) -> bool {
+        self.0 == TOMBSTONE_JSON
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+macro_rules! raw_json_serde {
+    ($name:ident, $parse:expr, $what:literal) => {
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::Error as _;
+                // Emitted verbatim (canonical already).
+                let raw: &RawValue = serde_json::from_str(&self.0).map_err(S::Error::custom)?;
+                raw.serialize(serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = serde_json::Value::deserialize(deserializer)?;
+                let parse: fn(&serde_json::Value) -> Option<Self> = $parse;
+                parse(&value).ok_or_else(|| D::Error::custom($what))
+            }
+        }
+    };
+}
+
+raw_json_serde!(WireKey, WireKey::from_json, "a record key needs a kind");
+raw_json_serde!(
+    WireValue,
+    |value| Some(WireValue::from_json(value)),
+    "invalid record value"
+);
+
+/// One distinct decoded value of a register and every dot that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypedSibling {
+    pub(crate) value: RecordValue,
+    /// Ascending; never empty.
+    pub(crate) dots: Vec<Dot>,
+    /// Most recent display stamp among `dots`.
+    pub(crate) at: i64,
+}
+
+/// How this version sees a register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RegisterView {
+    /// Every surviving value decodes: one sibling, or a conflict (more
+    /// than one). Equal values are grouped, in order of their smallest dot.
+    Known(Vec<TypedSibling>),
+    /// A surviving value needs a newer Portico (or is malformed): the
+    /// register is kept and relayed causally, and it **never** produces a
+    /// local deletion or a local overwrite. The local record stays as it
+    /// is until a version that reads it applies it.
+    Held,
+}
+
+/// A register this version cannot apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldRecord {
+    /// The `kind` of its key.
+    pub(crate) kind: String,
+    /// The typed key when the kind is known but a value is not: S1b must
+    /// leave that local record untouched.
+    pub(crate) key: Option<RecordKey>,
+}
+
+/// The typed view of a whole state (what S1b applies).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Projection {
+    pub(crate) known: BTreeMap<RecordKey, Vec<TypedSibling>>,
+    pub(crate) held: Vec<HeldRecord>,
+}
+
 /// One unresolved conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Conflict<'a> {
-    pub(crate) key: &'a RecordKey,
-    pub(crate) siblings: Vec<super::clock::Sibling<'a, RecordValue>>,
+pub(crate) struct Conflict {
+    pub(crate) key: RecordKey,
+    pub(crate) siblings: Vec<TypedSibling>,
 }
 
-/// What a merge could not keep.
+/// Anomalies of a merge (alerts, S1b).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MergeReport {
-    /// Opaque records left out because [`MAX_OPAQUE_BYTES`] was reached.
-    pub(crate) opaque_dropped: usize,
     /// Dots received with a value different from the local one for the
-    /// same dot: a misbehaving device holding the key (alert, S1b).
+    /// same dot: a misbehaving device holding the key.
     pub(crate) divergent_dots: usize,
+    /// Live local values removed by coverage while the other state has no
+    /// entry for their key (S1a review finding 3). Expected only after a
+    /// tombstone collection; otherwise an inflated context.
+    pub(crate) dropped_live_without_successor: usize,
 }
 
-/// The synced state: global context, registers, opaque passthrough.
+/// The synced state: global context and one generic register per key.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SyncState {
     context: VersionVector,
-    records: BTreeMap<RecordKey, MvRegister<RecordValue>>,
-    /// Raw JSON of records this version does not understand.
-    opaque: BTreeSet<String>,
+    records: BTreeMap<WireKey, MvRegister<WireValue>>,
+}
+
+fn is_live(value: &WireValue) -> bool {
+    !value.is_tombstone()
 }
 
 impl SyncState {
@@ -491,29 +678,86 @@ impl SyncState {
         &self.context
     }
 
-    pub(crate) fn records(&self) -> impl Iterator<Item = (&RecordKey, &MvRegister<RecordValue>)> {
+    /// Every register, known or not.
+    pub(crate) fn registers(&self) -> impl Iterator<Item = (&WireKey, &MvRegister<WireValue>)> {
         self.records.iter()
     }
 
-    pub(crate) fn get(&self, key: &RecordKey) -> Option<&MvRegister<RecordValue>> {
-        self.records.get(key)
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
     }
 
-    pub(crate) fn opaque_len(&self) -> usize {
-        self.opaque.len()
+    /// The register of a typed key.
+    pub(crate) fn register(&self, key: &RecordKey) -> Option<&MvRegister<WireValue>> {
+        self.records.get(&WireKey::encode(key).ok()?)
     }
 
-    /// "Purge" action of the UI (F15): forget every opaque record.
-    pub(crate) fn purge_opaque(&mut self) {
-        self.opaque.clear();
+    /// The typed view of the register of `key` (`None`: no register).
+    pub(crate) fn view(&self, key: &RecordKey) -> Option<RegisterView> {
+        self.register(key).map(view_of)
     }
 
-    /// Joins `other` into `self` (commutative, associative, idempotent on
-    /// registers and contexts).
-    pub(crate) fn merge(&mut self, other: &Self) -> MergeReport {
+    /// The value of `key` when its register is known and holds exactly one
+    /// distinct value.
+    pub(crate) fn value(&self, key: &RecordKey) -> Option<RecordValue> {
+        match self.view(key)? {
+            RegisterView::Known(mut siblings) if siblings.len() == 1 => {
+                siblings.pop().map(|sibling| sibling.value)
+            }
+            _ => None,
+        }
+    }
+
+    /// The typed view of every register.
+    pub(crate) fn project(&self) -> Projection {
+        let mut projection = Projection::default();
+        for (wire_key, register) in &self.records {
+            let key = wire_key.decode();
+            match (key, view_of(register)) {
+                (Some(key), RegisterView::Known(siblings)) => {
+                    projection.known.insert(key, siblings);
+                }
+                (key, _) => projection.held.push(HeldRecord {
+                    kind: wire_key.kind(),
+                    key,
+                }),
+            }
+        }
+        projection
+    }
+
+    /// Joins `other` (the state of device `source`) into `self`.
+    ///
+    /// Transactional (S1a review finding 2): the merge is computed on a
+    /// copy, whose invariants (counts, context size, values per register)
+    /// and encoded size are checked; on failure `self` is left untouched
+    /// and the error names `source`. Commutative, associative and
+    /// idempotent on registers and contexts.
+    pub(crate) fn merge(
+        &mut self,
+        other: &Self,
+        source: &DeviceId,
+    ) -> Result<MergeReport, SyncError> {
+        let mut merged = self.clone();
+        let report = merged.merge_unchecked(other);
+        let refused = |reason| SyncError::MergeRefused {
+            device: source.short(),
+            reason,
+        };
+        if let Some(reason) = merged.invariant_problem() {
+            return Err(refused(reason));
+        }
+        if crypto::json_len(&merged)? > MAX_STATE_BYTES {
+            return Err(refused("the merged data would be too large to publish"));
+        }
+        *self = merged;
+        Ok(report)
+    }
+
+    fn merge_unchecked(&mut self, other: &Self) -> MergeReport {
         let empty = MvRegister::default();
-        let mut divergent_dots: usize = 0;
-        let keys: BTreeSet<RecordKey> = self
+        let mut report = MergeReport::default();
+        let keys: BTreeSet<WireKey> = self
             .records
             .keys()
             .chain(other.records.keys())
@@ -522,28 +766,14 @@ impl SyncState {
         for key in keys {
             let theirs = other.records.get(&key).unwrap_or(&empty);
             let ours = self.records.entry(key).or_default();
-            divergent_dots =
-                divergent_dots.saturating_add(ours.merge(&self.context, theirs, &other.context));
+            let merged = ours.merge(&self.context, theirs, &other.context, is_live);
+            report.divergent_dots = report.divergent_dots.saturating_add(merged.divergent);
+            report.dropped_live_without_successor = report
+                .dropped_live_without_successor
+                .saturating_add(merged.dropped_live_without_successor);
         }
         self.records.retain(|_, register| !register.is_empty());
         self.context.join(&other.context);
-        let mut report = MergeReport {
-            divergent_dots,
-            ..MergeReport::default()
-        };
-        let mut opaque_bytes: usize = self.opaque.iter().map(String::len).sum();
-        for raw in &other.opaque {
-            if self.opaque.contains(raw) {
-                continue;
-            }
-            let next = opaque_bytes.saturating_add(raw.len());
-            if next > MAX_OPAQUE_BYTES {
-                report.opaque_dropped = report.opaque_dropped.saturating_add(1);
-                continue;
-            }
-            opaque_bytes = next;
-            self.opaque.insert(raw.clone());
-        }
         report
     }
 
@@ -551,12 +781,19 @@ impl SyncState {
     pub(crate) fn write(
         &mut self,
         clock: &mut LocalClock,
-        key: RecordKey,
-        value: RecordValue,
+        key: &RecordKey,
+        value: &RecordValue,
         at: i64,
     ) -> Result<Dot, SyncError> {
-        validate_record(&key, &value)?;
-        if !self.records.contains_key(&key) && self.records.len() >= MAX_RECORDS {
+        validate_record(key, value)?;
+        let wire_key = WireKey::encode(key)?;
+        let wire_value = WireValue::encode(value)?;
+        if let Some(RegisterView::Held) = self.view(key) {
+            // A newer device's value: overwriting it from here would lose
+            // what this version cannot read.
+            return Err(SyncError::RecordHeld { kind: key.kind() });
+        }
+        if !self.records.contains_key(&wire_key) && self.records.len() >= MAX_RECORDS {
             return Err(SyncError::TooLarge {
                 what: "sync state",
                 max: MAX_RECORDS,
@@ -564,7 +801,10 @@ impl SyncState {
         }
         let dot = clock.next()?;
         self.context.insert(dot);
-        self.records.entry(key).or_default().write(dot, at, value);
+        self.records
+            .entry(wire_key)
+            .or_default()
+            .write(dot, at, wire_value);
         Ok(dot)
     }
 
@@ -573,25 +813,25 @@ impl SyncState {
     pub(crate) fn delete(
         &mut self,
         clock: &mut LocalClock,
-        key: RecordKey,
+        key: &RecordKey,
         at: i64,
     ) -> Result<Option<Dot>, SyncError> {
-        match self.records.get(&key) {
+        match self.register(key) {
             None => Ok(None),
-            Some(register) if register.single().is_some_and(RecordValue::is_tombstone) => Ok(None),
-            Some(_) => self.write(clock, key, RecordValue::Tombstone, at).map(Some),
+            Some(register) if register.single().is_some_and(WireValue::is_tombstone) => Ok(None),
+            Some(_) => self
+                .write(clock, key, &RecordValue::Tombstone, at)
+                .map(Some),
         }
     }
 
-    /// Every register with more than one distinct value.
-    pub(crate) fn conflicts(&self) -> Vec<Conflict<'_>> {
-        self.records
-            .iter()
-            .filter(|(_, register)| register.is_conflict())
-            .map(|(key, register)| Conflict {
-                key,
-                siblings: register.siblings(),
-            })
+    /// Every known register with more than one distinct value.
+    pub(crate) fn conflicts(&self) -> Vec<Conflict> {
+        self.project()
+            .known
+            .into_iter()
+            .filter(|(_, siblings)| siblings.len() > 1)
+            .map(|(key, siblings)| Conflict { key, siblings })
             .collect()
     }
 
@@ -604,15 +844,22 @@ impl SyncState {
         resolution: &Resolution,
         at: i64,
     ) -> Result<Dot, SyncError> {
-        let register = self.records.get(key).ok_or(SyncError::Resolution {
-            reason: "no such record",
-        })?;
-        if !register.is_conflict() {
+        let siblings = match self.view(key) {
+            None => {
+                return Err(SyncError::Resolution {
+                    reason: "no such record",
+                });
+            }
+            Some(RegisterView::Held) => {
+                return Err(SyncError::RecordHeld { kind: key.kind() });
+            }
+            Some(RegisterView::Known(siblings)) => siblings,
+        };
+        if siblings.len() < 2 {
             return Err(SyncError::Resolution {
                 reason: "the record is not in conflict",
             });
         }
-        let siblings = register.siblings();
         let value = match resolution {
             Resolution::Pick(index) => siblings
                 .get(*index)
@@ -635,7 +882,7 @@ impl SyncState {
                 }
                 let mut union = BTreeSet::new();
                 for sibling in &siblings {
-                    match sibling.value {
+                    match &sibling.value {
                         RecordValue::Tags(tags) => union.extend(tags.iter().cloned()),
                         RecordValue::Tombstone => {}
                         _ => {
@@ -652,116 +899,157 @@ impl SyncState {
                 }
             }
         };
-        self.write(clock, key.clone(), value, at)
+        self.write(clock, key, &value, at)
     }
 
     /// Drops registers whose every surviving dot is a tombstone covered by
     /// `stable` (the meet of the contexts of every non-revoked device,
-    /// computed by the engine). The global context keeps them deleted
-    /// everywhere (F6). Returns how many registers were collected.
+    /// computed by the engine), whatever their kind. The global context
+    /// keeps them deleted everywhere (F6). Returns how many registers were
+    /// collected.
     pub(crate) fn collect_tombstones(&mut self, stable: &VersionVector) -> usize {
         let before = self.records.len();
         self.records
-            .retain(|_, register| !register.collect_if(stable, RecordValue::is_tombstone));
+            .retain(|_, register| !register.collect_if(stable, WireValue::is_tombstone));
         before.saturating_sub(self.records.len())
     }
 
     /// Structural invariants of a state read from a snapshot: bounded
     /// counts, counters ≥ 1, every dot covered by the context.
     pub(crate) fn check_invariants(&self) -> Result<(), SyncError> {
-        let corrupt = |reason| SyncError::Corrupt {
-            what: "snapshot",
-            reason,
-        };
         if self.records.len() > MAX_RECORDS {
             return Err(SyncError::TooLarge {
                 what: "sync state",
                 max: MAX_RECORDS,
             });
         }
-        if self.context.len() > MAX_CONTEXT_DEVICES {
-            return Err(corrupt("too many devices in the context"));
+        match self.invariant_problem() {
+            None => Ok(()),
+            Some(reason) => Err(SyncError::Corrupt {
+                what: "snapshot",
+                reason,
+            }),
         }
-        if self.opaque.iter().map(String::len).sum::<usize>() > MAX_OPAQUE_BYTES {
-            return Err(SyncError::TooLarge {
-                what: "unknown sync records",
-                max: MAX_OPAQUE_BYTES,
-            });
+    }
+
+    fn invariant_problem(&self) -> Option<&'static str> {
+        if self.records.len() > MAX_RECORDS {
+            return Some("too many records");
+        }
+        if self.context.len() > MAX_CONTEXT_DEVICES {
+            return Some("too many devices in the context");
         }
         if self.context.iter().any(|(_, &counter)| counter == 0) {
-            return Err(corrupt("zero counter in the context"));
+            return Some("zero counter in the context");
         }
         for register in self.records.values() {
             if register.is_empty() {
-                return Err(corrupt("empty register"));
+                return Some("empty register");
             }
             if register.entries().len() > MAX_ENTRIES_PER_REGISTER {
-                return Err(corrupt("too many concurrent values"));
+                return Some("too many concurrent values");
             }
             for dot in register.entries().keys() {
                 if dot.counter == 0 || !self.context.covers(dot) {
-                    return Err(corrupt("a value is outside the causal context"));
+                    return Some("a value is outside the causal context");
                 }
             }
         }
-        Ok(())
+        None
     }
 }
 
+/// Typed view of one register (see [`RegisterView`]).
+fn view_of(register: &MvRegister<WireValue>) -> RegisterView {
+    let mut siblings: Vec<TypedSibling> = Vec::new();
+    for (dot, entry) in register.entries() {
+        let Some(value) = entry.value.decode() else {
+            return RegisterView::Held;
+        };
+        if let Some(sibling) = siblings.iter_mut().find(|s| s.value == value) {
+            sibling.dots.push(*dot);
+            sibling.at = sibling.at.max(entry.at);
+        } else {
+            siblings.push(TypedSibling {
+                value,
+                dots: vec![*dot],
+                at: entry.at,
+            });
+        }
+    }
+    RegisterView::Known(siblings)
+}
+
 // ── Wire format ─────────────────────────────────────────────────────────
+//
+// The generic record shape: `{"key": {"kind": "…", …}, "entries": [{"dot":
+// {"d", "c"}, "at", "value": <any JSON>}]}`. Every kind, known or not, has
+// it, so every kind merges causally. Something without that shape (an
+// unknown field at the record or entry level, a key without `kind`) makes
+// the whole state unreadable (`Corrupt`): changing the generic shape needs
+// a new body format.
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EntryWire {
     dot: Dot,
     at: i64,
-    value: RecordValue,
+    value: WireValue,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordWire {
-    key: RecordKey,
+    key: WireKey,
     entries: Vec<EntryWire>,
 }
 
 #[derive(Serialize)]
 struct StateWireOut<'a> {
     context: &'a VersionVector,
-    records: Vec<Box<RawValue>>,
+    records: Vec<RecordWireOut<'a>>,
+}
+
+#[derive(Serialize)]
+struct RecordWireOut<'a> {
+    key: &'a WireKey,
+    entries: Vec<EntryWireOut<'a>>,
+}
+
+#[derive(Serialize)]
+struct EntryWireOut<'a> {
+    dot: Dot,
+    at: i64,
+    value: &'a WireValue,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StateWireIn {
     context: VersionVector,
-    records: Vec<Box<RawValue>>,
+    records: Vec<RecordWire>,
 }
 
 impl Serialize for SyncState {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::Error as _;
-        let mut records = Vec::with_capacity(self.records.len().saturating_add(self.opaque.len()));
-        for (key, register) in &self.records {
-            let wire = RecordWire {
-                key: key.clone(),
-                entries: register
-                    .entries()
-                    .iter()
-                    .map(|(dot, entry)| EntryWire {
-                        dot: *dot,
-                        at: entry.at,
-                        value: entry.value.clone(),
-                    })
-                    .collect(),
-            };
-            records.push(serde_json::value::to_raw_value(&wire).map_err(S::Error::custom)?);
-        }
-        for raw in &self.opaque {
-            records.push(RawValue::from_string(raw.clone()).map_err(S::Error::custom)?);
-        }
         StateWireOut {
             context: &self.context,
-            records,
+            records: self
+                .records
+                .iter()
+                .map(|(key, register)| RecordWireOut {
+                    key,
+                    entries: register
+                        .entries()
+                        .iter()
+                        .map(|(dot, entry)| EntryWireOut {
+                            dot: *dot,
+                            at: entry.at,
+                            value: &entry.value,
+                        })
+                        .collect(),
+                })
+                .collect(),
         }
         .serialize(serializer)
     }
@@ -773,38 +1061,38 @@ impl<'de> Deserialize<'de> for SyncState {
         if wire.records.len() > MAX_RECORDS.saturating_add(MAX_RECORDS) {
             return Err(D::Error::custom("too many records"));
         }
-        let mut state = Self {
-            context: wire.context,
-            ..Self::default()
-        };
-        for raw in wire.records {
-            // Anything this version cannot read exactly is kept verbatim.
-            let Ok(record) = serde_json::from_str::<RecordWire>(raw.get()) else {
-                state.opaque.insert(raw.get().to_owned());
-                continue;
-            };
-            if record.entries.len() > MAX_ENTRIES_PER_REGISTER {
-                return Err(D::Error::custom("too many concurrent values"));
-            }
-            let mut entries = BTreeMap::new();
+        let mut records: BTreeMap<WireKey, BTreeMap<Dot, Entry<WireValue>>> = BTreeMap::new();
+        for record in wire.records {
+            // Several records with one key (a newer writer, or a key
+            // written in two equivalent forms): their entries merge, still
+            // bounded by the caps below.
+            let entries = records.entry(record.key).or_default();
             for entry in record.entries {
                 let value = Entry {
                     at: entry.at,
                     value: entry.value,
                 };
-                if entries.insert(entry.dot, value).is_some() {
-                    return Err(D::Error::custom("duplicate dot"));
+                match entries.get(&entry.dot) {
+                    Some(existing) if existing.value != value.value => {
+                        return Err(D::Error::custom("one dot with two values"));
+                    }
+                    Some(_) => {}
+                    None => {
+                        entries.insert(entry.dot, value);
+                    }
+                }
+                if entries.len() > MAX_ENTRIES_PER_REGISTER {
+                    return Err(D::Error::custom("too many concurrent values"));
                 }
             }
-            if state
-                .records
-                .insert(record.key, MvRegister::from_entries(entries))
-                .is_some()
-            {
-                return Err(D::Error::custom("duplicate record key"));
-            }
         }
-        Ok(state)
+        Ok(Self {
+            context: wire.context,
+            records: records
+                .into_iter()
+                .map(|(key, entries)| (key, MvRegister::from_entries(entries)))
+                .collect(),
+        })
     }
 }
 
@@ -863,27 +1151,33 @@ pub(crate) mod tests {
             }
         }
 
+        // Owned arguments keep the many test call sites short.
+        #[allow(clippy::needless_pass_by_value)]
         pub(crate) fn write(&mut self, key: RecordKey, value: RecordValue) -> Dot {
             self.state
-                .write(&mut self.clock, key, value, 0)
+                .write(&mut self.clock, &key, &value, 0)
                 .expect("write")
         }
 
+        // Owned argument, as `write`.
+        #[allow(clippy::needless_pass_by_value)]
         pub(crate) fn delete(&mut self, key: RecordKey) -> Option<Dot> {
-            self.state.delete(&mut self.clock, key, 0).expect("delete")
+            self.state.delete(&mut self.clock, &key, 0).expect("delete")
         }
 
         pub(crate) fn pull(&mut self, other: &Self) {
             self.clock
-                .observe(other.state.context())
-                .expect("no restore");
-            self.state.merge(&other.state);
+                .check_claim(other.state.context(), &other.clock.device())
+                .expect("no inflated claim");
+            self.state
+                .merge(&other.state, &other.clock.device())
+                .expect("within caps");
         }
     }
 
     fn merged(a: &SyncState, b: &SyncState) -> SyncState {
         let mut out = a.clone();
-        out.merge(b);
+        out.merge(b, &device(9)).expect("within caps");
         out
     }
 
@@ -910,8 +1204,8 @@ pub(crate) mod tests {
         b.write(host_key("prod"), host("10.0.0.1"));
         a.pull(&b);
         assert!(a.state.conflicts().is_empty());
-        let register = a.state.get(&host_key("prod")).expect("record");
-        assert_eq!(register.single(), Some(&host("10.0.0.1")));
+        assert_eq!(a.state.value(&host_key("prod")), Some(host("10.0.0.1")));
+        let register = a.state.register(&host_key("prod")).expect("record");
         assert_eq!(register.entries().len(), 2, "both dots kept, one value");
     }
 
@@ -925,7 +1219,7 @@ pub(crate) mod tests {
         a.pull(&b);
         let conflicts = a.state.conflicts();
         assert_eq!(conflicts.len(), 1);
-        let values: Vec<&RecordValue> = conflicts[0].siblings.iter().map(|s| s.value).collect();
+        let values: Vec<&RecordValue> = conflicts[0].siblings.iter().map(|s| &s.value).collect();
         assert!(values.contains(&&RecordValue::Tombstone));
         assert!(values.contains(&&host("10.0.0.9")));
     }
@@ -939,8 +1233,8 @@ pub(crate) mod tests {
         a.pull(&b);
         assert!(a.state.conflicts().is_empty());
         assert_eq!(
-            a.state.get(&host_key("prod")).and_then(MvRegister::single),
-            Some(&RecordValue::Tombstone)
+            a.state.value(&host_key("prod")),
+            Some(RecordValue::Tombstone)
         );
         assert_eq!(a.delete(host_key("prod")), None, "already deleted");
         assert_eq!(a.delete(host_key("other")), None, "absent");
@@ -952,19 +1246,29 @@ pub(crate) mod tests {
         a.write(host_key("prod"), host("10.0.0.1"));
         // A device holding the key re-uses A's dot for another value.
         let mut forged = a.state.clone();
-        let register = forged.records.get_mut(&host_key("prod")).expect("reg");
+        let register = forged
+            .records
+            .get_mut(&WireKey::encode(&host_key("prod")).expect("key"))
+            .expect("reg");
         let dot = *register.entries().keys().next().expect("dot");
-        register.write(dot, 0, host("6.6.6.6"));
+        register.write(dot, 0, WireValue::encode(&host("6.6.6.6")).expect("value"));
         let mut b = Replica::new(2);
         b.pull(&a);
-        let report = b.state.merge(&forged);
+        let report = b.state.merge(&forged, &device(3)).expect("merge");
         assert_eq!(report.divergent_dots, 1);
         assert_eq!(
-            b.state.get(&host_key("prod")).and_then(MvRegister::single),
-            Some(&host("10.0.0.1")),
+            b.state.value(&host_key("prod")),
+            Some(host("10.0.0.1")),
             "the value already verified is kept"
         );
-        assert_eq!(a.state.merge(&a.state.clone()).divergent_dots, 0);
+        let copy = a.state.clone();
+        assert_eq!(
+            a.state
+                .merge(&copy, &device(1))
+                .expect("merge")
+                .divergent_dots,
+            0
+        );
     }
 
     #[test]
@@ -980,7 +1284,7 @@ pub(crate) mod tests {
         );
         a.pull(&b);
         assert!(a.state.conflicts().is_empty());
-        assert_eq!(a.state.records().count(), 2);
+        assert_eq!(a.state.len(), 2);
     }
 
     #[test]
@@ -998,10 +1302,7 @@ pub(crate) mod tests {
             .resolve(&mut clock, &tags_key("prod"), &Resolution::Union, 5)
             .expect("union");
         a.clock = clock;
-        assert_eq!(
-            a.state.get(&tags_key("prod")).and_then(MvRegister::single),
-            Some(&tags(&["db", "eu"]))
-        );
+        assert_eq!(a.state.value(&tags_key("prod")), Some(tags(&["db", "eu"])));
         b.pull(&a);
         c.pull(&a);
         assert_eq!(b.state, a.state);
@@ -1036,16 +1337,14 @@ pub(crate) mod tests {
                 .resolve(&mut clock, &host_key("prod"), &Resolution::Pick(2), 0)
                 .is_err()
         );
-        let picked = a.state.get(&host_key("prod")).expect("reg").siblings()[1]
-            .value
-            .clone();
+        let Some(RegisterView::Known(siblings)) = a.state.view(&host_key("prod")) else {
+            panic!("known register");
+        };
+        let picked = siblings[1].value.clone();
         a.state
             .resolve(&mut clock, &host_key("prod"), &Resolution::Pick(1), 0)
             .expect("pick");
-        assert_eq!(
-            a.state.get(&host_key("prod")).and_then(MvRegister::single),
-            Some(&picked)
-        );
+        assert_eq!(a.state.value(&host_key("prod")), Some(picked));
     }
 
     #[test]
@@ -1062,22 +1361,22 @@ pub(crate) mod tests {
         let stable = VersionVector::meet([a.state.context(), b.state.context()]);
         assert_eq!(a.state.collect_tombstones(&stable), 1);
         assert_eq!(b.state.collect_tombstones(&stable), 1);
-        assert!(a.state.get(&host_key("old")).is_none());
+        assert!(a.state.register(&host_key("old")).is_none());
         // A new device joins a folder that only holds A's old snapshot.
         let mut joiner = Replica::new(3);
         joiner.pull(&old_snapshot_of_a);
-        assert!(joiner.state.get(&host_key("old")).is_some());
+        assert!(joiner.state.register(&host_key("old")).is_some());
         joiner.write(host_key("new"), host("10.0.0.3"));
         // The old devices merge the joiner: "old" stays deleted.
         a.pull(&joiner);
         b.pull(&joiner);
-        assert!(a.state.get(&host_key("old")).is_none());
-        assert!(b.state.get(&host_key("old")).is_none());
-        assert!(a.state.get(&host_key("new")).is_some());
+        assert!(a.state.register(&host_key("old")).is_none());
+        assert!(b.state.register(&host_key("old")).is_none());
+        assert!(a.state.register(&host_key("new")).is_some());
         // And the joiner learns the deletion as soon as it sees them.
         joiner.pull(&a);
-        assert!(joiner.state.get(&host_key("old")).is_none());
-        assert!(joiner.state.get(&host_key("kept")).is_some());
+        assert!(joiner.state.register(&host_key("old")).is_none());
+        assert!(joiner.state.register(&host_key("kept")).is_some());
         assert_eq!(joiner.state, a.state);
     }
 
@@ -1121,11 +1420,22 @@ pub(crate) mod tests {
         ] {
             assert_eq!(SettingKey::parse(path), None, "{path}");
         }
-        // A newer device's unknown setting is opaque, not an error.
-        let json = r#"{"context":{},"records":[{"key":{"kind":"setting","key":"updates.check"},"entries":[]}]}"#;
-        let state: SyncState = serde_json::from_str(json).expect("parse");
-        assert_eq!(state.records().count(), 0);
-        assert_eq!(state.opaque_len(), 1);
+        // A newer device's unknown setting is held, not an error.
+        let dev = "01010101010101010101010101010101";
+        let json = format!(
+            r#"{{"context":{{"{dev}":1}},"records":[{{"key":{{"kind":"setting","key":"updates.check"}},"entries":[{{"dot":{{"d":"{dev}","c":1}},"at":0,"value":{{"type":"text","v":"never"}}}}]}}]}}"#
+        );
+        let state: SyncState = serde_json::from_str(&json).expect("parse");
+        state.check_invariants().expect("valid");
+        let projection = state.project();
+        assert!(projection.known.is_empty());
+        assert_eq!(
+            projection.held,
+            vec![HeldRecord {
+                kind: "setting".into(),
+                key: None
+            }]
+        );
     }
 
     #[test]
@@ -1167,7 +1477,7 @@ pub(crate) mod tests {
         for (key, value) in bad {
             let error = a
                 .state
-                .write(&mut a.clock, key.clone(), value, 0)
+                .write(&mut a.clock, &key, &value, 0)
                 .expect_err("invalid");
             assert!(matches!(error, SyncError::InvalidRecord { .. }), "{key:?}");
         }
@@ -1215,39 +1525,349 @@ pub(crate) mod tests {
             assert!(HomeRelPath::parse(bad).is_err(), "{bad:?}");
         }
         assert!(HomeRelPath::parse(&format!("~/{}", "a".repeat(2000))).is_err());
-        // An invalid path from the folder never parses as a known record.
+        // An invalid path from the folder never decodes as a known value:
+        // the register is held (never applied), not dropped.
         let json = r#"{"context":{"01010101010101010101010101010101":1},"records":[{"key":{"kind":"host","alias":"p"},"entries":[{"dot":{"d":"01010101010101010101010101010101","c":1},"at":0,"value":{"type":"host","v":{"hostname":"h","identity_file":"~/../x"}}}]}]}"#;
         let state: SyncState = serde_json::from_str(json).expect("parse");
-        assert!(state.get(&host_key("p")).is_none());
-        assert_eq!(state.opaque_len(), 1);
+        assert_eq!(state.view(&host_key("p")), Some(RegisterView::Held));
+        assert_eq!(state.value(&host_key("p")), None);
+    }
+
+    /// A write of an arbitrary wire key and value, as a newer Portico (or
+    /// a device holding the key) produces it.
+    fn write_wire(
+        replica: &mut Replica,
+        key: &serde_json::Value,
+        value: &serde_json::Value,
+    ) -> Dot {
+        let dot = replica.clock.next().expect("dot");
+        replica.state.context.insert(dot);
+        replica
+            .state
+            .records
+            .entry(WireKey::from_json(key).expect("key"))
+            .or_default()
+            .write(dot, 0, WireValue::from_json(value));
+        dot
+    }
+
+    fn numbered_device(side: u8, n: usize) -> DeviceId {
+        let mut bytes = [side; ID_LEN];
+        let n = u16::try_from(n).expect("small");
+        bytes[..2].copy_from_slice(&n.to_be_bytes());
+        DeviceId::from_bytes(bytes)
     }
 
     #[test]
-    fn opaque_records_pass_through_with_a_cap() {
-        let unknown = r#"{"key":{"kind":"future_kind","id":"x"},"entries":[]}"#;
-        let json = format!(r#"{{"context":{{}},"records":[{unknown}]}}"#);
-        let state: SyncState = serde_json::from_str(&json).expect("parse");
-        assert_eq!(state.opaque_len(), 1);
-        let mut a = Replica::new(1);
-        a.write(host_key("p"), host("h"));
-        a.state.merge(&state);
-        let republished = serde_json::to_string(&a.state).expect("ser");
-        assert!(republished.contains(unknown), "{republished}");
-        let back: SyncState = serde_json::from_str(&republished).expect("parse");
-        assert_eq!(back, a.state);
-        // The cap: big opaque records beyond 256 KiB are dropped, counted.
-        let mut big = SyncState::default();
-        for i in 0..5 {
-            big.opaque
-                .insert(format!(r#"{{"k":{i},"pad":"{}"}}"#, "x".repeat(60 * 1024)));
+    fn merge_that_would_break_invariants_is_refused_and_leaves_state_intact() {
+        // 1024 disjoint context devices on each side: each state is valid,
+        // their union is not.
+        let wide = |side: u8| {
+            let mut state = SyncState::default();
+            for n in 0..MAX_CONTEXT_DEVICES {
+                state.context.insert(Dot {
+                    device: numbered_device(side, n),
+                    counter: 1,
+                });
+            }
+            state.check_invariants().expect("valid on its own");
+            state
+        };
+        let mut ours = wide(0xa0);
+        let before = ours.clone();
+        let error = ours.merge(&wide(0xb0), &device(7)).expect_err("too wide");
+        assert_eq!(
+            error,
+            SyncError::MergeRefused {
+                device: device(7).short(),
+                reason: "too many devices in the context",
+            }
+        );
+        assert_eq!(ours, before, "nothing merged");
+
+        // Two registers of the same key with 64 concurrent dots each.
+        let crowded = |side: u8| {
+            let mut state = SyncState::default();
+            let mut entries = BTreeMap::new();
+            for n in 0..MAX_ENTRIES_PER_REGISTER {
+                let dot = Dot {
+                    device: numbered_device(side, n),
+                    counter: 1,
+                };
+                state.context.insert(dot);
+                entries.insert(
+                    dot,
+                    Entry {
+                        at: 0,
+                        value: WireValue::encode(&host(&format!("10.0.{side}.{n}")))
+                            .expect("value"),
+                    },
+                );
+            }
+            state.records.insert(
+                WireKey::encode(&host_key("prod")).expect("key"),
+                MvRegister::from_entries(entries),
+            );
+            state.check_invariants().expect("valid on its own");
+            state
+        };
+        let mut ours = crowded(1);
+        let before = ours.clone();
+        assert!(matches!(
+            ours.merge(&crowded(2), &device(8)),
+            Err(SyncError::MergeRefused {
+                reason: "too many concurrent values",
+                ..
+            })
+        ));
+        assert_eq!(ours, before);
+        // Within the caps, the same state merges.
+        ours.merge(&crowded(1), &device(8)).expect("idempotent");
+        assert_eq!(ours, before);
+    }
+
+    #[test]
+    fn merge_that_would_be_too_large_to_publish_is_refused() {
+        let mut big = Replica::new(1);
+        let notes = "n".repeat(2000);
+        for i in 0..2100 {
+            big.write(
+                RecordKey::HostMeta {
+                    alias: format!("h{i}"),
+                    field: MetaField::Notes,
+                },
+                RecordValue::Text(notes.clone()),
+            );
         }
-        let mut target = SyncState::default();
-        let report = target.merge(&big);
-        assert_eq!(target.opaque_len(), 4);
-        assert_eq!(report.opaque_dropped, 1);
-        assert!(big.check_invariants().is_err(), "too large to read");
-        target.purge_opaque();
-        assert_eq!(target.opaque_len(), 0);
+        big.state.check_invariants().expect("counts are fine");
+        let mut target = Replica::new(2);
+        target.write(host_key("p"), host("h"));
+        let before = target.state.clone();
+        assert!(matches!(
+            target.state.merge(&big.state, &device(1)),
+            Err(SyncError::MergeRefused { .. })
+        ));
+        assert_eq!(target.state, before);
+    }
+
+    #[test]
+    fn inflated_third_party_context_is_deferred_not_merged() {
+        use super::super::guard::{ClaimCheck, ContextClaim, check_context_claims};
+        let (mut victim, mut observer) = (Replica::new(1), Replica::new(2));
+        victim.write(host_key("prod"), host("10.0.0.1"));
+        victim.write(tags_key("prod"), tags(&["db"]));
+        observer.pull(&victim);
+        // A compromised device publishes context[victim] = u64::MAX with
+        // none of the victim's dots: every victim value looks overwritten.
+        let mut attacker = Replica::new(5);
+        attacker.write(host_key("other"), host("10.0.0.5"));
+        attacker.state.context.insert(Dot {
+            device: device(1),
+            counter: u64::MAX,
+        });
+        attacker
+            .state
+            .check_invariants()
+            .expect("structurally valid");
+        let roster = BTreeSet::from([device(1), device(2), device(5)]);
+        // Verified clocks: from each device's own authenticated snapshot.
+        let verified = BTreeMap::from([
+            (device(1), victim.clock.counter()),
+            (device(2), observer.clock.counter()),
+        ]);
+        let check = check_context_claims(&device(5), attacker.state.context(), &roster, &verified);
+        assert_eq!(
+            check,
+            ClaimCheck::Defer(vec![ContextClaim {
+                device: device(1),
+                claimed: u64::MAX,
+                verified: 2,
+                in_roster: true,
+            }])
+        );
+        // Deferred: not merged, the victim's values survive.
+        assert_eq!(
+            observer.state.value(&host_key("prod")),
+            Some(host("10.0.0.1"))
+        );
+        // Had it been merged, the report flags the anomaly.
+        let mut forced = observer.state.clone();
+        let report = forced.merge(&attacker.state, &device(5)).expect("merge");
+        assert_eq!(report.dropped_live_without_successor, 2);
+        assert_eq!(forced.register(&host_key("prod")), None);
+        // The victim's clock is not marked restored by a third party.
+        assert!(matches!(
+            victim
+                .clock
+                .check_claim(attacker.state.context(), &device(5)),
+            Err(SyncError::ThirdPartyClaim { .. })
+        ));
+        victim
+            .clock
+            .observe_own_context(victim.state.context())
+            .expect("own evidence is consistent");
+        victim.write(host_key("prod"), host("10.0.0.2"));
+        // An honest snapshot is accepted.
+        assert_eq!(
+            check_context_claims(&device(2), observer.state.context(), &roster, &verified),
+            ClaimCheck::Accept
+        );
+    }
+
+    #[test]
+    fn unknown_kind_edited_twice_relays_only_the_latest_and_stays_readable() {
+        let key = serde_json::json!({"kind": "future_kind", "id": "x"});
+        let (mut newer, mut older) = (Replica::new(2), Replica::new(1));
+        write_wire(
+            &mut newer,
+            &key,
+            &serde_json::json!({"type": "future", "v": 1}),
+        );
+        older.pull(&newer);
+        let latest = write_wire(
+            &mut newer,
+            &key,
+            &serde_json::json!({"type": "future", "v": 2}),
+        );
+        older.pull(&newer);
+        // The older version holds it, relays it, never applies it.
+        let projection = older.state.project();
+        assert!(projection.known.is_empty());
+        assert_eq!(
+            projection.held,
+            vec![HeldRecord {
+                kind: "future_kind".into(),
+                key: None
+            }]
+        );
+        // Relayed through the older device's snapshot (JSON round trip).
+        let json = serde_json::to_string(&older.state).expect("ser");
+        let relayed: SyncState = serde_json::from_str(&json).expect("readable");
+        relayed.check_invariants().expect("valid");
+        let mut another_newer = Replica::new(3);
+        another_newer
+            .state
+            .merge(&relayed, &device(1))
+            .expect("no duplicate-key error");
+        let wire_key = WireKey::from_json(&key).expect("key");
+        let register = another_newer.state.records.get(&wire_key).expect("present");
+        assert_eq!(register.entries().len(), 1, "only the latest edit");
+        let (dot, entry) = register.entries().iter().next().expect("entry");
+        assert_eq!(*dot, latest);
+        assert_eq!(entry.value.as_str(), r#"{"type":"future","v":2}"#);
+        // The newer device itself reads the relay back unchanged.
+        let mut back = newer.state.clone();
+        assert_eq!(
+            back.merge(&relayed, &device(1)).expect("merge"),
+            MergeReport::default()
+        );
+        assert_eq!(back, newer.state);
+    }
+
+    #[test]
+    fn newer_field_on_a_known_kind_is_held_never_applied_and_relayed_intact() {
+        let (mut older, mut newer) = (Replica::new(1), Replica::new(2));
+        older.write(host_key("prod"), host("10.0.0.1"));
+        newer.pull(&older);
+        // A newer Portico added a field to host values and edited prod.
+        let newer_value = serde_json::json!({"type": "host", "v": {
+            "hostname": "10.0.0.9", "user": null, "port": null, "identity_file": null,
+            "proxy_jump": null, "renamed_from": null, "color": "red"}});
+        let key = serde_json::to_value(host_key("prod")).expect("key");
+        write_wire(&mut newer, &key, &newer_value);
+        older.pull(&newer);
+        // Held: not a deletion, not an overwrite of the local record.
+        assert_eq!(
+            older.state.view(&host_key("prod")),
+            Some(RegisterView::Held)
+        );
+        assert_eq!(older.state.value(&host_key("prod")), None);
+        let projection = older.state.project();
+        assert!(!projection.known.contains_key(&host_key("prod")));
+        assert_eq!(
+            projection.held,
+            vec![HeldRecord {
+                kind: "host".into(),
+                key: Some(host_key("prod"))
+            }]
+        );
+        assert!(older.state.conflicts().is_empty());
+        // The older version cannot overwrite or delete it.
+        let counter = older.clock.counter();
+        assert_eq!(
+            older
+                .state
+                .write(&mut older.clock, &host_key("prod"), &host("10.0.0.3"), 0),
+            Err(SyncError::RecordHeld { kind: "host" })
+        );
+        assert!(
+            older
+                .state
+                .delete(&mut older.clock, &host_key("prod"), 0)
+                .is_err()
+        );
+        assert_eq!(older.clock.counter(), counter, "no dot spent");
+        // Relayed intact to another newer device.
+        let mut third = Replica::new(3);
+        third.pull(&older);
+        let register = third.state.register(&host_key("prod")).expect("relayed");
+        let relayed = register.single().expect("one value");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(relayed.as_str()).expect("json"),
+            newer_value
+        );
+        assert_eq!(
+            third.state.register(&host_key("prod")),
+            newer.state.register(&host_key("prod"))
+        );
+    }
+
+    #[test]
+    fn synced_identity_file_rejects_expansion_chars_and_trailing_dots() {
+        for bad in [
+            "~/.ssh/id_$USER",
+            "~/.ssh/%h",
+            "~/.ssh/id#1",
+            "~/.ssh/a=b",
+            "~/.ssh/\"id\"",
+            "~/.ssh/'id'",
+            "~/.ssh/`id`",
+            "~/.ssh./id",
+            "~/keys /id",
+            "~/.ssh/id.",
+            "~/.ssh/id ",
+            "~/NUL",
+            "~/.ssh/nul.key",
+            "~/.ssh/com1",
+            "~/.ssh/COM0.pem",
+            "~/.ssh/LPT9",
+            "~/.ssh/con .txt",
+            "~/aux/id",
+            "~/.ssh/a|b",
+            "~/.ssh/a?b",
+            "~/.ssh/a*b",
+            "~/.ssh/a<b>",
+            "~/x\ty",
+        ] {
+            assert!(
+                matches!(
+                    HomeRelPath::parse(bad),
+                    Err(SyncError::InvalidRecord {
+                        field: "identity_file",
+                        ..
+                    })
+                ),
+                "{bad:?}"
+            );
+        }
+        for good in [
+            "~/.ssh/id_ed25519",
+            "~/.ssh/console",
+            "~/.ssh/com10",
+            "~/.ssh/nul-key",
+        ] {
+            HomeRelPath::parse(good).expect(good);
+        }
     }
 
     #[test]
@@ -1270,22 +1890,45 @@ pub(crate) mod tests {
         // Zero counter.
         let state = parse(format!(r#"{{"context":{{"{dev}":0}},"records":[]}}"#)).expect("parse");
         assert!(state.check_invariants().is_err());
-        // Duplicate keys or dots are parse errors.
+        // Duplicate keys merge their entries (finding 4); a repeated dot
+        // with the same value is one entry, with another value an error.
         let entry =
             format!(r#"{{"dot":{{"d":"{dev}","c":1}},"at":0,"value":{{"type":"tombstone"}}}}"#);
+        let other_value =
+            format!(r#"{{"dot":{{"d":"{dev}","c":1}},"at":0,"value":{{"type":"bool","v":true}}}}"#);
         let record = format!(r#"{{"key":{{"kind":"host","alias":"p"}},"entries":[{entry}]}}"#);
+        let twice = parse(format!(
+            r#"{{"context":{{"{dev}":1}},"records":[{record},{record}]}}"#
+        ))
+        .expect("duplicate keys merge");
+        assert_eq!(twice.len(), 1);
+        assert_eq!(
+            twice.register(&host_key("p")).map(|r| r.entries().len()),
+            Some(1)
+        );
+        // Key fields in another order are the same canonical key.
+        let reordered = format!(r#"{{"key":{{"alias":"p","kind":"host"}},"entries":[{entry}]}}"#);
+        let same = parse(format!(
+            r#"{{"context":{{"{dev}":1}},"records":[{record},{reordered}]}}"#
+        ))
+        .expect("parse");
+        assert_eq!(same, twice);
         assert!(
             parse(format!(
-                r#"{{"context":{{"{dev}":1}},"records":[{record},{record}]}}"#
+                r#"{{"context":{{"{dev}":1}},"records":[{{"key":{{"kind":"host","alias":"p"}},"entries":[{entry},{other_value}]}}]}}"#
             ))
             .is_err()
         );
-        assert!(
-            parse(format!(
-                r#"{{"context":{{"{dev}":1}},"records":[{{"key":{{"kind":"host","alias":"p"}},"entries":[{entry},{entry}]}}]}}"#
-            ))
-            .is_err()
-        );
+        // Without the generic record shape: refused.
+        for bad in [
+            r#"{"context":{},"records":[{"key":{"alias":"p"},"entries":[]}]}"#,
+            r#"{"context":{},"records":[{"key":"p","entries":[]}]}"#,
+            r#"{"context":{},"records":[{"key":{"kind":""},"entries":[]}]}"#,
+            r#"{"context":{},"records":[{"key":{"kind":"host","alias":"p"},"entries":[],"extra":1}]}"#,
+            r#"{"context":{},"records":[],"extra":1}"#,
+        ] {
+            assert!(parse(bad.to_owned()).is_err(), "{bad}");
+        }
         let ok = parse(format!(
             r#"{{"context":{{"{dev}":1}},"records":[{record}]}}"#
         ))
@@ -1393,7 +2036,7 @@ pub(crate) mod tests {
             match *op {
                 Op::Write { device, key, value } => {
                     let replica = &mut history.replicas[device];
-                    if let Some(register) = replica.state.get(&key_of(key)) {
+                    if let Some(register) = replica.state.register(&key_of(key)) {
                         for dot in register.entries().keys() {
                             history.overwritten.insert((key_of(key), *dot));
                         }
@@ -1408,7 +2051,7 @@ pub(crate) mod tests {
                     let replica = &mut history.replicas[device];
                     let before: Vec<Dot> = replica
                         .state
-                        .get(&key_of(key))
+                        .register(&key_of(key))
                         .map(|r| r.entries().keys().copied().collect())
                         .unwrap_or_default();
                     if let Some(dot) = replica.delete(key_of(key)) {
@@ -1482,13 +2125,14 @@ pub(crate) mod tests {
             let history = run(&ops);
             let mut forward = SyncState::default();
             for r in &history.replicas {
-                forward.merge(&r.state);
+                forward.merge(&r.state, &r.clock.device()).expect("within caps");
             }
             let mut shuffled = SyncState::default();
             for &index in &order {
-                shuffled.merge(&history.replicas[index].state);
+                let source = history.replicas[index].clock.device();
+                shuffled.merge(&history.replicas[index].state, &source).expect("within caps");
                 // Duplicated deliveries change nothing.
-                shuffled.merge(&history.replicas[index].state);
+                shuffled.merge(&history.replicas[index].state, &source).expect("within caps");
             }
             prop_assert_eq!(&forward, &shuffled);
             forward.check_invariants().map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
@@ -1502,11 +2146,11 @@ pub(crate) mod tests {
             prop_assume!(!history.collected);
             let mut all = SyncState::default();
             for r in &history.replicas {
-                all.merge(&r.state);
+                all.merge(&r.state, &r.clock.device()).expect("within caps");
             }
             for written in &history.writes {
                 let present = all
-                    .get(&written.key)
+                    .register(&written.key)
                     .is_some_and(|r| r.entries().contains_key(&written.dot));
                 let overwritten = history.overwritten.contains(&(written.key.clone(), written.dot));
                 prop_assert!(present || overwritten, "lost {:?}", written);
@@ -1523,7 +2167,7 @@ pub(crate) mod tests {
             }
             b.write(key_of(0), value_of(v2));
             a.pull(&b);
-            let conflict = a.state.get(&key_of(0)).is_some_and(MvRegister::is_conflict);
+            let conflict = a.state.register(&key_of(0)).is_some_and(MvRegister::is_conflict);
             prop_assert_eq!(conflict, !sync_first && v1 != v2);
         }
     }

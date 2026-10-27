@@ -15,9 +15,11 @@
 //!   grouped for display ([`MvRegister::siblings`]) without losing dots,
 //!   which keeps the merge commutative, associative and idempotent.
 //! - **No reuse after restore** (security review F5): [`LocalClock`] refuses
-//!   to issue dots once it has observed a context or a published clock of
-//!   its own device that is ahead of it ([`SyncError::RestoredState`]); the
-//!   engine then re-joins under a new [`DeviceId`].
+//!   to issue dots once its **own** files (own snapshot, own replica) show
+//!   a context or a published clock ahead of it
+//!   ([`SyncError::RestoredState`]); the engine then re-joins under a new
+//!   [`DeviceId`]. A claim made by another device's context is only an
+//!   alert ([`SyncError::ThirdPartyClaim`], S1a review finding 3).
 //!
 //! The wall clock appears only as a display stamp (`at`, unix seconds).
 
@@ -225,6 +227,13 @@ pub(crate) struct Entry<V> {
     pub(crate) value: V,
 }
 
+/// Anomalies of one register merge ([`MvRegister::merge`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RegisterMerge {
+    pub(crate) divergent: usize,
+    pub(crate) dropped_live_without_successor: usize,
+}
+
 /// Multi-value register over the dots that survive in one state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MvRegister<V> {
@@ -272,22 +281,40 @@ impl<V: Clone + PartialEq> MvRegister<V> {
     /// Merges `other` (with its state's context) into `self` (with its
     /// own context). Contexts are joined by the caller, once per state.
     ///
-    /// Returns how many dots both sides hold with **different** values.
-    /// Honest devices never produce one (a dot names one write); only a
-    /// device holding the key and misbehaving can. The local value is kept
-    /// and the caller raises an alert.
+    /// The returned [`RegisterMerge`] counts two anomalies:
+    /// - `divergent`: dots both sides hold with **different** values.
+    ///   Honest devices never produce one (a dot names one write); only a
+    ///   device holding the key and misbehaving can. The local value is
+    ///   kept and the caller raises an alert.
+    /// - `dropped_live_without_successor`: local values that are not
+    ///   tombstones (`is_live`) and are dropped because the other context
+    ///   covers them while the other side has **no entry at all** for this
+    ///   key (S1a review finding 3). Besides the collection of a stable
+    ///   tombstone (which an honest peer only does once every device has
+    ///   seen the deletion, or after the stale horizon), only an inflated
+    ///   context produces it.
     pub(crate) fn merge(
         &mut self,
         own_context: &VersionVector,
         other: &Self,
         other_context: &VersionVector,
-    ) -> usize {
-        self.entries
-            .retain(|dot, _| other.entries.contains_key(dot) || !other_context.covers(dot));
-        let mut divergent: usize = 0;
+        is_live: impl Fn(&V) -> bool,
+    ) -> RegisterMerge {
+        let mut report = RegisterMerge::default();
+        let other_empty = other.entries.is_empty();
+        self.entries.retain(|dot, entry| {
+            let keep = other.entries.contains_key(dot) || !other_context.covers(dot);
+            if !keep && other_empty && is_live(&entry.value) {
+                report.dropped_live_without_successor =
+                    report.dropped_live_without_successor.saturating_add(1);
+            }
+            keep
+        });
         for (dot, entry) in &other.entries {
             match self.entries.get(dot) {
-                Some(own) if own.value != entry.value => divergent = divergent.saturating_add(1),
+                Some(own) if own.value != entry.value => {
+                    report.divergent = report.divergent.saturating_add(1);
+                }
                 None if !own_context.covers(dot) => {
                     self.entries.insert(*dot, entry.clone());
                 }
@@ -295,7 +322,7 @@ impl<V: Clone + PartialEq> MvRegister<V> {
                 _ => {}
             }
         }
-        divergent
+        report
     }
 
     /// Distinct values, each with its dots (equal values collapse), in
@@ -354,11 +381,20 @@ impl<V: Clone + PartialEq> MvRegister<V> {
 
 /// Issues this device's dots. The counter is persisted (inside the sealed
 /// replica, S1b) **before** any dot is published, so it never goes back.
+///
+/// Only this device's **own** files can prove that its local state was
+/// restored (S1a review finding 3): its own snapshot in the folder
+/// ([`LocalClock::observe_own_counter`]) or the context of its own
+/// snapshot or replica ([`LocalClock::observe_own_context`]). A context
+/// published by another device that claims more of this device's dots is
+/// checked with [`LocalClock::check_claim`]: a typed alert naming the
+/// claimant, without any change of state (no forced re-join).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalClock {
     device: DeviceId,
     counter: u64,
-    /// Set once a newer state of this device was observed: no more dots.
+    /// Set once a newer state of this device was observed in its own
+    /// files: no more dots.
     restored: bool,
 }
 
@@ -379,20 +415,39 @@ impl LocalClock {
         self.counter
     }
 
-    /// Checks a context received from the folder (any snapshot): if it
-    /// knows a dot of this device beyond the local counter, the local
-    /// state was restored or cloned. The clock then refuses every new dot.
-    pub(crate) fn observe(&mut self, context: &VersionVector) -> Result<(), SyncError> {
-        self.observe_counter(context.get(&self.device))
+    /// Checks the context of this device's **own** snapshot (in the
+    /// folder) or replica: ahead of the local counter means the local
+    /// state was restored or cloned, and the clock refuses every new dot.
+    pub(crate) fn observe_own_context(&mut self, context: &VersionVector) -> Result<(), SyncError> {
+        self.observe_own_counter(context.get(&self.device))
     }
 
     /// Same check against the `clock` published in this device's own
     /// snapshot file.
-    pub(crate) fn observe_counter(&mut self, published: u64) -> Result<(), SyncError> {
+    pub(crate) fn observe_own_counter(&mut self, published: u64) -> Result<(), SyncError> {
         if published > self.counter {
             self.restored = true;
         }
         self.ensure_not_restored()
+    }
+
+    /// Checks a context published by **another** device (`claimant`). A
+    /// claim beyond the local counter is [`SyncError::ThirdPartyClaim`];
+    /// the clock is left as it is (a compromised device must not be able
+    /// to force a re-join). S1b defers such a snapshot instead of merging
+    /// it (`guard::check_context_claims`).
+    pub(crate) fn check_claim(
+        &self,
+        context: &VersionVector,
+        claimant: &DeviceId,
+    ) -> Result<(), SyncError> {
+        if context.get(&self.device) > self.counter {
+            return Err(SyncError::ThirdPartyClaim {
+                device: self.device.short(),
+                claimant: claimant.short(),
+            });
+        }
+        Ok(())
     }
 
     fn ensure_not_restored(&self) -> Result<(), SyncError> {
@@ -535,7 +590,7 @@ mod tests {
         b.write(dot(2, 1), 20, "y");
         ctx_b.insert(dot(2, 1));
         let mut merged = a.clone();
-        merged.merge(&ctx_a, &b, &ctx_b);
+        merged.merge(&ctx_a, &b, &ctx_b, |_| true);
         assert!(merged.is_conflict());
         assert_eq!(merged.siblings().len(), 2);
         assert_eq!(merged.single(), None);
@@ -545,7 +600,7 @@ mod tests {
         let mut ctx_c = VersionVector::default();
         ctx_c.insert(dot(3, 1));
         let mut equal = a.clone();
-        equal.merge(&ctx_a, &c, &ctx_c);
+        equal.merge(&ctx_a, &c, &ctx_c, |_| true);
         assert!(!equal.is_conflict());
         assert_eq!(equal.single(), Some(&"x"));
         let siblings = equal.siblings();
@@ -564,16 +619,17 @@ mod tests {
         other.write(dot(2, 1), 0, "y");
         let mut other_ctx = VersionVector::default();
         other_ctx.insert(dot(2, 1));
-        reg.merge(&ctx, &other, &other_ctx);
+        reg.merge(&ctx, &other, &other_ctx, |_| true);
         ctx.join(&other_ctx);
         assert!(reg.is_conflict());
         reg.write(dot(1, 2), 0, "z");
         ctx.insert(dot(1, 2));
         // The old side still holds y: it is covered by our context.
         let mut stale = other.clone();
-        stale.merge(&other_ctx, &reg, &ctx);
+        let report = stale.merge(&other_ctx, &reg, &ctx, |_| true);
+        assert_eq!(report, RegisterMerge::default(), "a successor exists");
         assert_eq!(stale.single(), Some(&"z"));
-        reg.merge(&ctx, &other, &other_ctx);
+        reg.merge(&ctx, &other, &other_ctx, |_| true);
         assert_eq!(reg.single(), Some(&"z"));
     }
 
@@ -625,9 +681,10 @@ mod tests {
         // The data dir is restored from a backup taken at counter 3.
         let mut restored = LocalClock::new(me, 3);
         // Before looking at the folder it would reuse dot 4: the engine
-        // must observe first (S1b does so at start and on every pass).
+        // must observe its own file first (S1b does so at start and on
+        // every pass).
         assert!(matches!(
-            restored.observe(&published),
+            restored.observe_own_context(&published),
             Err(SyncError::RestoredState { .. })
         ));
         assert!(matches!(
@@ -635,11 +692,15 @@ mod tests {
             Err(SyncError::RestoredState { .. })
         ));
         // Observing an older or equal context afterwards does not unlock it.
-        assert!(restored.observe(&VersionVector::default()).is_err());
+        assert!(
+            restored
+                .observe_own_context(&VersionVector::default())
+                .is_err()
+        );
         assert!(restored.next().is_err());
         // Same through the published clock of the own snapshot file.
         let mut restored = LocalClock::new(me, 3);
-        assert!(restored.observe_counter(5).is_err());
+        assert!(restored.observe_own_counter(5).is_err());
         assert!(restored.next().is_err());
         // Re-join under a new identity: its dots can never equal old ones.
         let mut rejoined = LocalClock::new(DeviceId::generate().expect("id"), 0);
@@ -648,9 +709,58 @@ mod tests {
         }
         // A context that is not ahead is fine.
         let mut current = LocalClock::new(me, 5);
-        current.observe(&published).expect("in sync");
-        current.observe_counter(5).expect("in sync");
+        current.observe_own_context(&published).expect("in sync");
+        current.observe_own_counter(5).expect("in sync");
+        current
+            .check_claim(&published, &device(2))
+            .expect("not ahead");
         assert_eq!(current.next().expect("dot").counter, 6);
+    }
+
+    #[test]
+    fn a_third_party_claim_never_marks_the_clock_restored() {
+        let me = device(1);
+        let mut clock = LocalClock::new(me, 3);
+        let mut inflated = VersionVector::default();
+        inflated.insert(Dot {
+            device: me,
+            counter: u64::MAX,
+        });
+        let error = clock
+            .check_claim(&inflated, &device(9))
+            .expect_err("claim ahead");
+        assert_eq!(
+            error,
+            SyncError::ThirdPartyClaim {
+                device: me.short(),
+                claimant: device(9).short(),
+            }
+        );
+        // No state change: the clock still issues dots.
+        assert_eq!(clock.next().expect("dot").counter, 4);
+    }
+
+    #[test]
+    fn dropped_live_values_without_successor_are_counted() {
+        let mut ours = MvRegister::default();
+        ours.write(dot(1, 1), 0, "live");
+        let mut own_ctx = VersionVector::default();
+        own_ctx.insert(dot(1, 1));
+        // The other side has no entry but a context covering our dot.
+        let mut inflated = VersionVector::default();
+        inflated.insert(dot(1, u64::MAX));
+        let report = ours.merge(&own_ctx, &MvRegister::default(), &inflated, |v| {
+            *v != "tomb"
+        });
+        assert_eq!(report.dropped_live_without_successor, 1);
+        assert!(ours.is_empty());
+        // A tombstone dropped that way is not counted.
+        let mut tomb = MvRegister::default();
+        tomb.write(dot(1, 1), 0, "tomb");
+        let report = tomb.merge(&own_ctx, &MvRegister::default(), &inflated, |v| {
+            *v != "tomb"
+        });
+        assert_eq!(report.dropped_live_without_successor, 0);
     }
 
     #[test]

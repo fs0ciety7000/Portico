@@ -349,7 +349,7 @@ fn check_jump_syntax(raw: &str) -> std::result::Result<(), ManagedHostError> {
 /// Characters of an `IdentityFile` path Portico writes: printable, the
 /// space as only blank (the value is then quoted), and none of the
 /// characters OpenSSH quotes, expands or reads as a comment.
-fn check_path_chars(text: &str) -> std::result::Result<(), &'static str> {
+pub(crate) fn check_path_chars(text: &str) -> std::result::Result<(), &'static str> {
     if text.is_empty() {
         return Err("empty");
     }

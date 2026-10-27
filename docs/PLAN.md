@@ -193,8 +193,10 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
   - **S1a, fondations pures** ✅ *(2026-10-27)* : `portico-core/src/sync/` sans E/S ni moteur : Argon2id à bornes propres,
     HKDF, XChaCha20-Poly1305, AAD canonique, MAC en temps constant, remplissage ; `bundle.toml` (créer, ouvrir, changer et
     réinitialiser la passphrase, roster scellé) ; instantanés et réplica scellés ; registres multi-valeurs à contexte global,
-    pierres tombales, conflits, passage opaque ; détection de retour arrière, fourche, rétrogradation et état restauré ;
-    générateur EFF et minimum de force imposé. 81 tests dont les lois de fusion en tests de propriétés
+    pierres tombales, conflits, registres génériques (compatibilité ascendante) ; détection de retour arrière, fourche, rétrogradation et état restauré ;
+    générateur EFF et minimum de force imposé. Correctifs de la revue de sécurité de l'implémentation (empreintes du contenu
+    authentifié, fusion transactionnelle, contextes de tiers différés, registres génériques, crédit diceware réservé aux
+    passphrases générées, chemins d'identité stricts). 93 tests dont les lois de fusion en tests de propriétés
   - **S1b, moteur** : `FolderIo` et racine sûre, projection des fichiers locaux, application validée (quarantaine, masquage
     d'alias, changements de destination retenus jusqu'à confirmation sur l'appareil), état local, tâche de fond, statut,
     événements, API create / join / unlock / resolve / change / reset / disable ; tests multi-moteurs avec fournisseur simulé

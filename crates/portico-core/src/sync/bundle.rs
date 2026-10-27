@@ -47,7 +47,7 @@ use super::crypto::{
     self, Canonical, DataKey, ID_LEN, KEY_LEN, KdfBounds, KdfParams, MAC_LEN, NONCE_LEN, SALT_LEN,
     Subkeys, TAG_LEN,
 };
-use super::passphrase;
+use super::passphrase::{self, NewPassphrase};
 
 /// Value of the `format` field.
 pub(crate) const BUNDLE_FORMAT: &str = "portico-sync";
@@ -119,7 +119,10 @@ pub(crate) struct OpenedBundle {
     pub(crate) roster: Roster,
     pub(crate) data_key: DataKey,
     pub(crate) keys: Subkeys,
-    /// SHA-256 of the file bytes (bundle high-water mark, F4).
+    /// Fingerprint of the authenticated content (bundle high-water mark,
+    /// F4): SHA-256 of the MAC input and the MAC, so a comment, whitespace,
+    /// key order or CRLF added to the file does not change it (S1a review
+    /// finding 1).
     pub(crate) fingerprint: [u8; 32],
     slots: Vec<Slot>,
 }
@@ -366,8 +369,14 @@ fn unwrap_slot(
     DataKey::from_bytes(&key)
 }
 
+/// Fingerprint of a bundle: its canonical MAC input (every field of the
+/// file, decoded) and its MAC.
+fn fingerprint(mac_input: &[u8], mac: &[u8; MAC_LEN]) -> [u8; 32] {
+    crypto::content_fingerprint("portico-sync/1 bundle", &[mac_input, mac])
+}
+
 /// Verifies the MAC and opens the roster with an unwrapped data key.
-fn verify(parsed: Parsed, text: &str, data_key: DataKey) -> Result<OpenedBundle, SyncError> {
+fn verify(parsed: Parsed, data_key: DataKey) -> Result<OpenedBundle, SyncError> {
     let keys = crypto::derive_subkeys(&data_key, &parsed.header.bundle_id, parsed.header.epoch)?;
     let input = mac_input(
         &parsed.header,
@@ -393,7 +402,7 @@ fn verify(parsed: Parsed, text: &str, data_key: DataKey) -> Result<OpenedBundle,
         roster,
         data_key,
         keys,
-        fingerprint: crypto::sha256(text.as_bytes()),
+        fingerprint: fingerprint(&input, &parsed.mac),
         slots: parsed.slots,
     })
 }
@@ -421,14 +430,14 @@ pub(crate) fn open(
 ) -> Result<OpenedBundle, SyncError> {
     let parsed = parse(text)?;
     let data_key = unwrap_slot(&parsed, passphrase, bounds)?;
-    verify(parsed, text, data_key)
+    verify(parsed, data_key)
 }
 
 /// Opens `bundle.toml` with a remembered data key (every poll): a key of
 /// another bundle or epoch fails the MAC ([`SyncError::BundleTampered`]).
 pub(crate) fn open_with_key(text: &str, data_key: &DataKey) -> Result<OpenedBundle, SyncError> {
     let parsed = parse(text)?;
-    verify(parsed, text, DataKey::from_bytes(data_key.bytes())?)
+    verify(parsed, DataKey::from_bytes(data_key.bytes())?)
 }
 
 /// Renders a bundle; seals the roster and computes the MAC.
@@ -440,10 +449,8 @@ fn render(
 ) -> Result<(String, OpenedBundle), SyncError> {
     check_roster(&roster)?;
     let keys = crypto::derive_subkeys(&data_key, &header.bundle_id, header.epoch)?;
-    let roster_json = Zeroizing::new(
-        serde_json::to_vec(&roster).map_err(|_| SyncError::Crypto("roster encoding failed"))?,
-    );
-    let padded = crypto::padded(&roster_json, ROSTER_MIN_BUCKET, "sync roster")?;
+    // Written straight into its padded buffer (finding 6).
+    let padded = crypto::padded_json(&roster, ROSTER_MIN_BUCKET, "sync roster")?;
     let (roster_nonce, roster_ciphertext) =
         crypto::seal(keys.roster.bytes(), &roster_aad(&header), padded)?;
     let input = mac_input(&header, &slots, &roster_nonce, &roster_ciphertext);
@@ -494,7 +501,7 @@ fn render(
         roster,
         data_key,
         keys,
-        fingerprint: crypto::sha256(text.as_bytes()),
+        fingerprint: fingerprint(&input, &mac),
         slots,
     };
     Ok((text, opened))
@@ -504,12 +511,12 @@ fn render(
 /// nonce).
 fn passphrase_slot(
     header: &BundleHeader,
-    passphrase: &SecretString,
+    passphrase: &NewPassphrase,
     data_key: &DataKey,
     bounds: &KdfBounds,
 ) -> Result<Slot, SyncError> {
     let kek = crypto::derive_kek(
-        passphrase,
+        passphrase.secret(),
         &header.kdf,
         &header.salt,
         &header.bundle_id,
@@ -531,9 +538,10 @@ fn passphrase_slot(
 }
 
 /// A new bundle (first device): random bundle id, salt and data key,
-/// epoch 1. The passphrase must meet the minimum strength.
+/// epoch 1. The passphrase must meet the minimum strength (the diceware
+/// estimate only for a generated one, finding 5).
 pub(crate) fn create(
-    passphrase: &SecretString,
+    passphrase: &NewPassphrase,
     first_device: RosterDevice,
     params: KdfParams,
     bounds: &KdfBounds,
@@ -567,7 +575,7 @@ pub(crate) fn create(
 /// for an extra confirmation and the other devices get a blocking alert).
 pub(crate) fn rewrap(
     opened: &OpenedBundle,
-    new_passphrase: &SecretString,
+    new_passphrase: &NewPassphrase,
     params: KdfParams,
     bounds: &KdfBounds,
 ) -> Result<(String, OpenedBundle), SyncError> {
@@ -592,7 +600,7 @@ pub(crate) fn rewrap(
 pub(crate) fn change_passphrase(
     text: &str,
     old: &SecretString,
-    new: &SecretString,
+    new: &NewPassphrase,
     params: KdfParams,
     bounds: &KdfBounds,
 ) -> Result<(String, OpenedBundle), SyncError> {
@@ -627,7 +635,7 @@ pub(crate) fn with_roster(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::crypto::tests::derivations;
-    use super::super::passphrase::tests::STRONG;
+    use super::super::passphrase::tests::{STRONG, STRONG_2, typed};
     use super::*;
 
     type FileEdit = Box<dyn Fn(&mut BundleFile)>;
@@ -647,7 +655,7 @@ pub(crate) mod tests {
 
     pub(crate) fn new_bundle() -> (String, OpenedBundle) {
         create(
-            &pass(STRONG),
+            &typed(STRONG),
             first_device(),
             KdfBounds::TEST_PARAMS,
             &KdfBounds::TEST,
@@ -685,7 +693,10 @@ pub(crate) mod tests {
         assert_eq!(opened.roster, created.roster);
         assert_eq!(opened.data_key.bytes(), created.data_key.bytes());
         assert_eq!(opened.keys.snapshot.bytes(), created.keys.snapshot.bytes());
-        assert_eq!(opened.fingerprint, crypto::sha256(text.as_bytes()));
+        assert_eq!(
+            opened.fingerprint, created.fingerprint,
+            "same authenticated content"
+        );
         assert_eq!(opened.header.epoch, 1);
         assert_eq!(opened.header.keyset_generation, 1);
         assert_eq!(opened.header.revision, 1);
@@ -902,7 +913,7 @@ pub(crate) mod tests {
         // Creation refuses out-of-bounds parameters too.
         assert!(matches!(
             create(
-                &pass(STRONG),
+                &typed(STRONG),
                 first_device(),
                 KdfParams::DEFAULT,
                 &KdfBounds::TEST
@@ -916,7 +927,7 @@ pub(crate) mod tests {
         let before = derivations();
         assert!(matches!(
             create(
-                &pass("hunter2"),
+                &typed("hunter2"),
                 first_device(),
                 KdfBounds::TEST_PARAMS,
                 &KdfBounds::TEST
@@ -930,7 +941,7 @@ pub(crate) mod tests {
             change_passphrase(
                 &text,
                 &pass(STRONG),
-                &pass("password1"),
+                &typed("password1"),
                 KdfBounds::TEST_PARAMS,
                 &KdfBounds::TEST
             ),
@@ -940,7 +951,7 @@ pub(crate) mod tests {
         assert!(matches!(
             rewrap(
                 &opened,
-                &pass("short"),
+                &typed("short"),
                 KdfBounds::TEST_PARAMS,
                 &KdfBounds::TEST
             ),
@@ -951,11 +962,11 @@ pub(crate) mod tests {
     #[test]
     fn change_passphrase_rewraps_the_same_data_key() {
         let (text, created) = new_bundle();
-        let new = "zoom zone zippy zipper zigzag zesty";
+        let new = STRONG_2;
         let (changed, opened) = change_passphrase(
             &text,
             &pass(STRONG),
-            &pass(new),
+            &typed(new),
             KdfBounds::TEST_PARAMS,
             &KdfBounds::TEST,
         )
@@ -978,7 +989,7 @@ pub(crate) mod tests {
             change_passphrase(
                 &text,
                 &pass(new),
-                &pass(new),
+                &typed(new),
                 KdfBounds::TEST_PARAMS,
                 &KdfBounds::TEST
             )
@@ -1009,7 +1020,7 @@ pub(crate) mod tests {
         let (_new_text, _) = change_passphrase(
             &old_text,
             &pass(STRONG),
-            &pass("zoom zone zippy zipper zigzag zesty"),
+            &typed(STRONG_2),
             KdfBounds::TEST_PARAMS,
             &KdfBounds::TEST,
         )
@@ -1022,10 +1033,10 @@ pub(crate) mod tests {
     fn reset_from_a_device_holding_the_key() {
         let (text, created) = new_bundle();
         let holder = open_with_key(&text, &created.data_key).expect("open with key");
-        let new = "zoom zone zippy zipper zigzag zesty";
+        let new = STRONG_2;
         let (reset, opened) = rewrap(
             &holder,
-            &pass(new),
+            &typed(new),
             KdfBounds::TEST_PARAMS,
             &KdfBounds::TEST,
         )

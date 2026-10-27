@@ -22,7 +22,11 @@
 //!   padded length. The same binding is repeated inside the plaintext and
 //!   compared after decryption. Opening also checks the device the caller
 //!   expects (the file name), so a snapshot replayed under another
-//!   device's name is refused.
+//!   device's name is refused, and refuses a keyset generation above the
+//!   bundle's current one ([`Expected`]).
+//! - **Fingerprint** (high-water marks): SHA-256 of the authenticated
+//!   content only (AAD, nonce, ciphertext), never of the file bytes, so
+//!   the provider can reformat the TOML without faking a fork.
 //! - **Plaintext**: JSON padded with spaces to a power-of-two bucket of at
 //!   least 16 KiB, at most 4 MiB; the file is capped at 8 MiB and its size
 //!   is checked before parsing.
@@ -39,7 +43,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use super::SyncError;
 use super::clock::{DeviceId, DeviceName};
@@ -133,13 +136,43 @@ pub(crate) struct ReplicaContent {
     pub(crate) high_water: HighWater,
 }
 
+/// What the reader expects of a container, from the verified
+/// `bundle.toml` and the file name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Expected {
+    pub(crate) bundle_id: [u8; ID_LEN],
+    pub(crate) epoch: u32,
+    /// The bundle's current keyset generation: a container sealed under a
+    /// higher one is refused (S1a review finding 6).
+    pub(crate) max_keyset_generation: u64,
+    /// The device the file name designates.
+    pub(crate) device: DeviceId,
+}
+
 /// A verified container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Opened<C> {
     pub(crate) binding: Binding,
     pub(crate) content: C,
-    /// SHA-256 of the file bytes (per-device high-water mark).
+    /// Fingerprint of the authenticated content (per-device high-water
+    /// mark): see [`fingerprint`].
     pub(crate) fingerprint: [u8; 32],
+}
+
+/// A sealed container: the file text and its fingerprint (what
+/// `guard::check_own_file` compares with the copy found in the folder).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sealed {
+    pub(crate) text: String,
+    pub(crate) fingerprint: [u8; 32],
+}
+
+/// Fingerprint of a container (S1a review finding 1): SHA-256 of what the
+/// AEAD authenticates, decoded (AAD, which binds the kind, the binding and
+/// the padded length; nonce; ciphertext and tag). The TOML around it (a
+/// comment, whitespace, key order, CRLF) does not enter it.
+fn fingerprint(aad: &[u8], nonce: &[u8; NONCE_LEN], ciphertext: &[u8]) -> [u8; 32] {
+    crypto::content_fingerprint("portico-sync/1 container", &[aad, nonce, ciphertext])
 }
 
 #[derive(Deserialize)]
@@ -187,13 +220,14 @@ fn aad(kind: ContainerKind, binding: &Binding, padded_len: usize) -> Vec<u8> {
     aad.finish().to_vec()
 }
 
-/// Seals `content` under `binding`; returns the file text.
+/// Seals `content` under `binding`; returns the file text and its
+/// fingerprint.
 pub(crate) fn seal<C: Serialize>(
     kind: ContainerKind,
     keys: &Subkeys,
     binding: &Binding,
     content: &C,
-) -> Result<String, SyncError> {
+) -> Result<Sealed, SyncError> {
     if binding.seq == 0 || binding.epoch == 0 || binding.keyset_generation == 0 {
         return Err(SyncError::Corrupt {
             what: kind.what(),
@@ -209,12 +243,12 @@ pub(crate) fn seal<C: Serialize>(
         seq: binding.seq,
         content,
     };
-    let json = Zeroizing::new(
-        serde_json::to_vec(&body).map_err(|_| SyncError::Crypto("encoding failed"))?,
-    );
-    let padded = crypto::padded(&json, MIN_BUCKET, kind.what())?;
+    // Serialized straight into its padded, zeroizing buffer: no
+    // reallocation leaves plaintext behind (S1a review finding 6).
+    let padded = crypto::padded_json(&body, MIN_BUCKET, kind.what())?;
     let aad = aad(kind, binding, padded.len());
     let (nonce, ciphertext) = crypto::seal(kind.key(keys).bytes(), &aad, padded)?;
+    let fingerprint = fingerprint(&aad, &nonce, &ciphertext);
     let envelope = Envelope {
         format: kind.format().to_owned(),
         version: CONTAINER_VERSION,
@@ -234,26 +268,21 @@ pub(crate) fn seal<C: Serialize>(
             max: MAX_CONTAINER_FILE_BYTES,
         });
     }
-    Ok(text)
+    Ok(Sealed { text, fingerprint })
 }
 
 /// Opens a container read from the folder (or the data dir).
-///
-/// `expected_device` is the device the file name designates; `bundle_id`
-/// and `epoch` come from the verified `bundle.toml`.
 pub(crate) fn open<C: DeserializeOwned>(
     kind: ContainerKind,
     keys: &Subkeys,
-    bundle_id: &[u8; ID_LEN],
-    epoch: u32,
-    expected_device: &DeviceId,
+    expected: &Expected,
     bytes: &[u8],
 ) -> Result<Opened<C>, SyncError> {
     let what = kind.what();
     let corrupt = |reason| SyncError::Corrupt { what, reason };
     let unauthenticated = || SyncError::Unauthenticated {
         what,
-        device: expected_device.short(),
+        device: expected.device.short(),
     };
     if bytes.len() > MAX_CONTAINER_FILE_BYTES {
         return Err(SyncError::TooLarge {
@@ -277,7 +306,7 @@ pub(crate) fn open<C: DeserializeOwned>(
     let envelope: Envelope = toml::from_str(text).map_err(|_| corrupt("unexpected content"))?;
     // Another device's file under this name, or another epoch: the AEAD
     // would fail anyway; refusing first gives a precise reason.
-    if envelope.device != *expected_device || envelope.epoch != epoch {
+    if envelope.device != expected.device || envelope.epoch != expected.epoch {
         return Err(unauthenticated());
     }
     let nonce: [u8; NONCE_LEN] = crypto::exact(
@@ -294,20 +323,19 @@ pub(crate) fn open<C: DeserializeOwned>(
         return Err(corrupt("bad ciphertext length"));
     }
     let binding = Binding {
-        bundle_id: *bundle_id,
-        epoch,
+        bundle_id: expected.bundle_id,
+        epoch: expected.epoch,
         keyset_generation: envelope.keyset_generation,
         device: envelope.device,
         seq: envelope.seq,
     };
-    let plaintext = crypto::open(
-        kind.key(keys).bytes(),
-        &nonce,
-        &aad(kind, &binding, padded_len),
-        &ciphertext,
-    )
-    .map_err(|_| unauthenticated())?;
+    let aad = aad(kind, &binding, padded_len);
+    let plaintext = crypto::open(kind.key(keys).bytes(), &nonce, &aad, &ciphertext)
+        .map_err(|_| unauthenticated())?;
     // Authenticated from here on.
+    if binding.keyset_generation > expected.max_keyset_generation {
+        return Err(corrupt("sealed under a newer key set than the bundle"));
+    }
     let body: Body<C> = serde_json::from_slice(&plaintext).map_err(|_| corrupt("bad content"))?;
     if body.format != BODY_FORMAT {
         return Err(SyncError::UnsupportedVersion {
@@ -327,7 +355,7 @@ pub(crate) fn open<C: DeserializeOwned>(
     Ok(Opened {
         binding,
         content: body.content,
-        fingerprint: crypto::sha256(bytes),
+        fingerprint: fingerprint(&aad, &nonce, &ciphertext),
     })
 }
 
@@ -349,7 +377,7 @@ pub(crate) fn seal_snapshot(
     keys: &Subkeys,
     binding: &Binding,
     content: &SnapshotContent,
-) -> Result<String, SyncError> {
+) -> Result<Sealed, SyncError> {
     check_app_version(&content.app_version)?;
     seal(ContainerKind::Snapshot, keys, binding, content)
 }
@@ -358,19 +386,10 @@ pub(crate) fn seal_snapshot(
 /// against the device's own entry of the context, the size of `seen`.
 pub(crate) fn open_snapshot(
     keys: &Subkeys,
-    bundle_id: &[u8; ID_LEN],
-    epoch: u32,
-    expected_device: &DeviceId,
+    expected: &Expected,
     bytes: &[u8],
 ) -> Result<Opened<SnapshotContent>, SyncError> {
-    let opened: Opened<SnapshotContent> = open(
-        ContainerKind::Snapshot,
-        keys,
-        bundle_id,
-        epoch,
-        expected_device,
-        bytes,
-    )?;
+    let opened: Opened<SnapshotContent> = open(ContainerKind::Snapshot, keys, expected, bytes)?;
     let content = &opened.content;
     check_app_version(&content.app_version)?;
     content.state.check_invariants()?;
@@ -401,28 +420,19 @@ pub(crate) fn seal_replica(
     keys: &Subkeys,
     binding: &Binding,
     content: &ReplicaContent,
-) -> Result<String, SyncError> {
+) -> Result<Sealed, SyncError> {
     seal(ContainerKind::Replica, keys, binding, content)
 }
 
-/// Opens the local replica of `device`.
+/// Opens the local replica of `expected.device`.
 pub(crate) fn open_replica(
     keys: &Subkeys,
-    bundle_id: &[u8; ID_LEN],
-    epoch: u32,
-    device: &DeviceId,
+    expected: &Expected,
     bytes: &[u8],
 ) -> Result<Opened<ReplicaContent>, SyncError> {
-    let opened: Opened<ReplicaContent> = open(
-        ContainerKind::Replica,
-        keys,
-        bundle_id,
-        epoch,
-        device,
-        bytes,
-    )?;
+    let opened: Opened<ReplicaContent> = open(ContainerKind::Replica, keys, expected, bytes)?;
     opened.content.state.check_invariants()?;
-    if opened.content.state.context().get(device) > opened.content.clock {
+    if opened.content.state.context().get(&expected.device) > opened.content.clock {
         return Err(SyncError::Corrupt {
             what: "local replica",
             reason: "context ahead of the device clock",
@@ -481,8 +491,17 @@ mod tests {
         }
     }
 
+    fn expected(bundle_id: [u8; ID_LEN], epoch: u32, device: DeviceId) -> Expected {
+        Expected {
+            bundle_id,
+            epoch,
+            max_keyset_generation: 1,
+            device,
+        }
+    }
+
     fn open_mine(bytes: &[u8]) -> Result<Opened<SnapshotContent>, SyncError> {
-        open_snapshot(&keys(), &BUNDLE, 1, &me(), bytes)
+        open_snapshot(&keys(), &expected(BUNDLE, 1, me()), bytes)
     }
 
     fn edit(text: &str, edit: impl FnOnce(&mut Envelope)) -> String {
@@ -497,20 +516,25 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let text = seal_snapshot(&keys(), &binding(42), &content()).expect("seal");
+        let sealed = seal_snapshot(&keys(), &binding(42), &content()).expect("seal");
+        let text = sealed.text;
         assert!(!text.contains("prod") && !text.contains("Laptop") && !text.contains("journalctl"));
         let opened = open_mine(text.as_bytes()).expect("open");
         assert_eq!(opened.binding, binding(42));
         assert_eq!(opened.content, content());
-        assert_eq!(opened.fingerprint, crypto::sha256(text.as_bytes()));
+        assert_eq!(opened.fingerprint, sealed.fingerprint);
         // A second seal of the same content differs (fresh nonce).
-        let again = seal_snapshot(&keys(), &binding(42), &content()).expect("seal");
+        let again = seal_snapshot(&keys(), &binding(42), &content())
+            .expect("seal")
+            .text;
         assert_ne!(again, text);
     }
 
     #[test]
     fn every_aad_field_is_bound() {
-        let text = seal_snapshot(&keys(), &binding(42), &content()).expect("seal");
+        let text = seal_snapshot(&keys(), &binding(42), &content())
+            .expect("seal")
+            .text;
         let unauthenticated = |result: Result<Opened<SnapshotContent>, SyncError>| {
             matches!(result, Err(SyncError::Unauthenticated { .. }))
         };
@@ -528,41 +552,31 @@ mod tests {
         let other = DeviceId::from_bytes([2; ID_LEN]);
         assert!(unauthenticated(open_snapshot(
             &keys(),
-            &BUNDLE,
-            1,
-            &other,
+            &expected(BUNDLE, 1, other),
             text.as_bytes()
         )));
         // …or the envelope edited to match the file name.
         let swapped = edit(&text, |e| e.device = other);
         assert!(unauthenticated(open_snapshot(
             &keys(),
-            &BUNDLE,
-            1,
-            &other,
+            &expected(BUNDLE, 1, other),
             swapped.as_bytes()
         )));
         // Epoch and bundle id the reader expects.
         assert!(unauthenticated(open_snapshot(
             &keys(),
-            &BUNDLE,
-            2,
-            &me(),
+            &expected(BUNDLE, 2, me()),
             text.as_bytes()
         )));
         let epoch_edit = edit(&text, |e| e.epoch = 2);
         assert!(unauthenticated(open_snapshot(
             &keys(),
-            &BUNDLE,
-            2,
-            &me(),
+            &expected(BUNDLE, 2, me()),
             epoch_edit.as_bytes()
         )));
         assert!(unauthenticated(open_snapshot(
             &keys(),
-            &[8; ID_LEN],
-            1,
-            &me(),
+            &expected([8; ID_LEN], 1, me()),
             text.as_bytes()
         )));
         // Keys of another bundle or epoch.
@@ -571,9 +585,7 @@ mod tests {
                 .expect("keys");
         assert!(unauthenticated(open_snapshot(
             &other_keys,
-            &BUNDLE,
-            1,
-            &me(),
+            &expected(BUNDLE, 1, me()),
             text.as_bytes()
         )));
         // Padded length: a ciphertext cut to a smaller bucket.
@@ -589,9 +601,7 @@ mod tests {
             open::<SnapshotContent>(
                 ContainerKind::Replica,
                 &keys(),
-                &BUNDLE,
-                1,
-                &me(),
+                &expected(BUNDLE, 1, me()),
                 replica_text.as_bytes()
             )
             .is_err()
@@ -600,7 +610,9 @@ mod tests {
 
     #[test]
     fn a_tampered_byte_anywhere_is_rejected() {
-        let text = seal_snapshot(&keys(), &binding(42), &content()).expect("seal");
+        let text = seal_snapshot(&keys(), &binding(42), &content())
+            .expect("seal")
+            .text;
         let bytes = text.as_bytes();
         for index in (FILE_COMMENT.len()..bytes.len()).step_by(5) {
             let mut altered = bytes.to_vec();
@@ -630,7 +642,9 @@ mod tests {
 
     #[test]
     fn padding_hides_the_size_within_a_bucket() {
-        let small = seal_snapshot(&keys(), &binding(1), &content()).expect("seal");
+        let small = seal_snapshot(&keys(), &binding(1), &content())
+            .expect("seal")
+            .text;
         let mut bigger = content();
         let mut replica = Replica::new(1);
         for i in 0..20 {
@@ -638,7 +652,9 @@ mod tests {
         }
         bigger.state = replica.state;
         bigger.clock = replica.clock.counter();
-        let medium = seal_snapshot(&keys(), &binding(1), &bigger).expect("seal");
+        let medium = seal_snapshot(&keys(), &binding(1), &bigger)
+            .expect("seal")
+            .text;
         assert_eq!(small.len(), medium.len(), "same 16 KiB bucket");
         let ct_len = |text: &str| {
             let envelope: Envelope =
@@ -652,7 +668,9 @@ mod tests {
         }
         bigger.state = replica.state;
         bigger.clock = replica.clock.counter();
-        let large = seal_snapshot(&keys(), &binding(1), &bigger).expect("seal");
+        let large = seal_snapshot(&keys(), &binding(1), &bigger)
+            .expect("seal")
+            .text;
         let len = ct_len(&large) - TAG_LEN;
         assert!(len.is_power_of_two() && len > MIN_BUCKET, "{len}");
         open_mine(large.as_bytes()).expect("open");
@@ -686,7 +704,9 @@ mod tests {
 
     #[test]
     fn versions_and_garbage() {
-        let text = seal_snapshot(&keys(), &binding(42), &content()).expect("seal");
+        let text = seal_snapshot(&keys(), &binding(42), &content())
+            .expect("seal")
+            .text;
         assert!(matches!(
             open_mine(edit(&text, |e| e.version = 2).as_bytes()),
             Err(SyncError::UnsupportedVersion { found: 2, .. })
@@ -807,8 +827,11 @@ mod tests {
             state: content.state.clone(),
             high_water: HighWater::default(),
         };
-        let text = seal_replica(&keys(), &binding(77), &replica).expect("seal");
-        let opened = open_replica(&keys(), &BUNDLE, 1, &me(), text.as_bytes()).expect("open");
+        let text = seal_replica(&keys(), &binding(77), &replica)
+            .expect("seal")
+            .text;
+        let opened =
+            open_replica(&keys(), &expected(BUNDLE, 1, me()), text.as_bytes()).expect("open");
         assert_eq!(opened.content, replica);
         assert_eq!(opened.binding.seq, 77);
         // The snapshot key or format cannot open it.
@@ -823,8 +846,45 @@ mod tests {
         // Local generation is bound.
         let older = edit(&text, |e| e.seq = 76);
         assert!(matches!(
-            open_replica(&keys(), &BUNDLE, 1, &me(), older.as_bytes()),
+            open_replica(&keys(), &expected(BUNDLE, 1, me()), older.as_bytes()),
             Err(SyncError::Unauthenticated { .. })
+        ));
+    }
+
+    #[test]
+    fn a_container_above_the_bundle_keyset_generation_is_refused() {
+        let mut newer = binding(5);
+        newer.keyset_generation = 2;
+        let text = seal_snapshot(&keys(), &newer, &content())
+            .expect("seal")
+            .text;
+        // The bundle this device verified is still at generation 1.
+        assert_eq!(
+            open_mine(text.as_bytes()).expect_err("above"),
+            SyncError::Corrupt {
+                what: "snapshot",
+                reason: "sealed under a newer key set than the bundle",
+            }
+        );
+        let mut current = expected(BUNDLE, 1, me());
+        current.max_keyset_generation = 2;
+        let opened = open_snapshot(&keys(), &current, text.as_bytes()).expect("open");
+        assert_eq!(opened.binding.keyset_generation, 2);
+        // An older generation stays readable (devices re-seal lazily).
+        current.max_keyset_generation = 3;
+        open_snapshot(&keys(), &current, text.as_bytes()).expect("older generation");
+        // Same for the replica.
+        let replica = ReplicaContent {
+            device_name: content().device_name,
+            clock: content().clock,
+            publish_seq: 1,
+            state: content().state,
+            high_water: HighWater::default(),
+        };
+        let text = seal_replica(&keys(), &newer, &replica).expect("seal").text;
+        assert!(matches!(
+            open_replica(&keys(), &expected(BUNDLE, 1, me()), text.as_bytes()),
+            Err(SyncError::Corrupt { .. })
         ));
     }
 }
