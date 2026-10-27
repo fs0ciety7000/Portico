@@ -1,6 +1,7 @@
 # Synchronisation chiffrée par dossier (phase 11)
 
-> **État : S1a livré (fondations pures dans `portico-core/src/sync/`) ; S1b (intégration au moteur) et S1c (UIs) à venir ; S2 et S3 ensuite.**
+> **État : S1a livré (fondations pures dans `portico-core/src/sync/`) ; S1b livré (intégration au moteur : dossier, projection,
+> application validée, passe, tâche de fond, API `Engine::sync_*`, événements) ; S1c (UIs) à venir ; S2 et S3 ensuite.**
 > Décisions du propriétaire du 2026-10-27 intégrées (§11), revue `agent-security` du même jour appliquée (§12, elle prime sur les
 > sections précédentes en cas d'écart). ADR : `docs/STACK.md`, 2026-10-27. Plan : `docs/PLAN.md`, phase 11.
 
@@ -397,11 +398,16 @@ Verrou exclusif `data_dir/sync/sync.lock` de la projection à la publication ; o
 | `model.rs` | clés, valeurs, `SyncState` (registres génériques), fusion transactionnelle, projection typée, conflits, collecte | ✅ S1a |
 | `guard.rs` | marques hautes, retour arrière, fourche, rétrogradation, restauration, retenues | ✅ S1a |
 | `passphrase.rs` | générateur EFF, estimation, minimum imposé | ✅ S1a |
-| `folder.rs` | `trait FolderIo` + `StdFolder`, candidats, placeholders, racine sûre (F9) | S1b |
-| `project.rs` / `apply.rs` | projection des fichiers locaux, application ordonnée et validée | S1b |
-| `state.rs` / `task.rs` | `data_dir/sync/` (`sync.toml` non secret, `replica.snap`), boucle de fond | S1b |
+| `folder.rs` | `trait FolderIo` + `StdFolder`, candidats, placeholders, racine sûre (F9), limites (F15) ; fournisseur simulé des tests | ✅ S1b |
+| `project.rs` / `apply.rs` | projection des fichiers locaux, modifications locales (F7), application ordonnée et validée (F1, F8) | ✅ S1b |
+| `state.rs` | `data_dir/sync/` (`sync.toml` non secret, `replica.snap` scellé, `confirm.toml`, `sync.lock`) | ✅ S1b |
+| `runner.rs` | `SyncCore` : une passe, créer, rejoindre, déverrouiller, résoudre, confirmer, désactiver | ✅ S1b |
+| `api.rs` | types publics (statut, appareils, conflits, issues, confirmations en attente) | ✅ S1b |
+| `engine/sync_api.rs` | `Engine::sync_*`, thread `portico-sync`, tâche de fond, événements | ✅ S1b |
 
-`Paths::sync_dir()` = `data_dir/sync` (local, jamais itinérant). Ordre d'une passe, sûr en cas de crash : fusion en mémoire →
+`Paths::sync_dir()` = `data_dir/sync` (local, jamais itinérant). Ordre d'une passe, sûr en cas de crash (tel que livré en S1b :
+verrou → racine sûre → `bundle.toml` → réplica → fichier propre → instantanés des autres, observés avant tout jugement de
+contexte → écritures locales → fusion → réplica persisté → application → collecte des pierres tombales → réplica → publication) : fusion en mémoire →
 persistance des points et du réplica (**un point n'est jamais publié avant d'être durable localement**) → application locale
 (idempotente) → projection appliquée → publication. Au démarrage et à chaque passe, **avant toute écriture**, lecture du fichier
 propre de l'appareil (`check_own_file`) : en avance → rejoindre sous un nouvel id.
@@ -415,12 +421,31 @@ préfixe d'id, F16), `sync_rename_device`, `sync_set_options`, `sync_disable` ; 
 Statuts : Disabled, Locked, Idle, Syncing, Waiting, FolderUnavailable, Alert (Rollback | Fork | BundleTampered |
 KeysRotatedElsewhere | PassphraseChangedTwice | PassphraseReset).
 
+**Livré en S1b** (`crate::sync::api`, toutes `async`, travail bloquant sur le thread `portico-sync` ou `spawn_blocking`) :
+`start_sync()` (tâche de fond), `sync_status() -> SyncOverview { status, folder, device, remember_key }`,
+`sync_probe_folder(PathBuf) -> FolderProbe`, `sync_generate_passphrase() -> GeneratedPassphrase`,
+`sync_create(SyncCreate) -> SyncStatus`, `sync_join_preview(SyncJoin) -> JoinPreview`,
+`sync_join_commit(token, JoinBulkChoice) -> SyncStatus`, `sync_unlock(SecretString)`, `sync_now()`, `sync_conflicts()`,
+`sync_resolve(id, SyncResolution::{Pick, Union, KeepBoth})`, `sync_issues()`, `sync_skip_on_this_device(key)`,
+`sync_pending_hosts()`, `sync_confirm_hosts(aliases)`, `sync_reject_hosts(aliases)`, `sync_acknowledge_alerts()`,
+`sync_change_passphrase(old, NewPassphrase)`, `sync_reset_passphrase(NewPassphrase)`, `sync_devices()`,
+`sync_rename_device(name)`, `sync_set_options(SyncOptions)`, `sync_disable(DisableOptions)` ; snippets (F8) :
+`synced_snippets_unconfirmed()`, `confirm_synced_snippet(id)`, `snippet_input_for(id, valeurs, run, bracketed_paste)`.
+`SyncStatus` : Disabled, Locked, Idle { last_pass, devices, conflicts, issues, pending_confirmations }, Syncing,
+Waiting { PartialSync | Placeholder | Deferred | Busy, device }, FolderUnavailable { Missing | NotMounted | PermissionDenied |
+BundleMissing | Unsafe | TooManyEntries }, Alert { Rollback | Fork | Restored | BundleTampered | KeysRotatedElsewhere |
+PassphraseChanged | ThirdPartyClaim | MergeRefused | Divergent | DroppedValues, device }, Error { summary }.
+
 Codes d'erreur (livrés en S1a) : `sync_wrong_passphrase`, `sync_passphrase_weak`, `sync_corrupt`, `sync_version`,
 `sync_kdf_out_of_bounds`, `sync_kdf_memory`, `sync_bundle_tampered`, `sync_snapshot_invalid`, `sync_rollback`, `sync_fork`,
 `sync_restored`, `sync_too_large`, `sync_device_name_invalid`, `sync_record_invalid`, `sync_resolution_invalid`, `sync_crypto`.
 S1b ajoute ceux des E/S et de l'application (`sync_folder_missing`, `sync_folder_not_portico`, `sync_folder_unwritable`,
-`sync_locked`, `sync_hosts_file_unmanaged`, `sync_alias_shadowed`, `sync_jump_missing`, `sync_key_missing`). Aucun message ne
-contient de valeur ni de secret.
+`sync_locked`, `sync_hosts_file_unmanaged`, `sync_alias_shadowed`, `sync_jump_missing`, `sync_key_missing`), et, livrés aussi :
+`sync_bundle_exists`, `sync_folder_unsafe`, `sync_folder_too_many`, `sync_folder_timeout`, `sync_folder_io`, `sync_disabled`,
+`sync_already_enabled`, `sync_join_expired`, `sync_busy`, `sync_host_in_use`, `sync_not_pending`, `sync_snippet_unconfirmed`,
+`sync_passphrase_changed`, `sync_keys_rotated`, `sync_divergent`, `sync_dropped_values`, `sync_deferred`, `sync_pending`,
+`sync_third_party_claim`, `sync_merge_refused`, `sync_record_needs_newer`. Chacun a un indice. Aucun message ne contient de
+valeur ni de secret.
 
 ### 5.3 Événements
 Nouveaux : `EngineEvent::Sync { status }`, `SyncConflicts { count }`, `SnippetsChanged`, `SettingsChanged { settings }` ;
@@ -500,14 +525,33 @@ Charger `ui-design-premium`, `tui-patterns` et `gui-tauri-patterns` avant. La pa
 - `passphrase` : liste EFF (7776 mots, triée, SHA-256 épinglé), générateur (6 mots distincts, uniforme, χ² sur 16 classes),
   rejet de la zone biaisée, seuil de force, `typed_list_words_in_list_order_are_weak`, coût borné sur entrée longue.
 
-**À venir** : S1b — `project`/`apply` sur `Paths::rooted` (édition à la main, `hosts.conf` non géré, alias masqué, rebond
-manquant, IdentityFile, snippet avec ESC en quarantaine, `updates.check` jamais synchronisé) et les tests nommés par la revue :
-`sync_apply_refuses_hostname_like_alias`, `sync_destination_change_held_until_confirmed`,
-`join_prefer_remote_does_not_confirm_redirects`, `quarantined_or_held_record_never_becomes_tombstone`,
-`synced_snippet_change_requires_confirmation_before_run`, `devices_dir_symlink_is_refused_and_nothing_written_outside` ;
-intégration multi-moteurs avec un `SimulatedProvider` (visibilité retardée, écritures tronquées, copies en conflit de chaque
-fournisseur, retour arrière, suppression, placeholders, réordonnancement, lecture seule, dossier absent, conflit de
-`bundle.toml`) ; injection de crash entre chaque étape de §5.1 ; fourche par clonage. S2 —
+**Livré en S1b (36 tests de plus, 129 dans `sync::` et `engine::sync_api`)** :
+- `folder` : noms des fichiers d'appareil (primaire, copies de chaque fournisseur, placeholders iCloud, temporaires ignorés),
+  racine refusée dans `~/.ssh` ou les dossiers de Portico, aller-retour, plafond de lecture, création sans écrasement,
+  pause au-delà de 256 entrées sans rien supprimer, dossier absent jamais recréé,
+  `devices_dir_symlink_is_refused_and_nothing_written_outside`, fichiers liés ni lus ni remplacés, racine remplacée par
+  un lien refusée.
+- `project` : projection des quatre fichiers, `updates.check` et `copy_on_select` jamais projetés, `hosts.conf` non géré
+  suspend les seuls hôtes (et garde leur dernière projection), édition à la main, suppression et renommage détectés,
+  snippet invalide (ESC) ni publié ni supprimé, chemins d'identité relatifs à `~`.
+- `state` : `sync.toml` sans secret, confirmations, verrou inter-processus.
+- `engine::sync_api` (deux moteurs ou plus, un dossier partagé simulé) : convergence avec conflit hors ligne résolu par
+  Union ; `sync_destination_change_held_until_confirmed` (refus, nouvelle destination, confirmation) ;
+  `join_prefer_remote_does_not_confirm_redirects` ; `sync_apply_refuses_hostname_like_alias` (nom d'hôte, alias de
+  `~/.ssh/config`, « ignorer sur cet appareil ») ; `quarantined_or_held_record_never_becomes_tombstone` ;
+  `synced_snippet_change_requires_confirmation_before_run` ; suppressions propagées par pierres tombales ; dossier de
+  données restauré → nouvel id sans perte ; retour arrière d'un fichier, fichier tronqué « en attente », copie en conflit
+  utilisée, nettoyage des seules copies propres vérifiées ; dossier absent, lecture seule ; deux processus sur un appareil
+  (verrou, sans fourche) ; désactivation (clé oubliée, données locales gardées), « ne pas mémoriser » puis déverrouillage ;
+  jeton de rattachement à usage unique et expirant ; création refusée (passphrase faible, bundle existant, dossier
+  privé) ; `hosts.conf` non géré ; changement et réinitialisation de passphrase alertant les autres appareils ; tâche de
+  fond qui publie après une modification locale ; liste blanche des réglages ; enregistrements d'un Portico plus récent
+  retenus et jamais appliqués ; contexte de tiers gonflé différé et signalé.
+
+**À venir** : injection de crash entre chaque étape de §5.1 et fourche par clonage de profil complet (couverts en partie :
+réplica persisté avant publication, dossier restauré) ; visibilité retardée et réordonnancement du fournisseur simulé ;
+conflit concurrent de `bundle.toml` entre deux appareils (politique livrée, scénario à écrire) ; repérage S0 des
+fournisseurs réels. S2 —
 `rotation_makes_new_snapshots_unreadable_with_old_dk`, `unbound_password_is_never_projected`,
 `bound_password_not_offered_for_other_key_on_b`, scénario avec serveur russh en process. Hygiène des secrets (motif
 `"hunter2"`) étendue aux types et DTO de sync. Cibles `cargo-fuzz` optionnelles (bundle, enveloppe, corps). CI Windows (DACL,
@@ -526,7 +570,7 @@ issues dans les 4 thèmes, TUI 80×24, GUI 880–1200 px.
 |---|---|---|
 | **S0** (repérage) | Mesurer Dropbox, iCloud Drive, OneDrive, Syncthing, Google Drive et un dépôt git : atomicité des renommages, nommage des conflits, fichiers temporaires ignorés, placeholders | Tableau des comportements observés dans ce document, fixtures du `SimulatedProvider` |
 | **S1a** ✅ | Fondations pures : crypto, `bundle.toml`, conteneurs scellés, horloges et fusion, gardes, passphrase, erreurs | 81 tests verts, clippy propre (Linux et cible Windows), `cargo deny` vert |
-| **S1b** | Dossier (`FolderIo`, racine sûre), projection, application validée (quarantaine, masquage, confirmation des destinations), état local, tâche de fond, statut et événements, API create/join/unlock/resolve/change/reset/disable | Deux moteurs sur un dossier partagé convergent, conflit hors ligne compris ; scénarios du `SimulatedProvider` verts |
+| **S1b** ✅ | Dossier (`FolderIo`, racine sûre), projection, application validée (quarantaine, masquage, confirmation des destinations), état local, tâche de fond, statut et événements, API create/join/unlock/resolve/change/reset/disable | Deux moteurs sur un dossier partagé convergent, conflit hors ligne compris ; scénarios du `SimulatedProvider` verts |
 | **S1c** | Assistant, barre de statut, panneau Sync, conflits, issues, badges (TUI + GUI) | Deux machines partagent hôtes, métadonnées, snippets et thème, conflit montré et résolu dans les deux UIs |
 | **S2** | **Rotation des clés et « oublier un appareil » d'abord**, puis mots de passe liés (indexation, couche interne, attente si verrouillé, mention TOFU, détection par K_cmp) | Révocation + rotation depuis un appareil restant ; mot de passe mémorisé sur A proposé sur B seulement pour la même clé hôte vérifiée |
 | **S3** | Emplacements X25519 par appareil, signatures Ed25519, réglage de l'horizon, exclusions par réglage, options (`KeyPassphrase`, indices `known_hosts` jamais écrits) | Exercice d'appareil perdu sans ressaisir la passphrase |
@@ -577,9 +621,62 @@ STALE_HORIZON_SECS}` (`observe_snapshot(device, seq, clock, empreinte, maintenan
 compteur local et les horloges des instantanés tout juste vérifiés : lire **tous** les instantanés d'une passe avant de juger
 les contextes) ; `passphrase::{generate_passphrase, assess_passphrase, NewPassphrase, GeneratedPassphrase}` (publics, pour les
 jauges des UIs ; `assess_passphrase` juge une saisie, `NewPassphrase::strength` ce que le cœur imposera). Les `#[allow(dead_code)]` de
-`sync/mod.rs` tombent avec S1b.
+`sync/mod.rs` tombent avec S1b. **Fait en S1b** : tout ce qui précède est utilisé ; les `allow(dead_code)` sont retirés (les
+seuls restants, ciblés et commentés : les sous-clés `secret` et `compare` de S2 ; quelques aides de S1a réservées aux tests
+sont en `#[cfg(test)]`).
 
 ---
+
+### Écarts de l'implémentation S1b
+
+| Écart | Raison |
+|---|---|
+| Modules `runner.rs` (passe et opérations), `api.rs` (types publics) et `engine/sync_api.rs` (méthodes du moteur, thread, tâche) au lieu de `state.rs` / `task.rs` seuls | `SyncCore` tient l'état en mémoire (clé, rapport, jetons) sur un seul thread ; les méthodes du moteur doivent voir ses champs privés |
+| Le thread `portico-sync` exécute la **passe entière** (dossier, fichiers locaux, trousseau), pas seulement les E/S du dossier ; délai de 60 s par opération | Une passe est une séquence ordonnée sous `sync.lock` : la couper entre threads ajouterait des états intermédiaires. Argon2 reste sur `spawn_blocking` |
+| Fichiers temporaires `devices/.<id>.snap.tmp-<aléa>` (ceux de `store::write_atomic`) au lieu de `~<id>.snap.tmp` | Même garantie (`create_new`, `0600` / DACL, `fsync`, `rename`) ; le listage ignore tout nom commençant par `.` |
+| Publication : passe 5 s après la dernière modification locale (au plus `poll` après la première), sans espacement minimal de 30 s entre publications ; passe finale à l'arrêt seulement si une modification locale attend | Le délai de 5 s regroupe déjà les rafales ; un état inchangé n'est jamais republié (empreinte de l'état publié) |
+| Passe de fond **sautée** quand l'autre processus tient `sync.lock` ; une commande de l'utilisateur (`sync_now`, résolutions) **attend** le verrou | §4.9 ; une commande ne doit pas répondre avec un statut périmé |
+| Renommage détecté à la projection (un hôte disparaît, un autre de même destination apparaît) → `renamed_from` ; le nouvel alias reste un **nouvel hôte** qui demande confirmation ailleurs | F1 strict : un nouvel alias est un nouvel hôte |
+| Suppression reçue d'un hôte : retiré de `hosts.conf` (refusée tant qu'un autre hôte rebondit par lui, `sync_host_in_use`), **métadonnées et mot de passe mémorisé laissés** | Les métadonnées ont leurs propres pierres tombales ; un appareil compromis ne doit pas pouvoir effacer des secrets locaux |
+| « Refuser » une destination la garde hors de `hosts.conf` sur cet appareil (empreinte locale), sans écriture propagée ; une autre destination redemande | Le refus est une décision locale ; « garder le mien partout » = modifier l'hôte localement (écriture ordinaire) |
+| Collecte des pierres tombales **après** l'application, en gardant celles dont la suppression n'est pas encore appliquée localement | Sinon une pierre tombale déjà stable était collectée avant d'être appliquée et l'hôte restait (trouvé par `deletions_propagate_as_tombstones`) |
+| Fichier d'appareil non authentifié **ou** malformé = « en attente » (`PartialSync`), sans compteur « stable sur deux passes » | Il ne supprime jamais rien (fusion par état) ; un fichier qui reste illisible reste visible comme attente |
+| Alerte bloquante de réinitialisation (#8) : toute `keyset_generation` plus haute que celle connue ou faite par cet appareil donne `PassphraseChanged`, à acquitter (`sync_acknowledge_alerts`) | Le roster scellé (`deny_unknown_fields`) ne peut pas porter de marqueur « réinitialisée » sans nouveau format ; l'alerte couvre changement et réinitialisation, ce qui est plus sûr |
+| `bundle.toml` divergent (même triplet, autre contenu) : gagnant = plus haut (époque, génération, révision) parmi `bundle.toml` et les copies du fournisseur, égalité → plus petite empreinte ; rosters réunis et `bundle.toml` réécrit (révision + 1) ; copies jamais supprimées ; l'appareil se rajoute au roster s'il en manque | Convergence sans perte d'appareil quand deux appareils rejoignent en même temps |
+| « Recréer le bundle depuis cet appareil » (§5.5) non livré : `FolderUnavailable { BundleMissing }`, aucune écriture | Demande la passphrase et un écran d'avertissement (S1c) |
+| `Resolution::Value` non livré | Modifier l'enregistrement localement est déjà une résolution (une écriture locale couvre tous les frères) |
+| Réplica illisible (non authentifié ou malformé) → nouveau rattachement sous un nouvel id avec un état vide (alerte `Restored`) | Aucun point de l'ancien id ne peut être réutilisé ; l'état revient des autres appareils |
+| Fichier propre forké (même séquence, autre contenu) traité comme une restauration : nouvel id | Même remède que §2.7 « si c'est cet appareil » |
+| Appareil retenu (`guard::withheld`) signalé tout de suite comme avertissement `sync_pending`, sans délai de 24 h | Avertissement non bloquant ; l'ancienneté reste mesurée sur l'heure locale (F17) |
+| Windows : points d'analyse refusés par `FileType::is_symlink` (lien, jonction) **et** comparaison du chemin canonique ; placeholders cloud acceptés ; lecture sans `FILE_FLAG_OPEN_REPARSE_POINT` | Ce drapeau empêcherait l'hydratation d'un fichier OneDrive ; la fenêtre résiduelle entre contrôle et `rename` est documentée dans `folder.rs` (un processus qui écrit dans le dossier peut déjà tout y remplacer, et ce qui est écrit est chiffré) |
+| F8 appliqué par le cœur via `Engine::snippet_input_for` (la GUI y passe) ; la TUI construit encore ses octets elle-même | Aucune UI ne peut activer la sync avant S1c : aucun snippet reçu ne peut atteindre la TUI d'ici là ; S1c la fait passer par le cœur |
+| `SyncStatus::Error { summary }` ajouté ; `sync_status` rend `SyncOverview` (statut, dossier, appareil, mémorisation) et `Syncing` avant la première passe du processus | Les UIs ont besoin du dossier et d'un état d'échec générique |
+
+### Ce que S1c attend de S1b
+- **Démarrage** : `Engine::start_sync()` au lancement (puis rien : la tâche fait une passe immédiate, toutes les 30 s et 5 s
+  après chaque modification locale) ; `sync_status()` pour la barre ; s'abonner à `EngineEvent::Sync { status }`,
+  `SyncConflicts { count }`, `SnippetsChanged` (recharger), `SettingsChanged { settings }` (thème et keymaps en direct ;
+  la GUI valide les keymaps reçues comme la TUI, F18), `HostsChanged` / `HostMeta`. Après `Lagged` : `sync_status()` et
+  `sync_conflicts()`.
+- **Assistant** : `sync_probe_folder` (Usable | ExistingBundle | Incomplete | Missing | Refused), `sync_generate_passphrase`
+  (montrée une fois), jauge par `assess_passphrase` / `NewPassphrase::strength`, `sync_create(SyncCreate { folder,
+  passphrase: NewPassphrase, device_name, remember_key: true par défaut })` ; rejoindre : `sync_join_preview` (rien
+  n'est écrit ; compte hôtes, métadonnées, snippets, réglages, conflits, « nécessite plus récent ») puis
+  `sync_join_commit(token, ReviewEach | PreferRemote | PreferLocal)` — le jeton expire (10 min) et ne sert qu'une fois.
+- **Barre / panneau** : `SyncStatus` (glyphe + libellé), `sync_devices` (`label` = nom + préfixe d'id, F16), `sync_now`,
+  `sync_change_passphrase` (dire qu'il ne protège pas d'une passphrase déjà fuitée, F2), `sync_reset_passphrase`
+  (confirmation supplémentaire), `sync_rename_device`, `sync_set_options`, `sync_disable(DisableOptions { forget_key: true,
+  remove_my_file })`, `sync_unlock` quand `Locked`, `sync_acknowledge_alerts` pour `PassphraseChanged`.
+- **Conflits** : `sync_conflicts` (côtés avec appareils, `local`, valeur) et `sync_resolve(id, Pick { index } | Union |
+  KeepBoth { keep })` — Union présélectionnée pour les tags, KeepBoth pour les snippets.
+- **Issues** : `sync_issues` (code, message, indice ; `warning`, `skippable`) et `sync_skip_on_this_device(key)`.
+- **Hôtes reçus (F1)** : `sync_pending_hosts` (nouveau ou non, destination actuelle et reçue, appareils, `renamed_from`),
+  `sync_confirm_hosts` / `sync_reject_hosts` ; badge dans la liste des hôtes ; aucun choix groupé ne vaut confirmation.
+- **Snippets (F8)** : badge via `synced_snippets_unconfirmed`, corps complet puis `confirm_synced_snippet` ; **la TUI doit
+  envoyer ses snippets par `snippet_input_for`** (refus `sync_snippet_unconfirmed`), comme la GUI désormais.
+- GUI : DTO dans `src/lib/api.ts` (types de `crate::sync::api`), commandes Tauri, capability `dialog:allow-open` (dossiers
+  seulement). `docs/KEYBINDINGS.md`, palette « Sync… ». Contrat `CLAUDE.md` §2/§4 (module `sync/`) et `SECURITY.md` à la
+  clôture.
 
 ## 11. Décisions du propriétaire (2026-10-27)
 1. KDF fort : m=256 Mio, t=3, plancher 128 Mio (plafond ramené à 512 Mio / t=6 par F13).
@@ -603,21 +700,21 @@ jauges des UIs ; `assess_passphrase` juge une saisie, `NewPassphrase::strength` 
 
 | # | Gravité | Exigence | État |
 |---|---|---|---|
-| F1 | ÉLEVÉ | Hôtes reçus soumis aux contrôles de masquage de l'import (quarantaine `sync_alias_shadowed`) ; nouvel hôte et changement de HostName/Port/User/ProxyJump/IdentityFile retenus jusqu'à confirmation sur l'appareil ; PreferRemote/PreferLocal ne confirment jamais | S1b |
+| F1 | ÉLEVÉ | Hôtes reçus soumis aux contrôles de masquage de l'import (quarantaine `sync_alias_shadowed`) ; nouvel hôte et changement de HostName/Port/User/ProxyJump/IdentityFile retenus jusqu'à confirmation sur l'appareil ; PreferRemote/PreferLocal ne confirment jamais | ✅ S1b (UI S1c) |
 | F2 | ÉLEVÉ | En S1, « abandonner ce bundle et en créer un nouveau » est le seul remède ; l'UI de changement dit qu'il ne protège pas d'une passphrase déjà fuitée ; rotation + oubli d'appareil en S2 avant les mots de passe ; recommander de changer les mots de passe serveurs déjà synchronisés après rotation | limite testée en S1a ; UI S1c ; rotation S2 |
 | F3 | ÉLEVÉ | Jamais de mot de passe non lié ; liés seulement, envoyés par B seulement si sa clé vérifiée = l'empreinte liée ; mention en lecture seule à l'invite TOFU | S2 (genre `Secret` réservé en S1a, jamais écrit) |
 | F4 | MOYEN | Marque haute locale du bundle, refus des rétrogradations ; keyset_generation dans l'AAD de l'emplacement ; cliquet de format | ✅ S1a |
-| F5 | MOYEN | Lire son propre fichier au démarrage et à chaque passe ; s'il est en avance → nouvel id ; horloge, séquence, génération dans le réplica scellé, un seul fichier atomique | ✅ S1a (primitives) ; câblage S1b |
+| F5 | MOYEN | Lire son propre fichier au démarrage et à chaque passe ; s'il est en avance → nouvel id ; horloge, séquence, génération dans le réplica scellé, un seul fichier atomique | ✅ S1a (primitives) ; ✅ S1b (câblage) |
 | F6 | MOYEN | Contexte causal global jamais collecté ; un enregistrement absent couvert par le contexte est supprimé, pas ressuscité | ✅ S1a |
-| F7 | MOYEN | La projection garde l'état non appliqué des clés retenues / en quarantaine / masquées / exclues ; seule la suppression d'une valeur réellement écrite donne une pierre tombale | S1b |
-| F8 | MOYEN | Snippet modifié par la sync : badge, corps complet et confirmation au premier lancement | S1b/S1c |
-| F9 | MOYEN | Racine canonisée ; contrôle `symlink_metadata` à chaque passe ; points d'analyse Windows ; exclusion de `~/.ssh`, config, données | S1b |
+| F7 | MOYEN | La projection garde l'état non appliqué des clés retenues / en quarantaine / masquées / exclues ; seule la suppression d'une valeur réellement écrite donne une pierre tombale | ✅ S1b |
+| F8 | MOYEN | Snippet modifié par la sync : badge, corps complet et confirmation au premier lancement | ✅ S1b (refus par le cœur, GUI branchée) ; UI et TUI S1c |
+| F9 | MOYEN | Racine canonisée ; contrôle `symlink_metadata` à chaque passe ; points d'analyse Windows ; exclusion de `~/.ssh`, config, données | ✅ S1b |
 | F10 | MOYEN | IdentityFile : composantes normales seulement sous `~` | ✅ S1a |
 | F11 | MOYEN | Détection de changement de secret par compteur de génération d'index ; HMAC(K_cmp, compte ‖ secret) dans l'enregistrement scellé | S2 (K_cmp dérivée en S1a) |
 | F12 | MOYEN | « Inclure les mots de passe » est un réglage du bundle, présenté comme tel | S2 |
 | F13 | FAIBLE | Bornes KDF propres (défaut 256 Mio t=3 p=1, plancher 128 Mio, plafond 512 Mio t=6 p=4) ; `try_reserve` + `hash_password_into_with_memory` ; (paramètres, sel) retenus localement | ✅ S1a |
-| F14 | FAIBLE | Sous-clés K_roster et K_local distinctes ; MAC sur encodage canonique préfixé ; comparaison en temps constant ; aucune écriture conditionnée au déballage avant vérification du MAC ; jeton de rattachement à usage unique avec expiration, DK en `Zeroizing` ; DK mémorisée en base64 `Zeroizing`, élément macOS non synchronisable ; « Désactiver » oublie la DK par défaut | ✅ S1a (crypto) ; reste S1b |
-| F15 | FAIBLE | ≤ 8 candidats par appareil, budget d'octets par passe, pause sans suppression au-delà de la limite de listage ; ~~passage opaque plafonné (256 Kio) + « purger »~~ remplacé par les registres génériques (§4.10), bornés par les plafonds d'enregistrements et de taille | ✅ S1a (registres) ; dossier S1b |
+| F14 | FAIBLE | Sous-clés K_roster et K_local distinctes ; MAC sur encodage canonique préfixé ; comparaison en temps constant ; aucune écriture conditionnée au déballage avant vérification du MAC ; jeton de rattachement à usage unique avec expiration, DK en `Zeroizing` ; DK mémorisée en base64 `Zeroizing`, élément macOS non synchronisable ; « Désactiver » oublie la DK par défaut | ✅ S1a (crypto) ; ✅ S1b |
+| F15 | FAIBLE | ≤ 8 candidats par appareil, budget d'octets par passe, pause sans suppression au-delà de la limite de listage ; ~~passage opaque plafonné (256 Kio) + « purger »~~ remplacé par les registres génériques (§4.10), bornés par les plafonds d'enregistrements et de taille | ✅ S1a (registres) ; ✅ S1b (dossier) |
 | F16 | FAIBLE | Nom d'appareil validé (pas de contrôle / bidi / invisible), toujours affiché avec le préfixe d'id | ✅ S1a |
 | F17 | FAIBLE | Ancienneté mesurée sur l'heure locale d'observation de la dernière nouvelle séquence, jamais `published_at` | ✅ S1a |
 | F18 | FAIBLE | `copy_on_select` non synchronisé ; la GUI valide les keymaps reçues comme la TUI ; force de passphrase imposée dans le cœur (`sync_passphrase_weak`) à la création, au changement et à la réinitialisation | ✅ S1a (cœur) ; GUI S1c |
@@ -628,7 +725,7 @@ jauges des UIs ; `assess_passphrase` juge une saisie, `NewPassphrase::strength` 
 |---|---|---|---|---|
 | 1 | ÉLEVÉ | Empreintes des marques hautes sur les octets bruts : un commentaire ou des CRLF ajoutés forgeaient une fourche ou une divergence sans la DK | Empreinte du contenu authentifié (AAD ‖ nonce ‖ chiffré ; entrée du MAC ‖ MAC), rendue par `seal_*` et `open_*` ; `guard::fingerprint(octets)` retiré | ✅ S1a |
 | 2 | MOYEN | La fusion n'imposait aucun plafond : un instantané valide d'un appareil compromis empoisonnait l'état local | `SyncState::merge` faillible et transactionnelle (copie, invariants, taille), `sync_merge_refused` nommant la source | ✅ S1a |
-| 3 | MOYEN | Contexte causal d'un tiers non borné : suppression silencieuse et nouveau rattachement forcé | `guard::check_context_claims` (instantané différé) ; `dropped_live_without_successor` ; `LocalClock` : restauration sur preuve propre seulement, `sync_third_party_claim` sinon | ✅ S1a (API) ; décision de différer et alertes en S1b |
+| 3 | MOYEN | Contexte causal d'un tiers non borné : suppression silencieuse et nouveau rattachement forcé | `guard::check_context_claims` (instantané différé) ; `dropped_live_without_successor` ; `LocalClock` : restauration sur preuve propre seulement, `sync_third_party_claim` sinon | ✅ S1a (API) ; ✅ S1b (report et alertes) |
 | 4 | MOYEN | Passage opaque sans causalité : la compatibilité ascendante promise ne tenait pas | Registres génériques de JSON canonique, décodage typé à la projection, registres retenus jamais appliqués, clés en double fusionnées (§4.10) | ✅ S1a |
 | 5 | MOYEN | Estimation diceware contournable par des mots de la liste tapés | `GeneratedPassphrase` (seule à recevoir le crédit diceware), `NewPassphrase::{Generated, Typed}` ; saisie jugée par `zxcvbn` et un modèle de séquence | ✅ S1a |
 | 6 | FAIBLE | `HomeRelPath` plus laxiste que `managed_hosts` ; génération de clés non bornée à l'ouverture ; limite Argon2 sous surallocation ; clair JSON réalloué | `check_path_chars` + `windows_name_problem` ; `Expected::max_keyset_generation` ; limite documentée (§2.3) ; `serde_json::to_writer` dans un tampon `Zeroizing` pré-dimensionné | ✅ S1a |

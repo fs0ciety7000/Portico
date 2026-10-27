@@ -197,9 +197,14 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
     générateur EFF et minimum de force imposé. Correctifs de la revue de sécurité de l'implémentation (empreintes du contenu
     authentifié, fusion transactionnelle, contextes de tiers différés, registres génériques, crédit diceware réservé aux
     passphrases générées, chemins d'identité stricts). 93 tests dont les lois de fusion en tests de propriétés
-  - **S1b, moteur** : `FolderIo` et racine sûre, projection des fichiers locaux, application validée (quarantaine, masquage
-    d'alias, changements de destination retenus jusqu'à confirmation sur l'appareil), état local, tâche de fond, statut,
-    événements, API create / join / unlock / resolve / change / reset / disable ; tests multi-moteurs avec fournisseur simulé
+  - **S1b, moteur** ✅ *(2026-10-27)* : `FolderIo` et racine sûre (liens et jonctions refusés, dossiers privés exclus,
+    limites de listage et d'octets), projection des fichiers locaux (éditions à la main, F7), application validée
+    (quarantaine, masquage d'alias, changements de destination retenus jusqu'à confirmation sur l'appareil, F1 ; snippets
+    reçus refusés au lancement avant confirmation, F8), état local scellé, passe sûre en cas de crash (fichier propre lu
+    avant toute écriture, contextes de tiers différés, fusion attribuée, collecte stable), thread `portico-sync` et tâche
+    de fond, statut et événements, API `Engine::sync_*` (create / join à jeton unique / unlock / resolve / confirm /
+    change / reset / disable…), clé de données dans le trousseau. 36 tests de plus (129 au total pour la sync), dont
+    20 scénarios multi-moteurs sur un fournisseur simulé
   - **S1c, interfaces** : assistant, barre de statut, panneau Sync, conflits, issues, badges, dans la TUI et la GUI
 - **S2, rotation puis mots de passe** : rotation des clés et « oublier un appareil » **d'abord** ; ensuite mots de passe
   **liés** seulement (jamais les non liés), opt-in au niveau du bundle et décoché par défaut, envoyés sur B seulement si B
@@ -314,7 +319,7 @@ runner, test manuel concluant du propriétaire sous Windows 11 le 2026-10-27).
 | 8 Windows | ✅ | 780 + 95 GUI + interop (13 scénarios) + CI windows-latest + test manuel Windows 11 | ✅ (2 audits, voir ci-dessous) | GUI Windows : barre native, raccourcis WebView2 neutralisés |
 | 9 Confort du terminal, mises à jour | ✅ | 736 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 10 Thème clair Marble, Auto | ✅ | 760 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (4 thèmes, 80×24 / 880–1200 px) |
-| 11 Sync chiffrée par dossier | ⏳ S1a livré (fondations) ; S1b, S1c, S2, S3 à venir | 81 (S1a, dont 6 tests de propriétés) | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue du code à faire | — |
+| 11 Sync chiffrée par dossier | ⏳ S1a (fondations) et S1b (moteur) livrés ; S1c, S2, S3 à venir | 129 (S1a 93, dont 6 tests de propriétés ; S1b 36) | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue S1a ✅ ; revue S1b (dossier, application) à faire | — |
 
 ## Revues de la phase 8 (2026-10-25)
 
