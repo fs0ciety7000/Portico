@@ -203,6 +203,7 @@ impl VersionVector {
     }
 
     /// `self ≥ other` pointwise.
+    #[cfg(test)]
     pub(crate) fn dominates(&self, other: &Self) -> bool {
         other
             .0
@@ -250,6 +251,7 @@ impl<V> Default for MvRegister<V> {
 
 /// One distinct value of a register and every surviving dot that wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct Sibling<'a, V> {
     pub(crate) value: &'a V,
     /// Ascending; never empty.
@@ -327,6 +329,7 @@ impl<V: Clone + PartialEq> MvRegister<V> {
 
     /// Distinct values, each with its dots (equal values collapse), in
     /// order of their smallest dot.
+    #[cfg(test)]
     pub(crate) fn siblings(&self) -> Vec<Sibling<'_, V>> {
         let mut siblings: Vec<Sibling<'_, V>> = Vec::new();
         for (dot, entry) in &self.entries {
@@ -407,6 +410,7 @@ impl LocalClock {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn device(&self) -> DeviceId {
         self.device
     }

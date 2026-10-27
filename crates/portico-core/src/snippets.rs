@@ -281,7 +281,7 @@ impl Snippet {
 
     /// Trims the name and description, drops trailing line breaks of the
     /// command (the `run` flag decides whether Enter is sent).
-    fn normalize(&mut self) {
+    pub(crate) fn normalize(&mut self) {
         self.id = self.id.trim().to_owned();
         self.name = self.name.trim().to_owned();
         self.command = self.command.trim_end_matches(['\n', '\r']).to_owned();
@@ -372,13 +372,22 @@ impl SnippetStore {
     /// left out with a warning naming only their position and the failing
     /// field; they stay in the file.
     pub fn list(&self) -> Result<Vec<Snippet>> {
+        self.list_with_invalid().map(|(valid, _)| valid)
+    }
+
+    /// [`Self::list`], plus the ids of the entries it leaves out (the
+    /// folder sync must neither publish them nor take their absence for a
+    /// deletion).
+    pub(crate) fn list_with_invalid(&self) -> Result<(Vec<Snippet>, Vec<String>)> {
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let file = self.load()?;
+        let mut invalid_ids = Vec::new();
         let mut valid = Vec::with_capacity(file.snippets.len());
         for (index, snippet) in file.snippets.into_iter().enumerate() {
             match snippet.validate() {
                 Ok(()) => valid.push(snippet),
                 Err(e) => {
+                    invalid_ids.push(snippet.id.clone());
                     let (field, reason) = match &e {
                         SnippetError::Invalid { field, reason } => (*field, *reason),
                         _ => ("snippet", "is invalid"),
@@ -393,7 +402,7 @@ impl SnippetStore {
                 }
             }
         }
-        Ok(valid)
+        Ok((valid, invalid_ids))
     }
 
     /// Loads the file (at most [`MAX_SNIPPETS_FILE_BYTES`]). Entries with a

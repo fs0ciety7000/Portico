@@ -678,11 +678,7 @@ impl SyncState {
         &self.context
     }
 
-    /// Every register, known or not.
-    pub(crate) fn registers(&self) -> impl Iterator<Item = (&WireKey, &MvRegister<WireValue>)> {
-        self.records.iter()
-    }
-
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.records.len()
     }
@@ -907,10 +903,22 @@ impl SyncState {
     /// computed by the engine), whatever their kind. The global context
     /// keeps them deleted everywhere (F6). Returns how many registers were
     /// collected.
+    #[cfg(test)]
     pub(crate) fn collect_tombstones(&mut self, stable: &VersionVector) -> usize {
+        self.collect_tombstones_except(stable, |_| false)
+    }
+
+    /// [`Self::collect_tombstones`], keeping the registers `keep` names
+    /// (S1b: a deletion not applied to the local files yet).
+    pub(crate) fn collect_tombstones_except(
+        &mut self,
+        stable: &VersionVector,
+        keep: impl Fn(&WireKey) -> bool,
+    ) -> usize {
         let before = self.records.len();
-        self.records
-            .retain(|_, register| !register.collect_if(stable, WireValue::is_tombstone));
+        self.records.retain(|key, register| {
+            keep(key) || !register.collect_if(stable, WireValue::is_tombstone)
+        });
         before.saturating_sub(self.records.len())
     }
 

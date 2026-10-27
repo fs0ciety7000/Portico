@@ -231,10 +231,14 @@ pub(crate) struct Subkeys {
     /// AEAD of device snapshots.
     pub(crate) snapshot: Subkey,
     /// Inner AEAD of each synced secret (S2).
+    // Derived now so the key schedule is fixed; first used by S2.
+    #[allow(dead_code)]
     pub(crate) secret: Subkey,
     /// HMAC of `bundle.toml`.
     pub(crate) header: Subkey,
     /// HMAC of local secret values for change detection (S2).
+    // Derived now so the key schedule is fixed; first used by S2.
+    #[allow(dead_code)]
     pub(crate) compare: Subkey,
     /// AEAD of the roster inside `bundle.toml`.
     pub(crate) roster: Subkey,
@@ -526,6 +530,7 @@ pub(crate) fn is_bucket(len: usize, min_bucket: usize) -> bool {
 
 /// Copies `content` into a fresh zeroizing buffer padded with spaces to its
 /// bucket, with room for the tag (sealing then never reallocates).
+#[cfg(test)]
 pub(crate) fn padded(
     content: &[u8],
     min_bucket: usize,

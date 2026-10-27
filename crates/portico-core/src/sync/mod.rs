@@ -8,12 +8,17 @@
 //!
 //! ## Delivery
 //!
-//! **S1a (this code): the pure foundations.** Nothing here touches the
-//! disk, the network, the keyring or the engine: every function takes and
-//! returns bytes or values, so it is deterministic to test. The engine
-//! wiring (folder I/O, projection of local files, apply, background task,
-//! events) is S1b; the UIs are S1c; passwords, key rotation and device
-//! revocation are S2/S3.
+//! - **S1a**: the pure foundations (crypto, bundle, containers, clocks and
+//!   merge, guards, passphrase): no disk, network, keyring or engine.
+//! - **S1b**: the engine wiring: the folder ([`folder`], safe root F9),
+//!   the projection of the local files ([`project`]), the validated
+//!   application ([`apply`], F1/F7/F8), the local state ([`state`]), the
+//!   pass and the user operations ([`runner`]), the public types ([`api`]);
+//!   the `Engine::sync_*` methods and the background task live in
+//!   `engine::sync_api`.
+//! - S1c: the UIs. S2/S3: passwords, key rotation, device revocation.
+//!
+//! No network call, ever: the folder is only read and written locally.
 //!
 //! ## Layout
 //!
@@ -26,6 +31,12 @@
 //! | [`model`] | Record keys and values, the synced state (generic keyed registers of canonical JSON) and its transactional merge, typed projection, conflicts, tombstone GC |
 //! | [`guard`] | Rollback, fork, downgrade and restored-state detection (high-water marks) |
 //! | [`passphrase`] | Diceware generator (EFF large wordlist) and the enforced strength minimum |
+//! | [`folder`] | `FolderIo`: listing, capped reads, atomic writes in `portico-sync/`, safe root (F9), limits (F15) |
+//! | [`state`] | `data_dir/sync/`: `sync.toml`, sealed replica, snippet confirmations, `sync.lock` |
+//! | [`project`] | Local files → records, local changes against the last applied projection (F7) |
+//! | [`apply`] | Validated application: quarantine, shadowing, confirmations (F1, F8) |
+//! | [`runner`] | One pass, create / join / unlock / resolve / confirm / disable |
+//! | [`api`] | Statuses, devices, conflicts, issues, pending confirmations (UI types) |
 //!
 //! ## Invariants (all modules)
 //!
@@ -41,23 +52,26 @@
 //! - The wall clock is display only; ordering and deletion use dots and
 //!   version vectors exclusively.
 
-// S1a ships the foundations without their consumer: the engine wiring
-// (S1b) is the only caller of these crate-internal modules. Remove these
-// `allow`s with S1b; the tests exercise every item meanwhile.
-#[allow(dead_code)]
+pub mod api;
+pub(crate) mod apply;
 pub(crate) mod bundle;
-#[allow(dead_code)]
 pub(crate) mod clock;
-#[allow(dead_code)]
 pub(crate) mod container;
-#[allow(dead_code)]
 pub(crate) mod crypto;
-#[allow(dead_code)]
+pub(crate) mod folder;
 pub(crate) mod guard;
-#[allow(dead_code)]
 pub(crate) mod model;
 pub mod passphrase;
+pub(crate) mod project;
+pub(crate) mod runner;
+pub(crate) mod state;
 
+pub use api::{
+    AlertKind, ConflictSide, DisableOptions, FolderProbe, FolderReason, JoinBulkChoice,
+    JoinPreview, PendingHostChange, SyncConflict, SyncCreate, SyncDevice, SyncHostValue, SyncIssue,
+    SyncJoin, SyncOptions, SyncOverview, SyncResolution, SyncSnippetValue, SyncStatus, SyncSubject,
+    SyncValue, WaitReason,
+};
 pub use clock::DeviceId;
 pub use passphrase::{
     GeneratedPassphrase, NewPassphrase, PassphraseStrength, assess_passphrase, generate_passphrase,
@@ -179,6 +193,113 @@ pub enum SyncError {
 
     #[error("sync cryptography failed: {0}")]
     Crypto(&'static str),
+
+    // ── S1b: folder, engine wiring, application ─────────────────────────
+    /// The chosen folder (or `portico-sync/` in it) is gone: unmounted
+    /// drive, provider not running. Never recreated automatically.
+    #[error("the sync folder is missing")]
+    FolderMissing,
+
+    /// `portico-sync/` exists but holds no `bundle.toml`.
+    #[error("the sync folder holds no Portico sync bundle")]
+    FolderNotPortico,
+
+    /// "Create" on a folder that already holds a bundle.
+    #[error("the sync folder already holds a Portico sync bundle")]
+    BundleExists,
+
+    #[error("the sync folder cannot be written")]
+    FolderUnwritable,
+
+    /// A link, a reparse point, or a folder inside `~/.ssh`, the config
+    /// or the data directory (F9).
+    #[error("the sync folder is not usable: {reason}")]
+    FolderUnsafe { reason: &'static str },
+
+    /// More device files than the listing limit: the sync pauses without
+    /// deleting anything (F15).
+    #[error("the sync folder holds more than {max} device files")]
+    FolderTooManyEntries { max: usize },
+
+    #[error("the sync folder did not answer within {secs} seconds")]
+    FolderTimeout { secs: u64 },
+
+    #[error("sync folder {op} failed ({kind})")]
+    FolderIo { op: &'static str, kind: String },
+
+    /// The data key is not in memory nor remembered: the passphrase is
+    /// needed on this device.
+    #[error("sync is locked on this device")]
+    Locked,
+
+    #[error("sync is not enabled on this device")]
+    Disabled,
+
+    #[error("sync is already enabled on this device")]
+    AlreadyEnabled,
+
+    /// A join token that expired, was already used, or never existed (F14).
+    #[error("this sync join expired or was already completed")]
+    JoinExpired,
+
+    /// Another sync operation is still running (a stalled folder).
+    #[error("sync is busy")]
+    Busy,
+
+    /// `hosts.conf` holds something Portico would not rewrite: the hosts
+    /// are neither projected nor applied until it is fixed.
+    #[error("hosts.conf was edited by hand: synced hosts are paused")]
+    HostsFileUnmanaged,
+
+    /// A received host would shadow a name of the user's own config
+    /// (F1): kept aside, never written.
+    #[error("synced host {alias} would shadow a host name of your ssh config")]
+    AliasShadowed { alias: String },
+
+    #[error("synced host {alias} jumps through {jump}, which is not known on this device")]
+    JumpMissing { alias: String, jump: String },
+
+    /// A warning: the host is written, its key is missing here.
+    #[error("the key of synced host {alias} is not on this device")]
+    KeyMissing { alias: String },
+
+    #[error("synced host {alias} was not removed: it is the jump host of {by}")]
+    HostInUse { alias: String, by: String },
+
+    #[error("no synced change of {alias} awaits confirmation")]
+    NotPending { alias: String },
+
+    /// F8: a snippet changed by sync runs only once confirmed here.
+    #[error("snippet {id} was changed by sync: review and confirm it before running it")]
+    SnippetUnconfirmed { id: String },
+
+    /// The key slots changed on another device (passphrase changed or
+    /// reset): an alert to acknowledge.
+    #[error("the sync passphrase was changed or reset on another device")]
+    PassphraseChanged,
+
+    /// A newer epoch (key rotation, S2).
+    #[error("the sync keys were rotated on another device")]
+    KeysRotated,
+
+    /// A device holding the key sent another value for a change already
+    /// received (a misbehaving device): the first value was kept.
+    #[error("sync device {device} sent {count} conflicting copies of changes already received")]
+    DivergentDots { device: String, count: usize },
+
+    /// Values removed by a device's context without a replacement (S1a
+    /// review finding 3).
+    #[error("sync device {device} removed {count} values without replacing them")]
+    DroppedWithoutSuccessor { device: String, count: usize },
+
+    /// A snapshot whose context claims changes not yet in the folder: not
+    /// merged until they arrive (S1a review finding 3).
+    #[error("the sync data of device {device} waits for other devices' files")]
+    Deferred { device: String },
+
+    /// A device file not readable yet (uploading, cloud placeholder).
+    #[error("the sync file of device {device} is not available yet")]
+    PendingFile { device: String },
 }
 
 impl SyncError {
@@ -289,6 +410,138 @@ impl SyncError {
             ),
             Self::Resolution { .. } => ("sync_resolution_invalid", None),
             Self::Crypto(_) => ("sync_crypto", None),
+            Self::FolderMissing => (
+                "sync_folder_missing",
+                Some(
+                    "Check that the drive is mounted and your sync service runs. Portico waits and retries; nothing is recreated.",
+                ),
+            ),
+            Self::FolderNotPortico => (
+                "sync_folder_not_portico",
+                Some(
+                    "Wait for your sync service to download bundle.toml, or pick the folder chosen on your first device.",
+                ),
+            ),
+            Self::BundleExists => (
+                "sync_bundle_exists",
+                Some("This folder already holds a sync: join it instead of creating a new one."),
+            ),
+            Self::FolderUnwritable => (
+                "sync_folder_unwritable",
+                Some(
+                    "Portico can read the folder but not write to it: changes from other devices still arrive; check the folder's permissions.",
+                ),
+            ),
+            Self::FolderUnsafe { .. } => (
+                "sync_folder_unsafe",
+                Some(
+                    "Pick a plain folder of your sync service, outside ~/.ssh and Portico's own folders, without links inside portico-sync.",
+                ),
+            ),
+            Self::FolderTooManyEntries { .. } => (
+                "sync_folder_too_many",
+                Some(
+                    "The devices folder holds unexpected files: remove what is not a Portico device file. Sync is paused, nothing was deleted.",
+                ),
+            ),
+            Self::FolderTimeout { .. } => (
+                "sync_folder_timeout",
+                Some(
+                    "The folder is slow or stalled (network drive, files being downloaded). Portico retries later.",
+                ),
+            ),
+            Self::FolderIo { .. } => (
+                "sync_folder_io",
+                Some("Check the sync folder and its permissions."),
+            ),
+            Self::Locked => (
+                "sync_locked",
+                Some("Enter the sync passphrase to unlock sync on this device."),
+            ),
+            Self::Disabled => (
+                "sync_disabled",
+                Some("Set up sync first: create a sync folder or join an existing one."),
+            ),
+            Self::AlreadyEnabled => (
+                "sync_already_enabled",
+                Some("Disable sync on this device before creating or joining another one."),
+            ),
+            Self::JoinExpired => (
+                "sync_join_expired",
+                Some("Start joining again: enter the passphrase and review the changes."),
+            ),
+            Self::Busy => (
+                "sync_busy",
+                Some("A sync operation is still running: try again in a moment."),
+            ),
+            Self::HostsFileUnmanaged => (
+                "sync_hosts_file_unmanaged",
+                Some(
+                    "hosts.conf holds lines Portico does not manage: undo the hand edit (or move it to ~/.ssh/config); synced hosts resume then. Other data keeps syncing.",
+                ),
+            ),
+            Self::AliasShadowed { .. } => (
+                "sync_alias_shadowed",
+                Some(
+                    "Skip it on this device, or rename the host on another device: Portico never shadows a host of your own config.",
+                ),
+            ),
+            Self::JumpMissing { .. } => (
+                "sync_jump_missing",
+                Some("It is applied once its jump host exists on this device."),
+            ),
+            Self::KeyMissing { .. } => (
+                "sync_key_missing",
+                Some("Copy the private key to this device, or edit the host to use a local key."),
+            ),
+            Self::HostInUse { .. } => (
+                "sync_host_in_use",
+                Some("Change the jump host of those hosts first."),
+            ),
+            Self::NotPending { .. } => (
+                "sync_not_pending",
+                Some("Reload the list of synced changes awaiting confirmation."),
+            ),
+            Self::SnippetUnconfirmed { .. } => (
+                "sync_snippet_unconfirmed",
+                Some(
+                    "Another device changed this snippet: read the whole command, then confirm it to run it here.",
+                ),
+            ),
+            Self::PassphraseChanged => (
+                "sync_passphrase_changed",
+                Some(
+                    "If you did not change it yourself, someone holding your sync passphrase or key did: check your devices.",
+                ),
+            ),
+            Self::KeysRotated => (
+                "sync_keys_rotated",
+                Some("Update Portico, then enter the new sync passphrase."),
+            ),
+            Self::DivergentDots { .. } => (
+                "sync_divergent",
+                Some(
+                    "That device sent two versions of one change: the first one was kept. Check that device.",
+                ),
+            ),
+            Self::DroppedWithoutSuccessor { .. } => (
+                "sync_dropped_values",
+                Some(
+                    "Another device's sync data removed values without replacing them: check that device.",
+                ),
+            ),
+            Self::Deferred { .. } => (
+                "sync_deferred",
+                Some(
+                    "Its changes are merged once the other devices' files arrive. If it lasts, check that device.",
+                ),
+            ),
+            Self::PendingFile { .. } => (
+                "sync_pending",
+                Some(
+                    "The file is still uploading or only a placeholder (iCloud: “Keep Downloaded”, OneDrive: “Always keep on this device”).",
+                ),
+            ),
         }
     }
 }
@@ -297,6 +550,8 @@ impl SyncError {
 mod tests {
     use super::*;
 
+    // One sample per variant: a flat list.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn every_error_has_a_sync_code() {
         let samples = [
@@ -360,6 +615,51 @@ mod tests {
             SyncError::RecordHeld { kind: "host" },
             SyncError::Resolution { reason: "x" },
             SyncError::Crypto("x"),
+            SyncError::FolderMissing,
+            SyncError::FolderNotPortico,
+            SyncError::BundleExists,
+            SyncError::FolderUnwritable,
+            SyncError::FolderUnsafe { reason: "x" },
+            SyncError::FolderTooManyEntries { max: 1 },
+            SyncError::FolderTimeout { secs: 1 },
+            SyncError::FolderIo {
+                op: "read",
+                kind: "x".into(),
+            },
+            SyncError::Locked,
+            SyncError::Disabled,
+            SyncError::AlreadyEnabled,
+            SyncError::JoinExpired,
+            SyncError::Busy,
+            SyncError::HostsFileUnmanaged,
+            SyncError::AliasShadowed { alias: "a".into() },
+            SyncError::JumpMissing {
+                alias: "a".into(),
+                jump: "b".into(),
+            },
+            SyncError::KeyMissing { alias: "a".into() },
+            SyncError::HostInUse {
+                alias: "a".into(),
+                by: "b".into(),
+            },
+            SyncError::NotPending { alias: "a".into() },
+            SyncError::SnippetUnconfirmed { id: "a".into() },
+            SyncError::PassphraseChanged,
+            SyncError::KeysRotated,
+            SyncError::DivergentDots {
+                device: "ab".into(),
+                count: 1,
+            },
+            SyncError::DroppedWithoutSuccessor {
+                device: "ab".into(),
+                count: 1,
+            },
+            SyncError::Deferred {
+                device: "ab".into(),
+            },
+            SyncError::PendingFile {
+                device: "ab".into(),
+            },
         ];
         for error in samples {
             let summary = crate::Error::from(error).summary();

@@ -51,6 +51,12 @@ pub enum SecretKey {
         host: String,
         port: u16,
     },
+    /// Data key of a folder sync bundle (phase 11, `docs/SYNC.md` §2.2),
+    /// remembered when the user keeps "remember on this device": base64 of
+    /// the 32 bytes. `bundle` is the bundle id in hex. On Windows the entry
+    /// is `Local` (never roaming, case E4); on macOS a keychain item that is
+    /// not synchronizable (the `keyring` default).
+    SyncDataKey { bundle: String, epoch: u32 },
 }
 
 impl SecretKey {
@@ -66,6 +72,7 @@ impl SecretKey {
             Self::UnboundHostPassword { user, host, port } => {
                 format!("unbound-password:{user}@{host}:{port}")
             }
+            Self::SyncDataKey { bundle, epoch } => format!("sync-key:{bundle}:{epoch}"),
         }
     }
 }
@@ -252,6 +259,11 @@ mod tests {
             port: 2222,
         };
         assert_eq!(k.account(), "unbound-password:root@db:2222");
+        let k = SecretKey::SyncDataKey {
+            bundle: "00ff".into(),
+            epoch: 1,
+        };
+        assert_eq!(k.account(), "sync-key:00ff:1");
     }
 
     #[test]

@@ -1594,6 +1594,230 @@ fn check_imported(home: &Path, host: &ManagedHost) -> Result<()> {
     Ok(())
 }
 
+// ── Folder sync (phase 11, `docs/SYNC.md` §4.7) ─────────────────────────
+
+/// Why a host received through the folder sync is not written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncHostRefusal {
+    /// A value Portico does not write (allowlists of [`create`]).
+    Invalid {
+        field: &'static str,
+        reason: &'static str,
+    },
+    /// The alias is declared by the user's own config (or the old import
+    /// file), or would shadow a name it relies on (F1).
+    Shadowed,
+    /// Its `ProxyJump` names a host unknown on this device.
+    JumpMissing {
+        jump: String,
+    },
+    Cycle,
+    /// Deletion refused: other hosts jump through it.
+    InUse {
+        by: String,
+    },
+}
+
+/// A prefix no alias starts with: the import's shadowing rules without
+/// its prefix exemption.
+const NO_PREFIX: &str = "\0";
+
+/// `hosts.conf` held under its lock for the folder sync: the hosts of the
+/// file, and the names of the **other** files (the user's `~/.ssh/config`
+/// and what it includes, the old import file) that a synced host must
+/// never shadow.
+pub(crate) struct SyncedHosts<'a> {
+    editor: Editor<'a>,
+    /// Lowercased aliases declared outside `hosts.conf`.
+    foreign_aliases: HashSet<String>,
+    /// Lowercased `ProxyJump` hosts used by hosts outside `hosts.conf`.
+    foreign_jumps: HashSet<String>,
+    /// Lowercased `HostName`s of hosts outside `hosts.conf`.
+    foreign_hostnames: HashSet<String>,
+}
+
+impl<'a> SyncedHosts<'a> {
+    /// Takes the `hosts.conf` lock and reads everything strictly (a
+    /// hand-edited file Portico would not rewrite fails with
+    /// `host_file_unmanaged`). Blocking.
+    pub(crate) fn open(config: &'a EngineConfig) -> Result<Self> {
+        let editor = Editor::open(config)?;
+        let current = editor.config_with(&editor.hosts)?;
+        let mut foreign_aliases = HashSet::new();
+        for alias in editor.every_alias(&current) {
+            if !same_file(&alias.source.file, &editor.target) {
+                foreign_aliases.insert(alias.name.to_lowercase());
+            }
+        }
+        let mut foreign_jumps = HashSet::new();
+        let mut foreign_hostnames = HashSet::new();
+        for alias in current.host_aliases() {
+            if same_file(&alias.source.file, &editor.target) {
+                continue;
+            }
+            let resolved = current.resolve(&alias.name, &editor.ctx);
+            for jump in &resolved.proxy_jump {
+                foreign_jumps.insert(jump.host.to_lowercase());
+            }
+            foreign_hostnames.insert(resolved.hostname.to_lowercase());
+        }
+        Ok(Self {
+            editor,
+            foreign_aliases,
+            foreign_jumps,
+            foreign_hostnames,
+        })
+    }
+
+    /// The hosts of `hosts.conf`, in file order.
+    pub(crate) fn hosts(&self) -> &[ManagedHost] {
+        &self.editor.hosts
+    }
+
+    /// The allowlists of [`create`] (an `IdentityFile` need not exist on
+    /// this device: OpenSSH tolerates it, the host reports it) and the
+    /// shadowing checks of the import (F1). Blocking.
+    pub(crate) fn check(&self, host: &ManagedHost) -> std::result::Result<(), SyncHostRefusal> {
+        let invalid = |field, reason| SyncHostRefusal::Invalid { field, reason };
+        if check_alias(&host.alias).ok().as_deref() != Some(host.alias.as_str()) {
+            return Err(invalid("alias", "not an alias Portico writes"));
+        }
+        if clean_hostname(&host.hostname).as_deref() != Some(host.hostname.as_str()) {
+            return Err(invalid("hostname", "not a host name Portico writes"));
+        }
+        if let Some(user) = &host.user
+            && clean_user(user).as_deref() != Some(user.as_str())
+        {
+            return Err(invalid("user", "not a user name Portico writes"));
+        }
+        if host.port == Some(0) {
+            return Err(invalid("port", "is 0"));
+        }
+        if let Some(path) = &host.identity_file {
+            let home = &self.editor.paths().home;
+            let under_home = path
+                .strip_prefix(home)
+                .is_ok_and(|rest| rest.components().all(|c| matches!(c, Component::Normal(_))));
+            let chars_ok = path
+                .strip_prefix(home)
+                .ok()
+                .and_then(Path::to_str)
+                .is_some_and(|rest| check_path_chars(rest).is_ok());
+            if !under_home || !chars_ok {
+                return Err(invalid(
+                    "identity_file",
+                    "not a path under the home directory Portico writes",
+                ));
+            }
+        }
+        if let Some(jump) = &host.proxy_jump {
+            if check_jump_syntax(jump).is_err() {
+                return Err(invalid("proxy_jump", "not one host alias"));
+            }
+            if jump.eq_ignore_ascii_case(&host.alias) {
+                return Err(SyncHostRefusal::Cycle);
+            }
+        }
+        let lower = host.alias.to_lowercase();
+        let shadows = self.foreign_aliases.contains(&lower)
+            // No prefix exempts a synced alias (an alias never holds NUL).
+            || crate::import::looks_like_other_host(&host.alias, &host.hostname, NO_PREFIX)
+            || lower == "localhost"
+            || self.foreign_jumps.contains(&lower)
+            || (!lower.contains('.')
+                && !lower.eq_ignore_ascii_case(&host.hostname)
+                && self.foreign_hostnames.contains(&lower));
+        if shadows {
+            return Err(SyncHostRefusal::Shadowed);
+        }
+        Ok(())
+    }
+
+    /// Writes `upserts` (checked with [`Self::check`] by the caller; jump
+    /// hosts first, a host whose jump host is unknown is refused) and
+    /// removes `deletes` (refused while another host jumps through it), in
+    /// one write of `hosts.conf`. Returns what was refused, by alias; the
+    /// rest is written. Metadata and remembered passwords are left alone
+    /// (they sync, or stay, on their own). Blocking.
+    pub(crate) fn apply(
+        &self,
+        upserts: Vec<ManagedHost>,
+        deletes: &[String],
+    ) -> Result<(bool, Vec<(String, SyncHostRefusal)>)> {
+        let mut hosts = self.editor.hosts.clone();
+        let mut refused: Vec<(String, SyncHostRefusal)> = Vec::new();
+        let mut changed = false;
+        let mut remaining = upserts;
+        loop {
+            let mut progress = false;
+            let mut later = Vec::new();
+            for host in remaining {
+                if let Some(jump) = &host.proxy_jump {
+                    let config = self.editor.config_with(&hosts)?;
+                    if Editor::known_jump(&config, jump).is_err() {
+                        later.push(host);
+                        continue;
+                    }
+                }
+                let previous = hosts.clone();
+                match hosts
+                    .iter_mut()
+                    .find(|h| h.alias.eq_ignore_ascii_case(&host.alias))
+                {
+                    Some(slot) if *slot == host => {}
+                    Some(slot) => {
+                        *slot = host.clone();
+                        changed = true;
+                    }
+                    None => {
+                        hosts.push(host.clone());
+                        changed = true;
+                    }
+                }
+                progress = true;
+                if host.proxy_jump.is_some() {
+                    let config = self.editor.config_with(&hosts)?;
+                    if self.editor.check_cycle(&config, &host.alias).is_err() {
+                        hosts = previous;
+                        refused.push((host.alias.clone(), SyncHostRefusal::Cycle));
+                    }
+                }
+            }
+            remaining = later;
+            if remaining.is_empty() || !progress {
+                break;
+            }
+        }
+        for host in remaining {
+            let jump = host.proxy_jump.clone().unwrap_or_default();
+            refused.push((host.alias, SyncHostRefusal::JumpMissing { jump }));
+        }
+        for alias in deletes {
+            let Some(index) = hosts
+                .iter()
+                .position(|h| h.alias.eq_ignore_ascii_case(alias))
+            else {
+                continue;
+            };
+            let config = self.editor.config_with(&hosts)?;
+            let (managed, foreign) = self.editor.referrers(&config, alias);
+            if !managed.is_empty() || !foreign.is_empty() {
+                let mut by = managed;
+                by.extend(foreign);
+                refused.push((alias.clone(), SyncHostRefusal::InUse { by: by.join(", ") }));
+                continue;
+            }
+            hosts.remove(index);
+            changed = true;
+        }
+        if changed {
+            let _ = self.editor.config_with(&hosts)?;
+            self.editor.write(&hosts)?;
+        }
+        Ok((changed, refused))
+    }
+}
+
 /// Depth-first walk of `ProxyJump` hops looking for `start` again.
 struct JumpWalk<'a> {
     config: &'a SshConfig,

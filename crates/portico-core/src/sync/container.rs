@@ -49,6 +49,7 @@ use super::clock::{DeviceId, DeviceName};
 use super::crypto::{self, Canonical, ID_LEN, MIN_BUCKET, NONCE_LEN, Subkey, Subkeys, TAG_LEN};
 use super::guard::HighWater;
 use super::model::{MAX_CONTEXT_DEVICES, SyncState};
+use super::state::LocalReplica;
 
 /// Envelope version of both containers.
 pub(crate) const CONTAINER_VERSION: u32 = 1;
@@ -134,6 +135,10 @@ pub(crate) struct ReplicaContent {
     pub(crate) publish_seq: u64,
     pub(crate) state: SyncState,
     pub(crate) high_water: HighWater,
+    /// What the engine keeps besides (S1b): merged sequences, last applied
+    /// projection, confirmations (`state::LocalReplica`).
+    #[serde(default)]
+    pub(crate) local: LocalReplica,
 }
 
 /// What the reader expects of a container, from the verified
@@ -826,6 +831,7 @@ mod tests {
             publish_seq: 9,
             state: content.state.clone(),
             high_water: HighWater::default(),
+            local: LocalReplica::default(),
         };
         let text = seal_replica(&keys(), &binding(77), &replica)
             .expect("seal")
@@ -880,6 +886,7 @@ mod tests {
             publish_seq: 1,
             state: content().state,
             high_water: HighWater::default(),
+            local: LocalReplica::default(),
         };
         let text = seal_replica(&keys(), &newer, &replica).expect("seal").text;
         assert!(matches!(
