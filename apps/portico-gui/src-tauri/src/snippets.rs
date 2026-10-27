@@ -108,24 +108,20 @@ pub(crate) async fn run_snippet(
     let alias = engine
         .session_alias(SessionId::from_raw(session))
         .ok_or_else(terminal_gone)?;
-    let snippet = engine
+    // Only a snippet that applies to this host.
+    engine
         .snippets_for(&alias)
         .await
         .map_err(summary)?
         .into_iter()
         .find(|s| s.id == id)
         .ok_or_else(|| not_here(&alias))?;
-    let pairs: Vec<(&str, &str)> = values
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let rendered = snippet.render_checked(&pairs).map_err(summary)?;
-    let bytes = portico_core::snippets::snippet_input(
-        &rendered,
-        run.unwrap_or(snippet.run),
-        bracketed_paste,
-    )
-    .map_err(summary)?;
+    // The core renders and refuses a snippet changed by sync that this
+    // device has not confirmed yet (`sync_snippet_unconfirmed`, F8).
+    let bytes = engine
+        .snippet_input_for(id, values.into_iter().collect(), run, bracketed_paste)
+        .await
+        .map_err(summary)?;
     for part in bytes.chunks(INPUT_CHUNK) {
         inputs
             .send(Bytes::copy_from_slice(part))
