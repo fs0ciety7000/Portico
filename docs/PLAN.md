@@ -181,12 +181,38 @@ propriétaire : `brew install` et AUR (tap, compte AUR, secrets, première relea
 
 **Sortie** : quatre panneaux sur deux hôtes utilisables au clavier seul ; une session enregistrée se relit à l'identique.
 
-### Phase 7 : synchronisation locale optionnelle ❌ *(abandonnée le 2026-10-22, décision du propriétaire)*
-- Sync de `hosts.toml`, des snippets et des réglages via un dossier choisi (Syncthing, git…) : **jamais de cloud imposé,
-  jamais de secret** (le vault reste local, ou s'exporte chiffré à part) ; fusion par entrée, conflits montrés à
-  l'utilisateur et jamais résolus en silence
+### Phase 11 : synchronisation chiffrée par dossier ⏳ *(ADR du 2026-10-27 ; remplace la phase 7 abandonnée le 2026-10-22 ; conception, décisions du propriétaire et revue `agent-security` : `docs/SYNC.md`)* *(Opus)*
+Hôtes de `hosts.conf`, métadonnées, snippets et réglages en liste blanche (puis, en S2, mots de passe liés en opt-in) partagés
+entre les machines de l'utilisateur via un dossier qu'il synchronise déjà (Dropbox, iCloud Drive, OneDrive, Syncthing, git…).
+Portico ne fait aucun appel réseau, le dossier ne contient que du chiffré, les conflits sont montrés et jamais résolus en
+silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, enregistrements, logs, consentement aux mises à jour.
 
-**Sortie** : deux machines partagent métadonnées et snippets via un dossier synchronisé, conflit d'édition compris.
+- **S0, repérage** : comportements réels des fournisseurs (renommages, copies en conflit, fichiers temporaires, placeholders)
+  consignés dans `docs/SYNC.md`, fixtures du fournisseur simulé
+- **S1, sync sans secret**
+  - **S1a, fondations pures** ✅ *(2026-10-27)* : `portico-core/src/sync/` sans E/S ni moteur : Argon2id à bornes propres,
+    HKDF, XChaCha20-Poly1305, AAD canonique, MAC en temps constant, remplissage ; `bundle.toml` (créer, ouvrir, changer et
+    réinitialiser la passphrase, roster scellé) ; instantanés et réplica scellés ; registres multi-valeurs à contexte global,
+    pierres tombales, conflits, passage opaque ; détection de retour arrière, fourche, rétrogradation et état restauré ;
+    générateur EFF et minimum de force imposé. 81 tests dont les lois de fusion en tests de propriétés
+  - **S1b, moteur** : `FolderIo` et racine sûre, projection des fichiers locaux, application validée (quarantaine, masquage
+    d'alias, changements de destination retenus jusqu'à confirmation sur l'appareil), état local, tâche de fond, statut,
+    événements, API create / join / unlock / resolve / change / reset / disable ; tests multi-moteurs avec fournisseur simulé
+  - **S1c, interfaces** : assistant, barre de statut, panneau Sync, conflits, issues, badges, dans la TUI et la GUI
+- **S2, rotation puis mots de passe** : rotation des clés et « oublier un appareil » **d'abord** ; ensuite mots de passe
+  **liés** seulement (jamais les non liés), opt-in au niveau du bundle et décoché par défaut, envoyés sur B seulement si B
+  vérifie la même clé hôte
+- **S3, plus tard** : emplacements de clé par appareil (rotation sans ressaisir la passphrase), signatures Ed25519, exclusions
+  par réglage, options à décider
+
+**Sortie S1** : deux machines partagent hôtes, métadonnées, snippets et thème via un dossier synchronisé ; une édition hors ligne
+sur les deux devient un conflit montré et résolu dans les deux UIs ; un changement de destination reçu n'est écrit qu'après
+confirmation sur l'appareil ; une ancienne copie remise dans le dossier est refusée (`sync_rollback`).
+**Sortie S2** : exercice d'appareil perdu (oubli + rotation depuis un appareil restant : l'appareil oublié ne lit plus les
+nouvelles données) ; un mot de passe mémorisé sur A n'est proposé sur B que pour la même clé hôte vérifiée.
+**Sortie S3** : rotation reçue par tous les appareils sans ressaisie de la passphrase.
+Revues : `agent-security` après crypto + format + dossier, après S2 et à la clôture (avec `SECURITY.md`) ;
+`agent-design-review` sur l'assistant, la barre de statut, les conflits et les issues (4 thèmes, 80×24, 880–1200 px).
 
 ### Phase 6b : hôtes gérés par Portico ✅ *(ADR du 2026-10-22, « Hôtes créés dans Portico »)*
 - Créer, modifier, dupliquer et supprimer des hôtes depuis la TUI et la GUI : alias, `HostName`, `User`, `Port`,
@@ -282,10 +308,11 @@ runner, test manuel concluant du propriétaire sous Windows 11 le 2026-10-27).
 | 5 SOCKS5, distribution, import Termius | ✅ (sortie partielle, voir phase 5) | 384 + 32 GUI + interop (13 scénarios) + E2E bureau 13/13 | ✅ (voir ci-dessous) | ✅ (import : captures 3 thèmes, 880–1200 px) |
 | 6 Split panes, asciicast | ✅ | 548 + 50 GUI + interop (13 scénarios) + E2E bureau 15/15 | ✅ (moteur + clôture, voir ci-dessous) | ✅ (panneaux + enregistrement, 2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 6b Hôtes Portico, import Termix | ✅ | 611 + 61 GUI + interop (13 scénarios) + E2E bureau 19/19 | ✅ (2 revues, voir ci-dessous) | ✅ (captures 3 thèmes, 80×24 / 880–1200 px, CLI) |
-| 7 Sync locale | ❌ abandonnée | | | |
+| 7 Sync locale | ❌ abandonnée (rouverte en phase 11) | | | |
 | 8 Windows | ✅ | 780 + 95 GUI + interop (13 scénarios) + CI windows-latest + test manuel Windows 11 | ✅ (2 audits, voir ci-dessous) | GUI Windows : barre native, raccourcis WebView2 neutralisés |
 | 9 Confort du terminal, mises à jour | ✅ | 736 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (2 passes, 3 thèmes, 80×24 / 880–1200 px) |
 | 10 Thème clair Marble, Auto | ✅ | 760 + 89 GUI + interop (13 scénarios) + E2E bureau 22/22 | ✅ (voir ci-dessous) | ✅ (4 thèmes, 80×24 / 880–1200 px) |
+| 11 Sync chiffrée par dossier | ⏳ S1a livré (fondations) ; S1b, S1c, S2, S3 à venir | 81 (S1a, dont 6 tests de propriétés) | revue de conception ✅ (F1–F18, `docs/SYNC.md` §12) ; revue du code à faire | — |
 
 ## Revues de la phase 8 (2026-10-25)
 
