@@ -20,7 +20,7 @@
 
   async function resolve(c: SyncConflict) {
     busy = c.id;
-    const failed = await sync.act(() => backend.syncResolve(c.id, choiceOf(c)));
+    const failed = await sync.act(() => backend.syncResolve(c.id, choiceOf(c), c.sides_hash));
     busy = null;
     if (failed) errors = { ...errors, [c.id]: failed };
     else {

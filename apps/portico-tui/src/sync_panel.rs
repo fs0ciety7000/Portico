@@ -749,6 +749,8 @@ pub(crate) enum SyncOutcome {
     Resolve {
         id: String,
         resolution: SyncResolution,
+        /// The sides shown ([`SyncConflict::sides_hash`]).
+        sides_hash: String,
     },
     Skip(String),
     ConfirmHost {
@@ -1192,6 +1194,7 @@ impl SyncPanel {
                     SyncOutcome::Resolve {
                         id: conflict.id.clone(),
                         resolution: choice.resolution(),
+                        sides_hash: conflict.sides_hash.clone(),
                     }
                 }
                 _ => SyncOutcome::None,

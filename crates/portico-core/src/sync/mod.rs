@@ -253,29 +253,29 @@ pub enum SyncError {
 
     /// A received host would shadow a name of the user's own config
     /// (F1): kept aside, never written.
-    #[error("synced host {alias} would shadow a host name of your ssh config")]
+    #[error("synced host `{alias}` would shadow a host name of your ssh config")]
     AliasShadowed { alias: String },
 
-    #[error("synced host {alias} jumps through {jump}, which is not known on this device")]
+    #[error("synced host `{alias}` jumps through `{jump}`, which is not known on this device")]
     JumpMissing { alias: String, jump: String },
 
     /// A warning: the host is written, its key is missing here.
-    #[error("the key of synced host {alias} is not on this device")]
+    #[error("the key of synced host `{alias}` is not on this device")]
     KeyMissing { alias: String },
 
-    #[error("synced host {alias} was not removed: it is the jump host of {by}")]
+    #[error("synced host `{alias}` was not removed: it is the jump host of `{by}`")]
     HostInUse { alias: String, by: String },
 
     /// Nothing awaits confirmation under that name, or what awaits is no
     /// longer what the user was shown (the hash differs): the UI reloads
     /// the list and shows the new content.
-    #[error("no synced change of {alias} awaits confirmation")]
+    #[error("no synced change of `{alias}` awaits confirmation")]
     NotPending { alias: String },
 
     /// A received host whose alias this device holds in a form that cannot
     /// be synced (an identity file outside the home directory…): the local
     /// host is kept, never overwritten nor deleted by sync.
-    #[error("synced host {alias} was not applied: this device's own {alias} cannot be synced")]
+    #[error("synced host `{alias}` was not applied: this device's own `{alias}` cannot be synced")]
     LocalHostUnsynced { alias: String },
 
     /// The same for host metadata, a snippet or a setting held here in a
@@ -284,7 +284,7 @@ pub enum SyncError {
     LocalRecordUnsynced { kind: &'static str },
 
     /// F8: a snippet changed by sync runs only once confirmed here.
-    #[error("snippet {id} was changed by sync: review and confirm it before running it")]
+    #[error("snippet `{id}` was changed by sync: review and confirm it before running it")]
     SnippetUnconfirmed { id: String },
 
     /// The key slots changed on another device (passphrase changed or
@@ -704,5 +704,38 @@ mod tests {
                 summary.message
             );
         }
+    }
+
+    /// B2 (S1c review): identifiers are quoted, so a UI that capitalises a
+    /// sentence never changes an alias (`legacy` stays `legacy`).
+    #[test]
+    fn aliases_are_quoted_in_messages() {
+        let message = |error: SyncError| crate::Error::from(error).summary().message;
+        assert_eq!(
+            message(SyncError::AliasShadowed {
+                alias: "legacy".into()
+            }),
+            "synced host `legacy` would shadow a host name of your ssh config"
+        );
+        assert_eq!(
+            message(SyncError::JumpMissing {
+                alias: "web".into(),
+                jump: "bastion".into()
+            }),
+            "synced host `web` jumps through `bastion`, which is not known on this device"
+        );
+        assert_eq!(
+            message(SyncError::SnippetUnconfirmed { id: "deploy".into() }),
+            "snippet `deploy` was changed by sync: review and confirm it before running it"
+        );
+        let taken = crate::managed_hosts::ManagedHostError::AliasTaken {
+            alias: "legacy".into(),
+            file: std::path::PathBuf::from("hosts.conf"),
+            line: 3,
+        };
+        assert_eq!(
+            taken.to_string(),
+            "`legacy` is already defined in hosts.conf:3"
+        );
     }
 }

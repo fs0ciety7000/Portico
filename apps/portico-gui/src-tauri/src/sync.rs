@@ -411,8 +411,12 @@ pub(crate) async fn sync_resolve(
     engine: State<'_, Engine>,
     id: String,
     resolution: SyncResolution,
+    sides_hash: String,
 ) -> Result<SyncStatus, ErrorSummary> {
-    engine.sync_resolve(id, resolution).await.map_err(summary)
+    engine
+        .sync_resolve(id, resolution, sides_hash)
+        .await
+        .map_err(summary)
 }
 
 #[tauri::command]

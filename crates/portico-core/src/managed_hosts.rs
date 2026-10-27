@@ -197,23 +197,23 @@ pub enum ManagedHostError {
     InvalidIdentityFile { reason: &'static str },
     #[error("invalid jump host: {reason}")]
     InvalidProxyJump { reason: &'static str },
-    #[error("jump host {alias} is not a known host")]
+    #[error("jump host `{alias}` is not a known host")]
     UnknownJumpHost { alias: String },
     #[error("ProxyJump loop: {chain}")]
     ProxyJumpCycle { chain: String },
-    #[error("{alias} is already defined in {}:{line}", file.display())]
+    #[error("`{alias}` is already defined in {}:{line}", file.display())]
     AliasTaken {
         alias: String,
         file: PathBuf,
         line: usize,
     },
-    #[error("{alias} is defined in {}, which Portico does not edit", file.display())]
+    #[error("`{alias}` is defined in {}, which Portico does not edit", file.display())]
     ReadOnly { alias: String, file: PathBuf },
-    #[error("no host named {alias}")]
+    #[error("no host named `{alias}`")]
     NotFound { alias: String },
-    #[error("{alias} is the jump host of {by}")]
+    #[error("`{alias}` is the jump host of `{by}`")]
     InUse { alias: String, by: String },
-    #[error("{alias} cannot become a Portico host: {reason}")]
+    #[error("`{alias}` cannot become a Portico host: {reason}")]
     NotDuplicable { alias: String, reason: &'static str },
     #[error("{}:{line}: {reason}", path.display())]
     FileInvalid {

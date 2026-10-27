@@ -209,6 +209,11 @@ pub struct SyncConflict {
     pub id: String,
     pub subject: SyncSubject,
     pub sides: Vec<ConflictSide>,
+    /// Identifies the sides shown: pass it back to
+    /// [`crate::Engine::sync_resolve`]. Sides changed since (another
+    /// device wrote again and a pass merged it) are refused with
+    /// `sync_not_pending`: the UI reloads and shows the new ones.
+    pub sides_hash: String,
 }
 
 /// A user decision on a conflict.

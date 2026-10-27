@@ -131,6 +131,25 @@ pub(crate) fn destination_hash(value: &HostValue) -> String {
     content_hash("portico-sync/1 host destination", &wire)
 }
 
+/// Hash of the sides of a conflict as shown (A5, S1c review): every
+/// side's value and the dots that wrote it, in order. A resolution names it
+/// so a conflict whose sides changed since (a pass merged a new write) is
+/// refused with `NotPending` instead of resolving content never shown.
+pub(crate) fn sides_hash(siblings: &[TypedSibling]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for sibling in siblings {
+        let wire = WireValue::encode(&sibling.value)
+            .map(|w| w.as_str().to_owned())
+            .unwrap_or_default();
+        let _ = write!(text, "{}\0{wire}\0", sibling.dots.len());
+        for dot in &sibling.dots {
+            let _ = write!(text, "{}:{}\0", dot.device, dot.counter);
+        }
+    }
+    content_hash("portico-sync/1 conflict sides", &text)
+}
+
 /// Hash of a snippet's command as received (what F8 confirms).
 pub(crate) fn snippet_hash(command: &str, run: bool) -> String {
     content_hash(

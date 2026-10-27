@@ -1455,6 +1455,7 @@ impl SyncCore {
             .map(|conflict| SyncConflict {
                 id: conflict_id(&conflict.key),
                 subject: subject(&conflict.key),
+                sides_hash: apply::sides_hash(&conflict.siblings),
                 sides: conflict
                     .siblings
                     .iter()
@@ -1893,7 +1894,7 @@ impl SyncCore {
         if bulk == JoinBulkChoice::ReviewEach {
             return Ok(status);
         }
-        let choices: Vec<(String, SyncResolution)> = self
+        let choices: Vec<(String, SyncResolution, String)> = self
             .report
             .conflicts
             .iter()
@@ -1905,11 +1906,12 @@ impl SyncCore {
                 Some((
                     conflict.id.clone(),
                     SyncResolution::Pick { index: side.index },
+                    conflict.sides_hash.clone(),
                 ))
             })
             .collect();
-        for (id, resolution) in choices {
-            self.record_resolution(&id, &resolution)?;
+        for (id, resolution, sides_hash) in choices {
+            self.record_resolution(&id, &resolution, &sides_hash)?;
         }
         self.pass()
     }
@@ -1952,13 +1954,31 @@ impl SyncCore {
         Ok(out)
     }
 
-    fn record_resolution(&mut self, id: &str, resolution: &SyncResolution) -> crate::Result<()> {
+    fn record_resolution(
+        &mut self,
+        id: &str,
+        resolution: &SyncResolution,
+        sides_hash: &str,
+    ) -> crate::Result<()> {
         let key = key_of_conflict(id).ok_or(SyncError::Resolution {
             reason: "no such conflict",
         })?;
         let snippets = Arc::clone(&self.snippets);
         let paths = self.config.paths.clone();
         self.with_session(|session| {
+            // The sides the user saw must still be the sides (A5).
+            let shown = match session.replica.state.view(&key) {
+                Some(RegisterView::Known(siblings)) if siblings.len() > 1 => {
+                    apply::sides_hash(&siblings) == sides_hash
+                }
+                _ => false,
+            };
+            if !shown {
+                return Err(SyncError::NotPending {
+                    alias: id.to_owned(),
+                }
+                .into());
+            }
             let at = now();
             let model = match resolution {
                 SyncResolution::Pick { index } => Resolution::Pick(*index),
@@ -2019,8 +2039,9 @@ impl SyncCore {
         &mut self,
         id: &str,
         resolution: &SyncResolution,
+        sides_hash: &str,
     ) -> crate::Result<SyncStatus> {
-        self.record_resolution(id, resolution)?;
+        self.record_resolution(id, resolution, sides_hash)?;
         Ok(self.status())
     }
 

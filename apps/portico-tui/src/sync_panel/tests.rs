@@ -159,6 +159,7 @@ fn side(index: usize, local: bool, value: SyncValue) -> ConflictSide {
 fn tags_preselect_union_and_snippets_keep_both() {
     let tags = SyncConflict {
         id: "c1".into(),
+        sides_hash: "h-c1".into(),
         subject: SyncSubject::HostMeta {
             alias: "web".into(),
             field: "tags".into(),
@@ -186,6 +187,7 @@ fn tags_preselect_union_and_snippets_keep_both() {
     };
     let snippets = SyncConflict {
         id: "c2".into(),
+        sides_hash: "h-c2".into(),
         subject: SyncSubject::Snippet { id: "s".into() },
         sides: vec![side(0, false, snippet("x")), side(1, true, snippet("y"))],
     };
@@ -196,6 +198,7 @@ fn tags_preselect_union_and_snippets_keep_both() {
     );
     let hosts = SyncConflict {
         id: "c3".into(),
+        sides_hash: "h-c3".into(),
         subject: SyncSubject::Host {
             alias: "web".into(),
         },
@@ -212,7 +215,7 @@ fn tags_preselect_union_and_snippets_keep_both() {
     panel.set_conflicts(Ok(vec![tags, hosts]));
     let data = SyncData::default();
     match panel.handle_key(key(KeyCode::Enter), &data, now) {
-        SyncOutcome::Resolve { id, resolution } => {
+        SyncOutcome::Resolve { id, resolution, .. } => {
             assert_eq!(id, "c1");
             assert_eq!(resolution, SyncResolution::Union);
         }
@@ -221,7 +224,7 @@ fn tags_preselect_union_and_snippets_keep_both() {
     panel.handle_key(ch(']'), &data, now);
     panel.handle_key(ch('j'), &data, now);
     match panel.handle_key(key(KeyCode::Enter), &data, now) {
-        SyncOutcome::Resolve { id, resolution } => {
+        SyncOutcome::Resolve { id, resolution, .. } => {
             assert_eq!(id, "c3");
             assert_eq!(resolution, SyncResolution::Pick { index: 1 });
         }

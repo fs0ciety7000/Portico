@@ -414,8 +414,15 @@ impl App {
             SyncOutcome::Acknowledge => self.run_op(SyncOp::Acknowledge, async move {
                 engine.sync_acknowledge_alerts().await.map(Some)
             }),
-            SyncOutcome::Resolve { id, resolution } => self.run_op(SyncOp::Resolve, async move {
-                engine.sync_resolve(id, resolution).await.map(Some)
+            SyncOutcome::Resolve {
+                id,
+                resolution,
+                sides_hash,
+            } => self.run_op(SyncOp::Resolve, async move {
+                engine
+                    .sync_resolve(id, resolution, sides_hash)
+                    .await
+                    .map(Some)
             }),
             SyncOutcome::Skip(record) => self.run_op(SyncOp::Skip, async move {
                 engine.sync_skip_on_this_device(record).await.map(Some)

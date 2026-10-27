@@ -408,9 +408,17 @@ impl Engine {
 
     // ── Decisions ───────────────────────────────────────────────────────
 
-    /// Resolves a conflict (a new write that covers every side).
-    pub async fn sync_resolve(&self, id: String, resolution: SyncResolution) -> Result<SyncStatus> {
-        self.on_sync(move |core| core.resolve(&id, &resolution))
+    /// Resolves a conflict (a new write that covers every side). The
+    /// decision names the sides shown ([`SyncConflict::sides_hash`]):
+    /// sides changed since are refused with `sync_not_pending` and nothing
+    /// is recorded (the UI reloads the conflicts and shows them again).
+    pub async fn sync_resolve(
+        &self,
+        id: String,
+        resolution: SyncResolution,
+        sides_hash: String,
+    ) -> Result<SyncStatus> {
+        self.on_sync(move |core| core.resolve(&id, &resolution, &sides_hash))
             .await
     }
 

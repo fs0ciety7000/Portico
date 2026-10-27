@@ -76,6 +76,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
     conflicts = [
       {
         id: "c-tags-db",
+        sides_hash: "demo-sides-tags-db",
         subject: { type: "host_meta", alias: "db-prod", field: "tags" },
         sides: [
           { index: 0, devices: [THIS], local: true, at: nowSecs() - 900, value: { type: "tags", value: ["prod", "db"] } },
@@ -84,6 +85,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       },
       {
         id: "c-snippet-restart",
+        sides_hash: "demo-sides-snippet-restart",
         subject: { type: "snippet", id: "restart-service" },
         sides: [
           { index: 0, devices: [THIS], local: true, at: nowSecs() - 3600, value: { type: "snippet", value: { name: "Restart a service", command: "sudo systemctl restart {{service}} && systemctl status {{service}} --no-pager", description: "Asks for sudo on the server", run: false } } },
@@ -285,7 +287,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       lastPass = nowSecs();
       return set(idle());
     },
-    async syncResolve(id: string, _resolution: SyncResolution) {
+    async syncResolve(id: string, _resolution: SyncResolution, _sidesHash: string) {
       await sleep(300);
       conflicts = conflicts.filter((c) => c.id !== id);
       emit({ type: "sync_conflicts", count: conflicts.length });

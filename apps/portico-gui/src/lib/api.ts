@@ -757,6 +757,8 @@ export interface SyncConflict {
   id: string;
   subject: SyncSubject;
   sides: ConflictSide[];
+  /** Pass back to `syncResolve`: sides changed since → `sync_not_pending`. */
+  sides_hash: string;
 }
 
 export type SyncResolution = { type: "pick"; index: number } | { type: "union" } | { type: "keep_both"; keep: number };
@@ -980,7 +982,7 @@ export const api = {
     invoke<JoinPreview>("sync_join_preview", { request: { passphrase, deviceName, rememberKey } }),
   syncJoinCommit: (token: string, bulk: JoinBulkChoice) => invoke<SyncStatus>("sync_join_commit", { token, bulk }),
   syncUnlock: (passphrase: string) => invoke<SyncStatus>("sync_unlock", { passphrase }),
-  syncResolve: (id: string, resolution: SyncResolution) => invoke<SyncStatus>("sync_resolve", { id, resolution }),
+  syncResolve: (id: string, resolution: SyncResolution, sidesHash: string) => invoke<SyncStatus>("sync_resolve", { id, resolution, sidesHash }),
   syncSkipOnThisDevice: (key: string) => invoke<SyncStatus>("sync_skip_on_this_device", { key }),
   syncConfirmHosts: (hosts: HostDecision[]) => invoke<SyncStatus>("sync_confirm_hosts", { hosts }),
   syncRejectHosts: (hosts: HostDecision[]) => invoke<SyncStatus>("sync_reject_hosts", { hosts }),

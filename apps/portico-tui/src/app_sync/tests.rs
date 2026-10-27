@@ -116,6 +116,7 @@ fn conflicts() -> Vec<SyncConflict> {
     vec![
         SyncConflict {
             id: "c-tags".into(),
+            sides_hash: "h-c-tags".into(),
             subject: SyncSubject::HostMeta {
                 alias: "web".into(),
                 field: "tags".into(),
@@ -139,6 +140,7 @@ fn conflicts() -> Vec<SyncConflict> {
         },
         SyncConflict {
             id: "c-host".into(),
+            sides_hash: "h-c-host".into(),
             subject: SyncSubject::Host { alias: "db".into() },
             sides: vec![
                 ConflictSide {
