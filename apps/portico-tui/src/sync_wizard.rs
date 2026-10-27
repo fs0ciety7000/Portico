@@ -8,8 +8,11 @@
 //! device (new passphrase with its meter, "Generate a passphrase", device
 //! name, "Remember the key on this device") or join (passphrase, then the
 //! review of what joining brings and how to settle conflicts; nothing is
-//! written before the commit) → the recovery warning, with an explicit "I
-//! understand", **before** the step that writes → done.
+//! written before the commit). The recovery warning sits **in** the step
+//! that writes (Q1, S1c review): create gates "Create" on "I saved it. A
+//! lost passphrase cannot be recovered unless a device remembers the key.",
+//! typed or generated alike; join gates "Join" on the same box, on the
+//! review. On success the wizard closes onto the Sync panel ("Sync is on").
 //!
 //! The join token is single use and expires (10 min, F14): when the commit
 //! is refused for that, the wizard goes back to the passphrase. The
@@ -19,7 +22,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portico_core::ErrorSummary;
-use portico_core::sync::{FolderProbe, JoinBulkChoice, JoinPreview, SyncStatus};
+use portico_core::sync::{FolderProbe, JoinBulkChoice, JoinPreview};
 
 use crate::form::{MAX_LINE, paste_line, push_char};
 use crate::sync_panel::{PassForm, PassKind, PassOutcome};
@@ -51,6 +54,10 @@ pub(crate) const BULK_NOTE: &str =
 /// The recovery warning, word for word as in the GUI.
 pub(crate) const RECOVERY: &str = "If you lose the passphrase and no device remembers the key, the content of the sync folder cannot be recovered: nobody can decrypt it, not even Portico. Your local hosts, snippets and settings are never deleted.";
 
+/// The box that gates create and join, word for word as in the GUI.
+pub(crate) const SAVED: &str =
+    "I saved it. A lost passphrase cannot be recovered unless a device remembers the key.";
+
 /// What a join token is good for (F14), in the review.
 pub(crate) const JOIN_TTL_SECS: u64 = 600;
 
@@ -60,12 +67,10 @@ pub(crate) enum Step {
     Folder,
     Create,
     Join,
+    /// What joining brings, the bulk choice and "I saved it".
     Review,
-    /// The recovery warning, before the step that writes.
-    Recovery,
     /// Waiting for the engine: its words.
     Working(&'static str),
-    Done(SyncStatus),
 }
 
 /// What the app should do after a key in the wizard.
@@ -73,8 +78,6 @@ pub(crate) enum Step {
 pub(crate) enum WizardOutcome {
     None,
     Close,
-    /// Close and show the Sync panel.
-    Finish,
     Complete(String),
     Probe(String),
     Generate,
@@ -89,6 +92,9 @@ pub(crate) enum WizardOutcome {
     },
 }
 
+/// The box of the join review is not checked.
+pub(crate) const SAVED_PROBLEM: &str = "Save the passphrase, then check this box";
+
 #[derive(Debug)]
 pub(crate) struct SyncWizard {
     pub(crate) step: Step,
@@ -102,7 +108,10 @@ pub(crate) struct SyncWizard {
     pub(crate) form: PassForm,
     pub(crate) preview: Option<(JoinPreview, Instant)>,
     pub(crate) bulk: usize,
-    pub(crate) understood: bool,
+    /// "I saved it" on the join review.
+    pub(crate) saved: bool,
+    /// Join pressed without the box: say so under it.
+    pub(crate) saved_problem: bool,
     /// The last refusal outside a form field.
     pub(crate) error: Option<ErrorSummary>,
     pub(crate) device_name: String,
@@ -119,7 +128,8 @@ impl SyncWizard {
             form: PassForm::new(PassKind::Create, device_name.clone()),
             preview: None,
             bulk: 0,
-            understood: false,
+            saved: false,
+            saved_problem: false,
             error: None,
             device_name,
         }
@@ -208,6 +218,8 @@ impl SyncWizard {
         self.form.busy = false;
         self.preview = Some((preview, now));
         self.bulk = 0;
+        self.saved = false;
+        self.saved_problem = false;
         self.error = None;
         self.step = Step::Review;
     }
@@ -270,11 +282,12 @@ impl SyncWizard {
                         self.step = Step::Working("Opening the sync folder…");
                         WizardOutcome::Preview
                     }
+                    // "I saved it" is checked (a field of the form).
                     PassOutcome::Submit => {
                         self.device_name = self.form.name.trim().to_owned();
-                        self.understood = false;
-                        self.step = Step::Recovery;
-                        WizardOutcome::None
+                        self.form.busy = true;
+                        self.step = Step::Working("Creating the sync folder…");
+                        WizardOutcome::Create
                     }
                     PassOutcome::Generate => WizardOutcome::Generate,
                     PassOutcome::Copy => WizardOutcome::Copy,
@@ -297,27 +310,16 @@ impl SyncWizard {
                     self.bulk = self.bulk.saturating_sub(1);
                     WizardOutcome::None
                 }
-                KeyCode::Enter => {
-                    self.understood = false;
-                    self.step = Step::Recovery;
-                    WizardOutcome::None
-                }
-                _ => WizardOutcome::None,
-            },
-            Step::Recovery => match key.code {
-                KeyCode::Esc => {
-                    self.step = if self.preview.is_some() {
-                        Step::Review
-                    } else {
-                        Step::Create
-                    };
-                    WizardOutcome::None
-                }
                 KeyCode::Char(' ') => {
-                    self.understood = !self.understood;
+                    self.saved = !self.saved;
+                    self.saved_problem = false;
                     WizardOutcome::None
                 }
-                KeyCode::Enter if self.understood => {
+                KeyCode::Enter if !self.saved => {
+                    self.saved_problem = true;
+                    WizardOutcome::None
+                }
+                KeyCode::Enter => {
                     if let Some((preview, at)) = &self.preview {
                         let token = preview.token.clone();
                         let expired = now.saturating_duration_since(*at).as_secs() >= JOIN_TTL_SECS;
@@ -337,18 +339,12 @@ impl SyncWizard {
                         self.step = Step::Working("Joining…");
                         WizardOutcome::Commit { token, bulk }
                     } else {
-                        self.form.busy = true;
-                        self.step = Step::Working("Creating the sync folder…");
-                        WizardOutcome::Create
+                        WizardOutcome::None
                     }
                 }
                 _ => WizardOutcome::None,
             },
             Step::Working(_) => WizardOutcome::None,
-            Step::Done(_) => match key.code {
-                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => WizardOutcome::Finish,
-                _ => WizardOutcome::None,
-            },
         }
     }
 

@@ -485,7 +485,9 @@ Charger `ui-design-premium`, `tui-patterns` et `gui-tauri-patterns` avant. La pa
    saisie avec complétion) ; **premier appareil** : passphrase + confirmation, jauge, « Générer une passphrase » (6 mots EFF),
    **minimum imposé par le cœur** (≥ 60 bits estimés ou ≥ 5 mots de la liste), nom d'appareil, « Mémoriser la clé sur cet
    appareil » (oui) ; **rejoindre** : passphrase puis revue (N hôtes, M snippets, K réglages entrants, conflits), rien n'est écrit
-   avant confirmation ; écran final d'avertissement de récupération avec « J'ai compris » explicite.
+   avant confirmation. L'avertissement de récupération vient **avant** l'étape irréversible, dans l'étape elle-même (revue S1c,
+   Q1) : case « I saved it. A lost passphrase cannot be recovered unless a device remembers the key. » qui conditionne
+   « Create » (passphrase tapée ou générée) et, sur la revue, « Join » ; réussite = « Sync is on ».
 2. **Barre de statut** : glyphe monochrome + libellé (`Synced 2 min ago`, `Syncing…`, `Waiting for <device>`,
    `Sync folder unavailable`, `Locked`) ; conflits et alertes en couleurs de statut seulement.
 3. **Panneau Sync** : appareils (nom + préfixe d'id, dernière publication, celui-ci, inactif), options, « Synchroniser »,
@@ -706,8 +708,8 @@ sont en `#[cfg(test)]`).
 Les deux UIs couvrent tous les parcours de §6 et ce que la liste ci-dessus attend.
 
 - **TUI** (`apps/portico-tui/src/sync_panel.rs`, `sync_wizard.rs`, `app_sync.rs`, `ui/sync.rs`) : `S` sur la liste des
-  hôtes et `Ctrl-Space y` partout (la TUI n'a pas de palette : c'est son « Sync… ») ; panneau à cinq onglets
-  (Overview, Conflicts, Issues, Received hosts, Received snippets), assistant, élément de barre de statut (glyphe `⇅`
+  hôtes et `Ctrl-Space y` partout (la TUI n'a pas de palette : c'est son « Sync… ») ; panneau à cinq onglets, ceux de
+  la GUI dans le même ordre (Overview, Conflicts, Received, Issues, Devices ; `1`-`5` identiques), assistant, élément de barre de statut (glyphe `⇅`
   monochrome et libellé, comptes en couleurs de statut), badge `⇅` et ligne « changed by <appareil> » sur l'hôte,
   bandeau « Sync » sous les détails, badge des snippets non confirmés. `start_sync` au lancement ; événements
   appliqués (`SettingsChanged` passe par les mêmes contrôles que `settings.toml`, F18) ; relecture complète après
@@ -717,15 +719,23 @@ Les deux UIs couvrent tous les parcours de §6 et ce que la liste ci-dessus atte
   Rust (aucune permission de dialogue dans la webview, capabilities inchangées) ; une passphrase générée reste côté
   Rust sous un jeton à usage unique et n'est montrée qu'une fois ; un scénario E2E bureau couvre la mise en place et
   la désactivation ; mode démo `?sync=…` et `?syncfolder=…` (`docs/TESTING.md`).
-- **F1 / F8** : chaque décision porte sur l'empreinte affichée, un élément à la fois (aucune confirmation groupée) ;
-  `sync_not_pending` recharge et demande de revoir. TUI : touches ignorées 400 ms après un changement de sélection ou
-  de contenu, et tant que le rechargement d'un `SyncPendingChanged` n'est pas revenu. L'envoi d'un snippet refusé par
+- **F1 / F8** : chaque décision porte sur l'empreinte affichée (destination, commande, et depuis la revue S1c les
+  côtés d'un conflit : `SyncConflict::sides_hash`) ; sélection explicite élément par élément, chaque destination
+  visible, rien de présélectionné, aucun « tout sélectionner » (la GUI offre « Confirm selected » sur des cases
+  cochées une à une ; la TUI décide un élément à la fois) ; `sync_not_pending` recharge et demande de revoir. TUI :
+  touches ignorées 400 ms après un changement de sélection ou de contenu (y compris de nouveaux côtés d'un conflit),
+  et tant que le rechargement d'un `SyncPendingChanged` n'est pas revenu ; un élément reçu ne se confirme qu'une fois
+  sa dernière ligne affichée, comme la GUI (revue S1c, A1). L'envoi d'un snippet refusé par
   `sync_snippet_unconfirmed` ouvre sa revue (commande entière), puis revient aux snippets.
+- **Correctifs des revues S1c** (sécurité A1–A6, conception B1–B16, questions Q1–Q2) : voir §12, « Revues de
+  l'implémentation S1c ». Le cœur ajoute `SyncConflict::sides_hash` et `sync_resolve(id, resolution, sides_hash)`
+  (`resolve_refuses_a_stale_sides_hash`) et met les identifiants de ses messages entre accents graves.
 
 | Écart S1c | Raison |
 |---|---|
-| Avertissement de récupération : TUI **avant** l'étape qui écrit (création, validation du rattachement) ; GUI en écran final, après la réussite | TUI : « J'ai compris » conditionne l'action irréversible. Les deux disent la même chose ; à aligner si l'on préfère un seul ordre |
-| Raccourci : TUI `S` / `Ctrl-Space y` ; GUI palette seulement | La TUI n'a pas de palette |
+| ~~Avertissement de récupération : TUI avant l'étape qui écrit, GUI en écran final~~ | Aligné par la revue S1c (Q1) : dans les deux UIs, case « I saved it… » dans l'étape qui écrit |
+| ~~Raccourci : TUI `S` / `Ctrl-Space y` ; GUI palette seulement~~ | Aligné par la revue S1c (Q2) : GUI `⇧S` dans la liste et `⌘⇧Y` / `Ctrl-Shift-Y` |
+| Presse-papiers TUI vidé 30 s après la copie d'une passphrase sans vérifier ce qu'il contient | Un terminal ne permet pas de lire son presse-papiers de façon fiable (OSC 52 en lecture rarement permis) : la TUI vide sans condition, sauf si Portico a copié autre chose entre-temps |
 | « Recréer le bundle depuis cet appareil » (§5.5) proposé nulle part | Le cœur ne le fournit pas encore (`FolderUnavailable { BundleMissing }` est expliqué, sans action) |
 | Acquittement proposé pour `PassphraseChanged` seulement | C'est la seule alerte que `sync_acknowledge_alerts` efface ; les autres sont expliquées avec leur indice |
 
@@ -769,6 +779,31 @@ Les deux UIs couvrent tous les parcours de §6 et ce que la liste ci-dessus atte
 | F16 | FAIBLE | Nom d'appareil validé (pas de contrôle / bidi / invisible), toujours affiché avec le préfixe d'id | ✅ S1a |
 | F17 | FAIBLE | Ancienneté mesurée sur l'heure locale d'observation de la dernière nouvelle séquence, jamais `published_at` | ✅ S1a |
 | F18 | FAIBLE | `copy_on_select` non synchronisé ; la GUI valide les keymaps reçues comme la TUI ; force de passphrase imposée dans le cœur (`sync_passphrase_weak`) à la création, au changement et à la réinitialisation | ✅ S1a (cœur) ; ✅ GUI S1c |
+
+### Revues de l'implémentation S1c (2026-10-27)
+
+**Sécurité** (agent-security, sur `8761671..03efaaf`) : aucun constat CRITIQUE ni ÉLEVÉ. Tous corrigés.
+
+| # | Gravité | Constat | Correctif | État |
+|---|---|---|---|---|
+| A1 | MOYEN | GUI : la commande d'un snippet reçu pouvait cacher une charge sous un pli de défilement invisible (F8) | GUI : « N lines · M characters », numéros de ligne, confirmation inactive tant que la fin n'a pas défilé, fondu « ↓ more ». TUI (parité) : `y` refusé tant que la dernière ligne de l'élément reçu n'a pas été affichée (« PgDn read to the end ») | ✅ |
+| A2 | FAIBLE | TUI : les tabulations d'une commande reçue étaient retirées à l'affichage mais tapées | Tabulation affichée en `→` discret (revue des snippets, vues de conflit) ; GUI de même | ✅ |
+| A3 | FAIBLE | GUI : la passphrase générée restait côté Rust après la fermeture du dialogue | `sync_forget_generated` à la fermeture, expiration 10 min, jeton aléatoire | ✅ |
+| A4 | FAIBLE | La passphrase générée restait dans le presse-papiers | Vidé après 30 s (TUI : OSC 52 vide, séquence en `Zeroizing`, sauf copie plus récente ; GUI : voir son commit) ; note « Copied — cleared from the clipboard in 30 s » | ✅ |
+| A5 | FAIBLE | Résolution d'un conflit non liée au contenu montré | `SyncConflict::sides_hash`, `sync_resolve(id, resolution, sides_hash)` → `sync_not_pending` si les côtés ont changé ; TUI : `↵` réarmé 400 ms à de nouveaux côtés ; GUI : choix réinitialisés | ✅ |
+| A6 | FAIBLE | La doc disait « aucune confirmation groupée » alors que la GUI a « Confirm selected » | Décision : comportement GUI conservé, doc reformulée (sélection explicite élément par élément, rien de présélectionné, aucun « tout sélectionner ») | ✅ |
+
+**Conception** (agent-design-review, verdict « presque ») : tout appliqué. Côté TUI : B2 (identifiants entre accents
+graves dans les messages du cœur ; `sentence()` ne met jamais de majuscule à un mot qui commence par un accent grave et
+les retire à l'affichage : « legacy is already defined… »), B5 (onglets Overview · Conflicts · Received · Issues ·
+Devices dans les deux UIs, libellés « Turn sync off », « Union of all tags », « Keep <appareil>'s », « On this
+device », « tags, groups, notes »), B6 (« à revoir » en `status-warning`), B15 (80×24 : la barre de statut dit
+« SYNC  ? help » sans répéter les touches du panneau ; colonne de la jauge et de « Remember » alignée sur le texte des
+champs ; « this device » marqué du seul point d'accent, « inactive » discret ; détails d'hôte « ⇅ changed by desk ·
+S review », l'id à partir de 120 colonnes ; numéro d'étape sans total ; HostName reçu coupé après `.` et `-`, marque
+de changement sur la ligne du libellé ; nom d'appareil par défaut `portico-` et quatre chiffres hexadécimaux),
+Q1 (avertissement de récupération dans l'étape qui écrit, case « I saved it… » pour créer et rejoindre, réussite
+« Sync is on »). Côté GUI : B1, B3, B4, B6–B14, B16, Q2 (voir le commit GUI).
 
 ### Revue de sécurité de l'implémentation S1b (agent-security, 2026-10-27)
 

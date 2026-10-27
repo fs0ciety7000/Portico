@@ -28,7 +28,7 @@ use crate::action::Action;
 use crate::app::{App, Overlay};
 use crate::keys::{Load, Notice};
 use crate::sync_panel::{PanelMode, SyncOutcome, SyncPanel, SyncTab};
-use crate::sync_wizard::{Step, SyncWizard, WizardOutcome};
+use crate::sync_wizard::{SyncWizard, WizardOutcome};
 
 /// A panel operation, to word its result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,13 +74,25 @@ where
     });
 }
 
-/// This machine's name for a new device (editable in the wizard).
+/// How long a copied passphrase stays in the clipboard (A4, S1c review).
+pub(crate) const CLIPBOARD_CLEAR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// This machine's name for a new device (editable in the wizard); without
+/// one, `portico-` and four random hex digits, so two such devices never
+/// read the same (B15, S1c review).
 fn default_device_name(machine: Option<&str>) -> String {
     machine
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map_or_else(
-            || "This computer".to_owned(),
+            || {
+                use std::hash::{BuildHasher, Hasher};
+                // Randomly keyed by the standard library: no extra crate.
+                let random = std::collections::hash_map::RandomState::new()
+                    .build_hasher()
+                    .finish();
+                format!("portico-{:04x}", random & 0xffff)
+            },
             |m| m.chars().take(64).collect(),
         )
 }
@@ -123,7 +135,7 @@ impl App {
                     self.sync.conflicts = list.len();
                 }
                 if let Some(panel) = &mut self.sync_panel {
-                    panel.set_conflicts(result);
+                    panel.set_conflicts(result, Instant::now());
                 }
             }
             Action::SyncIssues(result) => {
@@ -150,6 +162,7 @@ impl App {
                 }
             }
             Action::SyncDone { op, result } => self.sync_done(&op, result),
+            Action::SyncClearClipboard(generation) => self.clear_clipboard(generation),
             Action::SyncProbed { folder, result } => {
                 if let Some(wizard) = &mut self.sync_wizard {
                     wizard.probed(folder, result);
@@ -178,10 +191,16 @@ impl App {
             }
             Action::SyncSetUp(result) => {
                 match result {
+                    // The wizard closes onto the panel: "Sync is on".
                     Ok(status) => {
-                        if let Some(wizard) = &mut self.sync_wizard {
-                            wizard.form.busy = false;
-                            wizard.step = Step::Done(status);
+                        if self.sync_wizard.take().is_some() {
+                            if let Some(overview) = &mut self.sync.overview {
+                                overview.status = status;
+                            }
+                            self.open_sync(SyncTab::Overview);
+                            if let Some(panel) = &mut self.sync_panel {
+                                panel.notice = Some(Notice::ok("Sync is on".to_owned()));
+                            }
                         }
                     }
                     Err(e) => {
@@ -339,7 +358,7 @@ impl App {
     /// A run of snippet `id` was refused (not confirmed here, F8): its
     /// review, over the snippets panel, which comes back after.
     pub(crate) fn review_snippet(&mut self, id: &str) {
-        let mut panel = SyncPanel::new(SyncTab::Snippets, self.device_name(), Instant::now());
+        let mut panel = SyncPanel::new(SyncTab::Received, self.device_name(), Instant::now());
         panel.select_snippet(&self.sync, id);
         panel.from_snippets = self.snippets_panel.is_some();
         self.sync_panel = Some(Box::new(panel));
@@ -370,6 +389,7 @@ impl App {
         match outcome {
             SyncOutcome::None => {}
             SyncOutcome::Close => self.close_sync_panel(),
+            SyncOutcome::Help => self.open_help(),
             SyncOutcome::OpenWizard => self.open_wizard(),
             SyncOutcome::Generate => self.generate_passphrase(),
             SyncOutcome::Copy => {
@@ -600,13 +620,33 @@ impl App {
         }
     }
 
-    /// The generated passphrase to the clipboard (OSC 52), once asked.
+    /// The generated passphrase to the clipboard (OSC 52), once asked; the
+    /// clipboard is emptied [`CLIPBOARD_CLEAR`] later unless Portico copied
+    /// something else meanwhile (A4: a terminal cannot be asked what its
+    /// clipboard holds, so the copy is tracked by a generation).
     fn copy_passphrase(&mut self, text: &str) {
-        self.osc52(text);
+        // `osc52_secret` moved the generation on: this copy's own.
+        self.osc52_secret(text);
+        let generation = self.clipboard_secret.get();
+        let tx = self.tx.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                tokio::time::sleep(CLIPBOARD_CLEAR).await;
+                let _ = tx.send(Action::SyncClearClipboard(generation));
+            });
+        }
         self.notify_warning(
-            "Passphrase copied".into(),
-            Some("Paste it into your password manager, then clear the clipboard.".into()),
+            "Copied — cleared from the clipboard in 30 s".into(),
+            Some("Paste it into your password manager now.".into()),
         );
+    }
+
+    /// The copied passphrase's time is up: empty the clipboard, unless
+    /// something else was copied since.
+    fn clear_clipboard(&mut self, generation: u64) {
+        if generation == self.clipboard_secret.get() {
+            self.osc52_secret("");
+        }
     }
 
     // ── wizard ─────────────────────────────────────────────────────────────
@@ -627,10 +667,6 @@ impl App {
             WizardOutcome::Close => {
                 self.sync_wizard = None;
                 self.overlay = None;
-            }
-            WizardOutcome::Finish => {
-                self.sync_wizard = None;
-                self.open_sync(SyncTab::Overview);
             }
             WizardOutcome::Complete(input) => spawn(self, async move {
                 let query = input.clone();

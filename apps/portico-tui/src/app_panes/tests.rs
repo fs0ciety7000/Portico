@@ -1264,7 +1264,7 @@ async fn run_snippet_refuses_unconfirmed_synced_snippet() {
             && app
                 .sync_panel
                 .as_ref()
-                .is_some_and(|p| p.tab == crate::sync_panel::SyncTab::Snippets)
+                .is_some_and(|p| p.tab == crate::sync_panel::SyncTab::Received)
             && app.sync.snippets.len() == 1
             && !app.sync.stale()
     })
@@ -1272,7 +1272,7 @@ async fn run_snippet_refuses_unconfirmed_synced_snippet() {
     assert!(lab.app.snippets_panel.is_some());
     let review = text(&screen(&mut lab.app, 80, 24));
     assert!(review.contains("make deploy"), "{review}");
-    assert!(review.contains("Runs when sent"), "{review}");
+    assert!(review.contains("Runs as soon as it is sent"), "{review}");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!received(&lab.alpha).contains("make deploy"));
 

@@ -295,4 +295,6 @@ pub(crate) enum Action {
     SyncPreviewed(Result<JoinPreview, ErrorSummary>),
     /// Create or join commit came back.
     SyncSetUp(Result<SyncStatus, ErrorSummary>),
+    /// A copied passphrase's 30 s are up (its copy generation).
+    SyncClearClipboard(u64),
 }

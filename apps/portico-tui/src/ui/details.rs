@@ -114,21 +114,25 @@ fn render_banner(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
     }
 }
 
-/// `⇅ changed by laptop (3f9c0ae1) · S to review`: a destination received
-/// through sync waits for this device (F1).
-fn received_line(app: &App, alias: &str) -> Option<Line<'static>> {
+/// Screen width from which the device id shows in the received line.
+const RECEIVED_IDS_AT: u16 = 120;
+
+/// `⇅ changed by laptop · S review` (`laptop (3f9c0ae1)` from 120
+/// columns): a destination received through sync waits for this device
+/// (F1).
+fn received_line(app: &App, alias: &str, screen_width: u16) -> Option<Line<'static>> {
     let s = app.styles();
     let change = app.sync.pending_for(alias)?;
     let key = app.keymap.shown("hosts.sync", 1);
     let mut spans = vec![
         Span::styled("⇅ ", s.status(s.theme.status.warning)),
         Span::styled(
-            crate::ui::sync::received_label(change),
+            crate::ui::sync::received_label_ids(change, screen_width >= RECEIVED_IDS_AT),
             s.status(s.theme.status.warning),
         ),
     ];
     if !key.is_empty() {
-        spans.push(Span::styled(format!(" · {key} to review"), s.muted()));
+        spans.push(Span::styled(format!(" · {key} review"), s.muted()));
     }
     Some(Line::from(spans))
 }
@@ -202,7 +206,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
             Span::styled(format!(":{}", r.port), s.muted()),
         ]),
     ];
-    lines.extend(received_line(app, &host.alias));
+    lines.extend(received_line(app, &host.alias, frame.area().width));
     lines.push(Line::from(""));
     lines.extend(status_lines(app, host, s));
     lines.push(Line::from(""));

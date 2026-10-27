@@ -210,24 +210,72 @@ fn tags_preselect_union_and_snippets_keep_both() {
     assert_eq!(choices(&hosts).first(), Some(&Choice::Pick { index: 0 }));
 
     // ↵ resolves the selected conflict with the choice on screen.
-    let now = Instant::now();
-    let mut panel = SyncPanel::new(SyncTab::Conflicts, "me".into(), now);
-    panel.set_conflicts(Ok(vec![tags, hosts]));
+    let t0 = Instant::now();
+    let mut panel = SyncPanel::new(SyncTab::Conflicts, "me".into(), t0);
+    panel.set_conflicts(Ok(vec![tags, hosts]), t0);
     let data = SyncData::default();
+    let now = later(t0);
     match panel.handle_key(key(KeyCode::Enter), &data, now) {
-        SyncOutcome::Resolve { id, resolution, .. } => {
+        SyncOutcome::Resolve {
+            id,
+            resolution,
+            sides_hash,
+        } => {
             assert_eq!(id, "c1");
             assert_eq!(resolution, SyncResolution::Union);
+            assert_eq!(sides_hash, "h-c1");
         }
         other => panic!("{other:?}"),
     }
     panel.handle_key(ch(']'), &data, now);
     panel.handle_key(ch('j'), &data, now);
+    let now = later(now);
     match panel.handle_key(key(KeyCode::Enter), &data, now) {
         SyncOutcome::Resolve { id, resolution, .. } => {
             assert_eq!(id, "c3");
             assert_eq!(resolution, SyncResolution::Pick { index: 1 });
         }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A5 (S1c review): the sides on screen changed (another device wrote
+/// again): `↵` waits, then resolves with the new sides' hash.
+#[test]
+fn new_conflict_sides_arm_enter_again() {
+    let conflict = |hash: &str, tag: &str| SyncConflict {
+        id: "c1".into(),
+        sides_hash: hash.into(),
+        subject: SyncSubject::HostMeta {
+            alias: "web".into(),
+            field: "tags".into(),
+        },
+        sides: vec![
+            side(0, false, SyncValue::Tags(vec![tag.into()])),
+            side(1, true, SyncValue::Tags(vec!["b".into()])),
+        ],
+    };
+    let t0 = Instant::now();
+    let data = SyncData::default();
+    let mut panel = SyncPanel::new(SyncTab::Conflicts, "me".into(), t0);
+    panel.set_conflicts(Ok(vec![conflict("h1", "a")]), t0);
+    let t1 = later(t0);
+    // The same sides again: nothing re-armed.
+    panel.set_conflicts(Ok(vec![conflict("h1", "a")]), t1);
+    assert!(matches!(
+        panel.handle_key(key(KeyCode::Enter), &data, t1),
+        SyncOutcome::Resolve { .. }
+    ));
+    // New sides: a quick ↵ does nothing.
+    panel.handle_key(key(KeyCode::Down), &data, t1);
+    panel.set_conflicts(Ok(vec![conflict("h2", "z")]), t1);
+    assert_eq!(panel.choice, 1, "the choice stays on the same conflict");
+    assert!(matches!(
+        panel.handle_key(key(KeyCode::Enter), &data, t1),
+        SyncOutcome::None
+    ));
+    match panel.handle_key(key(KeyCode::Enter), &data, later(t1)) {
+        SyncOutcome::Resolve { sides_hash, .. } => assert_eq!(sides_hash, "h2"),
         other => panic!("{other:?}"),
     }
 }
@@ -250,6 +298,15 @@ fn typed_passphrase_needs_a_matching_confirmation() {
         Some(PassField::Confirm)
     );
     typed(&mut form, " staple");
+    // Q1: "I saved it…" gates create, for a typed passphrase too.
+    assert_eq!(form.handle_key(key(KeyCode::Enter)), PassOutcome::None);
+    assert_eq!(form.focused(), Some(PassField::Saved));
+    assert_eq!(
+        form.problem.as_ref().map(|(f, ..)| *f),
+        Some(PassField::Saved)
+    );
+    form.handle_key(ch(' '));
+    assert!(form.saved);
     assert_eq!(form.handle_key(key(KeyCode::Enter)), PassOutcome::Submit);
     match form.take_new() {
         NewPassphrase::Typed(secret) => {
@@ -274,13 +331,16 @@ fn generated_passphrase_is_shown_and_must_be_written_down() {
     assert!(form.strength.is_some_and(|s| s.acceptable));
     assert_eq!(form.focused(), Some(PassField::New));
     assert_eq!(form.handle_key(ch('c')), PassOutcome::Copy);
+    // No confirmation field: "I saved it…" covers a generated one (Q1).
+    assert!(!form.fields().contains(&PassField::Confirm));
     assert_eq!(form.handle_key(key(KeyCode::Enter)), PassOutcome::None);
     assert_eq!(
         form.problem.as_ref().map(|(f, ..)| *f),
-        Some(PassField::Confirm)
+        Some(PassField::Saved)
     );
+    assert_eq!(form.focused(), Some(PassField::Saved));
     form.handle_key(ch(' '));
-    assert!(form.wrote_down);
+    assert!(form.saved);
     assert_eq!(form.handle_key(key(KeyCode::Enter)), PassOutcome::Submit);
     assert!(matches!(form.take_new(), NewPassphrase::Generated(_)));
     assert!(form.generated.is_none());
@@ -322,7 +382,8 @@ fn host_decisions_are_armed_bound_to_the_hash_and_wait_for_reloads() {
         ],
         t0,
     );
-    let mut panel = SyncPanel::new(SyncTab::Hosts, "me".into(), t0);
+    let mut panel = SyncPanel::new(SyncTab::Received, "me".into(), t0);
+    panel.seen_end = Some("h1".into());
     // Too soon: typed for something else.
     assert!(matches!(
         panel.handle_key(ch('y'), &data, t0),
@@ -335,13 +396,19 @@ fn host_decisions_are_armed_bound_to_the_hash_and_wait_for_reloads() {
         }
         other => panic!("{other:?}"),
     }
-    // Moving re-arms: the new item must be on screen long enough.
+    // Moving re-arms: the new item must be on screen long enough, and
+    // read to its end.
     panel.handle_key(ch('j'), &data, t1);
     assert!(matches!(
         panel.handle_key(ch('n'), &data, t1),
         SyncOutcome::None
     ));
     let t2 = later(t1);
+    assert!(matches!(
+        panel.handle_key(ch('n'), &data, t2),
+        SyncOutcome::None
+    ));
+    panel.seen_end = Some("h2".into());
     match panel.handle_key(ch('n'), &data, t2) {
         SyncOutcome::RejectHost { alias, hash } => {
             assert_eq!((alias.as_str(), hash.as_str()), ("db", "h2"));
@@ -368,6 +435,12 @@ fn host_decisions_are_armed_bound_to_the_hash_and_wait_for_reloads() {
         panel.handle_key(ch('y'), &data, t3),
         SyncOutcome::None
     ));
+    // The new destination was not read yet.
+    assert!(matches!(
+        panel.handle_key(ch('y'), &data, later(t3)),
+        SyncOutcome::None
+    ));
+    panel.seen_end = Some("h3".into());
     match panel.handle_key(ch('y'), &data, later(t3)) {
         SyncOutcome::ConfirmHost { hash, .. } => assert_eq!(hash, "h3", "the hash shown now"),
         other => panic!("{other:?}"),
@@ -395,8 +468,19 @@ fn snippet_confirmation_carries_the_hash_shown() {
         ],
         t0,
     );
-    let mut panel = SyncPanel::new(SyncTab::Snippets, "me".into(), t0);
+    let mut panel = SyncPanel::new(SyncTab::Received, "me".into(), t0);
     panel.select_snippet(&data, "b");
+    // A1: not before its last line was on screen.
+    assert!(matches!(
+        panel.handle_key(ch('y'), &data, later(t0)),
+        SyncOutcome::None
+    ));
+    panel.seen_end = Some("hb".into());
+    // `n` rejects hosts only.
+    assert!(matches!(
+        panel.handle_key(ch('n'), &data, later(t0)),
+        SyncOutcome::None
+    ));
     match panel.handle_key(ch('y'), &data, later(t0)) {
         SyncOutcome::ConfirmSnippet { id, hash, .. } => {
             assert_eq!((id.as_str(), hash.as_str()), ("b", "hb"));
@@ -502,10 +586,17 @@ fn overview_offers_what_the_status_allows() {
     // Tabs: Tab, Shift-Tab, digits.
     panel.handle_key(key(KeyCode::Tab), &data, t0);
     assert_eq!(panel.tab, SyncTab::Conflicts);
+    // The GUI's order: Overview · Conflicts · Received · Issues · Devices.
+    panel.handle_key(ch('3'), &data, t0);
+    assert_eq!(panel.tab, SyncTab::Received);
     panel.handle_key(ch('5'), &data, t0);
-    assert_eq!(panel.tab, SyncTab::Snippets);
+    assert_eq!(panel.tab, SyncTab::Devices);
     panel.handle_key(key(KeyCode::BackTab), &data, t0);
-    assert_eq!(panel.tab, SyncTab::Hosts);
+    assert_eq!(panel.tab, SyncTab::Issues);
+    assert!(matches!(
+        panel.handle_key(ch('?'), &data, t0),
+        SyncOutcome::Help
+    ));
     assert!(matches!(
         panel.handle_key(key(KeyCode::Esc), &data, t0),
         SyncOutcome::Close

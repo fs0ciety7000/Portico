@@ -211,6 +211,9 @@ pub(crate) struct App {
     pub(crate) machine: Option<String>,
     /// OSC 52 goes to the real terminal (off in tests).
     pub(crate) clipboard: bool,
+    /// Generation of the passphrase last copied by the sync screens: its
+    /// clearing 30 s later applies only if nothing was copied since.
+    pub(crate) clipboard_secret: std::cell::Cell<u64>,
     /// Terminals being recorded, with the file name when known. Driven by
     /// `RecordingState::Started` / `Stopped` only (and `is_recording`
     /// after a lagged bus), never by the result of `start_recording`.
@@ -323,6 +326,7 @@ impl App {
             probes: HashMap::new(),
             machine: None,
             clipboard: true,
+            clipboard_secret: std::cell::Cell::new(0),
             recording: HashMap::new(),
             recordings_panel: None,
             player: None,

@@ -7,11 +7,15 @@
 //!   things to review and alerts are counted in status colours only.
 //! - **Panel**: one tab row (counts in status colours), the tab's body,
 //!   then the last result and the keys. Received hosts show the current
-//!   and received destination side by side, every value whole (wrapped,
-//!   never cut); received snippets show the whole command, scrollable.
-//!   Values from other devices go through `display_safe` (no control or
-//!   bidi character reaches the terminal).
-//! - **Wizard**: one step at a time, its keys under it.
+//!   and received destination side by side, every value whole (wrapped at
+//!   `.` and `-`, never cut); received snippets show the whole command,
+//!   scrollable, its line and character counts above it. The view records
+//!   when the last line of the selected item was on screen (`seen_end`):
+//!   only then is `y` accepted (A1). Values from other devices go through
+//!   `display_safe`, or `display_cells` where a tab must stay visible (a
+//!   muted `→`, A2): no control or bidi character reaches the terminal.
+//! - **Wizard**: one step at a time, its keys under it; the step number
+//!   has no total (it depends on the folder).
 //!
 //! At 82 columns or less, the panel takes the full width. Only theme
 //! tokens (`Styles`).
@@ -31,13 +35,15 @@ use secrecy::ExposeSecret;
 use time::OffsetDateTime;
 
 use crate::app::App;
-use crate::form::display_safe;
+use crate::form::{Cell, display_cells, display_safe};
 use crate::keys::Load;
 use crate::sync_panel::{
-    Choice, GLYPH, PanelMode, PassField, PassForm, PassKind, SyncData, SyncPanel, SyncTab, TABS,
-    Tone, alert_text, choices, folder_reason, status_label, subject_label,
+    Choice, GLYPH, PanelMode, PassField, PassForm, PassKind, ReceivedItem, SyncData, SyncPanel,
+    SyncTab, TABS, Tone, alert_text, choices, folder_reason, status_label, subject_label,
 };
-use crate::sync_wizard::{BULK, BULK_NOTE, JOIN_TTL_SECS, RECOVERY, Step, SyncWizard};
+use crate::sync_wizard::{
+    BULK, BULK_NOTE, JOIN_TTL_SECS, RECOVERY, SAVED, SAVED_PROBLEM, Step, SyncWizard,
+};
 use crate::theme::Styles;
 use crate::ui::{fmt, form, spinner};
 
@@ -130,13 +136,38 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// `changed by laptop (3f9c0ae1)` / `new from laptop (3f9c0ae1)`.
 pub(crate) fn received_label(change: &PendingHostChange) -> String {
+    received_label_ids(change, true)
+}
+
+/// [`received_label`], with or without the device ids (`changed by
+/// laptop`: on a narrow screen, B15).
+pub(crate) fn received_label_ids(change: &PendingHostChange, ids: bool) -> String {
     let devices = if change.devices.is_empty() {
         "another device".to_owned()
-    } else {
+    } else if ids {
         change.devices.join(", ")
+    } else {
+        change
+            .devices
+            .iter()
+            .map(|d| device_name(d))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let verb = if change.new { "new from" } else { "changed by" };
     display_safe(&format!("{verb} {devices}"))
+}
+
+/// `laptop (3f9c0ae1)` → `laptop` (the core's label: name, then the id
+/// prefix in parentheses).
+fn device_name(label: &str) -> &str {
+    label
+        .rsplit_once(" (")
+        .filter(|(_, id)| {
+            id.strip_suffix(')')
+                .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        .map_or(label, |(name, _)| name)
 }
 
 /// The banner under the details: what waits for this device.
@@ -174,6 +205,7 @@ pub(crate) fn banner_lines(app: &App, w: usize) -> Vec<Line<'static>> {
 
 // ── panel ────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // layout, then body (marks `seen_end`), then keys
 pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     let s = app.styles();
     let tick = app.tick;
@@ -210,24 +242,27 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     frame.render_widget(block, area);
     let w = usize::from(inner.width);
 
-    let mut foot: Vec<Line<'static>> = Vec::new();
-    if let Some(words) = panel.busy {
-        foot.push(Line::from(vec![
-            Span::styled(format!("{} ", spinner(tick)), tone_style(s, Tone::Busy)),
-            Span::styled(words, s.secondary()),
-        ]));
-    }
-    if let Some(n) = &panel.notice {
-        foot.extend(form::notice(s, n.ok, &n.message, n.hint.as_deref(), w));
-    }
-    if !dialog_open {
-        let hints = panel.hints(data, now);
-        if !foot.is_empty() {
-            foot.push(Line::from(""));
+    let foot_lines = |panel: &SyncPanel| {
+        let mut foot: Vec<Line<'static>> = Vec::new();
+        if let Some(words) = panel.busy {
+            foot.push(Line::from(vec![
+                Span::styled(format!("{} ", spinner(tick)), tone_style(s, Tone::Busy)),
+                Span::styled(words, s.secondary()),
+            ]));
         }
-        foot.extend(form::hints(s, &hints, true, w));
-    }
-    let foot_height = u16::try_from(foot.len()).unwrap_or(4);
+        if let Some(n) = &panel.notice {
+            foot.extend(form::notice(s, n.ok, &n.message, n.hint.as_deref(), w));
+        }
+        if !dialog_open {
+            let hints = panel.hints(data, now);
+            if !foot.is_empty() {
+                foot.push(Line::from(""));
+            }
+            foot.extend(form::hints(s, &hints, true, w));
+        }
+        foot
+    };
+    let foot_height = u16::try_from(foot_lines(panel).len()).unwrap_or(4);
     let [tabs_area, body_area, foot_area] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(3),
@@ -235,10 +270,13 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     ])
     .areas(inner);
     frame.render_widget(Paragraph::new(tab_row(panel, data, s, w)), tabs_area);
-    frame.render_widget(Paragraph::new(foot), foot_area);
 
     let body_height = usize::from(body_area.height);
-    let (lines, focus_line) = body_lines(panel, data, s, tick, w);
+    let Body {
+        lines,
+        focus: focus_line,
+        end,
+    } = body_lines(panel, data, s, tick, w);
     // The selected item stays in view; long text scrolls (`PgDn`).
     let total = lines.len();
     let max_first = total.saturating_sub(body_height);
@@ -249,8 +287,17 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     {
         first = focus.saturating_sub(1).min(max_first);
     }
+    // The last line of the received item was on screen: it can be decided.
+    if let Some((end_line, hash)) = end
+        && end_line >= first
+        && end_line < first + body_height
+    {
+        panel.seen_end = Some(hash);
+    }
     let shown: Vec<Line<'static>> = lines.into_iter().skip(first).take(body_height).collect();
     frame.render_widget(Paragraph::new(shown), body_area);
+    // The keys after the body: `y` shows as soon as the end is on screen.
+    frame.render_widget(Paragraph::new(foot_lines(panel)), foot_area);
     if first + body_height < total {
         let more = format!(" ↓ {} more ", total - first - body_height);
         let x = body_area
@@ -269,21 +316,19 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     }
 }
 
-/// `Overview  Conflicts 2  Issues  Hosts 1  Snippets`, then a rule.
+/// `Overview  Conflicts 2  Received 3  Issues  Devices`, then a rule.
 fn tab_row(panel: &SyncPanel, data: &SyncData, s: Styles, w: usize) -> Vec<Line<'static>> {
     let count = |tab: SyncTab| -> usize {
         match tab {
-            SyncTab::Overview => 0,
+            SyncTab::Overview | SyncTab::Devices => 0,
             SyncTab::Conflicts => panel.conflicts.ready().map_or(data.conflicts, Vec::len),
             SyncTab::Issues => panel.issues.ready().map_or(0, Vec::len),
-            SyncTab::Hosts => data.pending.len(),
-            SyncTab::Snippets => data.snippets.len(),
+            SyncTab::Received => data.to_review(),
         }
     };
-    let full: usize = TABS.iter().map(|t| t.title().chars().count() + 6).sum();
     let mut spans = Vec::new();
     for (i, tab) in TABS.iter().enumerate() {
-        let title = if full > w { tab.short() } else { tab.title() };
+        let title = tab.title();
         let selected = *tab == panel.tab;
         let style = if selected {
             s.accent().add_modifier(ratatui::style::Modifier::BOLD)
@@ -309,20 +354,40 @@ fn tab_row(panel: &SyncPanel, data: &SyncData, s: Styles, w: usize) -> Vec<Line<
     ]
 }
 
-/// The body of the tab (or of the open form), and the line to keep in view.
-fn body_lines(
-    panel: &SyncPanel,
-    data: &SyncData,
-    s: Styles,
-    tick: u64,
-    w: usize,
-) -> (Vec<Line<'static>>, Option<usize>) {
+/// The body of the tab (or of the open form).
+struct Body {
+    lines: Vec<Line<'static>>,
+    /// The line to keep in view (the selected choice or issue).
+    focus: Option<usize>,
+    /// The last line of the selected received item, and its hash.
+    end: Option<(usize, String)>,
+}
+
+impl Body {
+    fn plain(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            lines,
+            focus: None,
+            end: None,
+        }
+    }
+
+    fn focused((lines, focus): (Vec<Line<'static>>, Option<usize>)) -> Self {
+        Self {
+            lines,
+            focus,
+            end: None,
+        }
+    }
+}
+
+fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize) -> Body {
     match &panel.mode {
         PanelMode::Browse | PanelMode::Skip { .. } => {}
-        PanelMode::Unlock(f) => return (unlock_lines(f, s, tick, w), None),
-        PanelMode::Change(f) => return (change_lines(f, s, tick, w), None),
+        PanelMode::Unlock(f) => return Body::plain(unlock_lines(f, s, tick, w)),
+        PanelMode::Change(f) => return Body::plain(change_lines(f, s, tick, w)),
         PanelMode::Reset { form, confirm } => {
-            return (reset_lines(form, confirm.is_some(), s, tick, w), None);
+            return Body::plain(reset_lines(form, confirm.is_some(), s, tick, w));
         }
         PanelMode::Rename { name, problem } => {
             let mut lines = vec![
@@ -347,29 +412,33 @@ fn body_lines(
             if let Some(e) = problem {
                 lines.extend(form::problem(s, LABEL, &e.message, w));
             }
-            return (lines, None);
+            return Body::plain(lines);
         }
         PanelMode::Disable { options, focus } => {
-            return (disable_lines(*options, *focus, s, w), None);
+            return Body::plain(disable_lines(*options, *focus, s, w));
         }
     }
-    let mut lines = match panel.tab {
-        SyncTab::Overview => overview_lines(panel, data, s, tick, w),
-        SyncTab::Conflicts => return conflict_lines(panel, s, tick, w),
-        SyncTab::Issues => return issue_lines(panel, s, tick, w),
-        SyncTab::Hosts => return host_lines(panel, data, s, tick, w),
-        SyncTab::Snippets => snippet_lines(panel, data, s, tick, w),
+    let (mut lines, focus) = match panel.tab {
+        SyncTab::Overview => (overview_lines(panel, data, s, tick, w), None),
+        SyncTab::Conflicts => return Body::focused(conflict_lines(panel, s, tick, w)),
+        SyncTab::Received => return received_lines(panel, data, s, tick, w),
+        SyncTab::Devices => (device_lines(panel, data, s, tick, w), None),
+        // The question of "Skip on this device" follows the issues.
+        SyncTab::Issues => issue_lines(panel, s, tick, w),
     };
     if let PanelMode::Skip { label, .. } = &panel.mode {
         lines.push(Line::from(""));
+        let asked = lines.len();
         lines.push(question(s, &format!("Skip {label} on this device?")));
         lines.extend(paragraph(
             s.secondary(),
             "It stays as it is here and is no longer applied on this device. The other devices keep it.",
             w,
         ));
+        // The question stays in view.
+        return Body::focused((lines, Some(asked)));
     }
-    (lines, None)
+    Body::focused((lines, focus))
 }
 
 fn paragraph(style: Style, text: &str, w: usize) -> Vec<Line<'static>> {
@@ -440,7 +509,7 @@ fn overview_lines(
                 lines.extend(paragraph(
                     warning(s),
                     &format!(
-                        "{} changed by sync still wait for your review (Received snippets): they do not run before.",
+                        "{} changed by sync still wait for your review (Received): they do not run before.",
                         plural(data.snippets.len(), "snippet", "snippets")
                     ),
                     w,
@@ -492,6 +561,18 @@ fn overview_lines(
             s.secondary(),
         )],
     ));
+    // The devices, counted (listed in the Devices tab).
+    if let Some(devices) = panel.devices.ready() {
+        let inactive = devices.iter().filter(|d| d.stale).count();
+        let mut value = vec![Span::styled(
+            plural(devices.len(), "device", "devices"),
+            s.secondary(),
+        )];
+        if inactive > 0 {
+            value.push(Span::styled(format!(" · {inactive} inactive"), s.muted()));
+        }
+        lines.push(row(s, "Devices", value));
+    }
     // What the status means, and what to do.
     let explain: Option<(String, &'static str, Style)> = match &overview.status {
         SyncStatus::FolderUnavailable { reason } => {
@@ -533,18 +614,43 @@ fn overview_lines(
             ]));
         }
     }
-    lines.push(Line::from(""));
+    lines
+}
+
+/// The Devices tab: every device of the sync, this one first marked.
+fn device_lines(
+    panel: &SyncPanel,
+    data: &SyncData,
+    s: Styles,
+    tick: u64,
+    w: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let locked = matches!(data.status(), Some(SyncStatus::Locked));
     match &panel.devices {
+        _ if matches!(data.status(), Some(SyncStatus::Disabled)) => {
+            lines.push(Line::from(Span::styled(
+                "Sync is off on this device.",
+                s.secondary(),
+            )));
+            lines.extend(paragraph(
+                s.muted(),
+                "Once sync is on, every device that shares the folder shows here, with when it last published.",
+                w,
+            ));
+        }
         Load::Loading => lines.push(loading(s, tick, "Reading the devices…")),
-        Load::Failed(e) if !matches!(overview.status, SyncStatus::Locked) => {
+        Load::Failed(e) if !locked => {
             lines.extend(form::notice(s, false, &e.message, e.hint.as_deref(), w));
         }
-        Load::Failed(_) => {}
+        Load::Failed(_) => {
+            lines.extend(paragraph(
+                s.secondary(),
+                "Unlock sync to see the devices.",
+                w,
+            ));
+        }
         Load::Ready(devices) => {
-            lines.push(Line::from(vec![
-                Span::styled("Devices", s.title()),
-                Span::styled(format!(" · {}", devices.len()), s.muted()),
-            ]));
             let label_w = devices
                 .iter()
                 .map(|d| display_safe(&d.label).chars().count())
@@ -553,6 +659,7 @@ fn overview_lines(
                 .min(w.saturating_sub(30).max(12));
             for d in devices {
                 let label = fmt::truncate(&display_safe(&d.label), label_w);
+                // The accent marks this device's dot only; words stay text.
                 let mut spans = vec![
                     Span::styled(
                         if d.this_device { "● " } else { "○ " },
@@ -562,7 +669,7 @@ fn overview_lines(
                     Span::raw("  "),
                 ];
                 if d.this_device {
-                    spans.push(Span::styled("this device", s.accent()));
+                    spans.push(Span::styled("this device", s.secondary()));
                 } else {
                     spans.push(Span::styled(
                         format!("published {}", ago(d.last_seen.or(d.published_at))),
@@ -570,13 +677,19 @@ fn overview_lines(
                     ));
                 }
                 if d.stale {
-                    spans.push(Span::styled(" · inactive", warning(s)));
+                    spans.push(Span::styled(" · inactive", s.muted()));
                 }
                 if d.revoked {
                     spans.push(Span::styled(" · removed", s.muted()));
                 }
                 lines.push(Line::from(spans));
             }
+            lines.push(Line::from(""));
+            lines.extend(paragraph(
+                s.muted(),
+                "A device is named with its id: a copy can never pass for another. Inactive: nothing published for a long time.",
+                w,
+            ));
         }
     }
     lines
@@ -585,7 +698,7 @@ fn overview_lines(
 fn strength_line(strength: Option<PassphraseStrength>, s: Styles) -> Line<'static> {
     let Some(st) = strength else {
         return Line::from(vec![
-            Span::styled(format!("{:<LABEL$}", "Strength"), s.muted()),
+            Span::styled(format!("{:<LABEL$} ", "Strength"), s.muted()),
             Span::styled(
                 format!(
                     "{}  at least {} bits",
@@ -610,12 +723,54 @@ fn strength_line(strength: Option<PassphraseStrength>, s: Styles) -> Line<'stati
         )
     };
     Line::from(vec![
-        Span::styled(format!("{:<LABEL$}", "Strength"), s.muted()),
+        Span::styled(format!("{:<LABEL$} ", "Strength"), s.muted()),
         Span::styled("▰".repeat(filled), style),
         Span::styled("▱".repeat(METER_CELLS.saturating_sub(filled)), s.muted()),
         Span::styled(format!("  {} bits · ", st.estimated_bits), s.secondary()),
         Span::styled(words, style),
     ])
+}
+
+/// The recovery warning in a box, then "I saved it…" (Q1): before the
+/// step that writes, in both create (a field of the form) and join (the
+/// review).
+fn saved_box(s: Styles, saved: bool, focused: bool, w: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, l) in fmt::wrap(RECOVERY, w.saturating_sub(4))
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(Line::from(vec![
+            Span::styled(if i == 0 { "▲ " } else { "  " }, warning(s)),
+            Span::styled(l, s.primary()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.extend(saved_check(s, saved, focused, w));
+    lines
+}
+
+/// `□ I saved it. A lost passphrase cannot be recovered…`, wrapped.
+fn saved_check(s: Styles, saved: bool, focused: bool, w: usize) -> Vec<Line<'static>> {
+    let mark = if saved { "■" } else { "□" };
+    let style = if focused { s.accent() } else { s.secondary() };
+    fmt::wrap(SAVED, w.saturating_sub(4))
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            Line::from(vec![
+                Span::styled(
+                    if i == 0 {
+                        format!("{mark} ")
+                    } else {
+                        "  ".to_owned()
+                    },
+                    style,
+                ),
+                Span::styled(l, style),
+            ])
+        })
+        .collect()
 }
 
 /// The fields of a passphrase form.
@@ -676,16 +831,16 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
                     let words = text.expose_secret().to_owned();
                     let label_style = if on { s.accent() } else { s.muted() };
                     let mut first = true;
-                    for l in fmt::wrap(&words, w.saturating_sub(LABEL)) {
+                    for l in fmt::wrap(&words, w.saturating_sub(LABEL + 1)) {
                         let lead = if first { label } else { "" };
                         first = false;
                         lines.push(Line::from(vec![
-                            Span::styled(format!("{lead:<LABEL$}"), label_style),
+                            Span::styled(format!("{lead:<LABEL$} "), label_style),
                             Span::styled(l, s.title()),
                         ]));
                     }
                     lines.push(Line::from(vec![
-                        Span::raw(" ".repeat(LABEL)),
+                        Span::raw(" ".repeat(LABEL + 1)),
                         Span::styled("Generated: 6 random words. Shown only here.", s.muted()),
                     ]));
                 } else {
@@ -703,14 +858,7 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
             }
             PassField::Confirm => {
                 if f.generated.is_some() {
-                    lines.push(form::toggle(
-                        s,
-                        "",
-                        LABEL,
-                        f.wrote_down,
-                        "I wrote it down",
-                        on,
-                    ));
+                    lines.push(form::toggle(s, "", LABEL, f.saved, "I wrote it down", on));
                 } else {
                     lines.push(form::secret(
                         s,
@@ -737,12 +885,21 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
                     "Remember the key on this device",
                     on,
                 ));
+                // Under the toggle's text (after `■ `).
                 let note = "Off on a shared computer: sync then asks for the passphrase after each restart.";
-                for l in fmt::wrap(note, w.saturating_sub(LABEL).max(10)) {
+                for l in fmt::wrap(note, w.saturating_sub(LABEL + 3).max(10)) {
                     lines.push(Line::from(vec![
-                        Span::raw(" ".repeat(LABEL)),
+                        Span::raw(" ".repeat(LABEL + 3)),
                         Span::styled(l, s.muted()),
                     ]));
+                }
+            }
+            PassField::Saved => {
+                lines.push(Line::from(""));
+                lines.extend(saved_box(s, f.saved, on, w));
+                // Under the box's text, not in the label column.
+                if let Some((message, _)) = problem_of(*field) {
+                    lines.extend(form::problem(s, 2, &message, w));
                 }
             }
         }
@@ -823,7 +980,7 @@ fn disable_lines(
     w: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(Span::styled("Disable sync on this device", s.title())),
+        Line::from(Span::styled("Turn sync off on this device", s.title())),
         Line::from(""),
     ];
     lines.extend(paragraph(
@@ -878,6 +1035,7 @@ fn value_fields(value: &SyncValue) -> Vec<(&'static str, String)> {
                     .join(" ")
             },
         )],
+        // The command keeps its tabs: `field_lines` shows them (A2).
         SyncValue::Snippet(sn) => vec![
             ("Name", display_safe(&sn.name)),
             ("Command", sn.command.clone()),
@@ -913,7 +1071,8 @@ fn host_fields(h: &SyncHostValue) -> Vec<(&'static str, String)> {
 
 /// A value's lines: fields that differ between the sides in the primary
 /// text, the others muted. Multi-line values (commands) keep their lines,
-/// wrapped by characters: nothing is cut.
+/// wrapped by characters, tabs shown as a muted `→`: nothing is cut or
+/// hidden.
 fn field_lines(
     fields: &[(&'static str, String)],
     differs: &dyn Fn(&str) -> bool,
@@ -930,42 +1089,100 @@ fn field_lines(
             s.muted()
         };
         let mut first = true;
-        for chunk in text
-            .split('\n')
-            .flat_map(|l| chunks(&display_safe(l), room))
-        {
+        for row in cell_rows(text, room) {
             let lead = if first { *label } else { "" };
             first = false;
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled(format!("{lead:<LABEL$}"), s.muted()),
-                Span::styled(chunk, style),
-            ]));
+            ];
+            spans.extend(cell_spans(&row, style, s.muted()));
+            lines.push(Line::from(spans));
         }
     }
     lines
 }
 
-/// `text` cut into pieces of `width` characters (at least one piece).
+/// `text` (every line of it) as rows of at most `width` cells, tabs kept
+/// (at least one row).
+fn cell_rows(text: &str, width: usize) -> Vec<Vec<Cell>> {
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let cells = display_cells(line);
+        if cells.is_empty() {
+            rows.push(Vec::new());
+        }
+        rows.extend(cells.chunks(width.max(1)).map(<[Cell]>::to_vec));
+    }
+    rows
+}
+
+/// A row of cells as spans: text in `style`, each tab a `→` in `tab`.
+fn cell_spans(row: &[Cell], style: Style, tab: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut text = String::new();
+    for cell in row {
+        match cell {
+            Cell::Char(c) => text.push(*c),
+            Cell::Tab => {
+                if !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), style));
+                }
+                spans.push(Span::styled("→", tab));
+            }
+        }
+    }
+    if !text.is_empty() {
+        spans.push(Span::styled(text, style));
+    }
+    spans
+}
+
+/// `text` cut into pieces of `width` characters (at least one piece),
+/// after a `.` or a `-` when one falls in the second half of a piece, so a
+/// host name wraps where it reads (B15).
 fn chunks(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
         return vec![String::new()];
     }
-    chars
-        .chunks(width.max(1))
-        .map(|c| c.iter().collect())
-        .collect()
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let mut end = start.saturating_add(width).min(chars.len());
+        if end < chars.len()
+            && let Some(cut) = chars
+                .get(start..end)
+                .and_then(|piece| piece.iter().rposition(|c| matches!(c, '.' | '-')))
+                .filter(|cut| *cut + 1 > width / 2)
+        {
+            end = start + cut + 1;
+        }
+        out.push(chars.get(start..end).unwrap_or_default().iter().collect());
+        start = end;
+    }
+    out
 }
 
-fn side_head(side: &ConflictSide) -> String {
-    let who = if side.devices.is_empty() {
-        "unknown device".to_owned()
+/// `On this device`, or the devices that wrote the side.
+fn side_who(side: &ConflictSide) -> String {
+    if side.local {
+        "On this device".to_owned()
+    } else if side.devices.is_empty() {
+        "Another device".to_owned()
     } else {
         display_safe(&side.devices.join(", "))
-    };
-    let mine = if side.local { " · this device" } else { "" };
-    format!("{who}{mine} · {}", ago(Some(side.at)))
+    }
+}
+
+/// `this device's` / `desk (77a1b2c3)'s` (as in "Keep …").
+fn side_owner(side: &ConflictSide) -> String {
+    if side.local {
+        "this device's".to_owned()
+    } else {
+        format!("{}'s", side_who(side))
+    }
 }
 
 #[allow(clippy::too_many_lines)] // the choices and their values
@@ -1025,15 +1242,26 @@ fn conflict_lines(
         let radio = if on { "● " } else { "○ " };
         let head_style = if on { s.title() } else { s.secondary() };
         let head = match choice {
-            Choice::Union => "Union of all sides".to_owned(),
+            Choice::Union => "Union of all tags".to_owned(),
             Choice::KeepBoth { .. } => "Keep both".to_owned(),
             Choice::Pick { index } => conflict
                 .sides
                 .iter()
                 .find(|side| side.index == *index)
                 .map_or_else(
-                    || "A side".to_owned(),
-                    |side| format!("Use {}", side_head(side)),
+                    || "Keep a side".to_owned(),
+                    |side| {
+                        let deleted = if matches!(side.value, SyncValue::Deleted) {
+                            " (delete it)"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "Keep {}{deleted} · {}",
+                            side_owner(side),
+                            ago(Some(side.at))
+                        )
+                    },
                 ),
         };
         lines.push(Line::from(vec![
@@ -1065,11 +1293,13 @@ fn conflict_lines(
                     .sides
                     .iter()
                     .find(|side| side.index == *keep)
-                    .map_or_else(String::new, side_head);
+                    .map_or_else(|| "one side's".to_owned(), side_owner);
+                // Never capitalised: a device name stays as written.
+                let keeper = keeper.replacen("this device's", "This device's", 1);
                 lines.extend(paragraph(
                     s.muted(),
                     &format!(
-                        "   The version of {keeper} keeps its name; every other version becomes a copy. Copies from other devices wait for your review before they run."
+                        "   {keeper} version keeps the id; every other version becomes a copy. Copies from other devices wait for your review before they run."
                     ),
                     w,
                 ));
@@ -1168,64 +1398,90 @@ fn issue_lines(
     (lines, focus)
 }
 
-// ── received hosts ───────────────────────────────────────────────────────
+// ── received: hosts, then snippets ───────────────────────────────────────
 
-#[allow(clippy::too_many_lines)] // the list, then the selected host's card
-fn host_lines(
-    panel: &SyncPanel,
-    data: &SyncData,
-    s: Styles,
-    tick: u64,
-    w: usize,
-) -> (Vec<Line<'static>>, Option<usize>) {
-    if data.pending.is_empty() {
-        let mut lines = if data.stale_hosts {
-            vec![loading(s, tick, "Reading the received hosts…")]
+/// The Received tab: one list (hosts waiting for this device's
+/// confirmation, F1, then snippets, F8), then the selected item's card.
+/// The card's last value line is `end`: the item is decided only once it
+/// has been on screen (A1).
+fn received_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize) -> Body {
+    if data.to_review() == 0 {
+        let mut lines = if data.stale() {
+            vec![loading(s, tick, "Reading what was received…")]
         } else {
             vec![Line::from(Span::styled(
-                "No received host waits for you.",
+                "Nothing received waits for you.",
                 s.secondary(),
             ))]
         };
         lines.extend(paragraph(
             s.muted(),
-            "When another device adds a host or changes where one connects, it waits here: nothing is written to hosts.conf before you confirm it on this device.",
+            "When another device adds a host or changes where one connects, it waits here: nothing is written to hosts.conf before you confirm it on this device. A snippet added or changed elsewhere does not run here before you read its whole command and confirm it.",
             w,
         ));
-        return (lines, None);
+        return Body::plain(lines);
     }
-    let selected = panel.host.min(data.pending.len().saturating_sub(1));
+    let total = data.to_review();
+    let selected = panel.received.min(total.saturating_sub(1));
     let mut lines = Vec::new();
-    // The list (a window around the selection).
+    // The list (a window around the selection), hosts then snippets.
     let first = selected.saturating_sub(LIST_ROWS.saturating_sub(1));
-    for (i, change) in data.pending.iter().enumerate().skip(first).take(LIST_ROWS) {
+    for i in (first..total).take(LIST_ROWS) {
         let on = i == selected;
-        let alias = display_safe(&change.alias);
-        let label = received_label(change);
-        let alias_w = alias.chars().count().min(w / 2);
+        let (name, label) = match data.pending.get(i) {
+            Some(change) => (display_safe(&change.alias), received_label(change)),
+            None => match data.snippets.get(i.saturating_sub(data.pending.len())) {
+                Some(sn) => (
+                    display_safe(&sn.snippet.name),
+                    "snippet · not confirmed".to_owned(),
+                ),
+                None => continue,
+            },
+        };
+        let name_w = name.chars().count().min(w / 2);
         lines.push(Line::from(vec![
             Span::styled(if on { "▍" } else { " " }, s.accent()),
             Span::styled(
-                format!("{}  ", fmt::truncate(&alias, alias_w)),
+                format!("{}  ", fmt::truncate(&name, name_w)),
                 if on { s.title() } else { s.primary() },
             ),
             Span::styled(
-                fmt::truncate(&label, w.saturating_sub(alias_w + 4)),
+                fmt::truncate(&label, w.saturating_sub(name_w + 4)),
                 warning(s),
             ),
         ]));
     }
-    if data.pending.len() > LIST_ROWS {
+    if total > LIST_ROWS {
         lines.push(Line::from(Span::styled(
-            format!("  {} of {}", selected + 1, data.pending.len()),
+            format!("  {} of {total}", selected + 1),
             s.muted(),
         )));
     }
     lines.push(Line::from(Span::styled("─".repeat(w), s.border())));
-    let Some(change) = data.pending.get(selected) else {
-        return (lines, None);
+    let Some(item) = panel.selected_received(data) else {
+        return Body::plain(lines);
     };
-    let focus = Some(lines.len());
+    let end = match item {
+        ReceivedItem::Host(change) => host_card(change, data.stale_hosts, &mut lines, s, tick, w),
+        ReceivedItem::Snippet(sn) => snippet_card(sn, data.stale_snippets, &mut lines, s, tick, w),
+    };
+    Body {
+        lines,
+        focus: None,
+        end: Some((end, item.hash().to_owned())),
+    }
+}
+
+/// The card of a received host: current vs received destination, every
+/// value whole. Returns the index of its last value line.
+fn host_card(
+    change: &PendingHostChange,
+    stale: bool,
+    lines: &mut Vec<Line<'static>>,
+    s: Styles,
+    tick: u64,
+    w: usize,
+) -> usize {
     lines.push(Line::from(vec![
         Span::styled(display_safe(&change.alias), s.title()),
         Span::styled(format!("  {}", received_label(change)), warning(s)),
@@ -1236,7 +1492,7 @@ fn host_lines(
             s.secondary(),
         )));
     }
-    if data.stale_hosts {
+    if stale {
         lines.push(loading(s, tick, "Updating: it changed on another device…"));
     }
     lines.push(Line::from(""));
@@ -1252,7 +1508,7 @@ fn host_lines(
     let mut head = vec![Span::raw(" ".repeat(LABEL))];
     if current.is_some() {
         head.push(Span::styled(
-            format!("{:<col$}  ", "Now on this device"),
+            format!("{:<col$}  ", "On this device"),
             s.muted(),
         ));
     }
@@ -1275,6 +1531,8 @@ fn host_lines(
         let right = chunks(value, col);
         let rows = left.len().max(right.len());
         for r in 0..rows {
+            // The change mark sits on the label's line.
+            let mark = r == 0 && differs && current.is_some();
             let mut spans = vec![Span::styled(
                 format!("{:<LABEL$}", if r == 0 { *label } else { "" }),
                 s.muted(),
@@ -1284,74 +1542,39 @@ fn host_lines(
                 spans.push(Span::styled(format!("{piece:<col$}  "), s.secondary()));
             }
             let piece = right.get(r).cloned().unwrap_or_default();
+            let pad = col.saturating_sub(piece.chars().count());
             spans.push(Span::styled(
                 piece,
                 if differs { s.title() } else { s.muted() },
             ));
-            if r == 0 && differs && current.is_some() {
+            if mark {
+                spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(" ◂", warning(s)));
             }
             lines.push(Line::from(spans));
         }
     }
+    let end = lines.len().saturating_sub(1);
     lines.push(Line::from(""));
     lines.extend(paragraph(
         s.muted(),
         "y writes this destination to hosts.conf on this device. n keeps it out here; the other devices keep it.",
         w,
     ));
-    (lines, focus)
+    end
 }
 
-// ── received snippets ────────────────────────────────────────────────────
-
-fn snippet_lines(
-    panel: &SyncPanel,
-    data: &SyncData,
+/// The card of a received snippet: the whole command as it will be typed
+/// (every line, wrapped by characters, tabs shown), its counts above it.
+/// Returns the index of its last command line.
+fn snippet_card(
+    sn: &portico_core::sync::UnconfirmedSnippet,
+    stale: bool,
+    lines: &mut Vec<Line<'static>>,
     s: Styles,
     tick: u64,
     w: usize,
-) -> Vec<Line<'static>> {
-    if data.snippets.is_empty() {
-        let mut lines = if data.stale_snippets {
-            vec![loading(s, tick, "Reading the received snippets…")]
-        } else {
-            vec![Line::from(Span::styled(
-                "No received snippet waits for you.",
-                s.secondary(),
-            ))]
-        };
-        lines.extend(paragraph(
-            s.muted(),
-            "A snippet added or changed on another device does not run here before you read its whole command and confirm it.",
-            w,
-        ));
-        return lines;
-    }
-    let selected = panel.snippet.min(data.snippets.len().saturating_sub(1));
-    let mut lines = Vec::new();
-    let first = selected.saturating_sub(LIST_ROWS.saturating_sub(1));
-    for (i, sn) in data.snippets.iter().enumerate().skip(first).take(LIST_ROWS) {
-        let on = i == selected;
-        lines.push(Line::from(vec![
-            Span::styled(if on { "▍" } else { " " }, s.accent()),
-            Span::styled(
-                fmt::truncate(&display_safe(&sn.snippet.name), w.saturating_sub(16)),
-                if on { s.title() } else { s.primary() },
-            ),
-            Span::styled("  not confirmed", warning(s)),
-        ]));
-    }
-    if data.snippets.len() > LIST_ROWS {
-        lines.push(Line::from(Span::styled(
-            format!("  {} of {}", selected + 1, data.snippets.len()),
-            s.muted(),
-        )));
-    }
-    lines.push(Line::from(Span::styled("─".repeat(w), s.border())));
-    let Some(sn) = data.snippets.get(selected) else {
-        return lines;
-    };
+) -> usize {
     lines.push(Line::from(Span::styled(
         display_safe(&sn.snippet.name),
         s.title(),
@@ -1359,37 +1582,52 @@ fn snippet_lines(
     if let Some(d) = &sn.snippet.description {
         lines.extend(paragraph(s.secondary(), &display_safe(d), w));
     }
-    lines.push(Line::from(Span::styled(
-        if sn.snippet.run {
-            "Runs when sent: Portico types it, then ↵."
-        } else {
-            "Pasted only: Portico types it, you press ↵."
-        },
-        s.secondary(),
-    )));
-    if data.stale_snippets {
+    if sn.snippet.run {
+        lines.push(Line::from(vec![
+            Span::styled("▲ ", warning(s)),
+            Span::styled("Runs as soon as it is sent (Enter is added).", s.primary()),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Pasted only: Portico types it, you press ↵.",
+            s.secondary(),
+        )));
+    }
+    if stale {
         lines.push(loading(s, tick, "Updating: it changed on another device…"));
     }
     lines.push(Line::from(""));
-    // The whole command, as it will be typed: every line, wrapped by
-    // characters, on a raised surface.
+    let command = &sn.snippet.command;
+    let count = |n: usize, one: &str, many: &str| plural(n, one, many);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} · {}",
+            count(command.split('\n').count(), "line", "lines"),
+            count(command.chars().count(), "character", "characters")
+        ),
+        s.muted(),
+    )));
+    // On a raised surface; a tab is a muted `→`.
     let room = w.saturating_sub(2).max(8);
-    for l in sn.snippet.command.split('\n') {
-        for piece in chunks(&display_safe(l), room) {
-            let pad = room.saturating_sub(piece.chars().count());
-            lines.push(Line::from(vec![Span::styled(
-                format!(" {piece}{} ", " ".repeat(pad)),
-                s.key_hint(),
-            )]));
-        }
+    for row in cell_rows(command, room) {
+        let pad = room.saturating_sub(row.len());
+        let mut spans = vec![Span::styled(" ", s.key_hint())];
+        spans.extend(cell_spans(
+            &row,
+            s.key_hint(),
+            s.key_hint().patch(s.muted()),
+        ));
+        spans.push(Span::styled(format!("{} ", " ".repeat(pad)), s.key_hint()));
+        lines.push(Line::from(spans));
     }
+    let end = lines.len().saturating_sub(1);
     lines.push(Line::from(""));
     lines.extend(paragraph(
         s.muted(),
         "y confirms this exact command on this device: it can run from now on. Any later change asks again.",
         w,
     ));
-    lines
+    end
 }
 
 // ── wizard ───────────────────────────────────────────────────────────────
@@ -1410,13 +1648,12 @@ pub(crate) fn render_wizard(app: &App, frame: &mut Frame<'_>, band: u16) {
     };
     let height = screen.height.saturating_sub(2).min(30);
     let area = crate::ui::panel_rect(screen, width, height, band);
-    let (index, total) = step_index(wizard);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(s.border_focus())
         .title(Line::from(vec![
             Span::styled(" Set up sync ", s.title()),
-            Span::styled(format!("· {index} of {total} "), s.muted()),
+            Span::styled(format!("· step {} ", step_index(wizard)), s.muted()),
         ]))
         .padding(Padding::new(2, 2, 1, 0))
         .style(s.overlay());
@@ -1437,28 +1674,52 @@ pub(crate) fn render_wizard(app: &App, frame: &mut Frame<'_>, band: u16) {
     let [body, foot_area] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(foot_height)]).areas(inner);
     let lines = wizard_lines(wizard, s, app.tick, w);
-    // A long step (the review, at 24 rows) keeps its end: the decision.
+    // A long step (the review, at 24 rows) keeps its end: the decision;
+    // so does the passphrase step once "I saved it…" (its last field) has
+    // the focus.
     let height = usize::from(body.height);
-    let skip = match wizard.step {
-        Step::Review => lines.len().saturating_sub(height),
-        _ => 0,
+    let keep_end = match wizard.step {
+        Step::Review => true,
+        Step::Create => wizard.form.focused() == Some(PassField::Saved),
+        _ => false,
     };
+    let skip = if keep_end {
+        lines.len().saturating_sub(height)
+    } else {
+        0
+    };
+    let total = lines.len();
     let shown: Vec<Line<'static>> = lines.into_iter().skip(skip).take(height).collect();
     frame.render_widget(Paragraph::new(shown), body);
     frame.render_widget(Paragraph::new(foot), foot_area);
+    // More below (the recovery box under the fields at 80×24): say so.
+    if skip + height < total {
+        let more = format!(" ↓ {} more ", total - skip - height);
+        let x = body
+            .right()
+            .saturating_sub(u16::try_from(more.chars().count()).unwrap_or(0));
+        frame.render_widget(
+            Paragraph::new(Span::styled(more, s.muted())),
+            Rect {
+                x,
+                y: body.bottom().saturating_sub(1),
+                width: body.right().saturating_sub(x),
+                height: 1,
+            },
+        );
+    }
 }
 
-/// `2 of 4`: intro, folder, passphrase (and review), recovery.
-fn step_index(wizard: &SyncWizard) -> (usize, usize) {
-    let total = if wizard.joining() { 5 } else { 4 };
-    let index = match wizard.step {
+/// The step's number: intro, folder, passphrase, (join) review. No total:
+/// it depends on what the folder holds (B15).
+fn step_index(wizard: &SyncWizard) -> usize {
+    match wizard.step {
         Step::Intro => 1,
         Step::Folder => 2,
-        Step::Create | Step::Join => 3,
         Step::Review => 4,
-        Step::Recovery | Step::Working(_) | Step::Done(_) => total,
-    };
-    (index, total)
+        Step::Working(_) if wizard.preview.is_some() => 4,
+        Step::Create | Step::Join | Step::Working(_) => 3,
+    }
 }
 
 fn wizard_hints(wizard: &SyncWizard) -> Vec<(&'static str, &'static str)> {
@@ -1476,32 +1737,25 @@ fn wizard_hints(wizard: &SyncWizard) -> Vec<(&'static str, &'static str)> {
         }
         Step::Create | Step::Join if wizard.form.busy => vec![],
         Step::Create => {
-            let mut hints = vec![("↵", "continue"), ("Tab", "next field")];
-            if wizard.form.generated.is_some() && wizard.form.focused() == Some(PassField::New) {
-                hints.extend([("c", "copy"), ("g", "another")]);
-            } else {
-                hints.push(("Ctrl-G", "generate"));
+            let mut hints = vec![("↵", "create"), ("Tab", "next field")];
+            match wizard.form.focused() {
+                Some(PassField::New) if wizard.form.generated.is_some() => {
+                    hints.extend([("c", "copy"), ("g", "another")]);
+                }
+                Some(PassField::Saved) => hints.push(("Space", "I saved it")),
+                _ => hints.push(("Ctrl-G", "generate")),
             }
             hints.push(("Esc", "back"));
             hints
         }
         Step::Join => vec![("↵", "review"), ("Tab", "next field"), ("Esc", "back")],
-        Step::Review => vec![("↵", "continue"), ("j k", "choose"), ("Esc", "back")],
-        Step::Recovery if wizard.understood => vec![
-            (
-                "↵",
-                if wizard.preview.is_some() {
-                    "join"
-                } else {
-                    "create"
-                },
-            ),
-            ("Space", "I understand"),
+        Step::Review => vec![
+            ("↵", "join"),
+            ("Space", "I saved it"),
+            ("j k", "choose"),
             ("Esc", "back"),
         ],
-        Step::Recovery => vec![("Space", "I understand"), ("Esc", "back")],
         Step::Working(_) => vec![],
-        Step::Done(_) => vec![("↵", "open the Sync panel")],
     }
 }
 
@@ -1592,14 +1846,11 @@ fn wizard_lines(wizard: &SyncWizard, s: Styles, tick: u64, w: usize) -> Vec<Line
             if let Some((preview, at)) = &wizard.preview {
                 lines.push(Line::from(Span::styled("Joining brings", s.title())));
                 let counts = [
-                    (preview.hosts, "host", "hosts"),
-                    (preview.host_meta, "host detail", "host details"),
-                    (preview.snippets, "snippet", "snippets"),
-                    (preview.settings, "setting", "settings"),
+                    plural(preview.hosts, "host", "hosts"),
+                    format!("{} tags, groups, notes", preview.host_meta),
+                    plural(preview.snippets, "snippet", "snippets"),
+                    plural(preview.settings, "setting", "settings"),
                 ]
-                .iter()
-                .map(|(n, one, many)| plural(*n, one, many))
-                .collect::<Vec<_>>()
                 .join(" · ");
                 lines.push(Line::from(Span::styled(counts, s.primary())));
                 let devices = preview
@@ -1653,27 +1904,15 @@ fn wizard_lines(wizard: &SyncWizard, s: Styles, tick: u64, w: usize) -> Vec<Line
                     format!("This review is valid for {} more min.", left.max(1)),
                     s.muted(),
                 )));
+                // Before the step that writes: the recovery box (Q1). Its
+                // words carry the warning (the full text is on the first
+                // device's passphrase step): the review fits 80×24.
+                lines.push(blank.clone());
+                lines.extend(saved_check(s, wizard.saved, true, w));
+                if wizard.saved_problem {
+                    lines.extend(form::problem(s, 2, SAVED_PROBLEM, w));
+                }
             }
-        }
-        Step::Recovery => {
-            lines.push(question(s, "Before you go on"));
-            lines.push(blank.clone());
-            lines.extend(paragraph(s.primary(), RECOVERY, w));
-            lines.push(blank.clone());
-            lines.extend(paragraph(
-                s.secondary(),
-                "Keep the passphrase in your password manager. A device that remembers the key can reset a lost passphrase.",
-                w,
-            ));
-            lines.push(blank.clone());
-            lines.push(form::toggle(
-                s,
-                "",
-                0,
-                wizard.understood,
-                "I understand",
-                true,
-            ));
         }
         Step::Working(words) => {
             lines.push(loading(s, tick, words));
@@ -1681,28 +1920,6 @@ fn wizard_lines(wizard: &SyncWizard, s: Styles, tick: u64, w: usize) -> Vec<Line
             lines.extend(paragraph(
                 s.muted(),
                 "Deriving the key takes a few seconds on purpose: it is what makes guessing the passphrase slow.",
-                w,
-            ));
-        }
-        Step::Done(status) => {
-            lines.push(Line::from(vec![
-                Span::styled("✓ ", ok(s)),
-                Span::styled("Sync is on for this device.", s.title()),
-            ]));
-            lines.push(blank.clone());
-            let (label, tone) = status_label(status, OffsetDateTime::now_utc());
-            lines.push(row(
-                s,
-                "Status",
-                vec![
-                    Span::styled(format!("{GLYPH} "), s.secondary()),
-                    Span::styled(label, tone_label_style(s, tone)),
-                ],
-            ));
-            lines.push(blank.clone());
-            lines.extend(paragraph(
-                s.secondary(),
-                "Received hosts and snippets wait for your confirmation in the Sync panel (S on the host list). The status bar shows how sync is doing.",
                 w,
             ));
         }

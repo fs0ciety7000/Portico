@@ -448,11 +448,18 @@ fn mode_and_hints(app: &App, screen: Rect) -> (&'static str, Hints) {
                 .map_or_else(|| vec![("Esc", "close")], |p| p.hints(&app.tunnels));
             return (" TUNNELS ", owned(hints));
         }
+        // The panel shows its own keys: the bar only points to the help
+        // (B15, S1c review: nothing said twice at 80 columns).
         _ if app.overlay == Some(crate::app::Overlay::Sync) => {
-            let hints = app.sync_panel.as_ref().map_or_else(
-                || vec![("Esc", "close")],
-                |p| p.hints(&app.sync, std::time::Instant::now()),
-            );
+            let browsing = app
+                .sync_panel
+                .as_ref()
+                .is_some_and(|p| matches!(p.mode, crate::sync_panel::PanelMode::Browse));
+            let hints = if browsing {
+                vec![("?", "help")]
+            } else {
+                vec![("Esc", "back")]
+            };
             return (" SYNC ", owned(hints));
         }
         _ if app.overlay == Some(crate::app::Overlay::SyncWizard) => {

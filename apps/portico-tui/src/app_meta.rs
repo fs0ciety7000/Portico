@@ -413,7 +413,7 @@ impl App {
 
     /// `?` from the session logs: the help over the panel, on the page
     /// that has its keys.
-    fn open_help(&mut self) {
+    pub(crate) fn open_help(&mut self) {
         self.help.over_panel = true;
         self.help.page = 0;
     }
@@ -473,6 +473,9 @@ impl App {
 
     /// Sends `text` to the local terminal's clipboard (OSC 52).
     pub(crate) fn osc52(&self, text: &str) {
+        // A pending clearing of a copied passphrase no longer applies.
+        self.clipboard_secret
+            .set(self.clipboard_secret.get().wrapping_add(1));
         if self.clipboard {
             let sequence = format!(
                 "\x1b]52;c;{}\x07",
@@ -482,6 +485,25 @@ impl App {
             let _ = out.write_all(sequence.as_bytes());
             let _ = out.flush();
         }
+    }
+
+    /// [`Self::osc52`] for a secret (a generated passphrase, or `""` to
+    /// empty the clipboard): the encoded text and the sequence live in
+    /// pre-sized `Zeroizing` buffers, wiped once written.
+    pub(crate) fn osc52_secret(&self, text: &str) {
+        self.clipboard_secret
+            .set(self.clipboard_secret.get().wrapping_add(1));
+        if !self.clipboard {
+            return;
+        }
+        let encoded = zeroize::Zeroizing::new(crate::app_panels::base64(text.as_bytes()));
+        let mut sequence = zeroize::Zeroizing::new(String::with_capacity(encoded.len() + 8));
+        sequence.push_str("\x1b]52;c;");
+        sequence.push_str(&encoded);
+        sequence.push('\x07');
+        let mut out = std::io::stdout();
+        let _ = out.write_all(sequence.as_bytes());
+        let _ = out.flush();
     }
 
     // ── settings ───────────────────────────────────────────────────────────
