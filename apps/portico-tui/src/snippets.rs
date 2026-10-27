@@ -4,8 +4,10 @@
 //!
 //! Typing filters the list, so the commands use `Ctrl`: `Ctrl-N` new,
 //! `Ctrl-E` edit, `Ctrl-D` delete. A snippet body is only ever typed into
-//! the target tab's remote terminal (through
-//! `portico_core::snippets::snippet_input`), never run locally.
+//! the target tab's remote terminal, never run locally, and its bytes
+//! always come from `Engine::snippet_input_for`: the core renders them and
+//! refuses a snippet changed by sync and not confirmed on this device
+//! (`sync_snippet_unconfirmed`, F8). The preview here is display only.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -21,17 +23,6 @@ use crate::keys::{Load, Notice};
 
 /// Most placeholder value characters accepted by the form.
 const MAX_VALUE: usize = 1024;
-
-/// Bytes for the terminal, or why they cannot be sent as asked (the core
-/// refuses a multi-line paste-only snippet without bracketed paste:
-/// `snippet_needs_paste_mode`).
-pub(crate) fn snippet_bytes(
-    rendered: &str,
-    run: bool,
-    bracketed_paste: bool,
-) -> Result<Vec<u8>, ErrorSummary> {
-    portico_core::snippets::snippet_input(rendered, run, bracketed_paste).map_err(|e| e.summary())
-}
 
 /// `global`, `hosts: web, db`, `#prod #eu`.
 pub(crate) fn scope_label(scope: &SnippetScope) -> String {
@@ -381,7 +372,8 @@ pub(crate) enum SnipMode {
     /// `opened_at`): the `↵` that sent the snippet, held or repeated,
     /// must never execute it.
     NeedsRun {
-        rendered: String,
+        id: String,
+        values: Vec<(String, String)>,
         error: ErrorSummary,
         opened_at: Instant,
     },
@@ -392,10 +384,11 @@ pub(crate) enum SnipOutcome {
     None,
     Close,
     Reload,
-    /// Type `rendered` into the target tab (`run` adds Enter). `values`
-    /// are remembered for the next time.
+    /// Type snippet `id`, rendered with `values` by the core, into the
+    /// target tab (`run` adds Enter). `values` are remembered for the next
+    /// time; empty ones are not sent (the core names a missing one).
     Send {
-        rendered: String,
+        id: String,
         run: bool,
         values: Vec<(String, String)>,
     },
@@ -522,8 +515,8 @@ impl SnippetsPanel {
         }
         if snippet.placeholders().is_empty() {
             return match snippet.render_checked(&[]) {
-                Ok(rendered) => SnipOutcome::Send {
-                    rendered,
+                Ok(_) => SnipOutcome::Send {
+                    id: snippet.id,
                     run: snippet.run,
                     values: Vec::new(),
                 },
@@ -613,15 +606,12 @@ impl SnippetsPanel {
                     KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % n,
                     KeyCode::BackTab | KeyCode::Up => form.focus = (form.focus + n - 1) % n,
                     KeyCode::Enter => match form.preview() {
-                        Ok(rendered) => {
+                        Ok(_) => {
+                            let id = form.snippet.id.clone();
                             let run = form.snippet.run;
                             let values = form.values.clone();
                             self.mode = SnipMode::Browse;
-                            return SnipOutcome::Send {
-                                rendered,
-                                run,
-                                values,
-                            };
+                            return SnipOutcome::Send { id, run, values };
                         }
                         Err(e) => form.error = Some(e),
                     },
@@ -667,7 +657,8 @@ impl SnippetsPanel {
                 return outcome;
             }
             SnipMode::NeedsRun {
-                rendered,
+                id,
+                values,
                 opened_at,
                 ..
             } => {
@@ -676,12 +667,13 @@ impl SnippetsPanel {
                 }
                 return match key.code {
                     KeyCode::Char('r' | 'R') => {
-                        let rendered = std::mem::take(rendered);
+                        let id = std::mem::take(id);
+                        let values = std::mem::take(values);
                         self.mode = SnipMode::Browse;
                         SnipOutcome::Send {
-                            rendered,
+                            id,
                             run: true,
-                            values: Vec::new(),
+                            values,
                         }
                     }
                     KeyCode::Esc => {
@@ -884,17 +876,20 @@ mod tests {
         );
         panel.handle_key(k(KeyCode::Tab), &remembered);
         panel.handle_key(k(KeyCode::Char('5')), &remembered);
-        let SnipOutcome::Send {
-            rendered,
-            run,
-            values,
-        } = panel.handle_key(k(KeyCode::Enter), &remembered)
+        let SnipOutcome::Send { id, run, values } =
+            panel.handle_key(k(KeyCode::Enter), &remembered)
         else {
             panic!("send");
         };
-        assert_eq!(rendered, "journalctl -u nginx -n 5");
+        assert_eq!(id, "logs");
         assert!(run);
-        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values,
+            [
+                ("unit".to_owned(), "nginx".to_owned()),
+                ("lines".to_owned(), "5".to_owned())
+            ]
+        );
     }
 
     #[test]
@@ -949,25 +944,11 @@ mod tests {
     }
 
     #[test]
-    fn paste_only_multi_line_needs_bracketed_paste() {
-        let refused = snippet_bytes("a\nb", false, false);
-        assert_eq!(
-            refused.err().map(|e| e.code),
-            Some("snippet_needs_paste_mode".to_owned())
-        );
-        assert_eq!(
-            snippet_bytes("a\nb", true, false).ok(),
-            Some(b"a\rb\r".to_vec())
-        );
-        assert!(snippet_bytes("a\nb", false, true).is_ok());
-        assert_eq!(snippet_bytes("ls", false, false).ok(), Some(b"ls".to_vec()));
-    }
-
-    #[test]
     fn needs_run_ignores_an_immediate_enter() {
         let mut panel = panel();
         let needs_run = |opened_at| SnipMode::NeedsRun {
-            rendered: "a\nb".into(),
+            id: "multi".into(),
+            values: vec![("unit".into(), "nginx".into())],
             error: ErrorSummary {
                 code: "snippet_needs_paste_mode".into(),
                 message: "cannot paste".into(),
@@ -997,12 +978,13 @@ mod tests {
             assert!(matches!(panel.mode, SnipMode::NeedsRun { .. }));
         }
         // Only `r` runs it.
-        let SnipOutcome::Send { rendered, run, .. } =
+        let SnipOutcome::Send { id, run, values } =
             panel.handle_key(k(KeyCode::Char('r')), &HashMap::new())
         else {
             panic!("r runs it");
         };
-        assert_eq!(rendered, "a\nb");
+        assert_eq!(id, "multi");
+        assert_eq!(values.len(), 1, "the values filled in are sent again");
         assert!(run);
         assert!(matches!(panel.mode, SnipMode::Browse));
         // Esc cancels.

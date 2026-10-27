@@ -11,6 +11,10 @@
 
 Le mode démo (`pnpm dev`, Playwright) sert au design ; il ne remplace pas l'E2E : seul ce dernier passe par
 l'IPC Tauri, le moteur réel, WebKitGTK et un serveur SSH.
+Synchronisation chiffrée (phase 11) en mode démo : `?sync=off|on|locked|alert|unavailable|syncing|waiting` choisit
+l'état affiché, `?syncfolder=join|incomplete` ce que la sonde du dossier répond dans l'assistant. Côté TUI, les
+écrans de la sync se capturent en texte et en ANSI truecolor (Obsidian et Marble, 80×24 et 120×36) avec
+`PORTICO_CAPTURE_DIR=<dossier> cargo test -p portico-tui sync_captures -- --ignored`.
 
 ## E2E de l'app de bureau
 

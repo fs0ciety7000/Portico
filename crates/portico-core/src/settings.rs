@@ -199,6 +199,16 @@ pub(crate) fn set_theme(
     save_locked(path, &settings)
 }
 
+/// Applies `edit` to the settings under one lock, like [`set_theme`] (the
+/// folder sync changes only its whitelisted keys this way). Blocking.
+pub(crate) fn update_with(path: &Path, edit: impl FnOnce(&mut Settings)) -> Result<Settings> {
+    let _lock = store::lock_exclusive(&store::lock_path(path))?;
+    let mut settings = load(path)?;
+    edit(&mut settings);
+    settings.validate()?;
+    save_locked(path, &settings)
+}
+
 /// Changes only `gui.copy_on_select`, under one lock like [`set_theme`].
 /// Blocking.
 pub(crate) fn set_copy_on_select(path: &Path, on: bool) -> Result<Settings> {

@@ -293,6 +293,14 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::CycleTheme
     ),
     bind!(
+        "hosts.sync",
+        Hosts,
+        ["S"],
+        "sync",
+        "« Sync » : synchronisation chiffrée par dossier (état, appareils, conflits, hôtes et snippets reçus à confirmer ; l'assistant quand elle est désactivée)",
+        Action::OpenSync
+    ),
+    bind!(
         "hosts.update",
         Hosts,
         ["u"],
@@ -539,6 +547,14 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "recordings",
         "« Recordings » : enregistrements de sessions (relire, supprimer)",
         Action::OpenRecordings
+    ),
+    bind!(
+        "prefix.sync",
+        Prefix,
+        ["y"],
+        "sync",
+        "« Sync » : le panneau de synchronisation chiffrée par dossier",
+        Action::OpenSync
     ),
     bind!(
         "prefix.search",
@@ -1444,6 +1460,8 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
         Overlay::HostForm => Action::HostFormKey,
         Overlay::Debug => Action::DebugKey,
         Overlay::Recordings => Action::RecordingsKey,
+        Overlay::Sync => Action::SyncKey,
+        Overlay::SyncWizard => Action::SyncWizardKey,
         // Every key drives the player's controls; none goes further.
         Overlay::Player => Action::PlayerKey,
         Overlay::Help => return None,
@@ -1455,6 +1473,14 @@ fn panel_key(key: KeyEvent, overlay: Option<Overlay>, ctrl: bool) -> Option<Acti
                 KeyCode::Esc,
                 KeyModifiers::NONE,
             )));
+        }
+        // The sync screens close themselves (a reload in flight, a
+        // passphrase being derived: they decide).
+        if overlay == Some(Overlay::Sync) {
+            return Some(Action::SyncKey(key));
+        }
+        if overlay == Some(Overlay::SyncWizard) {
+            return Some(Action::SyncWizardKey(key));
         }
         return Some(Action::CloseOverlay);
     }
@@ -1726,8 +1752,12 @@ mod tests {
             Some(Action::CancelPrefix)
         ));
         assert!(matches!(
-            map(KeyCode::Char('y'), KeyModifiers::NONE, Focus::Hosts, true),
+            map(KeyCode::Char('q'), KeyModifiers::NONE, Focus::Hosts, true),
             Some(Action::CancelPrefix)
+        ));
+        assert!(matches!(
+            map(KeyCode::Char('y'), KeyModifiers::NONE, Focus::Hosts, true),
+            Some(Action::OpenSync)
         ));
     }
 

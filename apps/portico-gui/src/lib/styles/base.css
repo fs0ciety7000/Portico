@@ -58,6 +58,11 @@ kbd {
   color: var(--text-on-accent);
   font-weight: 600;
 }
+.modal button.danger:not(.secondary) kbd {
+  background: color-mix(in srgb, var(--text-on-accent) 12%, transparent);
+  border-color: transparent;
+  color: inherit;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

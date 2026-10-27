@@ -73,6 +73,31 @@ pub enum EngineEvent {
     Update {
         status: crate::update::UpdateStatus,
     },
+    /// The folder sync status changed (phase 11): the status bar shows it.
+    /// After a lagged bus, UIs call [`crate::Engine::sync_status`] and
+    /// [`crate::Engine::sync_conflicts`].
+    Sync {
+        status: crate::sync::SyncStatus,
+    },
+    /// The number of sync conflicts changed.
+    SyncConflicts {
+        count: usize,
+    },
+    /// What awaits a confirmation on this device changed — received host
+    /// destinations or snippets changed by sync — including a change of
+    /// **content** at the same count (another device published again):
+    /// UIs reload [`crate::Engine::sync_pending_hosts`] and
+    /// [`crate::Engine::synced_snippets_unconfirmed`] and drop any
+    /// confirmation screen showing the old content.
+    SyncPendingChanged,
+    /// `snippets.toml` changed outside the UI's own edits (folder sync):
+    /// UIs reload the snippets ([`crate::Engine::snippets`]).
+    SnippetsChanged,
+    /// `settings.toml` changed outside the UI's own edits (folder sync):
+    /// UIs apply the theme and keymaps live.
+    SettingsChanged {
+        settings: crate::settings::Settings,
+    },
 }
 
 /// Lifecycle of a terminal recording ([`crate::recording`]). Every

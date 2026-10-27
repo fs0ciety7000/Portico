@@ -1188,3 +1188,126 @@ async fn search_bar_captures() {
         }
     }
 }
+
+/// A snippet received through the folder sync and not confirmed on this
+/// device is never typed: the TUI only gets snippet bytes from the core,
+/// which refuses it (F8). Real sync on a real folder, public API only.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario, two devices, end to end
+async fn run_snippet_refuses_unconfirmed_synced_snippet() {
+    use portico_core::snippets::{Snippet, SnippetScope};
+    use portico_core::sync::{
+        JoinBulkChoice, NewPassphrase, SyncCreate, SyncJoin, generate_passphrase,
+    };
+
+    let mut lab = lab().await;
+    // Another device shares a snippet through a sync folder; this one joins.
+    let other = Env::new("");
+    let shared = tempfile::tempdir().unwrap();
+    other
+        .engine
+        .save_snippet(Snippet {
+            id: "deploy".into(),
+            name: "Deploy".into(),
+            command: "make deploy".into(),
+            description: None,
+            scope: SnippetScope::Global,
+            run: true,
+        })
+        .await
+        .unwrap();
+    let passphrase = generate_passphrase().unwrap();
+    let typed = passphrase.as_secret().clone();
+    other
+        .engine
+        .sync_create(SyncCreate {
+            folder: shared.path().to_path_buf(),
+            passphrase: NewPassphrase::Generated(passphrase),
+            device_name: "Laptop".into(),
+            remember_key: false,
+        })
+        .await
+        .unwrap();
+    let preview = lab
+        .app
+        .engine
+        .sync_join_preview(SyncJoin {
+            folder: shared.path().to_path_buf(),
+            passphrase: typed,
+            device_name: "Desktop".into(),
+            remember_key: false,
+        })
+        .await
+        .unwrap();
+    lab.app
+        .engine
+        .sync_join_commit(preview.token, JoinBulkChoice::ReviewEach)
+        .await
+        .unwrap();
+
+    lab.select("alpha");
+    lab.app.update(Action::Connect);
+    lab.until(|app| app.tabs.len() == 1 && all_live(app)).await;
+    lab.until(|app| grid_text(app).contains("welcome")).await;
+    lab.app.update(Action::OpenSnippets);
+    lab.until(|app| {
+        app.snippets_panel
+            .as_ref()
+            .is_some_and(|p| p.all.ready().is_some_and(|all| all.len() == 1))
+    })
+    .await;
+    press(&mut lab.app, KeyCode::Enter, KeyModifiers::NONE);
+    // Refused by the core: its review opens (the whole command), over the
+    // snippets panel, which stays.
+    lab.until(|app| {
+        app.overlay == Some(crate::app::Overlay::Sync)
+            && app
+                .sync_panel
+                .as_ref()
+                .is_some_and(|p| p.tab == crate::sync_panel::SyncTab::Received)
+            && app.sync.snippets.len() == 1
+            && !app.sync.stale()
+    })
+    .await;
+    assert!(lab.app.snippets_panel.is_some());
+    let review = text(&screen(&mut lab.app, 80, 24));
+    assert!(review.contains("make deploy"), "{review}");
+    assert!(review.contains("Runs as soon as it is sent"), "{review}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!received(&lab.alpha).contains("make deploy"));
+
+    // `y` too soon (typed for something else) confirms nothing.
+    press(&mut lab.app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(
+        lab.app
+            .sync_panel
+            .as_ref()
+            .is_some_and(|p| p.busy.is_none())
+    );
+    // Then `y` confirms the hash shown, and the snippets panel is back.
+    tokio::time::sleep(crate::dialog::ARM_DELAY).await;
+    press(&mut lab.app, KeyCode::Char('y'), KeyModifiers::NONE);
+    lab.until(|app| app.overlay == Some(crate::app::Overlay::Snippets) && app.sync_panel.is_none())
+        .await;
+    assert!(
+        lab.app
+            .snippets_panel
+            .as_ref()
+            .and_then(|p| p.notice.as_ref())
+            .is_some_and(|n| n.ok && n.message.contains("confirmed")),
+        "{:?}",
+        lab.app.snippets_panel.as_ref().map(|p| &p.notice)
+    );
+    assert!(
+        lab.app
+            .engine
+            .synced_snippets_unconfirmed()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    press(&mut lab.app, KeyCode::Enter, KeyModifiers::NONE);
+    lab.until(|app| app.snippets_panel.is_none()).await;
+    let alpha = &lab.alpha;
+    eventually(|| received(alpha).contains("make deploy")).await;
+}

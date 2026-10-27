@@ -12,7 +12,7 @@ use crossterm::event::KeyEvent;
 use portico_core::ErrorSummary;
 use portico_core::engine::ConnectRequest;
 use portico_core::events::SessionPhase;
-use portico_core::ids::SessionId;
+use portico_core::ids::{SessionId, TerminalId};
 use portico_core::keys::LocalKey;
 use portico_core::vault::VaultStatus;
 
@@ -24,7 +24,7 @@ use crate::keys::{
     CopyState, GenForm, HostPicker, KeysOutcome, KeysPanel, Load, Mode, Notice, file_name,
     host_hint, taken_names,
 };
-use crate::snippets::{SnipMode, SnipOutcome, SnippetsPanel, snippet_bytes};
+use crate::snippets::{SnipMode, SnipOutcome, SnippetsPanel};
 
 /// Longest public key line shown or sent to the clipboard.
 const MAX_PUBLIC_LINE: usize = 16 * 1024;
@@ -243,6 +243,12 @@ impl App {
                     panel.select_id(&saved.id);
                 }
             }
+            Action::SnippetInput {
+                target,
+                id,
+                values,
+                result,
+            } => self.snippet_input(target, id, values, result),
             Action::SnippetDeleted { name, result } => {
                 let Some(panel) = &mut self.snippets_panel else {
                     return;
@@ -736,7 +742,7 @@ impl App {
 
     // ── snippets ───────────────────────────────────────────────────────────
 
-    fn open_snippets(&mut self) {
+    pub(crate) fn open_snippets(&mut self) {
         self.prefix = false;
         self.tunnels_panel = None;
         self.keys_panel = None;
@@ -771,7 +777,7 @@ impl App {
         self.reload_snippets();
     }
 
-    fn reload_snippets(&self) {
+    pub(crate) fn reload_snippets(&self) {
         let engine = self.engine.clone();
         spawn(self, async move {
             Action::SnippetsLoaded(engine.snippets().await.map_err(|e| e.summary()))
@@ -792,13 +798,9 @@ impl App {
                 panel.all = Load::Loading;
                 self.reload_snippets();
             }
-            SnipOutcome::Send {
-                rendered,
-                run,
-                values,
-            } => {
-                self.snippet_values.extend(values);
-                self.send_snippet(&rendered, run);
+            SnipOutcome::Send { id, run, values } => {
+                self.snippet_values.extend(values.iter().cloned());
+                self.send_snippet(id, values, run);
             }
             SnipOutcome::Save(snippet) => {
                 let engine = self.engine.clone();
@@ -818,54 +820,103 @@ impl App {
         }
     }
 
-    /// Types a rendered snippet into the target tab, then shows that tab.
-    fn send_snippet(&mut self, rendered: &str, run: bool) {
-        let live = self.snippet_target.and_then(|id| {
+    /// The live target tab of the snippets panel, or a notice why not.
+    fn snippet_target_view(&mut self) -> Option<TerminalId> {
+        let live = self.snippet_target.filter(|id| {
             self.views()
-                .find(|t| t.id == id && !t.closed && t.ended.is_none())
+                .any(|t| t.id == *id && !t.closed && t.ended.is_none())
         });
-        let target = live.and_then(|view| self.pane_of_terminal(view.id));
-        let Some(view) = live else {
-            if let Some(panel) = &mut self.snippets_panel {
-                panel.notice = Some(Notice {
-                    ok: false,
-                    message: "The terminal tab closed".into(),
-                    hint: Some("Open a terminal on the host, then try again.".into()),
-                });
-            }
+        if live.is_none()
+            && let Some(panel) = &mut self.snippets_panel
+        {
+            panel.notice = Some(Notice {
+                ok: false,
+                message: "The terminal tab closed".into(),
+                hint: Some("Open a terminal on the host, then try again.".into()),
+            });
+        }
+        live
+    }
+
+    /// Asks the core for the bytes of snippet `id` (rendered with
+    /// `values`): only it may produce them, after its sync confirmation
+    /// check (F8). They are typed when they come back.
+    fn send_snippet(&mut self, id: String, values: Vec<(String, String)>, run: bool) {
+        let Some(target) = self.snippet_target_view() else {
             return;
         };
-        let bracketed = view.mode().contains(TermMode::BRACKETED_PASTE);
-        match snippet_bytes(rendered, run, bracketed) {
-            Ok(bytes) => {
-                view.send(bytes);
-                let id = view.id;
-                // Typing into the pane returns it to the live view.
-                if let Some(view) = self.views_mut().find(|v| v.id == id) {
-                    view.close_search();
-                }
-                self.overlay = None;
-                self.snippets_panel = None;
-                // The pane typed into is shown and focused.
-                if let Some((tab, pane)) = target {
-                    self.show_pane(tab, pane);
-                }
+        let bracketed = self
+            .views()
+            .find(|v| v.id == target)
+            .is_some_and(|v| v.mode().contains(TermMode::BRACKETED_PASTE));
+        let filled: Vec<(String, String)> = values
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .cloned()
+            .collect();
+        let engine = self.engine.clone();
+        spawn(self, async move {
+            let result = engine
+                .snippet_input_for(id.clone(), filled, Some(run), bracketed)
+                .await
+                .map_err(|e| e.summary());
+            Action::SnippetInput {
+                target,
+                id,
+                values,
+                result,
             }
+        });
+    }
+
+    /// Types the core's bytes into the target tab, then shows that tab; or
+    /// says why the core refused them.
+    pub(crate) fn snippet_input(
+        &mut self,
+        target: TerminalId,
+        id: String,
+        values: Vec<(String, String)>,
+        result: Result<Vec<u8>, ErrorSummary>,
+    ) {
+        let bytes = match result {
+            Ok(bytes) => bytes,
             Err(error) => {
                 if let Some(panel) = &mut self.snippets_panel {
                     if error.code == "snippet_needs_paste_mode" {
                         panel.mode = SnipMode::NeedsRun {
-                            rendered: rendered.to_owned(),
+                            id,
+                            values,
                             error,
                             // Armed later: a held or repeated key that sent
                             // the snippet must not also run it.
                             opened_at: std::time::Instant::now(),
                         };
+                    } else if error.code == "sync_snippet_unconfirmed" {
+                        // Changed by sync, not confirmed here (F8): its
+                        // review (the whole command), not a bare error.
+                        self.review_snippet(&id);
                     } else {
                         panel.notice = Some(Notice::error(error));
                     }
                 }
+                return;
             }
+        };
+        if self.snippet_target != Some(target) || self.snippet_target_view().is_none() {
+            return;
+        }
+        let pane = self.pane_of_terminal(target);
+        let Some(view) = self.views_mut().find(|v| v.id == target) else {
+            return;
+        };
+        view.send(bytes);
+        // Typing into the pane returns it to the live view.
+        view.close_search();
+        self.overlay = None;
+        self.snippets_panel = None;
+        // The pane typed into is shown and focused.
+        if let Some((tab, pane)) = pane {
+            self.show_pane(tab, pane);
         }
     }
 }

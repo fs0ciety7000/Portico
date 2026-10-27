@@ -152,6 +152,10 @@ pub enum Error {
     // ── 0.3.0: update check ─────────────────────────────────────────────
     #[error(transparent)]
     Update(#[from] crate::update::UpdateError),
+
+    // ── Phase 11: encrypted folder sync ─────────────────────────────────
+    #[error(transparent)]
+    Sync(#[from] crate::sync::SyncError),
 }
 
 /// Host key verification failures. Never recoverable by a click: see
@@ -341,6 +345,9 @@ impl Error {
 
             // ── 0.3.0 ──
             Self::Update(e) => e.code_and_hint(),
+
+            // ── Phase 11 ──
+            Self::Sync(e) => e.code_and_hint(),
         };
         let hint_override = match self {
             Self::Key(e) => e.hint_override(),

@@ -117,16 +117,20 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
 /// Core messages are lowercase sentences (`wrong vault passphrase`): the
 /// first word is capitalised for display, unless it is a name, a path or an
 /// identifier (`id_ed25519 …`, `~/.ssh/…`, `ssh-agent …`, `web: …`), left as
-/// written. Same rule as the GUI's `sentence()`; never used to decide
-/// anything (no string matching on errors).
+/// written. The core quotes identifiers in backticks (`` `legacy` is
+/// already defined… ``): a first word in backticks is never capitalised,
+/// and the backticks are dropped for display (B2, S1c review). Same rule as
+/// the GUI's `sentence()`; never used to decide anything (no string
+/// matching on errors).
 pub(crate) fn sentence(text: &str) -> String {
     let first_word = text.split(char::is_whitespace).next().unwrap_or_default();
     let plain = !first_word.is_empty() && first_word.chars().all(|c| c.is_ascii_lowercase());
     let mut chars = text.chars();
-    match chars.next() {
+    let shown: String = match chars.next() {
         Some(first) if plain => first.to_uppercase().chain(chars).collect(),
         _ => text.to_owned(),
-    }
+    };
+    shown.replace('`', "")
 }
 
 /// Greedy word wrap to `width` columns (character count); words longer
@@ -198,6 +202,19 @@ mod tests {
         ] {
             assert_eq!(sentence(kept), kept);
         }
+    }
+
+    /// B2 (S1c review): an identifier the core quotes is never capitalised.
+    #[test]
+    fn legacy_is_already_defined() {
+        assert_eq!(
+            sentence("`legacy` is already defined in hosts.conf:3"),
+            "legacy is already defined in hosts.conf:3"
+        );
+        assert_eq!(
+            sentence("synced host `web` jumps through `bastion`"),
+            "Synced host web jumps through bastion"
+        );
     }
 
     #[test]

@@ -309,7 +309,7 @@ fn key_defaults_blocking(local_user: &str) -> KeyDefaultsDto {
 /// `%COMPUTERNAME%` (lowercased) on Windows, where `/etc/hostname` is never
 /// read (it would be a relative path on the current drive);
 /// `$HOSTNAME` then `/etc/hostname` on Unix.
-fn local_hostname() -> Option<String> {
+pub(crate) fn local_hostname() -> Option<String> {
     let raw = if cfg!(windows) {
         std::env::var("COMPUTERNAME").ok()?.to_lowercase()
     } else {

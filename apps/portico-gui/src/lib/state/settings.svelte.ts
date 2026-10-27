@@ -113,6 +113,19 @@ class SettingsState {
   /** Reads settings.toml: theme, keymap; one notice for what was ignored. */
   async init(themes: ThemeInfo[]) {
     this.themes = themes;
+    await this.#read();
+  }
+
+  /** settings.toml changed outside this view (folder sync, phase 11):
+   * theme and keymaps apply live, received keymaps checked like local
+   * ones (invalid entries ignored and reported, F18). Nothing is written. */
+  async reload() {
+    if (!this.themes.length) return;
+    await this.#read();
+  }
+
+  async #read() {
+    const themes = this.themes;
     let settings;
     try {
       settings = await backend.getSettings();

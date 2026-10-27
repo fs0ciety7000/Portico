@@ -186,6 +186,10 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
             if h.meta.favorite {
                 spans.push(Span::styled(" ★", s.accent()));
             }
+            // A destination received through sync waits for this device.
+            if app.sync.pending_for(&h.alias).is_some() {
+                spans.push(Span::styled(" ⇅", s.status(s.theme.status.warning)));
+            }
             let target = match &h.resolved.user {
                 Some(u) => format!("{u}@{}", h.resolved.hostname),
                 None => h.resolved.hostname.clone(),

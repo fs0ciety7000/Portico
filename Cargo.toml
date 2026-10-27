@@ -18,7 +18,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -76,6 +76,15 @@ secrecy = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.6"
 chacha20poly1305 = "0.11"
+# Encrypted folder sync (ADR "Synchronisation chiffrée par dossier"): HKDF
+# subkeys, SHA-256 fingerprints and constant-time MAC compare. All three were
+# already in the lock (through russh / argon2); now direct dependencies.
+hkdf = "0.13"
+sha2 = "0.11"
+subtle = "2.6"
+# Passphrase strength estimate of the sync passphrase (same ADR). Without the
+# `builder` feature: no proc-macro dependency.
+zxcvbn = { version = "3.1", default-features = false }
 
 # Process hardening (safe wrappers: setrlimit, prctl).
 rustix = { version = "1.1", features = ["fs", "process"] }
@@ -106,6 +115,8 @@ url = "2.5"
 
 # Dev
 tempfile = "3"
+# Property tests of the sync merge laws (ADR "Synchronisation chiffrée par dossier").
+proptest = { version = "1", default-features = false, features = ["std"] }
 pretty_assertions = "1"
 # VT parser of alacritty_terminal (same version: no new crate in the lock),
 # for differential tests of the playback sanitiser.

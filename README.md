@@ -13,6 +13,7 @@
 
 - **Zéro lock-in** : tout fonctionne hors ligne. Vos données Portico sont en TOML lisible.
 - **Votre setup est la source de vérité** : `~/.ssh/config` (Include, Match, ProxyJump…), `known_hosts`, `ssh-agent` et vos clés.
+- **Synchronisation chiffrée, sans cloud de Portico** : hôtes, tags, snippets et réglages passent d'un appareil à l'autre par un dossier que vous synchronisez déjà (iCloud Drive, Dropbox, OneDrive, Syncthing, git…) ; seuls des fichiers chiffrés en sortent, jamais vos clés privées ni `known_hosts`, et chaque hôte ou snippet reçu attend votre confirmation.
 - **Sécurisé** : secrets dans le trousseau système (Keychain, Secret Service, Gestionnaire d'identification Windows), jamais en clair.
 - **Premium** : trois thèmes sombres (Obsidian, Basalt, Travertine Night) et un clair (Marble), plus **Auto** qui suit le système (Marble le jour, votre thème sombre la nuit) ; statut de connexion et latence toujours visibles.
 

@@ -344,6 +344,66 @@ const UPDATES: Panel = Panel {
     outro: "Quand une version plus récente est connue, la barre de statut affiche « 0.3.1 available » en accent, à droite, jusqu'à la mise à jour (aucune fenêtre ne s'ouvre d'elle-même). La vue donne « You have 0.3.0. », le lien des notes de version et la marche à suivre selon l'installation (Homebrew, AppImage, paquet pacman, .deb, sinon la page de version) puis « Portico never downloads or installs anything itself. »",
 };
 
+const SYNC: Panel = Panel {
+    title: "TUI : synchronisation chiffrée par dossier",
+    intro: "« Sync » : `S` depuis la liste, `Ctrl-Space y` partout (la TUI n'a pas de palette : c'est l'équivalent de « Sync… »). Le panneau a les cinq onglets de la GUI, dans le même ordre (`1`-`5` identiques) : Overview (état, dossier, mémorisation de la clé, nombre d'appareils), Conflicts, Received (hôtes reçus puis snippets reçus, une seule liste), Issues, Devices (préfixe d'id, dernière publication, « this device » marqué du seul point d'accent, « inactive » en texte discret) ; les nombres en couleur d'avertissement. La barre de statut ne répète pas les touches du panneau : « SYNC  ? help ». Quand la synchronisation est désactivée, Overview l'explique (seuls des fichiers chiffrés quittent la machine ; clés privées et `known_hosts` jamais synchronisés ; Portico n'envoie rien sur le réseau) et `↵` ouvre l'assistant. Les snippets reçus non confirmés restent consultables et confirmables même désactivée. Toutes les décisions portent sur l'élément affiché (empreinte de la destination, de la commande ou des côtés d'un conflit) ; elles sont armées : touches ignorées 400 ms après un changement de sélection ou de contenu (y compris de nouveaux côtés d'un conflit), et tant qu'un rechargement (`SyncPendingChanged`) est en cours. Un élément reçu ne se confirme qu'une fois sa dernière ligne affichée (« PgDn read to the end » tant qu'elle ne l'a pas été) ; une tabulation d'une commande reçue s'affiche en `→` discret. Aucune confirmation groupée.",
+    rows: &[
+        (
+            "Onglet suivant / précédent ; onglet n",
+            "`Tab` / `Shift-Tab`, `→` / `←` ; `1`-`5`",
+        ),
+        (
+            "Se déplacer ; faire défiler un texte long (commande, détails)",
+            "`j` / `k`, `↓` / `↑` ; `PgDn` / `PgUp`, `J` / `K`",
+        ),
+        ("Aide (par-dessus le panneau)", "`?`"),
+        ("Overview : synchroniser maintenant", "`s`"),
+        (
+            "Overview : changer la passphrase (« Changing the passphrase does not protect against one that already leaked… », F2)",
+            "`c`",
+        ),
+        (
+            "Overview : réinitialiser la passphrase depuis cet appareil (puis confirmation armée : seul `y` réinitialise ; les autres appareils affichent une alerte à acquitter)",
+            "`R`",
+        ),
+        ("Overview : renommer cet appareil", "`r`"),
+        (
+            "Overview : mémoriser ou oublier la clé sur cet appareil",
+            "`m`",
+        ),
+        (
+            "Overview : « Turn sync off » (« Forget the key on this device » coché, « Remove this device's file from the sync folder » non coché ; `Espace` coche, `↵` désactive ; les données locales restent)",
+            "`D`",
+        ),
+        (
+            "Overview : déverrouiller (état « Sync locked »)",
+            "`↵` ou `u`",
+        ),
+        (
+            "Overview : acquitter l'alerte « passphrase changed or reset on <appareil> »",
+            "`a`",
+        ),
+        (
+            "Conflicts : choisir (« Union of all tags » présélectionnée pour les tags, « Keep both » pour les snippets, sinon « Keep <appareil>'s » / « Keep this device's » ; les champs qui diffèrent en texte principal) ; appliquer ; conflit suivant / précédent",
+            "`j` / `k` ; `↵` ; `]` / `[`",
+        ),
+        (
+            "Received : confirmer / refuser l'hôte affiché (« On this device » et « Received » côte à côte : HostName, User, Port, IdentityFile, ProxyJump, valeurs entières coupées après `.` ou `-`) ; confirmer le snippet affiché (commande entière, nombre de lignes et de caractères)",
+            "`y` / `n` ; `y`",
+        ),
+        (
+            "Issues : « Skip on this device » quand c'est possible (confirmation armée, seul `y`)",
+            "`x`",
+        ),
+        (
+            "Formulaires (passphrase, nom) : champ suivant ; générer une passphrase (6 mots EFF, montrée une fois) ; la copier (OSC 52, effacée du presse-papiers 30 s après) ; une autre ; revenir à la saisie",
+            "`Tab` ; `Ctrl-G` ; `c` ; `g` ; `Backspace`",
+        ),
+        ("Fermer (un formulaire : revenir)", "`Esc`, `q`, `Ctrl-C`"),
+    ],
+    outro: "Assistant « Set up sync » (titre « step n », sans total : il dépend du dossier) : explication, dossier (saisie, `Tab` complète les dossiers, `↵` demande au moteur ce qu'il contient : « No Portico sync here yet. », « A Portico sync with N devices. », incomplet, absent, refusé avec son indice), puis premier appareil (passphrase et confirmation, jauge de force du moteur, `Ctrl-G` génère, nom de l'appareil, par défaut le nom de la machine ou `portico-` et quatre chiffres hexadécimaux, « Remember the key on this device » coché, puis l'avertissement de récupération et la case « I saved it. A lost passphrase cannot be recovered unless a device remembers the key. » (`Espace`), exigée pour créer, passphrase tapée ou générée) ou rejoindre (passphrase, puis revue : hôtes, « tags, groups, notes », snippets, réglages, conflits, « nécessite une version plus récente » ; choix Review each / Prefer the folder's / Prefer this device's, qui ne confirment jamais un hôte reçu ; jeton valable 10 min, une fois ; la même case, exigée pour rejoindre). Après la création ou l'adhésion, l'assistant se ferme sur le panneau : « Sync is on ». Un refus du moteur s'affiche sous le champ concerné (code et indice). La barre de statut de la liste montre `⇅` et l'état (« Synced 2 min ago », « Syncing… », « Waiting for <appareil> », « Sync folder unavailable », « Sync locked », « Sync off » quand il y a la place), puis conflits et éléments à revoir en couleur d'avertissement, `▲` en couleur d'erreur pour une alerte. Un hôte dont la destination reçue attend porte `⇅` dans la liste ; ses détails disent « ⇅ changed by <appareil> · S review » (l'id de l'appareil à partir de 120 colonnes) ; un bandeau « Sync » sous les détails compte ce qui attend. Un snippet non confirmé porte « ⇅ to review » ; l'envoyer ouvre sa revue (commande entière) au lieu d'une erreur, puis revient aux snippets.",
+};
+
 /// Fixed keys of the configurable contexts (not rebindable).
 const FIXED: &[(Context, &str, &str)] = &[
     (Context::Hosts, "Aller à l'onglet n", "`1`-`9`"),
@@ -455,6 +515,7 @@ pub(crate) fn block() -> String {
         &SNIPPETS,
         &RECORDINGS,
         &UPDATES,
+        &SYNC,
     ] {
         panel_section(&mut out, panel);
     }

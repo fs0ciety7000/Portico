@@ -190,7 +190,8 @@ impl App {
             Action::UpdateCheckSaved(result) => self.update_check_saved(result),
             // `UpdateLoaded(Err)`: settings.toml is unreadable, its own toast
             // says so; nothing is asked (the answer could not be saved).
-            _ => {}
+            Action::UpdateLoaded(Err(_)) => {}
+            other => self.update_sync(other),
         }
     }
 

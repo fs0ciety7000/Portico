@@ -39,7 +39,27 @@ pub(crate) fn display_safe(text: &str) -> String {
         .collect()
 }
 
-fn is_bidi_control(c: char) -> bool {
+/// One displayable piece of a received value: a character, or a tab (shown
+/// as a muted `→`, never removed: it is typed with the rest, A2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cell {
+    Char(char),
+    Tab,
+}
+
+/// `display_safe` that keeps tabs visible: controls and bidi overrides are
+/// dropped, a tab becomes [`Cell::Tab`].
+pub(crate) fn display_cells(text: &str) -> Vec<Cell> {
+    text.chars()
+        .filter_map(|c| match c {
+            '\t' => Some(Cell::Tab),
+            c if c.is_control() || is_bidi_control(c) => None,
+            c => Some(Cell::Char(c)),
+        })
+        .collect()
+}
+
+pub(crate) fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
 }
 
@@ -55,5 +75,9 @@ mod tests {
         paste_line(&mut v, "bc\u{7}d\nsecond", 4);
         assert_eq!(v, "abcd");
         assert_eq!(display_safe("me\u{202E}@lap\ttop"), "me@laptop");
+        assert_eq!(
+            display_cells("a\tb\u{1b}\u{202E}"),
+            vec![Cell::Char('a'), Cell::Tab, Cell::Char('b')]
+        );
     }
 }

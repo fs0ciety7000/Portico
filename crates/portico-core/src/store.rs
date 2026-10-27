@@ -12,6 +12,7 @@
 //! | `state/update.toml` | last opt-in update check (data dir)     |
 //! | `vault.toml`      | encrypted secrets fallback (data dir)     |
 //! | `recordings/*.cast` | opt-in terminal recordings (data dir)   |
+//! | `sync/`           | folder sync state, sealed replica (data dir) |
 //!
 //! Secrets are **never** written here in clear text (see [`crate::secrets`]
 //! and [`crate::vault`]).
@@ -117,6 +118,13 @@ impl Paths {
     /// `recordings/` (data dir): asciicast files, see [`crate::recording`].
     pub fn recordings(&self) -> PathBuf {
         self.data_dir.join("recordings")
+    }
+
+    /// `sync/` (data dir, **local**: never in a roaming profile, case E4 of
+    /// `docs/SYNC.md`): `sync.toml`, the sealed `replica.snap`, the
+    /// confirmations and the inter-process `sync.lock` of the folder sync.
+    pub fn sync_dir(&self) -> PathBuf {
+        self.data_dir.join("sync")
     }
 
     /// OpenSSH default identities, in OpenSSH's order.
@@ -484,6 +492,24 @@ fn create_missing_private_dirs(dir: &Path) -> Result<()> {
 /// lock is released when the returned file is dropped. Each open is its
 /// own lock holder, so two handles in one process exclude each other too.
 pub(crate) fn lock_exclusive(path: &Path) -> Result<std::fs::File> {
+    let file = open_lock_file(path)?;
+    file.lock().map_err(|e| Error::io(path, e))?;
+    Ok(file)
+}
+
+/// [`lock_exclusive`] without waiting: `None` when another holder has the
+/// lock (the folder sync skips a pass then, `docs/SYNC.md` §4.9).
+pub(crate) fn try_lock_exclusive(path: &Path) -> Result<Option<std::fs::File>> {
+    let file = open_lock_file(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(Error::io(path, e)),
+    }
+}
+
+/// Opens (creating it `0600` if needed) the lock file `path`.
+fn open_lock_file(path: &Path) -> Result<std::fs::File> {
     if let Some(dir) = path.parent() {
         create_private_dir_all(dir)?;
     }
@@ -504,7 +530,6 @@ pub(crate) fn lock_exclusive(path: &Path) -> Result<std::fs::File> {
     if created {
         crate::winfs::restrict_file(&file, path).map_err(|e| Error::io(path, e))?;
     }
-    file.lock().map_err(|e| Error::io(path, e))?;
     Ok(file)
 }
 

@@ -41,6 +41,8 @@ use crate::sftp::{RemoteEntry, SftpClient, TransferRequest};
 use crate::ssh_config::{ConfigWarning, ResolveContext};
 use crate::store::Paths;
 
+mod sync_api;
+
 /// Capacity of the control-plane broadcast channel. Slow subscribers get
 /// `RecvError::Lagged` and must resync from [`Engine`] queries.
 pub const DEFAULT_EVENT_CAPACITY: usize = 1024;
@@ -301,6 +303,8 @@ struct Inner {
     // ── 0.3.0: opt-in update check ──
     /// The periodic check, while `[updates] check = true`.
     update_task: Mutex<Option<CancellationToken>>,
+    // ── Phase 11: folder sync ──
+    sync: sync_api::SyncHandle,
 }
 
 #[derive(Debug)]
@@ -337,6 +341,7 @@ impl Engine {
                 terminals: Mutex::default(),
                 recordings_active: Arc::default(),
                 update_task: Mutex::default(),
+                sync: sync_api::SyncHandle::default(),
             }),
         }
     }
@@ -910,17 +915,29 @@ impl Engine {
         snippet: crate::snippets::Snippet,
     ) -> Result<crate::snippets::Snippet> {
         let store = Arc::clone(&self.inner.snippets);
-        tokio::task::spawn_blocking(move || store.save(snippet))
+        let saved = tokio::task::spawn_blocking(move || store.save(snippet))
             .await
-            .map_err(|_| Error::EngineClosed)?
+            .map_err(|_| Error::EngineClosed)?;
+        self.sync_touch();
+        saved
     }
 
+    /// Deletes a snippet. Its sync confirmation gate (F8), if any, goes
+    /// with it: a gate only ever leaves with a confirmation or the
+    /// snippet itself.
     pub async fn delete_snippet(&self, id: &str) -> Result<()> {
         let store = Arc::clone(&self.inner.snippets);
+        let paths = self.inner.config.paths.clone();
         let id = id.to_owned();
-        tokio::task::spawn_blocking(move || store.delete(&id))
-            .await
-            .map_err(|_| Error::EngineClosed)?
+        let deleted = tokio::task::spawn_blocking(move || {
+            store.delete(&id)?;
+            crate::sync::state::forget_confirmation(&paths, &id);
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::EngineClosed)?;
+        self.sync_touch();
+        deleted
     }
 
     /// Snippets whose scope covers `host_alias` (global ones, those naming
@@ -1000,6 +1017,7 @@ impl Engine {
             tokio::task::spawn_blocking(move || crate::hosts::update_meta(&path, &key, change))
                 .await
                 .map_err(|_| Error::EngineClosed)??;
+        self.sync_touch();
         self.emit(EngineEvent::HostMeta {
             alias: alias.to_owned(),
             meta: meta.clone(),
@@ -1153,9 +1171,11 @@ impl Engine {
         settings: crate::settings::Settings,
     ) -> Result<crate::settings::Settings> {
         let path = self.inner.config.paths.settings();
-        tokio::task::spawn_blocking(move || crate::settings::save(&path, &settings))
+        let saved = tokio::task::spawn_blocking(move || crate::settings::save(&path, &settings))
             .await
-            .map_err(|_| Error::EngineClosed)?
+            .map_err(|_| Error::EngineClosed)?;
+        self.sync_touch();
+        saved
     }
 
     /// Remembers the theme without touching the rest of `settings.toml`
@@ -1168,11 +1188,13 @@ impl Engine {
         dark_theme: Option<String>,
     ) -> Result<crate::settings::Settings> {
         let path = self.inner.config.paths.settings();
-        tokio::task::spawn_blocking(move || {
+        let saved = tokio::task::spawn_blocking(move || {
             crate::settings::set_theme(&path, theme.as_deref(), dark_theme.as_deref())
         })
         .await
-        .map_err(|_| Error::EngineClosed)?
+        .map_err(|_| Error::EngineClosed)?;
+        self.sync_touch();
+        saved
     }
 
     /// Remembers the GUI's "Copy on select" preference, alone, like
@@ -1455,6 +1477,7 @@ impl Engine {
             tokio::task::spawn_blocking(move || crate::import::apply(&config, &plan, &options))
                 .await
                 .map_err(|_| Error::EngineClosed)??;
+        self.sync_touch();
         if applied.hosts_changed {
             self.emit(EngineEvent::HostsChanged);
         }
@@ -1598,6 +1621,7 @@ impl Engine {
     }
 
     fn hosts_changed(&self, summary: Option<&crate::managed_hosts::HostSummary>) {
+        self.sync_touch();
         self.emit(EngineEvent::HostsChanged);
         if let Some(summary) = summary {
             self.emit(EngineEvent::HostMeta {

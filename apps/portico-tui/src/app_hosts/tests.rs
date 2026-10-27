@@ -839,7 +839,7 @@ fn dialog_key(lab: &mut Lab, code: KeyCode) {
 /// password remembered (never in `hosts.conf`).
 #[tokio::test]
 async fn a_password_with_no_vault_creates_it_then_saves() {
-    let mut lab = Lab::without_vault(USER_CONFIG).await;
+    let mut lab = Box::pin(Lab::without_vault(USER_CONFIG)).await;
     lab.app.update(Action::AddHost);
     lab.type_text("pw");
     lab.form_key(KeyCode::Tab);

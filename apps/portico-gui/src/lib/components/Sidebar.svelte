@@ -2,7 +2,7 @@
   // Host list: search, then either the ranked results (flat) or the
   // sections (Recent, groups, Other) whose headers are rows too: the
   // keyboard moves over both, ↵ / ← / → fold a section.
-  import { describe, type SessionView } from "../api";
+  import { describe, type PendingHostChange, type SessionView } from "../api";
   import type { Row } from "../hostlist";
   import { keymap } from "../state/keymap.svelte";
   import OriginBadge from "./OriginBadge.svelte";
@@ -19,6 +19,8 @@
     onforget,
     ontoggle,
     onadd,
+    pending = {},
+    onreview,
   }: {
     rows: Row[];
     /** Hosts in the config (empty-state wording). */
@@ -35,7 +37,15 @@
     ontoggle: (sectionId: string) => void;
     /** "Add host…" (phase 6b). */
     onadd: () => void;
+    /** Received hosts waiting for this device's confirmation (sync, F1), by alias. */
+    pending?: Record<string, PendingHostChange>;
+    /** Opens the review of received hosts. */
+    onreview?: () => void;
   } = $props();
+
+  const received = $derived(Object.values(pending));
+  const newCount = $derived(received.filter((p) => p.new).length);
+  /** `laptop` from `laptop (3f9c0ae1)`: the row stays short, the title has it all. */
 
   let listEl: HTMLUListElement | undefined = $state();
 
@@ -87,6 +97,16 @@
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" /></svg>
     </button>
   </div>
+
+  {#if received.length && onreview}
+    <button class="received" onclick={onreview} data-testid="received-hosts">
+      <span class="received-dot"></span>
+      <span>
+        {received.length} received {received.length === 1 ? "host" : "hosts"} to confirm{newCount ? ` · ${newCount} new` : ""}
+      </span>
+      <span class="review">Review</span>
+    </button>
+  {/if}
 
   {#if flat || loading}
     <div class="section-title static">{flatTitle} <span class="count">{loading ? "" : rows.length}</span></div>
@@ -148,6 +168,11 @@
               <span class="alias" title={host.alias}>{host.alias}</span>
               {#if host.favorite}<span class="star" aria-label="favorite" title="Favorite">★</span>{/if}
               {#if host.origin !== "ssh_config"}<OriginBadge origin={host.origin} compact />{/if}
+              {#if pending[host.alias]}
+                {@const change = pending[host.alias]}
+                {@const by = `${change?.new ? "New from" : "Changed by"} ${change?.devices.join(", ") || "another device"}`}
+                <span class="changed" role="img" title={`${by}: the destination waits for your confirmation (Sync, Received)`} aria-label={by} data-testid="host-changed">⇅</span>
+              {/if}
             </span>
             <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
             {#if row.section.kind === "recent"}
@@ -215,6 +240,41 @@
   }
   .search input::placeholder { color: var(--text-muted); }
   .search-row { display: flex; gap: var(--space-2); }
+  /* Received hosts (sync): a quiet notice, its dot in a status colour. */
+  .received {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: var(--size-control);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--text-sm);
+    text-align: left;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .received:hover { border-color: var(--border-strong); }
+  .received:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .received-dot { flex: 0 0 auto; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; background: var(--status-warning); }
+  .received .review { margin-left: auto; color: var(--accent); }
+  /* A received destination waits (sync): a compact pill, the full text in
+     its title and in the host details. */
+  .changed {
+    display: inline-grid;
+    flex: 0 0 auto;
+    place-items: center;
+    min-width: var(--size-badge-sm);
+    height: var(--size-badge-sm);
+    padding: 0 var(--space-1);
+    border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent);
+    border-radius: var(--radius-pill);
+    color: var(--status-warning);
+    font-size: var(--text-xs);
+    line-height: 1;
+  }
   .search-row .search { flex: 1; min-width: 0; }
   /* "Add host…": a quiet square beside the search, the accent on hover and focus. */
   .add {

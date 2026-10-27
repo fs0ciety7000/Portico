@@ -17,6 +17,7 @@ mod meta;
 mod recordings;
 mod settings;
 mod snippets;
+mod sync;
 mod terminals;
 mod updates;
 
@@ -30,6 +31,7 @@ use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 use crate::files::Files;
 use crate::import::Imports;
 use crate::recordings::Playbacks;
+use crate::sync::SyncUi;
 use crate::terminals::Terminals;
 
 /// Event name carrying serialized `EngineEvent`s to the frontend.
@@ -156,6 +158,7 @@ fn run_app() {
             app.manage(Files::default());
             app.manage(Imports::default());
             app.manage(Arc::new(Playbacks::default()));
+            app.manage(SyncUi::default());
             // Before the page paints: a light system gets the light theme's
             // background (what `auto`, the default, shows), not a dark flash.
             // The view then sets the exact theme (`set_window_theme`).
@@ -266,6 +269,35 @@ fn run_app() {
             recordings::playback_control,
             recordings::playback_ack,
             recordings::playback_close,
+            sync::sync_start,
+            sync::sync_status,
+            sync::sync_now,
+            sync::sync_devices,
+            sync::sync_conflicts,
+            sync::sync_issues,
+            sync::sync_pending_hosts,
+            sync::synced_snippets_unconfirmed,
+            sync::sync_default_device_name,
+            sync::sync_pick_folder,
+            sync::sync_probe_again,
+            sync::sync_generate_passphrase,
+            sync::sync_forget_generated,
+            sync::sync_assess_passphrase,
+            sync::sync_create,
+            sync::sync_join_preview,
+            sync::sync_join_commit,
+            sync::sync_unlock,
+            sync::sync_resolve,
+            sync::sync_skip_on_this_device,
+            sync::sync_confirm_hosts,
+            sync::sync_reject_hosts,
+            sync::confirm_synced_snippet,
+            sync::sync_acknowledge_alerts,
+            sync::sync_change_passphrase,
+            sync::sync_reset_passphrase,
+            sync::sync_rename_device,
+            sync::sync_set_options,
+            sync::sync_disable,
         ])
         .build(tauri::generate_context!());
 
@@ -305,7 +337,8 @@ fn run_app() {
 }
 
 /// Closes what a (re)loading page opened: terminals (and so their
-/// recordings), playbacks, upload tokens, a pending import, sessions.
+/// recordings), playbacks, upload tokens, a pending import, the sync
+/// wizard's folder and generated passphrase, sessions.
 fn release_page(webview: &tauri::Webview) {
     if let Some(terminals) = webview.try_state::<Arc<Terminals>>() {
         terminals.close_all();
@@ -318,6 +351,9 @@ fn release_page(webview: &tauri::Webview) {
     }
     if let Some(imports) = webview.try_state::<Imports>() {
         imports.clear();
+    }
+    if let Some(sync) = webview.try_state::<SyncUi>() {
+        sync.clear();
     }
     if let Some(engine) = webview.try_state::<Engine>() {
         engine.disconnect_all();

@@ -925,6 +925,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1677,6 +1683,17 @@ checksum = "b95f7c0680e4142284cf8b22c14a476e87d61b004a3a0861872b32ef7ead40a2"
 dependencies = [
  "bit-set 0.5.3",
  "regex",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -4187,7 +4204,7 @@ dependencies = [
 
 [[package]]
 name = "portico-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4195,6 +4212,7 @@ dependencies = [
  "chacha20poly1305",
  "directories",
  "futures",
+ "hkdf",
  "hmac",
  "keyring",
  "keyring-core",
@@ -4202,6 +4220,7 @@ dependencies = [
  "pkcs8",
  "portico-winsec",
  "pretty_assertions",
+ "proptest",
  "rand 0.10.3",
  "russh",
  "russh-sftp",
@@ -4212,6 +4231,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2 0.11.1",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -4223,16 +4244,18 @@ dependencies = [
  "ureq",
  "vte",
  "zeroize",
+ "zxcvbn",
 ]
 
 [[package]]
 name = "portico-gui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "directories",
  "portico-core",
  "portico-theme",
+ "rand 0.10.3",
  "secrecy",
  "serde",
  "serde_json",
@@ -4249,14 +4272,14 @@ dependencies = [
 
 [[package]]
 name = "portico-theme"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "portico-tui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "alacritty_terminal",
  "bytes",
@@ -4281,7 +4304,7 @@ dependencies = [
 
 [[package]]
 name = "portico-winsec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tempfile",
  "tokio",
@@ -4409,6 +4432,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
+dependencies = [
+ "bitflags 2.13.2",
+ "chacha20",
+ "core_detect",
+ "num-traits",
+ "rand 0.10.3",
+ "rand_xorshift",
+ "regex-syntax",
+ "unarray",
+]
+
+[[package]]
 name = "psm"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4478,6 +4517,15 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rand_xorshift"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
+dependencies = [
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "ratatui"
@@ -6169,7 +6217,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6227,7 +6275,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bitflags 2.13.2",
- "fancy-regex",
+ "fancy-regex 0.11.0",
  "filedescriptor",
  "finl_unicode",
  "fixedbitset",
@@ -6667,6 +6715,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unicode-ident"
@@ -7920,4 +7974,20 @@ dependencies = [
  "serde",
  "syn 3.0.9",
  "winnow 1.0.4",
+]
+
+[[package]]
+name = "zxcvbn"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9eaee90f4a795d1eb4ba6c51e1c1721d4784d550e8efa7b2600f29c867365e0"
+dependencies = [
+ "chrono",
+ "fancy-regex 0.18.0",
+ "itertools",
+ "lazy_static",
+ "regex",
+ "time",
+ "wasm-bindgen",
+ "web-sys",
 ]

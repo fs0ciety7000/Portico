@@ -26,15 +26,19 @@
 //!   `{{other}}` is inserted literally, never expanded;
 //! - a multi-line body is only pasted (`run = false`) inside a bracketed
 //!   paste: without it, each line break would run a line
-//!   ([`snippet_input`] refuses with `snippet_needs_paste_mode`).
+//!   (`snippet_input` refuses with `snippet_needs_paste_mode`).
 //!
 //! `snippets.toml` is read with a size cap; entries that fail validation
 //! are hidden from [`SnippetStore::list`] (kept in the file, a warning is
 //! logged without their content) and duplicate or malformed ids are
 //! re-derived from the name.
 //!
-//! [`Snippet::render_checked`] enforces this; [`snippet_input`] turns the
-//! result into the bytes the UI writes on its `TerminalHandle`.
+//! [`Snippet::render_checked`] enforces this; `snippet_input` (crate
+//! private) turns the result into the bytes the UI writes on its
+//! `TerminalHandle`. UIs get those bytes only from
+//! [`crate::Engine::snippet_input_for`], which also refuses a snippet
+//! changed by sync and not confirmed on this device (F8): no public path
+//! skips that gate.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -281,7 +285,7 @@ impl Snippet {
 
     /// Trims the name and description, drops trailing line breaks of the
     /// command (the `run` flag decides whether Enter is sent).
-    fn normalize(&mut self) {
+    pub(crate) fn normalize(&mut self) {
         self.id = self.id.trim().to_owned();
         self.name = self.name.trim().to_owned();
         self.command = self.command.trim_end_matches(['\n', '\r']).to_owned();
@@ -313,7 +317,7 @@ impl Snippet {
 ///
 /// Defensive: whatever the input, ESC and other control characters (except
 /// tab and line breaks) are dropped, so the paste can never be closed early.
-pub fn snippet_input(rendered: &str, run: bool, bracketed_paste: bool) -> Result<Vec<u8>> {
+pub(crate) fn snippet_input(rendered: &str, run: bool, bracketed_paste: bool) -> Result<Vec<u8>> {
     let body = rendered
         .trim_end_matches(['\n', '\r'])
         .replace("\r\n", "\n");
@@ -372,13 +376,22 @@ impl SnippetStore {
     /// left out with a warning naming only their position and the failing
     /// field; they stay in the file.
     pub fn list(&self) -> Result<Vec<Snippet>> {
+        self.list_with_invalid().map(|(valid, _)| valid)
+    }
+
+    /// [`Self::list`], plus the ids of the entries it leaves out (the
+    /// folder sync must neither publish them nor take their absence for a
+    /// deletion).
+    pub(crate) fn list_with_invalid(&self) -> Result<(Vec<Snippet>, Vec<String>)> {
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let file = self.load()?;
+        let mut invalid_ids = Vec::new();
         let mut valid = Vec::with_capacity(file.snippets.len());
         for (index, snippet) in file.snippets.into_iter().enumerate() {
             match snippet.validate() {
                 Ok(()) => valid.push(snippet),
                 Err(e) => {
+                    invalid_ids.push(snippet.id.clone());
                     let (field, reason) = match &e {
                         SnippetError::Invalid { field, reason } => (*field, *reason),
                         _ => ("snippet", "is invalid"),
@@ -393,7 +406,7 @@ impl SnippetStore {
                 }
             }
         }
-        Ok(valid)
+        Ok((valid, invalid_ids))
     }
 
     /// Loads the file (at most [`MAX_SNIPPETS_FILE_BYTES`]). Entries with a
@@ -424,7 +437,21 @@ impl SnippetStore {
 
     /// Creates or updates (by id) a snippet and returns it as stored. An
     /// empty id is derived from the name and made unique.
-    pub fn save(&self, mut snippet: Snippet) -> Result<Snippet> {
+    pub fn save(&self, snippet: Snippet) -> Result<Snippet> {
+        self.save_guarded(snippet, |_| Ok(()))
+    }
+
+    /// [`Self::save`], running `before_write` with the snippet as it will
+    /// be stored (its final id) under the store lock, before the file is
+    /// written: an error there writes nothing. The folder sync records a
+    /// received snippet's confirmation gate this way **before** the
+    /// snippet exists on disk (F8): a crash in between leaves at worst a
+    /// gate without its snippet, never a runnable unconfirmed snippet.
+    pub(crate) fn save_guarded(
+        &self,
+        mut snippet: Snippet,
+        before_write: impl FnOnce(&Snippet) -> Result<()>,
+    ) -> Result<Snippet> {
         snippet.normalize();
         snippet.validate()?;
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
@@ -432,6 +459,7 @@ impl SnippetStore {
         if snippet.id.is_empty() {
             snippet.id = unique_id(&snippet.name, &file.snippets);
         }
+        before_write(&snippet)?;
         match file.snippets.iter_mut().find(|s| s.id == snippet.id) {
             Some(existing) => existing.clone_from(&snippet),
             None => file.snippets.push(snippet.clone()),

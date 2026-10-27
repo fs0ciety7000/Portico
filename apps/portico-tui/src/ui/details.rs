@@ -114,9 +114,65 @@ fn render_banner(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
     }
 }
 
+/// Screen width from which the device id shows in the received line.
+const RECEIVED_IDS_AT: u16 = 120;
+
+/// `⇅ changed by laptop · S review` (`laptop (3f9c0ae1)` from 120
+/// columns): a destination received through sync waits for this device
+/// (F1).
+fn received_line(app: &App, alias: &str, screen_width: u16) -> Option<Line<'static>> {
+    let s = app.styles();
+    let change = app.sync.pending_for(alias)?;
+    let key = app.keymap.shown("hosts.sync", 1);
+    let mut spans = vec![
+        Span::styled("⇅ ", s.status(s.theme.status.warning)),
+        Span::styled(
+            crate::ui::sync::received_label_ids(change, screen_width >= RECEIVED_IDS_AT),
+            s.status(s.theme.status.warning),
+        ),
+    ];
+    if !key.is_empty() {
+        spans.push(Span::styled(format!(" · {key} review"), s.muted()));
+    }
+    Some(Line::from(spans))
+}
+
+/// The sync banner at the bottom of `area` when received hosts or
+/// snippets wait for this device; returns what is left.
+fn render_sync_banner(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
+    let s = app.styles();
+    let w = usize::from(area.width.saturating_sub(4));
+    let lines = crate::ui::sync::banner_lines(app, w);
+    if lines.is_empty() || area.height < 14 {
+        return area;
+    }
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let [details, banner] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Min(6),
+        ratatui::layout::Constraint::Length(height),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(s.border())
+                .title(Line::from(Span::styled(" Sync ", s.secondary())))
+                .padding(Padding::horizontal(1))
+                .style(s.surface()),
+        ),
+        banner,
+    );
+    details
+}
+
 /// Returns the area of the details (above the `Include` banner, if any).
+#[allow(clippy::too_many_lines)] // one row per resolved option, in order
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
     let s = app.styles();
+    let area = render_sync_banner(app, frame, area);
     let area = render_banner(app, frame, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -149,8 +205,9 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) -> Rect {
             Span::styled(format!("{user}@{}", r.hostname), s.secondary()),
             Span::styled(format!(":{}", r.port), s.muted()),
         ]),
-        Line::from(""),
     ];
+    lines.extend(received_line(app, &host.alias, frame.area().width));
+    lines.push(Line::from(""));
     lines.extend(status_lines(app, host, s));
     lines.push(Line::from(""));
     lines.extend(route_lines(app, host, s));

@@ -36,6 +36,7 @@
   import { vault } from "../state/vault.svelte";
   import { workspace } from "../state/workspace.svelte";
   import GroupField from "./GroupField.svelte";
+  import CodeText from "./CodeText.svelte";
   import Modal from "./Modal.svelte";
   import OriginBadge from "./OriginBadge.svelte";
   import TagsField from "./TagsField.svelte";
@@ -111,8 +112,6 @@
     if (confirmDiscard) queueMicrotask(() => keepEditing?.focus());
   });
 
-  /** An error message as shown: a sentence, unless it starts with an alias. */
-  const say = (e: ErrorSummary) => (capitalizable(e.code) ? sentence(e.message) : e.message);
 
   function clear(field: FieldName) {
     if (errors[field]) errors[field] = undefined;
@@ -226,7 +225,7 @@
 {#snippet fieldError(field: FieldName, help: string | null)}
   {#if errors[field]}
     {@const e = errors[field]}
-    <p class="inline-error" id={`host-${field}-error`}><span>{say(e)}</span>{#if e.hint}<span class="hint">{e.hint}</span>{/if}</p>
+    <p class="inline-error" id={`host-${field}-error`}><span><CodeText text={e.message} capitalize={capitalizable(e.code)} /></span>{#if e.hint}<span class="hint"><CodeText text={e.hint} capitalize={false} /></span>{/if}</p>
   {:else if help}
     <span class="help">{help}</span>
   {/if}
@@ -424,7 +423,7 @@
     </label>
 
     {#if formError}
-      <p class="inline-error form-error" role="alert"><span>{say(formError)}</span>{#if formError.hint}<span class="hint">{formError.hint}</span>{/if}</p>
+      <p class="inline-error form-error" role="alert"><span><CodeText text={formError.message} capitalize={capitalizable(formError.code)} /></span>{#if formError.hint}<span class="hint"><CodeText text={formError.hint} capitalize={false} /></span>{/if}</p>
     {/if}
   </div>
 

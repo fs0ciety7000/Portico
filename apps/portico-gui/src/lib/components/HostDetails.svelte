@@ -10,6 +10,8 @@
   import { INCLUDE_MESSAGE, READ_ONLY_IMPORTED } from "../hostform";
   import { updates } from "../state/updates.svelte";
   import UpdateBanner from "./UpdateBanner.svelte";
+  import { sync } from "../state/sync.svelte";
+  import { destination } from "../syncview";
 
   let {
     host,
@@ -134,6 +136,19 @@
 
         {#if host.notes}
           <p class="notes">{host.notes}</p>
+        {/if}
+
+        {#if sync.pendingByAlias[host.alias]}
+          {@const change = sync.pendingByAlias[host.alias]}
+          {#if change}
+            <div class="received" data-testid="host-received">
+              <span>
+                Changed by <span class="mono">{change.devices.join(", ") || "another device"}</span>: the new destination
+                <span class="mono">{destination(change.incoming)}</span> waits for your confirmation. Until then this device keeps the one above.
+              </span>
+              <button class="secondary" onclick={() => sync.reviewHost(change)}>Review…</button>
+            </div>
+          {/if}
         {/if}
 
         <dl>
@@ -450,4 +465,18 @@
     text-align: center;
   }
   .placeholder :global(svg) { opacity: 0.85; margin-bottom: var(--space-3); }
+  /* A received destination (sync, F1): a status-coloured hairline, not an alarm. */
+  .received {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border-left: 2px solid var(--status-warning);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+  }
+  .received button { flex: 0 0 auto; margin-left: auto; }
 </style>
