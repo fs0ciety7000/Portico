@@ -40,6 +40,28 @@
 //!    validated application (`apply`), last applied projection persisted,
 //!    then the snapshot is published when the state changed (or our file
 //!    is behind).
+//!
+//! ## S2a additions (`docs/SYNC.md` §13)
+//!
+//! - **Epoch floor first** (R2): a transition in progress (`rotation.toml`)
+//!   is carried forward before anything else ([`rotation`]); then the
+//!   clear header of `bundle.toml` is judged against the floor before any
+//!   key is used: a newer epoch is checked against this device's lineage
+//!   (`KeysRotatedElsewhere`, `RotationConflict` or tampering), an older
+//!   one is a rollback (the folder is rewritten from `bundle.verified`
+//!   only when strictly lower, RR2).
+//! - **Snapshot headers** of every active device are read before any
+//!   merge: a newer epoch stops the pass (RR5: `sync_discard_newer_file`),
+//!   an older one waits (`NeedsNewKeys`) and is never merged.
+//! - **Forgotten devices** (roster v2): their files are ignored and
+//!   removed, their writes are bounded by their exact `revoked_clock`
+//!   (`RevokedWrites`), their entries are immutable once observed, and the
+//!   roster union is field by field (§13.4.6).
+//! - **Password policy**: while it is off, `secret` registers are dropped
+//!   on every side of the merge; while it is on they are relayed opaque.
+//! - **Retained lineage** (E1): `C_E` is computed at every open and kept in
+//!   `commitment.toml` and the replica, with `bundle.verified` and the
+//!   history of slots.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -59,6 +81,7 @@ use super::api::{
     SyncSnippetValue, SyncStatus, SyncSubject, SyncValue, WaitReason,
 };
 use super::apply::{self, ApplyInput, Issue, destination_hash, issue_key};
+use super::bundle::ClearHeader;
 use super::bundle::{self, OpenedBundle, Roster, RosterDevice};
 use super::clock::{DeviceId, DeviceName, LocalClock, VersionVector};
 use super::container::{
@@ -73,6 +96,7 @@ use super::model::{
 };
 use super::project::{self, LocalView};
 use super::state::{self, LocalReplica, SyncConfig};
+use super::{api, lineage};
 use crate::engine::EngineConfig;
 use crate::events::EngineEvent;
 use crate::secrets::SecretKey;
@@ -96,6 +120,9 @@ pub(crate) struct SyncTuning {
     /// [`crate::Engine::start_sync`] starts the polling task (the tests
     /// drive their passes themselves).
     pub(crate) background: bool,
+    /// Tests: stop a key change there, as a crash would.
+    #[cfg(test)]
+    pub(crate) crash_at: Option<CrashPoint>,
 }
 
 impl Default for SyncTuning {
@@ -109,6 +136,8 @@ impl Default for SyncTuning {
             op_timeout: Duration::from_secs(60),
             join_ttl: Duration::from_secs(600),
             background: true,
+            #[cfg(test)]
+            crash_at: None,
         }
     }
 }
@@ -144,6 +173,8 @@ struct Report {
     conflicts: Vec<SyncConflict>,
     devices: Vec<SyncDevice>,
     waiting: Option<(WaitReason, Option<String>)>,
+    /// Values held out of sync (R3, RR4).
+    held: Vec<api::RevokedValueItem>,
 }
 
 /// Everything a pass works on, loaded under `sync.lock`.
@@ -163,6 +194,79 @@ struct Session {
     roster_rewrite: Option<Roster>,
 }
 
+mod rotation;
+
+#[cfg(test)]
+pub(crate) use rotation::CrashPoint;
+pub(crate) use rotation::{
+    Authorization, RotationPlan, build_rotation, conflict_decide, unlock_decide,
+};
+
+/// Data keys in memory, indexed by `(bundle, epoch)` (S2a, R2: never the
+/// key of another epoch for the one `sync.toml` names) and dropped when
+/// `sync.toml`, `rotation.toml` or the retained commitment changed under
+/// this process (the other Portico process adopted, rotated, or chose
+/// another lineage).
+#[derive(Debug, Default)]
+struct KeyCache {
+    stamp: Option<String>,
+    entries: Vec<(String, u32, DataKey)>,
+}
+
+/// Most keys kept (the current epoch and the next one of a transition).
+const KEY_CACHE_ENTRIES: usize = 4;
+
+impl KeyCache {
+    fn get(&self, bundle: &str, epoch: u32) -> Option<DataKey> {
+        self.entries
+            .iter()
+            .find(|(b, e, _)| b == bundle && *e == epoch)
+            .and_then(|(_, _, key)| DataKey::from_bytes(key.bytes()).ok())
+    }
+
+    fn put(&mut self, bundle: &str, epoch: u32, key: &DataKey) {
+        let Ok(copy) = DataKey::from_bytes(key.bytes()) else {
+            return;
+        };
+        self.entries
+            .retain(|(b, e, _)| !(b == bundle && *e == epoch));
+        self.entries.push((bundle.to_owned(), epoch, copy));
+        let excess = self.entries.len().saturating_sub(KEY_CACHE_ENTRIES);
+        self.entries.drain(..excess);
+    }
+
+    /// Drops the keys of `bundle` below `epoch` (step 8: `DK_N` leaves
+    /// memory once the replica is migrated).
+    fn forget_below(&mut self, bundle: &str, epoch: u32) {
+        self.entries
+            .retain(|(b, e, _)| !(b == bundle && *e < epoch));
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.stamp = None;
+    }
+}
+
+/// A device file announcing a newer epoch (RR5).
+#[derive(Debug, Clone)]
+struct NewerFile {
+    device: DeviceId,
+    file: FolderFile,
+    epoch: u32,
+    fingerprint: String,
+    label: String,
+}
+
+/// What [`SyncCore::open_bundle`] found.
+struct OpenedSet {
+    bundle: OpenedBundle,
+    union: Roster,
+    clock_conflicts: Vec<DeviceId>,
+    main_won: bool,
+    rewrite: bool,
+}
+
 /// The sync state machine (one per engine, on the sync thread).
 #[derive(Debug)]
 pub(crate) struct SyncCore {
@@ -170,7 +274,20 @@ pub(crate) struct SyncCore {
     snippets: Arc<SnippetStore>,
     events: broadcast::Sender<EngineEvent>,
     tuning: SyncTuning,
-    data_key: Option<DataKey>,
+    keys: KeyCache,
+    /// Files that announced a newer epoch at the last pass (RR5).
+    newer_files: Vec<NewerFile>,
+    /// Alerts raised outside a pass (a re-join during an adoption), shown
+    /// by the next report.
+    carry_alerts: Vec<Alert>,
+    /// `sync-key:` entries written before the index were probed for this
+    /// `(bundle, epoch)` (§13.3.8).
+    probed_keys: Option<(String, u32)>,
+    /// As of the last pass: each device's announced version (Q5), the
+    /// withheld devices, the bundle's format version.
+    peer_versions: BTreeMap<DeviceId, String>,
+    withheld: BTreeSet<DeviceId>,
+    bundle_version: u32,
     joins: BTreeMap<String, PendingJoin>,
     report: Report,
     status: Arc<Mutex<SyncStatus>>,
@@ -239,12 +356,30 @@ pub(crate) fn status_for(error: &crate::Error) -> SyncStatus {
                 kind: AlertKind::BundleTampered,
                 device: None,
             },
-            SyncError::Rollback { .. } => SyncStatus::Alert {
+            SyncError::Rollback { .. } | SyncError::FormatDowngrade { .. } => SyncStatus::Alert {
                 kind: AlertKind::Rollback,
                 device: None,
             },
             SyncError::KeysRotated => SyncStatus::Alert {
                 kind: AlertKind::KeysRotatedElsewhere,
+                device: None,
+            },
+            SyncError::NewerEpochFile { device } => SyncStatus::Alert {
+                kind: AlertKind::KeysRotatedElsewhere,
+                device: Some(device.clone()),
+            },
+            SyncError::RotationConflict | SyncError::ConflictKeepsForgotten { .. } => {
+                SyncStatus::Alert {
+                    kind: AlertKind::RotationConflict,
+                    device: None,
+                }
+            }
+            SyncError::DeviceForgotten { by, .. } => SyncStatus::Alert {
+                kind: AlertKind::DeviceForgotten,
+                device: Some(by.clone()),
+            },
+            SyncError::RotationPending => SyncStatus::Waiting {
+                reason: WaitReason::RotationPending,
                 device: None,
             },
             SyncError::Busy => SyncStatus::Waiting {
@@ -262,9 +397,14 @@ pub(crate) fn status_for(error: &crate::Error) -> SyncStatus {
 }
 
 fn data_key_account(sync: &SyncConfig) -> SecretKey {
+    key_account(&sync.bundle_id, sync.epoch)
+}
+
+/// `sync-key:<bundle>:<epoch>`.
+fn key_account(bundle: &str, epoch: u32) -> SecretKey {
     SecretKey::SyncDataKey {
-        bundle: sync.bundle_id.clone(),
-        epoch: sync.epoch,
+        bundle: bundle.to_owned(),
+        epoch,
     }
 }
 
@@ -365,7 +505,13 @@ impl SyncCore {
             snippets,
             events,
             tuning,
-            data_key: None,
+            keys: KeyCache::default(),
+            newer_files: Vec::new(),
+            carry_alerts: Vec::new(),
+            probed_keys: None,
+            peer_versions: BTreeMap::new(),
+            withheld: BTreeSet::new(),
+            bundle_version: bundle::BUNDLE_V1,
             joins: BTreeMap::new(),
             report: Report::default(),
             status,
@@ -415,33 +561,80 @@ impl SyncCore {
 
     // ── Loading ─────────────────────────────────────────────────────────
 
-    /// The data key: in memory, else the keychain (when remembered).
-    fn data_key_for(&mut self, sync: &SyncConfig) -> Result<DataKey, SyncError> {
-        if let Some(key) = &self.data_key {
-            return DataKey::from_bytes(key.bytes());
+    /// Drops the cached keys when `sync.toml`, `rotation.toml` or the
+    /// retained commitment changed since the last check (R2: the other
+    /// Portico process adopted, rotated or switched lineage).
+    fn stamp_keys(&mut self, sync: &SyncConfig) {
+        let paths = &self.config.paths;
+        let next = state::load_rotation(paths)
+            .ok()
+            .flatten()
+            .map_or(0, |r| r.next_epoch);
+        let commit = state::load_commitment(paths)
+            .ok()
+            .flatten()
+            .map(|c| c.commit)
+            .unwrap_or_default();
+        let stamp = format!(
+            "{}:{}:{}:{}:{commit}",
+            sync.bundle_id, sync.epoch, sync.device, next
+        );
+        if self.keys.stamp.as_deref() != Some(stamp.as_str()) {
+            if self.keys.stamp.is_some() {
+                self.keys.entries.clear();
+            }
+            self.keys.stamp = Some(stamp);
         }
-        if !sync.remember_key {
-            return Err(SyncError::Locked);
+    }
+
+    /// Re-stamps after this process changed its own files (the keys it
+    /// holds stay valid).
+    fn restamp_keys(&mut self, sync: &SyncConfig) {
+        let entries = std::mem::take(&mut self.keys.entries);
+        self.keys.stamp = None;
+        self.stamp_keys(sync);
+        self.keys.entries = entries;
+    }
+
+    /// The data key of the current epoch (`sync.toml`): in memory, else
+    /// the keychain (when remembered).
+    fn data_key_for(&mut self, sync: &SyncConfig) -> Result<DataKey, SyncError> {
+        self.stamp_keys(sync);
+        self.epoch_key(sync, sync.epoch).ok_or(SyncError::Locked)
+    }
+
+    /// The data key of `(bundle, epoch)`: cached, else the keychain
+    /// (cached then). An entry is only ever there when this device chose
+    /// to remember its key at that epoch ("don't remember" deletes it): a
+    /// rotation that switched the choice still finds the key it needs to
+    /// migrate the replica after a crash.
+    fn epoch_key(&mut self, sync: &SyncConfig, epoch: u32) -> Option<DataKey> {
+        if let Some(key) = self.keys.get(&sync.bundle_id, epoch) {
+            return Some(key);
         }
         let stored = self
             .config
             .secrets
-            .get(&data_key_account(sync))
-            .map_err(|_| SyncError::Locked)?
-            .ok_or(SyncError::Locked)?;
-        let bytes = Zeroizing::new(
-            B64.decode(stored.expose_secret())
-                .map_err(|_| SyncError::Locked)?,
-        );
-        let key = DataKey::from_bytes(&bytes)?;
-        self.data_key = Some(DataKey::from_bytes(key.bytes())?);
-        Ok(key)
+            .get(&key_account(&sync.bundle_id, epoch))
+            .ok()
+            .flatten()?;
+        let bytes = Zeroizing::new(B64.decode(stored.expose_secret()).ok()?);
+        let key = DataKey::from_bytes(&bytes).ok()?;
+        self.keys.put(&sync.bundle_id, epoch, &key);
+        Some(key)
+    }
+
+    /// Stores `key` as `sync-key:<bundle>:<epoch>` (indexed first, §13.3.8).
+    fn remember_key_at(&self, bundle: &str, epoch: u32, key: &DataKey) -> crate::Result<()> {
+        let encoded = Zeroizing::new(B64.encode(key.bytes()));
+        let secret = SecretString::from(encoded.as_str().to_owned());
+        self.config
+            .secrets
+            .set(&key_account(bundle, epoch), &secret)
     }
 
     fn remember_key(&self, sync: &SyncConfig, key: &DataKey) -> crate::Result<()> {
-        let encoded = Zeroizing::new(B64.encode(key.bytes()));
-        let secret = SecretString::from(encoded.as_str().to_owned());
-        self.config.secrets.set(&data_key_account(sync), &secret)
+        self.remember_key_at(&sync.bundle_id, sync.epoch, key)
     }
 
     fn open_folder(&self, sync: &SyncConfig) -> Result<Arc<dyn FolderIo>, SyncError> {
@@ -458,38 +651,34 @@ impl SyncCore {
         Ok(io)
     }
 
-    /// Opens `bundle.toml` (and its provider copies) with the data key;
-    /// returns the winner and whether `bundle.toml` itself must be
-    /// rewritten (a copy won, or the rosters differ).
+    /// `bundle.toml` of the folder, as text.
+    fn read_bundle(folder: &dyn FolderIo) -> Result<String, SyncError> {
+        let bytes = folder
+            .read(&FolderFile::Bundle, bundle::MAX_BUNDLE_BYTES)?
+            .ok_or(SyncError::FolderNotPortico)?;
+        String::from_utf8(bytes).map_err(|_| SyncError::Corrupt {
+            what: "bundle.toml",
+            reason: "not UTF-8",
+        })
+    }
+
+    /// Opens `bundle.toml` (and its provider copies of the same epoch)
+    /// with the data key; returns the winner, the field-by-field union of
+    /// the rosters (§13.4.6) with its clock conflicts, whether the main
+    /// file won, and whether `bundle.toml` itself must be rewritten (a copy
+    /// won, or the union differs from the winner's roster).
     fn open_bundle(
         folder: &dyn FolderIo,
         listing: &Listing,
+        main_text: &str,
         key: &DataKey,
         sync: &SyncConfig,
-    ) -> Result<(OpenedBundle, Roster, bool), SyncError> {
+    ) -> Result<OpenedSet, SyncError> {
         let max = bundle::MAX_BUNDLE_BYTES;
-        let main_bytes = folder
-            .read(&FolderFile::Bundle, max)?
-            .ok_or(SyncError::FolderNotPortico)?;
-        let main_text = std::str::from_utf8(&main_bytes).map_err(|_| SyncError::Corrupt {
-            what: "bundle.toml",
-            reason: "not UTF-8",
-        })?;
         let main = bundle::open_with_key(main_text, key)?;
-        let rank = |b: &OpenedBundle| {
-            (
-                b.header.epoch,
-                b.header.keyset_generation,
-                b.header.revision,
-                std::cmp::Reverse(b.fingerprint),
-            )
-        };
-        let mut union: BTreeMap<DeviceId, RosterDevice> = main
-            .roster
-            .devices
-            .iter()
-            .map(|d| (d.id, d.clone()))
-            .collect();
+        let rank = |b: &OpenedBundle| (b.header.rank(), std::cmp::Reverse(b.fingerprint));
+        let mut union = main.roster.clone();
+        let mut clock_conflicts: Vec<DeviceId> = Vec::new();
         let mut best = main;
         let mut copy_won = false;
         for copy in &listing.bundle_copies {
@@ -502,12 +691,15 @@ impl SyncCore {
             let Ok(opened) = bundle::open_with_key(text, key) else {
                 continue;
             };
-            if opened.header.bundle_id != best.header.bundle_id {
+            if opened.header.bundle_id != best.header.bundle_id
+                || opened.header.epoch != best.header.epoch
+                || opened.commit != best.commit
+            {
                 continue;
             }
-            for device in &opened.roster.devices {
-                union.entry(device.id).or_insert_with(|| device.clone());
-            }
+            let (merged, report) = bundle::union_rosters(&union, &opened.roster);
+            union = merged;
+            clock_conflicts.extend(report.clock_conflicts);
             if rank(&opened) > rank(&best) {
                 best = opened;
                 copy_won = true;
@@ -519,11 +711,14 @@ impl SyncCore {
         if best.header.epoch > sync.epoch {
             return Err(SyncError::KeysRotated);
         }
-        let roster = Roster {
-            devices: union.into_values().collect(),
-        };
-        let roster_differs = roster.devices.len() != best.roster.devices.len();
-        Ok((best, roster, copy_won || roster_differs))
+        let rewrite = copy_won || union != best.roster;
+        Ok(OpenedSet {
+            bundle: best,
+            union,
+            clock_conflicts,
+            main_won: !copy_won,
+            rewrite,
+        })
     }
 
     fn expected(bundle: &OpenedBundle, device: DeviceId) -> Expected {
@@ -535,17 +730,232 @@ impl SyncCore {
         }
     }
 
-    /// Loads everything a pass needs (steps 1–3 of the module doc). The
-    /// caller holds `sync.lock`.
+    /// What a locked device can say about a newer `bundle.toml` (§13.3.2):
+    /// its link at this device's epoch carries the retained `C_E` (E1) →
+    /// "keys changed elsewhere" (the proof is checked after the new
+    /// passphrase opens it); else plain "locked".
+    fn locked_verdict(&self, sync: &SyncConfig, clear: &ClearHeader) -> SyncError {
+        if clear.epoch <= sync.epoch {
+            return SyncError::Locked;
+        }
+        let retained = state::retained_commitment(&self.config.paths, &sync.bundle_id, sync.epoch)
+            .ok()
+            .flatten();
+        match (retained, clear.link_at(sync.epoch)) {
+            (Some(commit), Some((link, _))) if link.digest == commit => SyncError::KeysRotated,
+            _ => SyncError::Locked,
+        }
+    }
+
+    /// The replica's lineage memory, read with this epoch's keys (empty
+    /// when the replica does not open), plus this epoch itself.
+    fn lineage_memory(
+        &self,
+        sync: &SyncConfig,
+        bundle_id: &[u8; crypto::ID_LEN],
+        keys: &crypto::Subkeys,
+    ) -> Vec<state::RetainedEpoch> {
+        let expected = Expected {
+            bundle_id: *bundle_id,
+            epoch: sync.epoch,
+            max_keyset_generation: u64::MAX,
+            device: sync.device,
+        };
+        let mut local = state::load_replica(&self.config.paths, keys, &expected)
+            .ok()
+            .flatten()
+            .map(|opened| opened.content.local)
+            .unwrap_or_default();
+        if let Ok(commit) = crypto::epoch_commitment(&keys.rotate, bundle_id, sync.epoch) {
+            local.remember_epoch(sync.epoch, &commit, crypto::KeyBytes::of(&keys.rotate));
+        }
+        local.lineage
+    }
+
+    /// Rewrites `bundle.toml` from `bundle.verified` when the folder holds
+    /// a **strictly lower** `(epoch, generation, revision)` of this bundle
+    /// (RR2: never over an equal or newer file). Best effort, once.
+    fn restore_if_lower(paths: &crate::store::Paths, folder: &dyn FolderIo, found: &ClearHeader) {
+        let Ok(Some(verified)) = state::load_bundle_copy(paths, state::BundleCopy::Verified) else {
+            return;
+        };
+        let Ok(mine) = bundle::peek(&verified) else {
+            return;
+        };
+        if mine.bundle_id == found.bundle_id && found.rank() < mine.rank() {
+            let _ = folder.write(&FolderFile::Bundle, verified.as_bytes());
+        }
+    }
+
+    /// Rewrites `bundle.toml` from `bundle.verified` (a file forged from
+    /// this device's own lineage, §13.3.2). Best effort.
+    fn restore_verified(paths: &crate::store::Paths, folder: &dyn FolderIo, epoch: u32) {
+        let Ok(Some(verified)) = state::load_bundle_copy(paths, state::BundleCopy::Verified) else {
+            return;
+        };
+        if bundle::peek(&verified).is_ok_and(|mine| mine.epoch == epoch) {
+            let _ = folder.write(&FolderFile::Bundle, verified.as_bytes());
+        }
+    }
+
+    /// A `bundle.toml` of an epoch above this device's floor (§13.3.2).
+    fn judge_newer(
+        &self,
+        sync: &SyncConfig,
+        folder: &dyn FolderIo,
+        clear: &ClearHeader,
+        rotate: &crypto::Subkey,
+        commit: &[u8; crypto::MAC_LEN],
+        memory: &[state::RetainedEpoch],
+    ) -> SyncError {
+        match lineage::judge_newer(clear, sync.epoch, commit, Some(rotate), memory) {
+            lineage::Verdict::RotatedElsewhere => SyncError::KeysRotated,
+            lineage::Verdict::ForgedFromOurs => {
+                Self::restore_verified(&self.config.paths, folder, sync.epoch);
+                SyncError::BundleTampered
+            }
+            lineage::Verdict::OtherLineage => SyncError::RotationConflict,
+            lineage::Verdict::Tampered => SyncError::BundleTampered,
+        }
+    }
+
+    /// "This device was removed by …" (§13.4.4).
+    fn forgotten(roster: &Roster, entry: &bundle::RevokedDevice) -> SyncError {
+        SyncError::DeviceForgotten {
+            by: Self::label(roster, &entry.revoked_by),
+            at: entry.revoked_at,
+        }
+    }
+
+    /// Reads the clear header of every candidate of every **active**
+    /// device before anything is merged or written (§13.3.5): a newer
+    /// epoch stops the pass, naming the file (RR5).
+    fn scan_newer(
+        &mut self,
+        folder: &dyn FolderIo,
+        listing: &Listing,
+        bundle: &OpenedBundle,
+    ) -> Result<(), SyncError> {
+        let mut found = Vec::new();
+        for device in bundle.roster.devices.iter().filter(|d| !d.revoked) {
+            let Some(candidates) = listing.devices.get(&device.id) else {
+                continue;
+            };
+            for candidate in candidates {
+                let Ok(Some(bytes)) = folder.read(&candidate.file, MAX_CONTAINER_FILE_BYTES) else {
+                    continue;
+                };
+                let Some(envelope) = container::peek(container::ContainerKind::Snapshot, &bytes)
+                else {
+                    continue;
+                };
+                if envelope.device == device.id && envelope.epoch > bundle.header.epoch {
+                    found.push(NewerFile {
+                        device: device.id,
+                        file: candidate.file.clone(),
+                        epoch: envelope.epoch,
+                        fingerprint: state::hex(&crypto::sha256(&bytes)),
+                        label: device.name.label(&device.id),
+                    });
+                }
+            }
+        }
+        let first = found.first().map(|f| f.label.clone());
+        self.newer_files = found;
+        match first {
+            Some(device) => Err(SyncError::NewerEpochFile { device }),
+            None => Ok(()),
+        }
+    }
+
+    /// Loads everything a pass needs (steps 1–3 of the module doc, with
+    /// the S2a checks). The caller holds `sync.lock`.
+    // One ordered sequence of checks (module doc): splitting it would
+    // scatter the order that makes it safe.
+    #[allow(clippy::too_many_lines)]
     fn open_session(&mut self, alerts: &mut Vec<Alert>) -> crate::Result<Session> {
         let paths = self.config.paths.clone();
         let paths = &paths;
-        let sync = state::load_config(paths)?.ok_or(SyncError::Disabled)?;
-        let key = self.data_key_for(&sync)?;
+        let mut sync = state::load_config(paths)?.ok_or(SyncError::Disabled)?;
+        self.local_cleanups(&sync);
+        if let Some(rotation) = state::load_rotation(paths)? {
+            // A transition in progress goes forward first (§13.3.4).
+            self.advance_transition(&sync, &rotation)?;
+            sync = state::load_config(paths)?.ok_or(SyncError::Disabled)?;
+        }
+        self.stamp_keys(&sync);
         let folder = self.open_folder(&sync)?;
         let listing = folder.list()?;
-        let (bundle, union_roster, rewrite) =
-            Self::open_bundle(folder.as_ref(), &listing, &key, &sync)?;
+        let main_text = Self::read_bundle(folder.as_ref())?;
+        let clear = bundle::peek(&main_text)?;
+        if clear.bundle_id != sync.bundle_bytes()? {
+            return Err(SyncError::BundleTampered.into());
+        }
+        let key = match self.data_key_for(&sync) {
+            Ok(key) => key,
+            Err(SyncError::Locked) => return Err(self.locked_verdict(&sync, &clear).into()),
+            Err(e) => return Err(e.into()),
+        };
+        let epoch_keys = crypto::derive_subkeys(&key, &clear.bundle_id, sync.epoch)?;
+        let commit = crypto::epoch_commitment(&epoch_keys.rotate, &clear.bundle_id, sync.epoch)?;
+        match clear.epoch.cmp(&sync.epoch) {
+            std::cmp::Ordering::Greater => {
+                let memory = self.lineage_memory(&sync, &clear.bundle_id, &epoch_keys);
+                return Err(self
+                    .judge_newer(
+                        &sync,
+                        folder.as_ref(),
+                        &clear,
+                        &epoch_keys.rotate,
+                        &commit,
+                        &memory,
+                    )
+                    .into());
+            }
+            std::cmp::Ordering::Less => {
+                // Below the floor (R2): never opened; put back what this
+                // device verified.
+                Self::restore_if_lower(paths, folder.as_ref(), &clear);
+                return Err(SyncError::Rollback {
+                    what: "bundle.toml".to_owned(),
+                }
+                .into());
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+        if clear.commit.is_some_and(|found| found != commit) {
+            // Another lineage at this device's epoch (§13.3.7): never
+            // rewritten.
+            let memory = self.lineage_memory(&sync, &clear.bundle_id, &epoch_keys);
+            return Err(lineage::judge_other_lineage(&clear, sync.epoch, &memory).into());
+        }
+        let opened = match Self::open_bundle(folder.as_ref(), &listing, &main_text, &key, &sync) {
+            Ok(opened) => opened,
+            Err(e @ SyncError::BundleTampered) => {
+                Self::restore_if_lower(paths, folder.as_ref(), &clear);
+                return Err(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let OpenedSet {
+            bundle,
+            union: union_roster,
+            clock_conflicts,
+            main_won,
+            rewrite,
+        } = opened;
+        if let Some(entry) = bundle.roster.revoked_entry(&sync.device) {
+            return Err(Self::forgotten(&bundle.roster, entry).into());
+        }
+        self.scan_newer(folder.as_ref(), &listing, &bundle)?;
+        // Never a re-join downward (§13.3.5): a replica sealed under a
+        // newer epoch than the bundle means the folder went back.
+        if state::replica_epoch(paths)?.is_some_and(|epoch| epoch > bundle.header.epoch) {
+            return Err(SyncError::Rollback {
+                what: "bundle.toml".to_owned(),
+            }
+            .into());
+        }
         let expected = Self::expected(&bundle, sync.device);
         let loaded = match state::load_replica(paths, &bundle.keys, &expected) {
             Ok(loaded) => loaded,
@@ -595,18 +1005,38 @@ impl SyncCore {
         }
         // F4: never an older bundle; a diverged one is rewritten below.
         let header = session.bundle.header.clone();
-        let observed = session.replica.high_water.observe_bundle(
-            header.epoch,
-            header.keyset_generation,
-            header.revision,
-            &session.bundle.fingerprint,
-        )?;
-        session
+        let observed = session
             .replica
             .high_water
-            .ratchet_format("bundle.toml", bundle::BUNDLE_VERSION)?;
-        if rewrite || observed == BundleObservation::Diverged {
-            session.roster_rewrite = Some(union_roster);
+            .observe_bundle(
+                header.epoch,
+                header.keyset_generation,
+                header.revision,
+                &session.bundle.fingerprint,
+            )
+            .and_then(|observed| {
+                // Ratchet on the version read (R13): v1 after v2 is a
+                // rollback.
+                session
+                    .replica
+                    .high_water
+                    .ratchet_format("bundle.toml", header.version)
+                    .map(|()| observed)
+            });
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(e) => {
+                Self::restore_if_lower(paths, session.folder.as_ref(), &clear);
+                return Err(e.into());
+            }
+        };
+        // E1: this epoch's commitment, the verified copy and its slot.
+        self.retain_lineage(&mut session, main_won.then_some(main_text.as_str()))?;
+        let mut roster = union_roster;
+        let mut fix = Self::enforce_revoked(&mut session, &mut roster, &clock_conflicts, alerts);
+        fix |= Self::ratchet_policy(&mut session, alerts);
+        if rewrite || fix || observed == BundleObservation::Diverged {
+            session.roster_rewrite = Some(roster);
         }
         let known = session.replica.local.known_keyset_generation;
         if known == 0 {
@@ -621,9 +1051,167 @@ impl SyncCore {
         Ok(session)
     }
 
+    /// E1: keeps `C_E` (`commitment.toml` and the replica's lineage
+    /// memory), `bundle.verified` (the main file, when it won) and its
+    /// passphrase slot in `bundle.history/`.
+    fn retain_lineage(&self, session: &mut Session, main_text: Option<&str>) -> crate::Result<()> {
+        let paths = &self.config.paths;
+        let bundle = &session.bundle;
+        state::save_commitment(
+            paths,
+            &session.sync.bundle_id,
+            bundle.header.epoch,
+            &bundle.commit,
+        )?;
+        session.replica.local.remember_epoch(
+            bundle.header.epoch,
+            &bundle.commit,
+            crypto::KeyBytes::of(&bundle.keys.rotate),
+        );
+        if let Some(text) = main_text {
+            state::save_bundle_copy(paths, state::BundleCopy::Verified, text)?;
+            if let Some(slot) = bundle.slot_id() {
+                state::remember_slot(paths, &slot, text)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Immutability of forgotten entries (§13.4.6): an entry observed once
+    /// keeps its `revoked_clock` and is never dropped; a change is an
+    /// alert naming the device and the observed value is put back.
+    /// Returns whether `roster` was corrected.
+    fn enforce_revoked(
+        session: &mut Session,
+        roster: &mut Roster,
+        clock_conflicts: &[DeviceId],
+        alerts: &mut Vec<Alert>,
+    ) -> bool {
+        let mut fixed = false;
+        let mut tampered: BTreeSet<DeviceId> = clock_conflicts.iter().copied().collect();
+        let seen = session.replica.local.revoked_seen.clone();
+        for (device, clock) in &seen {
+            match roster.revoked.iter_mut().find(|entry| entry.id == *device) {
+                Some(entry) if entry.revoked_clock == *clock => {}
+                Some(entry) => {
+                    entry.revoked_clock = *clock;
+                    tampered.insert(*device);
+                    fixed = true;
+                }
+                None => {
+                    roster.devices.retain(|d| d.id != *device);
+                    roster.revoked.push(bundle::RevokedDevice {
+                        id: *device,
+                        revoked_at: 0,
+                        revoked_by: *device,
+                        revoked_clock: *clock,
+                    });
+                    tampered.insert(*device);
+                    fixed = true;
+                }
+            }
+        }
+        roster.revoked.sort_by_key(|entry| entry.id);
+        for entry in &roster.revoked {
+            session
+                .replica
+                .local
+                .revoked_seen
+                .entry(entry.id)
+                .or_insert(entry.revoked_clock);
+        }
+        for device in tampered {
+            alerts.push(Alert {
+                kind: AlertKind::BundleTampered,
+                device: Some(Self::label(&session.bundle.roster, &device)),
+                error: SyncError::BundleTampered,
+            });
+        }
+        fixed
+    }
+
+    /// Ratchet of the policy generation (R8): an older one than seen is
+    /// tampering; the bundle is then treated as "passwords off" (closed in
+    /// doubt). Returns `false`: nothing to rewrite (a device holding the
+    /// key wrote it; a rotation fixes it).
+    fn ratchet_policy(session: &mut Session, alerts: &mut Vec<Alert>) -> bool {
+        let seen = session.replica.local.policy_generation;
+        let found = session.bundle.roster.policy.generation;
+        if found < seen {
+            alerts.push(Alert {
+                kind: AlertKind::BundleTampered,
+                device: None,
+                error: SyncError::BundleTampered,
+            });
+            session.bundle.roster.policy.include_passwords = false;
+        } else {
+            session.replica.local.policy_generation = found;
+        }
+        false
+    }
+
     /// Rewrites `bundle.toml` with `roster` (revision + 1, data key only),
-    /// adding or renaming this device. A failure is retried next pass.
-    fn write_roster(session: &mut Session, mut roster: Roster) {
+    /// adding or renaming this device and moving its former ids to the
+    /// forgotten list (a re-join with provenance, §13.3.5). A roster that
+    /// needs v2 fields upgrades a v1 bundle ([`bundle::to_v2`]); otherwise
+    /// the version read is kept. A failure is retried next pass.
+    fn write_roster(&self, session: &mut Session, roster: Roster) {
+        let roster = Self::with_self(session, roster);
+        let needs_v2 = !roster.revoked.is_empty()
+            || roster.policy != bundle::Policy::default()
+            || roster.devices.iter().any(|d| d.revoked);
+        let rendered = if needs_v2 {
+            bundle::to_v2(&session.bundle, roster)
+        } else {
+            bundle::with_roster(&session.bundle, roster)
+        };
+        let Ok((text, opened)) = rendered else {
+            return;
+        };
+        if session
+            .folder
+            .write(&FolderFile::Bundle, text.as_bytes())
+            .is_err()
+        {
+            return;
+        }
+        let header = opened.header.clone();
+        let observed = session
+            .replica
+            .high_water
+            .observe_bundle(
+                header.epoch,
+                header.keyset_generation,
+                header.revision,
+                &opened.fingerprint,
+            )
+            .and_then(|_| {
+                session
+                    .replica
+                    .high_water
+                    .ratchet_format("bundle.toml", header.version)
+            });
+        if observed.is_ok() {
+            let _ = state::save_bundle_copy(&self.config.paths, state::BundleCopy::Verified, &text);
+            if let Some(slot) = opened.slot_id() {
+                let _ = state::remember_slot(&self.config.paths, &slot, &text);
+            }
+            for entry in &opened.roster.revoked {
+                session
+                    .replica
+                    .local
+                    .revoked_seen
+                    .entry(entry.id)
+                    .or_insert(entry.revoked_clock);
+            }
+            session.replica.local.retire.clear();
+            session.bundle = opened;
+        }
+    }
+
+    /// `roster` with this device active under its current name and its
+    /// former ids forgotten with their last clock.
+    fn with_self(session: &Session, mut roster: Roster) -> Roster {
         let me = session.sync.device;
         let name = session.replica.device_name.clone();
         match roster.devices.iter_mut().find(|d| d.id == me) {
@@ -635,45 +1223,41 @@ impl SyncCore {
                 revoked: false,
             }),
         }
+        for (former, clock) in &session.replica.local.retire {
+            roster.devices.retain(|d| d.id != *former);
+            if roster.revoked_entry(former).is_none() {
+                roster.revoked.push(bundle::RevokedDevice {
+                    id: *former,
+                    revoked_at: now(),
+                    revoked_by: *former,
+                    revoked_clock: *clock,
+                });
+            }
+        }
         roster.devices.sort_by_key(|d| d.id);
-        let Ok((text, opened)) = bundle::with_roster(&session.bundle, roster) else {
-            return;
-        };
-        if session
-            .folder
-            .write(&FolderFile::Bundle, text.as_bytes())
-            .is_err()
-        {
-            return;
-        }
-        let header = opened.header.clone();
-        if session
-            .replica
-            .high_water
-            .observe_bundle(
-                header.epoch,
-                header.keyset_generation,
-                header.revision,
-                &opened.fingerprint,
-            )
-            .is_ok()
-        {
-            session.bundle = opened;
-        }
+        roster.revoked.sort_by_key(|d| d.id);
+        roster
     }
 
-    /// Makes sure this device is in the roster under its current name.
-    fn ensure_in_roster(session: &mut Session) {
+    /// Makes sure this device is in the roster under its current name (and
+    /// its former ids are forgotten).
+    fn ensure_in_roster(&self, session: &mut Session) {
         let me = session.sync.device;
-        let ok = session
+        let present = session
             .bundle
             .roster
             .devices
             .iter()
             .any(|d| d.id == me && d.name == session.replica.device_name);
-        if !ok {
+        let retired = session
+            .replica
+            .local
+            .retire
+            .keys()
+            .all(|former| session.bundle.roster.revoked_entry(former).is_some());
+        if !present || !retired {
             let roster = session.bundle.roster.clone();
-            Self::write_roster(session, roster);
+            self.write_roster(session, roster);
         }
     }
 
@@ -686,6 +1270,17 @@ impl SyncCore {
             .iter()
             .filter(|d| !d.revoked)
             .map(|d| d.id)
+            .collect()
+    }
+
+    /// Forgotten devices and their exact bound (§13.4.2).
+    fn revoked_clocks(session: &Session) -> BTreeMap<DeviceId, u64> {
+        session
+            .bundle
+            .roster
+            .revoked
+            .iter()
+            .map(|entry| (entry.id, entry.revoked_clock))
             .collect()
     }
 
@@ -705,9 +1300,10 @@ impl SyncCore {
         let former = session.sync.device;
         let label = opened.content.device_name.label(&former);
         let roster = Self::active_roster(session);
+        let revoked = Self::revoked_clocks(session);
         let verified = session.replica.high_water.verified_clocks();
         let context = opened.content.state.context();
-        match guard::check_context_claims(&former, context, &roster, &verified) {
+        match guard::check_context_claims(&former, context, &roster, &revoked, &verified) {
             ClaimCheck::Accept => {
                 if let Err(error) = session.replica.state.merge(&opened.content.state, &former) {
                     alerts.push(Alert {
@@ -814,7 +1410,7 @@ impl SyncCore {
         session.replica_gen = 0;
         state::save_config(&self.config.paths, &session.sync)?;
         self.save_replica(session)?;
-        Self::ensure_in_roster(session);
+        self.ensure_in_roster(session);
         Ok(())
     }
 
@@ -845,11 +1441,14 @@ impl SyncCore {
     }
 
     /// The best (highest valid sequence) snapshot of `device` among its
-    /// candidates. Unauthenticated copies (torn, uploading) are skipped.
+    /// candidates. Unauthenticated copies (torn, uploading) are skipped; a
+    /// copy whose clear header announces an older epoch is never merged
+    /// and marks the device "needs the new keys" (§13.3.6).
     fn best_snapshot(
         session: &mut Session,
         device: DeviceId,
         partial: &mut bool,
+        stale_keys: &mut BTreeSet<DeviceId>,
         issues: &mut Vec<Issue>,
     ) -> Option<(FolderFile, Opened<SnapshotContent>)> {
         let candidates = session
@@ -883,6 +1482,16 @@ impl SyncCore {
                     continue;
                 }
             };
+            if container::peek(container::ContainerKind::Snapshot, &bytes)
+                .is_some_and(|envelope| envelope.epoch < session.bundle.header.epoch)
+            {
+                // This device's own older file is only behind (published
+                // again under the new keys).
+                if device != session.sync.device {
+                    stale_keys.insert(device);
+                }
+                continue;
+            }
             match container::open_snapshot(&session.bundle.keys, &expected, &bytes) {
                 Ok(opened) => {
                     if best
@@ -926,7 +1535,10 @@ impl SyncCore {
     fn pass_with(&mut self, wait: bool) -> crate::Result<SyncStatus> {
         let paths = self.config.paths.clone();
         if !state::is_set_up(&paths) {
-            self.data_key = None;
+            self.keys.clear();
+            // Left behind by a disable (possibly by 0.6): meaningless now
+            // (RR6).
+            let _ = state::remove_transition_files(&paths);
             self.set_status(SyncStatus::Disabled);
             return Ok(SyncStatus::Disabled);
         }
@@ -963,9 +1575,11 @@ impl SyncCore {
         let at = now();
         let me = session.sync.device;
 
+        alerts.append(&mut self.carry_alerts);
         // ── This device's own file (F5), before any write ──
         let mut partial = false;
-        let own = Self::best_snapshot(&mut session, me, &mut partial, &mut issues);
+        let mut stale_keys: BTreeSet<DeviceId> = BTreeSet::new();
+        let own = Self::best_snapshot(&mut session, me, &mut partial, &mut stale_keys, &mut issues);
         let local_fingerprint = session
             .replica
             .local
@@ -1018,7 +1632,7 @@ impl SyncCore {
         }
         // Only now (own file checked, §5.1) may `bundle.toml` be written.
         if let Some(union_roster) = session.roster_rewrite.take() {
-            Self::write_roster(&mut session, union_roster);
+            self.write_roster(&mut session, union_roster);
         }
         let me = session.sync.device;
         // Our own provider copies, verified and older: removed (only ever
@@ -1040,27 +1654,39 @@ impl SyncCore {
                 }
             }
         }
-        Self::ensure_in_roster(&mut session);
+        self.ensure_in_roster(&mut session);
 
         // ── Every other device, observed before any context is judged ──
         let roster = Self::active_roster(&session);
+        let revoked = Self::revoked_clocks(&session);
+        // Files of forgotten devices: ignored and removed (§13.4.3).
+        Self::remove_forgotten_files(&session, &revoked);
         let others: Vec<DeviceId> = session
             .listing
             .devices
             .keys()
             .copied()
-            .filter(|d| *d != me)
+            .filter(|d| *d != me && !revoked.contains_key(d))
             .collect();
         let mut received: Vec<(DeviceId, Opened<SnapshotContent>)> = Vec::new();
         let mut present: BTreeMap<DeviceId, u64> = BTreeMap::new();
         let mut seen_vectors: Vec<BTreeMap<DeviceId, u64>> = Vec::new();
         for device in others {
-            let Some((_, opened)) =
-                Self::best_snapshot(&mut session, device, &mut partial, &mut issues)
-            else {
+            let Some((_, opened)) = Self::best_snapshot(
+                &mut session,
+                device,
+                &mut partial,
+                &mut stale_keys,
+                &mut issues,
+            ) else {
                 continue;
             };
             present.insert(device, opened.binding.seq);
+            session
+                .replica
+                .local
+                .peer_versions
+                .insert(device, opened.content.app_version.clone());
             seen_vectors.push(opened.content.seen.clone());
             let label = opened.content.device_name.label(&device);
             match session.replica.high_water.observe_snapshot(
@@ -1099,7 +1725,9 @@ impl SyncCore {
         // Devices whose newer snapshot others merged but which is not in
         // the folder (yet): withheld or still uploading.
         for withheld in guard::withheld(&present, seen_vectors.iter()) {
-            if withheld.device == me {
+            // A device still on older keys is "needs the new keys", not
+            // withheld: its file is there, under the previous epoch.
+            if withheld.device == me || stale_keys.contains(&withheld.device) {
                 continue;
             }
             let label = Self::label(&session.bundle.roster, &withheld.device);
@@ -1127,9 +1755,21 @@ impl SyncCore {
                     error: e,
                 });
             }
-            match guard::check_context_claims(&device, context, &roster, &verified) {
+            match guard::check_context_claims(&device, context, &roster, &revoked, &verified) {
                 ClaimCheck::Accept => accepted.push((device, opened)),
-                ClaimCheck::Defer(_) => {
+                ClaimCheck::Defer(claims) => {
+                    // Writes of a forgotten device beyond its exact bound,
+                    // relayed by `device` (§13.4.2).
+                    for claim in claims.iter().filter(|claim| claim.revoked) {
+                        alerts.push(Alert {
+                            kind: AlertKind::RevokedWrites,
+                            device: Some(label.clone()),
+                            error: SyncError::RevokedWrites {
+                                device: label.clone(),
+                                forgotten: Self::label(&session.bundle.roster, &claim.device),
+                            },
+                        });
+                    }
                     issues.push(Issue {
                         key: format!("device:{device}"),
                         record: None,
@@ -1145,7 +1785,8 @@ impl SyncCore {
         }
 
         // ── Local changes (projection), then the merge ──
-        let view = project::observe(&self.config.paths, &self.snippets);
+        let mut view = project::observe(&self.config.paths, &self.snippets);
+        let held = Self::hold_values(&mut session, &mut view);
         for problem in &view.problems {
             issues.push(Issue {
                 key: "kind:hosts".to_owned(),
@@ -1193,9 +1834,18 @@ impl SyncCore {
                 }
             }
         }
+        let passwords_on = session.bundle.roster.policy.include_passwords;
+        if !passwords_on {
+            session.replica.state.drop_kind(project::KIND_SECRET);
+        }
         for (device, opened) in accepted {
             let label = opened.content.device_name.label(&device);
-            match session.replica.state.merge(&opened.content.state, &device) {
+            match merge_with_policy(
+                &mut session.replica.state,
+                &opened.content.state,
+                &device,
+                passwords_on,
+            ) {
                 Ok(report) => {
                     session
                         .replica
@@ -1312,8 +1962,30 @@ impl SyncCore {
                 });
         }
 
-        issues.extend(outcome.issues.iter().cloned());
+        // Held values (R3, RR4): their own issue replaces "unsynced".
+        issues.extend(
+            outcome
+                .issues
+                .iter()
+                .filter(|issue| issue.record.as_ref().is_none_or(|key| !held.contains(key)))
+                .cloned(),
+        );
+        issues.extend(Self::held_issues(&session));
+        for device in &stale_keys {
+            let label = Self::label(&session.bundle.roster, device);
+            issues.push(Issue {
+                key: format!("device:{device}"),
+                record: None,
+                error: SyncError::NeedsNewKeys {
+                    device: label.clone(),
+                },
+                warning: true,
+                skippable: false,
+            });
+            waiting.get_or_insert((WaitReason::NeedsNewKeys, Some(label)));
+        }
         self.save_replica(&mut session)?;
+        self.collect_old_keys(&session.sync);
 
         // ── Publication ──
         let state_hash = state::hex(&crypto::sha256(
@@ -1375,6 +2047,15 @@ impl SyncCore {
         }
         let report = Self::build_report(&session, issues, alerts, &outcome.pending, waiting, at);
         let status = Self::status_of(&report, at);
+        self.peer_versions = session.replica.local.peer_versions.clone();
+        self.withheld = guard::withheld(&present, seen_vectors.iter())
+            .into_iter()
+            .map(|w| w.device)
+            .collect();
+        self.bundle_version = session.bundle.header.version;
+        let held_before: BTreeSet<String> =
+            self.report.held.iter().map(|h| h.key.clone()).collect();
+        let held_now: BTreeSet<String> = report.held.iter().map(|h| h.key.clone()).collect();
         let count = report.conflicts.len();
         let pending = PendingSet {
             hosts: report
@@ -1395,10 +2076,11 @@ impl SyncCore {
             self.conflicts_count = count;
             self.emit(EngineEvent::SyncConflicts { count });
         }
-        let announced = match &self.pending_seen {
-            Some(seen) => *seen != pending,
-            None => pending != PendingSet::default(),
-        };
+        let announced = held_before != held_now
+            || match &self.pending_seen {
+                Some(seen) => *seen != pending,
+                None => pending != PendingSet::default(),
+            };
         self.pending_seen = Some(pending);
         if announced {
             self.emit(EngineEvent::SyncPendingChanged);
@@ -1562,6 +2244,20 @@ impl SyncCore {
                 }
             })
             .collect();
+        let held = session
+            .replica
+            .local
+            .held_values
+            .iter()
+            .filter_map(|(wire, value)| {
+                let key = wire.decode()?;
+                Some(api::RevokedValueItem {
+                    key: conflict_id(&key),
+                    subject: subject(&key),
+                    device: value.label.clone(),
+                })
+            })
+            .collect();
         Report {
             issues,
             alerts,
@@ -1569,6 +2265,7 @@ impl SyncCore {
             conflicts,
             devices,
             waiting,
+            held,
         }
     }
 
@@ -1726,7 +2423,8 @@ impl SyncCore {
             self.forget_orphan_key(&sync, remember_key);
             return Err(e);
         }
-        self.data_key = Some(DataKey::from_bytes(opened.data_key.bytes())?);
+        self.keys.clear();
+        self.keys.put(&sync.bundle_id, sync.epoch, &opened.data_key);
         self.pass()
     }
 
@@ -1801,10 +2499,12 @@ impl SyncCore {
         }
         let io = self.tuning.opener.open(&root);
         let listing = io.list()?;
+        Self::refuse_put_back(io.as_ref(), &listing, opened.header.epoch)?;
         let mut merged = SyncState::default();
         let mut devices = Vec::new();
         let mut budget = PASS_BYTE_BUDGET;
-        for (device, candidates) in &listing.devices {
+        let joinable = |(device, _): &(&DeviceId, _)| opened.roster.revoked_entry(device).is_none();
+        for (device, candidates) in listing.devices.iter().filter(joinable) {
             let expected = Self::expected(opened, *device);
             let mut best: Option<Opened<SnapshotContent>> = None;
             for candidate in candidates {
@@ -1895,6 +2595,26 @@ impl SyncCore {
         Ok(preview)
     }
 
+    /// R2 (§13.3.6): a device file newer than `bundle.toml` means the
+    /// bundle was put back: a new device never joins it.
+    fn refuse_put_back(io: &dyn FolderIo, listing: &Listing, epoch: u32) -> Result<(), SyncError> {
+        for candidates in listing.devices.values() {
+            for candidate in candidates {
+                let Ok(Some(bytes)) = io.read(&candidate.file, MAX_CONTAINER_FILE_BYTES) else {
+                    continue;
+                };
+                if container::peek(container::ContainerKind::Snapshot, &bytes)
+                    .is_some_and(|envelope| envelope.epoch > epoch)
+                {
+                    return Err(SyncError::Rollback {
+                        what: "bundle.toml".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Joins (single-use token): keychain, local state, first pass, then
     /// the bulk choice as explicit resolutions. Received hosts stay
     /// pending whatever the choice (F1).
@@ -1941,7 +2661,8 @@ impl SyncCore {
             self.forget_orphan_key(&sync, join.remember_key);
             return Err(e);
         }
-        self.data_key = Some(join.data_key);
+        self.keys.clear();
+        self.keys.put(&sync.bundle_id, sync.epoch, &join.data_key);
         let status = self.pass()?;
         if bulk == JoinBulkChoice::ReviewEach {
             return Ok(status);
@@ -1968,22 +2689,6 @@ impl SyncCore {
         self.pass()
     }
 
-    /// Unlock with a data key derived by the caller.
-    pub(crate) fn finish_unlock(
-        &mut self,
-        sync: &SyncConfig,
-        opened: &OpenedBundle,
-    ) -> crate::Result<SyncStatus> {
-        if opened.header.bundle_id != sync.bundle_bytes()? {
-            return Err(SyncError::BundleTampered.into());
-        }
-        if sync.remember_key {
-            self.remember_key(sync, &opened.data_key)?;
-        }
-        self.data_key = Some(DataKey::from_bytes(opened.data_key.bytes())?);
-        self.pass()
-    }
-
     // ── Changes of the state outside a pass ─────────────────────────────
 
     /// Runs `edit` on a loaded session (under `sync.lock`), saves the
@@ -1992,12 +2697,21 @@ impl SyncCore {
         &mut self,
         edit: impl FnOnce(&mut Session) -> crate::Result<T>,
     ) -> crate::Result<T> {
+        self.with_session_core(|_, session| edit(session))
+    }
+
+    /// [`Self::with_session`] whose edit also sees the core (roster
+    /// writes).
+    fn with_session_core<T>(
+        &mut self,
+        edit: impl FnOnce(&Self, &mut Session) -> crate::Result<T>,
+    ) -> crate::Result<T> {
         let out = {
             crate::store::create_private_dir_all(&self.config.paths.sync_dir())?;
             let _lock = state::lock(&self.config.paths)?;
             let mut alerts = Vec::new();
             let mut session = self.open_session(&mut alerts)?;
-            let out = edit(&mut session)?;
+            let out = edit(self, &mut session)?;
             self.save_replica(&mut session)?;
             state::save_config(&self.config.paths, &session.sync)?;
             out
@@ -2165,9 +2879,9 @@ impl SyncCore {
     }
 
     pub(crate) fn rename_device(&mut self, name: DeviceName) -> crate::Result<SyncStatus> {
-        self.with_session(|session| {
+        self.with_session_core(|core, session| {
             session.replica.device_name = name;
-            Self::ensure_in_roster(session);
+            core.ensure_in_roster(session);
             Ok(())
         })?;
         Ok(self.status())
@@ -2215,29 +2929,26 @@ impl SyncCore {
         })?;
         Ok(self.status())
     }
+}
 
-    /// Disables sync on this device; local data is kept.
-    pub(crate) fn disable(
-        &mut self,
-        forget_key: bool,
-        remove_my_file: bool,
-    ) -> crate::Result<SyncStatus> {
-        if let Some(sync) = state::load_config(&self.config.paths)? {
-            let _lock = state::lock(&self.config.paths)?;
-            if remove_my_file && let Ok(io) = self.open_folder(&sync) {
-                let _ = io.remove(&FolderFile::primary(&sync.device));
-            }
-            if forget_key {
-                self.config.secrets.delete(&data_key_account(&sync))?;
-            }
-            state::remove_local_state(&self.config.paths)?;
-        }
-        self.data_key = None;
-        self.joins.clear();
-        self.report = Report::default();
-        self.set_status(SyncStatus::Disabled);
-        Ok(SyncStatus::Disabled)
+/// Merges `incoming` (the state of `source`) under the bundle's password
+/// policy (§13.5.3, R8, RR3). Off: `secret` registers are dropped on both
+/// sides; every device purges, so none is ever "covered and absent" on one
+/// side only. On: they merge and are relayed **opaque**, whether or not
+/// this device consents (S2b): never decrypted, projected nor applied
+/// here, so a non-consenting device's context never makes the consenting
+/// ones drop a shared password.
+pub(crate) fn merge_with_policy(
+    state: &mut SyncState,
+    incoming: &SyncState,
+    source: &DeviceId,
+    passwords_on: bool,
+) -> Result<super::model::MergeReport, SyncError> {
+    if passwords_on {
+        return state.merge(incoming, source);
     }
+    state.drop_kind(project::KIND_SECRET);
+    state.merge(&incoming.without_kind(project::KIND_SECRET), source)
 }
 
 /// `true` when the replica could not be read (an alert was pushed).
@@ -2295,4 +3006,142 @@ fn settle_applied(
         }
     }
     applied
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::super::clock::{DeviceId, LocalClock};
+    use super::super::model::{RecordKey, RecordValue, SealedValue, SyncState};
+    use super::merge_with_policy;
+
+    fn device(n: u8) -> DeviceId {
+        DeviceId::from_bytes([n; 16])
+    }
+
+    fn sealed(n: u8) -> RecordValue {
+        RecordValue::Sealed(SealedValue {
+            nonce: format!("nonce-{n}"),
+            ciphertext: format!("ct-{n}"),
+            compare: format!("mac-{n}"),
+        })
+    }
+
+    fn secret_key(account: u8) -> RecordKey {
+        RecordKey::Secret {
+            account: format!("password:root@host{account}:22#SHA256:x"),
+        }
+    }
+
+    struct Node {
+        id: DeviceId,
+        clock: LocalClock,
+        state: SyncState,
+    }
+
+    impl Node {
+        fn new(n: u8) -> Self {
+            Self {
+                id: device(n),
+                clock: LocalClock::new(device(n), 0),
+                state: SyncState::default(),
+            }
+        }
+
+        /// Merges `other` in; returns the values dropped without successor.
+        fn pull(&mut self, other: &Node, passwords_on: bool) -> usize {
+            merge_with_policy(&mut self.state, &other.state, &other.id, passwords_on)
+                .expect("merge")
+                .dropped_live_without_successor
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        /// RR3: policy on, B never consents (it never writes a password,
+        /// never applies one) but merges and relays the registers opaque.
+        /// A and C only ever talk through B: every password they wrote
+        /// survives on both, and no merge drops a value.
+        #[test]
+        fn non_consenting_device_relays_secrets_and_drops_nothing(
+            writes in proptest::collection::vec((any::<bool>(), 0u8..4, 0u8..8), 1..24)
+        ) {
+            let mut a = Node::new(1);
+            let mut b = Node::new(2);
+            let mut c = Node::new(3);
+            let mut dropped = 0;
+            let mut last: std::collections::BTreeMap<u8, RecordValue> = std::collections::BTreeMap::new();
+            for (by_a, account, value) in writes {
+                let writer = if by_a { &mut a } else { &mut c };
+                let key = secret_key(account);
+                writer
+                    .state
+                    .write_unvalidated(&mut writer.clock, &key, &sealed(value), 0)
+                    .expect("write");
+                last.insert(account, sealed(value));
+                // Through B only, in both directions.
+                if by_a {
+                    dropped += b.pull(&a, true);
+                    dropped += c.pull(&b, true);
+                    dropped += b.pull(&c, true);
+                    dropped += a.pull(&b, true);
+                } else {
+                    dropped += b.pull(&c, true);
+                    dropped += a.pull(&b, true);
+                    dropped += b.pull(&a, true);
+                    dropped += c.pull(&b, true);
+                }
+            }
+            prop_assert_eq!(dropped, 0);
+            for (account, value) in &last {
+                let key = secret_key(*account);
+                prop_assert_eq!(a.state.value(&key), Some(value.clone()));
+                prop_assert_eq!(c.state.value(&key), Some(value.clone()));
+                prop_assert_eq!(b.state.value(&key), Some(value.clone()), "relayed");
+            }
+        }
+    }
+
+    /// R8: while the policy is off, every device drops the `secret`
+    /// registers on both sides of every merge; nothing else changes and no
+    /// value is dropped.
+    #[test]
+    fn disabled_policy_filters_secret_registers_everywhere() {
+        let mut a = Node::new(1);
+        let mut b = Node::new(2);
+        let host = RecordKey::Host {
+            alias: "web".into(),
+        };
+        let value = RecordValue::Host(super::super::model::HostValue {
+            hostname: "10.0.0.1".into(),
+            user: None,
+            port: None,
+            identity_file: None,
+            proxy_jump: None,
+            renamed_from: None,
+        });
+        a.state.write(&mut a.clock, &host, &value, 0).expect("host");
+        a.state
+            .write_unvalidated(&mut a.clock, &secret_key(1), &sealed(1), 0)
+            .expect("secret");
+        b.state
+            .write_unvalidated(&mut b.clock, &secret_key(2), &sealed(2), 0)
+            .expect("secret");
+        assert_eq!(b.pull(&a, false), 0);
+        assert_eq!(a.pull(&b, false), 0);
+        for node in [&a, &b] {
+            assert_eq!(node.state.value(&host), Some(value.clone()));
+            assert!(node.state.view(&secret_key(1)).is_none());
+            assert!(node.state.view(&secret_key(2)).is_none());
+        }
+        // Policy on again: only new writes travel (nothing was resurrected).
+        a.state
+            .write_unvalidated(&mut a.clock, &secret_key(3), &sealed(3), 0)
+            .expect("secret");
+        assert_eq!(b.pull(&a, true), 0);
+        assert_eq!(b.state.value(&secret_key(3)), Some(sealed(3)));
+        assert!(b.state.view(&secret_key(1)).is_none());
+    }
 }

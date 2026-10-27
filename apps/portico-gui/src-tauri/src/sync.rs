@@ -566,6 +566,8 @@ pub(crate) async fn sync_disable(
         .sync_disable(DisableOptions {
             forget_key,
             remove_my_file,
+            // "Leave the device list" comes with the S2 screens (S2c-1).
+            leave_roster: false,
         })
         .await
         .map_err(summary)?;

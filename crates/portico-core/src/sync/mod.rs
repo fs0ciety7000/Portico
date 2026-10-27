@@ -16,7 +16,12 @@
 //!   pass and the user operations ([`runner`]), the public types ([`api`]);
 //!   the `Engine::sync_*` methods and the background task live in
 //!   `engine::sync_api`.
-//! - S1c: the UIs. S2/S3: passwords, key rotation, device revocation.
+//! - S1c: the UIs.
+//! - **S2a**: bundle v2 (epoch commitment, chained lineage, roster with
+//!   forgotten devices and the password policy), key rotation and
+//!   adoption going forward only, forgetting a device, the local epoch
+//!   floor, `IndexedSecretStore` (`docs/SYNC.md` §13). S2b/S3: passwords,
+//!   device slots.
 //!
 //! No network call, ever: the folder is only read and written locally.
 //!
@@ -29,7 +34,8 @@
 //! | [`container`] | Sealed device snapshots (`devices/<id>.snap`) and the sealed local replica |
 //! | [`clock`] | Device ids, dots, version vectors, multi-value registers, the local dot issuer |
 //! | [`model`] | Record keys and values, the synced state (generic keyed registers of canonical JSON) and its transactional merge, typed projection, conflicts, tombstone GC |
-//! | [`guard`] | Rollback, fork, downgrade and restored-state detection (high-water marks) |
+//! | [`guard`] | Rollback, fork, downgrade and restored-state detection (high-water marks), exact bounds of forgotten devices |
+//! | [`lineage`] | Judging a key lineage: rotation elsewhere, fork, forgery (S2a) |
 //! | [`passphrase`] | Diceware generator (EFF large wordlist) and the enforced strength minimum |
 //! | [`folder`] | `FolderIo`: listing, capped reads, atomic writes in `portico-sync/`, safe root (F9), limits (F15) |
 //! | [`state`] | `data_dir/sync/`: `sync.toml`, sealed replica, snippet confirmations, `sync.lock` |
@@ -60,6 +66,7 @@ pub(crate) mod container;
 pub(crate) mod crypto;
 pub(crate) mod folder;
 pub(crate) mod guard;
+pub(crate) mod lineage;
 pub(crate) mod model;
 pub mod passphrase;
 pub(crate) mod project;
@@ -314,6 +321,76 @@ pub enum SyncError {
     /// A device file not readable yet (uploading, cloud placeholder).
     #[error("the sync file of device {device} is not available yet")]
     PendingFile { device: String },
+
+    // ── S2a: rotation, forgetting a device (`docs/SYNC.md` §13) ─────────
+    /// The new passphrase opens a key slot this device already verified
+    /// (the current one or one of its history, RR1): a rotation must
+    /// change it, and an adoption under it did not come from the user.
+    #[error("this sync passphrase opens older sync keys")]
+    PassphraseReused,
+
+    /// Two devices rotated the keys from the same epoch (§13.3.7).
+    #[error("two devices changed the sync keys at the same time")]
+    RotationConflict,
+
+    /// The other lineage of a rotation conflict still lists a device this
+    /// device forgot (E2): adopting it would bring that device back.
+    #[error("the other device's sync keys still include forgotten device {device}")]
+    ConflictKeepsForgotten { device: String },
+
+    /// This device is in the roster's forgotten list (§13.4.4).
+    #[error("this device was removed from the sync by {by}")]
+    DeviceForgotten { by: String, at: i64 },
+
+    #[error("this device cannot forget itself")]
+    ForgetSelf,
+
+    #[error("sync device {device} is not in the device list")]
+    DeviceUnknown { device: String },
+
+    /// The roster's forgotten list is full (it is never pruned, R4).
+    #[error("the sync bundle already lists {max} forgotten devices")]
+    RosterFull { max: usize },
+
+    /// A snapshot carries changes of a forgotten device beyond its exact
+    /// bound (§13.4.2): not merged.
+    #[error("sync device {device} relays changes of forgotten device {forgotten}")]
+    RevokedWrites { device: String, forgotten: String },
+
+    /// A local value written by a forgotten device (or of unknown origin
+    /// after a re-join, RR4) waits for the user's decision.
+    #[error("a synced {kind} entry here was written by {device}: keep it or take the synced value")]
+    RevokedValue { kind: &'static str, device: String },
+
+    /// Devices whose last verified snapshot announces Portico < 0.7: they
+    /// stop syncing at the first S2 operation (Q5).
+    #[error("{count} sync devices run a Portico older than 0.7")]
+    PeersOutdated { count: usize },
+
+    #[error("this sync key entry is the key in use")]
+    KeyEntryCurrent,
+
+    #[error("this keychain entry is not an old sync key")]
+    KeyEntryInvalid,
+
+    /// The new keys cannot be checked against this device's lineage: its
+    /// local record of the current epoch is lost.
+    #[error("this device cannot check the new sync keys")]
+    LineageUnknown,
+
+    /// A key rotation (or adoption) is written locally and waits for the
+    /// folder (§13.3.4): it only ever goes forward.
+    #[error("a change of the sync keys waits for the sync folder")]
+    RotationPending,
+
+    /// A device file announces keys newer than this device's (§13.3.5).
+    #[error("the sync file of device {device} announces newer keys")]
+    NewerEpochFile { device: String },
+
+    /// An active device still publishes under older keys: its file is
+    /// never merged until it types the new passphrase (§13.3.6).
+    #[error("sync device {device} still uses the previous sync keys")]
+    NeedsNewKeys { device: String },
 }
 
 impl SyncError {
@@ -345,9 +422,9 @@ impl SyncError {
                 Some("Another device runs a newer Portico: update Portico on this device."),
             ),
             Self::FormatDowngrade { .. } => (
-                "sync_version",
+                "sync_rollback",
                 Some(
-                    "An older Portico file replaced a newer one in the sync folder: check the folder's history and your devices.",
+                    "A sync file was put back to an earlier version: open Portico on an up-to-date device.",
                 ),
             ),
             Self::KdfOutOfBounds { .. } => (
@@ -375,7 +452,7 @@ impl SyncError {
             Self::Rollback { .. } => (
                 "sync_rollback",
                 Some(
-                    "An older copy of a sync file was put back (restore, provider history, or an attacker). It was ignored.",
+                    "A sync file was put back to an earlier version (restore, provider history, or an attacker). It was ignored: open Portico on an up-to-date device.",
                 ),
             ),
             Self::Fork { .. } => (
@@ -542,7 +619,9 @@ impl SyncError {
             ),
             Self::KeysRotated => (
                 "sync_keys_rotated",
-                Some("Update Portico, then enter the new sync passphrase."),
+                Some(
+                    "Type the new passphrase chosen on the other device. If you did not change the keys, type nothing.",
+                ),
             ),
             Self::DivergentDots { .. } => (
                 "sync_divergent",
@@ -566,6 +645,85 @@ impl SyncError {
                 "sync_pending",
                 Some(
                     "The file is still uploading or only a placeholder (iCloud: “Keep Downloaded”, OneDrive: “Always keep on this device”).",
+                ),
+            ),
+            Self::PassphraseReused => (
+                "sync_passphrase_reused",
+                Some(
+                    "This passphrase opens older keys: choose another one (rotation), or type nothing if you did not change the keys (adoption).",
+                ),
+            ),
+            Self::RotationConflict => (
+                "sync_rotation_conflict",
+                Some(
+                    "Two devices changed the keys at the same time: use the other device's keys or keep this device's.",
+                ),
+            ),
+            Self::ConflictKeepsForgotten { .. } => (
+                "sync_rotation_conflict",
+                Some(
+                    "The other device's keys still include a device you removed: keep this device's keys instead.",
+                ),
+            ),
+            Self::DeviceForgotten { .. } => (
+                "sync_device_forgotten",
+                Some("This device was removed: turn sync off, or join again as a new device."),
+            ),
+            Self::ForgetSelf => (
+                "sync_forget_self",
+                Some("To remove this device, use Turn sync off."),
+            ),
+            Self::DeviceUnknown { .. } => {
+                ("sync_device_unknown", Some("Reload the list of devices."))
+            }
+            Self::RosterFull { .. } => (
+                "sync_roster_full",
+                Some("Too many removed devices: create a new sync bundle."),
+            ),
+            Self::RevokedWrites { .. } => (
+                "sync_revoked_writes",
+                Some(
+                    "That device relays changes of a removed device: type the new passphrase on that device.",
+                ),
+            ),
+            Self::RevokedValue { .. } => (
+                "sync_revoked_value",
+                Some(
+                    "Value written by a removed device (or of unknown origin): keep it, or take the synced value.",
+                ),
+            ),
+            Self::PeersOutdated { .. } => (
+                "sync_peers_outdated",
+                Some("Update Portico on these devices (0.7 or later)."),
+            ),
+            Self::KeyEntryCurrent => (
+                "sync_key_entry_current",
+                Some("This is the key in use: use Turn sync off."),
+            ),
+            Self::KeyEntryInvalid => (
+                "sync_key_entry_invalid",
+                Some("Only old sync keys can be removed here."),
+            ),
+            Self::LineageUnknown => (
+                "sync_lineage_unknown",
+                Some(
+                    "This device lost its record of the current keys: turn sync off, then join again as a new device.",
+                ),
+            ),
+            Self::RotationPending => (
+                "sync_rotation_pending",
+                Some(
+                    "The new keys are saved on this device: Portico writes them to the folder as soon as it answers.",
+                ),
+            ),
+            Self::NeedsNewKeys { .. } => (
+                "sync_needs_new_keys",
+                Some("Type the new sync passphrase on that device."),
+            ),
+            Self::NewerEpochFile { .. } => (
+                "sync_keys_rotated",
+                Some(
+                    "A device file announces newer keys. Type the new passphrase if someone changed the keys; otherwise remove that file.",
                 ),
             ),
         }
@@ -688,11 +846,51 @@ mod tests {
             SyncError::PendingFile {
                 device: "ab".into(),
             },
+            SyncError::PassphraseReused,
+            SyncError::RotationConflict,
+            SyncError::ConflictKeepsForgotten {
+                device: "ab".into(),
+            },
+            SyncError::DeviceForgotten {
+                by: "ab".into(),
+                at: 0,
+            },
+            SyncError::ForgetSelf,
+            SyncError::DeviceUnknown {
+                device: "ab".into(),
+            },
+            SyncError::RosterFull { max: 1024 },
+            SyncError::RevokedWrites {
+                device: "ab".into(),
+                forgotten: "cd".into(),
+            },
+            SyncError::RevokedValue {
+                kind: "host",
+                device: "ab".into(),
+            },
+            SyncError::PeersOutdated { count: 1 },
+            SyncError::KeyEntryCurrent,
+            SyncError::KeyEntryInvalid,
+            SyncError::LineageUnknown,
+            SyncError::RotationPending,
+            SyncError::NewerEpochFile {
+                device: "ab".into(),
+            },
+            SyncError::NeedsNewKeys {
+                device: "ab".into(),
+            },
         ];
         for error in samples {
             let summary = crate::Error::from(error).summary();
             assert!(summary.code.starts_with("sync_"), "{}", summary.code);
             assert!(!summary.message.is_empty());
+            assert!(
+                summary.hint.is_some()
+                    || summary.code == "sync_resolution_invalid"
+                    || summary.code == "sync_crypto",
+                "{}",
+                summary.code
+            );
             // Messages start lowercase (project convention).
             assert!(
                 summary

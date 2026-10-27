@@ -66,6 +66,11 @@ pub enum WaitReason {
     Deferred,
     /// The other Portico process is syncing, or a pass is still running.
     Busy,
+    /// An active device still publishes under older keys: it must type
+    /// the new passphrase (S2a, §13.3.6). Its file is never merged.
+    NeedsNewKeys,
+    /// The new keys are written here and wait for the folder (§13.3.4).
+    RotationPending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +115,13 @@ pub enum AlertKind {
     Divergent,
     /// A device's data removed values without replacing them.
     DroppedValues,
+    /// Two devices changed the keys at the same time (S2a, §13.3.7):
+    /// [`crate::Engine::sync_resolve_rotation_conflict`].
+    RotationConflict,
+    /// This device was removed from the sync (§13.4.4).
+    DeviceForgotten,
+    /// A device relays changes of a removed device (§13.4.2).
+    RevokedWrites,
 }
 
 /// One device of the bundle.
@@ -354,10 +366,18 @@ pub enum JoinBulkChoice {
 /// always kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisableOptions {
-    /// Forget the data key in the keychain (default `true`, F14).
+    /// Forget the data key in the keychain (default `true`, F14), and
+    /// every older sync key of this bundle indexed here (S2a).
     pub forget_key: bool,
     /// Remove this device's file from the folder.
     pub remove_my_file: bool,
+    /// Leave the device list (S2a, §13.4.5): this device moves to the
+    /// roster's forgotten list with its own clock, without a key rotation
+    /// (an S2 operation: the bundle becomes version 2). Best effort: sync
+    /// is turned off even when the bundle cannot be opened. It does **not**
+    /// exclude this device: only forgetting it from another device does.
+    #[serde(default)]
+    pub leave_roster: bool,
 }
 
 impl Default for DisableOptions {
@@ -365,8 +385,171 @@ impl Default for DisableOptions {
         Self {
             forget_key: true,
             remove_my_file: false,
+            leave_roster: false,
         }
     }
+}
+
+// ── S2a: key rotation and forgetting a device (`docs/SYNC.md` §13.7) ────
+
+/// How the user authorizes a key rotation (§13.3.2).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RotateAuth {
+    /// The current passphrase (it must open the current key slot).
+    CurrentPassphrase(SecretString),
+    /// "I no longer know it", behind the reset-level confirmation of the
+    /// UI (owner decision Q6): this device's data key authorizes.
+    ResetConfirmed,
+}
+
+/// "Rotate keys" (§13.3): a new epoch, a new data key, a mandatory new
+/// passphrase every other device must type.
+#[derive(Debug)]
+pub struct RotateKeys {
+    pub authorization: RotateAuth,
+    pub new_passphrase: NewPassphrase,
+    /// Remember the new data key in the system keychain.
+    pub remember_key: bool,
+}
+
+/// "Forget a device" (§13.4): always a rotation, plus the devices moved to
+/// the roster's forgotten list.
+#[derive(Debug)]
+pub struct ForgetDevice {
+    /// Ids (32 hex characters) of the devices to forget; never this one.
+    pub device_ids: Vec<String>,
+    pub authorization: RotateAuth,
+    pub new_passphrase: NewPassphrase,
+    pub remember_key: bool,
+}
+
+/// What a rotation (or a forget) did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationOutcome {
+    /// The new epoch.
+    pub epoch: u32,
+    /// The status after the rotation (`Waiting { RotationPending }` while
+    /// the folder does not answer: it completes later, forward only).
+    pub status: SyncStatus,
+    /// Labels of the devices that must type the new passphrase.
+    pub enter_new_passphrase_on: Vec<String>,
+    /// Labels of the devices forgotten by this rotation.
+    pub forgotten: Vec<String>,
+    /// Server accounts whose password was shared and should be changed
+    /// (F2). Always empty before password sync (S2b).
+    pub exposed_accounts: Vec<String>,
+}
+
+/// One device in a rotation preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationPeer {
+    pub id: String,
+    /// `"name (3f9c0ae1)"`.
+    pub label: String,
+    pub this_device: bool,
+    /// What its last verified snapshot announced.
+    pub app_version: Option<String>,
+    /// Older than Portico 0.7: it stops syncing at the first S2 operation
+    /// (warning `sync_peers_outdated`, Q5).
+    pub outdated: bool,
+    /// Some of its data is still on its way (withheld or uploading): what
+    /// it alone holds may be lost if it never adopts the new keys.
+    pub waiting: bool,
+}
+
+/// What a rotation would affect (shown before it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationPreview {
+    pub devices: Vec<RotationPeer>,
+    /// Labels of the outdated devices.
+    pub outdated: Vec<String>,
+    /// The bundle switches to version 2 with this operation.
+    pub format_upgrade: bool,
+    /// Always empty before password sync (S2b).
+    pub exposed_accounts: Vec<String>,
+}
+
+/// What forgetting a device would affect (§13.4.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgetPreview {
+    pub id: String,
+    pub label: String,
+    /// Local time its last new snapshot was seen.
+    pub last_seen: Option<i64>,
+    /// Records whose surviving value it wrote (they stay).
+    pub last_written: Vec<SyncSubject>,
+    /// Always empty before password sync (S2b).
+    pub exposed_accounts: Vec<String>,
+    /// Devices that must type the new passphrase afterwards.
+    pub enter_new_passphrase_on: Vec<String>,
+}
+
+/// The user's answer to a rotation conflict (§13.3.7).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RotationChoice {
+    /// Type the other device's passphrase: its keys are checked like an
+    /// adoption (lineage from the last common epoch, passphrase history,
+    /// and none of this device's forgotten devices may be active there).
+    UseOther(SecretString),
+    /// Rotate again from this device's keys (epoch + 1). Devices the other
+    /// rotation removed are not removed by this one: remove them again.
+    KeepMine {
+        new_passphrase: NewPassphrase,
+        remember_key: bool,
+    },
+}
+
+/// A device file that announces newer keys than this device's (§13.3.5,
+/// RR5): [`crate::Engine::sync_discard_newer_file`] removes it when nobody
+/// changed the keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewerEpochFile {
+    /// Device id (32 hex characters).
+    pub device: String,
+    /// `"name (3f9c0ae1)"` when the roster knows it.
+    pub label: String,
+    /// `devices/<id>.snap` (or a provider copy of it).
+    pub file: String,
+    /// The epoch its clear header announces (not authenticated).
+    pub epoch: u32,
+    /// Identifies the file shown: pass it back to discard it.
+    pub fingerprint: String,
+}
+
+/// An old sync key in the keychain (§13.3.8): never the key in use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncKeyEntry {
+    /// `sync-key:<bundle>:<epoch>`: pass it back to remove it.
+    pub account: String,
+    /// The bundle id (hex).
+    pub bundle: String,
+    pub epoch: u32,
+    /// It belongs to the bundle this device syncs with.
+    pub this_bundle: bool,
+}
+
+/// A local value written by a forgotten device (or of unknown origin after
+/// a re-join), held out of sync until the user decides (§13.4.2, R3, RR4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokedValueItem {
+    /// Pass it back to [`crate::Engine::sync_revoked_value`].
+    pub key: String,
+    pub subject: SyncSubject,
+    /// The forgotten device's label, or `None` for "unknown origin".
+    pub device: Option<String>,
+}
+
+/// The decision on a [`RevokedValueItem`]: nothing is preselected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevokedValueChoice {
+    /// Publish this device's value as its own write.
+    KeepAsMine,
+    /// Take the value the other devices hold (or delete it here when they
+    /// hold none).
+    TakeSynced,
 }
 
 /// Options of this device.

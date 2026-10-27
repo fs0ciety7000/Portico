@@ -663,7 +663,7 @@ export interface WrittenKey {
 // ── Folder sync (phase 11): mirrors `portico_core::sync::api` (serde
 // snake_case, as the core serializes it) and `sync.rs` (camelCase DTOs).
 
-export type WaitReason = "partial_sync" | "placeholder" | "deferred" | "busy";
+export type WaitReason = "partial_sync" | "placeholder" | "deferred" | "busy" | "needs_new_keys" | "rotation_pending";
 export type FolderReason = "missing" | "not_mounted" | "permission_denied" | "bundle_missing" | "unsafe" | "too_many_entries";
 export type AlertKind =
   | "rollback"
@@ -675,7 +675,10 @@ export type AlertKind =
   | "third_party_claim"
   | "merge_refused"
   | "divergent"
-  | "dropped_values";
+  | "dropped_values"
+  | "rotation_conflict"
+  | "device_forgotten"
+  | "revoked_writes";
 
 /** Mirrors `SyncStatus`. Device labels are `name (3f9c0ae1)` (F16). */
 export type SyncStatus =

@@ -40,6 +40,8 @@ pub(crate) const KIND_HOST: &str = "host";
 pub(crate) const KIND_META: &str = "host_meta";
 pub(crate) const KIND_SNIPPET: &str = "snippet";
 pub(crate) const KIND_SETTING: &str = "setting";
+/// Passwords (S2b); filtered at the merge while the policy is off (S2a).
+pub(crate) const KIND_SECRET: &str = "secret";
 
 /// The local files, as records.
 #[derive(Debug, Clone, Default)]
