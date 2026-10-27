@@ -30,7 +30,7 @@
   );
 </script>
 
-<button class="sync" data-tone={view.tone} onclick={() => sync.show(conflicts ? "conflicts" : received ? "received" : "overview")} {title} data-testid="sync-status">
+<button class="sync" data-tone={view.tone} onclick={() => sync.show(alert ? "overview" : conflicts ? "conflicts" : received ? "received" : "overview")} {title} data-testid="sync-status">
   <svg viewBox="0 0 16 16" aria-hidden="true" class:spin={view.tone === "busy" && status?.state === "syncing"}>
     {#if status?.state === "locked"}
       <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />

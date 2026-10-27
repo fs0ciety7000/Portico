@@ -17,7 +17,11 @@ import {
   deviceName,
   explainAlert,
   explainFolder,
+  explainWait,
   JOIN_TTL_MS,
+  keyEntryLabel,
+  keysNeedYou,
+  listText,
   probeVerdict,
   scrolledToEnd,
   strengthView,
@@ -66,6 +70,9 @@ test("alerts name the device and say what to do", () => {
     "merge_refused",
     "divergent",
     "dropped_values",
+    "rotation_conflict",
+    "device_forgotten",
+    "revoked_writes",
   ];
   for (const kind of kinds) {
     const e = explainAlert(kind, "laptop (3f9c0ae1)");
@@ -284,4 +291,60 @@ test("a conflict choice is bound to the sides shown", () => {
   assert.match(conflicts, /if \(!live\.has\(k\)\) delete choices\[k\]/);
   // The resolution names the sides it was chosen for.
   assert.match(conflicts, /backend\.syncResolve\(c\.id, choiceOf\(c\), c\.sides_hash\)/);
+});
+
+test("S2c-1: key states have their own status-bar labels (same words as the TUI)", () => {
+  const laptop = "laptop (3f9c0ae1)";
+  const cases: [SyncStatus, string, string][] = [
+    [{ state: "waiting", reason: "rotation_pending", device: null }, "Finishing key rotation…", "busy"],
+    [{ state: "waiting", reason: "needs_new_keys", device: laptop }, "New keys needed on laptop", "warning"],
+    [{ state: "waiting", reason: "needs_new_keys", device: null }, "New keys needed", "warning"],
+    [{ state: "alert", kind: "keys_rotated_elsewhere", device: laptop }, "Keys changed — enter new passphrase", "warning"],
+    [{ state: "alert", kind: "rotation_conflict", device: laptop }, "Key conflict", "error"],
+    [{ state: "alert", kind: "device_forgotten", device: laptop }, "Removed from sync", "error"],
+    [{ state: "alert", kind: "revoked_writes", device: laptop }, "Changes from a removed device", "error"],
+  ];
+  for (const [status, label, tone] of cases) assert.deepEqual(syncLabel(status, NOW), { label, tone });
+});
+
+test("S2c-1: key alerts name the device and say what to do", () => {
+  const laptop = "laptop (3f9c0ae1)";
+  const adopt = explainAlert("keys_rotated_elsewhere", laptop);
+  assert.equal(adopt.title, `Keys were changed on ${laptop}`);
+  assert.match(adopt.body, /NEW passphrase/);
+  assert.match(adopt.hint, /If you did not change the keys on another device, type nothing/);
+  assert.match(explainAlert("rotation_conflict", laptop).body, /laptop \(3f9c0ae1\) and this device/);
+  assert.match(explainAlert("rotation_conflict", laptop).hint, /keep this device's keys/);
+  const forgotten = explainAlert("device_forgotten", laptop);
+  assert.match(forgotten.body, /laptop \(3f9c0ae1\) removed this device/);
+  assert.match(forgotten.hint, /join again as a new device/);
+  assert.match(explainAlert("revoked_writes", laptop).body, /laptop \(3f9c0ae1\) relays/);
+  assert.match(explainWait("needs_new_keys", laptop), /laptop \(3f9c0ae1\) still uses the old keys/);
+  assert.match(explainWait("rotation_pending", null), /saved on this device/);
+});
+
+test("S2c-1: helpers", () => {
+  assert.equal(listText([]), "");
+  assert.equal(listText(["a"]), "a");
+  assert.equal(listText(["a", "b", "c"]), "a, b and c");
+  assert.equal(keyEntryLabel({ bundle: "9c1e4a07b2d3", epoch: 1, this_bundle: true }), "Keys 1 · this sync");
+  assert.equal(keyEntryLabel({ bundle: "9c1e4a07b2d3", epoch: 3, this_bundle: false }), "Keys 3 · another sync (9c1e4a07)");
+  assert.equal(keysNeedYou({ state: "alert", kind: "keys_rotated_elsewhere", device: null }), "adopt");
+  assert.equal(keysNeedYou({ state: "alert", kind: "rotation_conflict", device: null }), "conflict");
+  assert.equal(keysNeedYou({ state: "alert", kind: "device_forgotten", device: null }), "forgotten");
+  assert.equal(keysNeedYou({ state: "alert", kind: "fork", device: null }), null);
+  assert.equal(keysNeedYou({ state: "locked" }), null);
+});
+
+test("S2c-1: passphrases never linger in the key dialogs", () => {
+  // Each dialog clears its secret fields when it sends them and when it closes.
+  for (const file of ["SyncRotate.svelte", "SyncAdopt.svelte", "SyncKeyConflict.svelte"]) {
+    const text = source(`components/${file}`);
+    assert.match(text, /onDestroy\(/, file);
+    assert.ok(!/console\.(log|debug|info)/.test(text), `${file} logs nothing`);
+  }
+  // The final rotation step is a security action: `y`, never Enter.
+  const rotate = source("components/SyncRotate.svelte");
+  assert.match(rotate, /step === "new" && key === "y"/);
+  assert.match(source("components/SyncKeyConflict.svelte"), /choice === "keep" && key === "y"/);
 });

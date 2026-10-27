@@ -21,6 +21,14 @@
 //!   holds a secret. Confirmations go back with the hash that was shown
 //!   (`destination_hash`, snippet `hash`); the core refuses a stale one
 //!   (`sync_not_pending`).
+//! - Key rotation and forgetting a device (S2c-1, §13.12 "Ce que S2c-1
+//!   doit brancher"): the current passphrase arrives as a `SecretString`,
+//!   "I no longer know it" as [`AuthDto::ResetConfirmed`] (the webview asks
+//!   the reset-level confirmation first, owner decision Q6), the new one
+//!   typed or by the generated token, like change and reset. Previews,
+//!   outcomes, newer files, old key entries and held values are the core's
+//!   own types: labels, ids, epochs and record names, never a key or a
+//!   passphrase.
 
 // Tauri injects `State` (and deserialized arguments) by value.
 #![allow(clippy::needless_pass_by_value)]
@@ -29,6 +37,10 @@ use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use portico_core::sync::api::{
+    ForgetDevice, ForgetPreview, NewerEpochFile, RevokedValueChoice, RevokedValueItem, RotateAuth,
+    RotateKeys, RotationChoice, RotationOutcome, RotationPreview, SyncKeyEntry,
+};
 use portico_core::sync::{
     DisableOptions, FolderProbe, JoinBulkChoice, JoinPreview, NewPassphrase, PassphraseStrength,
     PendingHostChange, SyncConflict, SyncCreate, SyncDevice, SyncIssue, SyncJoin, SyncOptions,
@@ -155,6 +167,65 @@ pub(crate) enum NewPassphraseDto {
     Typed { value: SecretString },
     /// The one [`sync_generate_passphrase`] returned.
     Generated { token: String },
+}
+
+/// How the user authorizes a rotation (or a forget).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum AuthDto {
+    /// The current passphrase (deserialized straight into `SecretString`).
+    Current { value: SecretString },
+    /// "I no longer know it", after the reset-level confirmation (Q6):
+    /// this device's data key authorizes.
+    ResetConfirmed,
+}
+
+impl From<AuthDto> for RotateAuth {
+    fn from(auth: AuthDto) -> Self {
+        match auth {
+            AuthDto::Current { value } => Self::CurrentPassphrase(value),
+            AuthDto::ResetConfirmed => Self::ResetConfirmed,
+        }
+    }
+}
+
+/// "Rotate keys" (and "Forget <device>" with `device_ids`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RotateDto {
+    /// Empty: a plain rotation; else the devices to forget.
+    #[serde(default)]
+    pub device_ids: Vec<String>,
+    pub authorization: AuthDto,
+    pub new_passphrase: NewPassphraseDto,
+    pub remember_key: bool,
+}
+
+/// "Turn sync off" (and "Join again as a new device").
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // Four independent checkboxes of one dialog.
+pub(crate) struct DisableDto {
+    pub forget_key: bool,
+    pub remove_my_file: bool,
+    /// "Leave the device list" (§13.4.5, R18).
+    pub leave_roster: bool,
+    /// Keep the folder picked for the wizard ("Join again").
+    #[serde(default)]
+    pub keep_folder: bool,
+}
+
+/// The answer to a rotation conflict (§13.3.7).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RotationChoiceDto {
+    /// The other device's passphrase.
+    UseOther { passphrase: SecretString },
+    #[serde(rename_all = "camelCase")]
+    KeepMine {
+        new_passphrase: NewPassphraseDto,
+        remember_key: bool,
+    },
 }
 
 /// `PassphraseStrength`, for the meter.
@@ -555,24 +626,178 @@ pub(crate) async fn sync_set_options(
         .map_err(summary)
 }
 
+/// Turns sync off. `keep_folder` ("Join again as a new device", a device
+/// that was forgotten): the sync folder stays picked here, so the wizard
+/// can probe and join it again without the webview naming a path.
 #[tauri::command]
 pub(crate) async fn sync_disable(
     engine: State<'_, Engine>,
     ui: State<'_, SyncUi>,
-    forget_key: bool,
-    remove_my_file: bool,
+    options: DisableDto,
 ) -> Result<SyncStatus, ErrorSummary> {
+    let DisableDto {
+        forget_key,
+        remove_my_file,
+        leave_roster,
+        keep_folder,
+    } = options;
+    let folder = if keep_folder {
+        engine.sync_status().await.ok().and_then(|o| o.folder)
+    } else {
+        None
+    };
     let status = engine
         .sync_disable(DisableOptions {
             forget_key,
             remove_my_file,
-            // "Leave the device list" comes with the S2 screens (S2c-1).
-            leave_roster: false,
+            leave_roster,
         })
         .await
         .map_err(summary)?;
     ui.clear();
+    if let Some(folder) = folder {
+        *ui.folder.lock().unwrap_or_else(PoisonError::into_inner) = Some(folder);
+    }
     Ok(status)
+}
+
+// ── Key rotation, forgetting a device (S2c-1, `docs/SYNC.md` §13) ──────
+
+#[tauri::command]
+pub(crate) async fn sync_rotation_preview(
+    engine: State<'_, Engine>,
+) -> Result<RotationPreview, ErrorSummary> {
+    engine.sync_rotation_preview().await.map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_forget_preview(
+    engine: State<'_, Engine>,
+    device_id: String,
+) -> Result<ForgetPreview, ErrorSummary> {
+    engine.sync_forget_preview(device_id).await.map_err(summary)
+}
+
+/// Rotates the keys, forgetting `device_ids` when there are any (always a
+/// rotation). The generated passphrase, if named, serves once either way.
+#[tauri::command]
+pub(crate) async fn sync_rotate_keys(
+    engine: State<'_, Engine>,
+    ui: State<'_, SyncUi>,
+    request: RotateDto,
+) -> Result<RotationOutcome, ErrorSummary> {
+    let RotateDto {
+        device_ids,
+        authorization,
+        new_passphrase,
+        remember_key,
+    } = request;
+    let new_passphrase = ui.take(new_passphrase)?;
+    let authorization = authorization.into();
+    if device_ids.is_empty() {
+        engine
+            .sync_rotate_keys(RotateKeys {
+                authorization,
+                new_passphrase,
+                remember_key,
+            })
+            .await
+    } else {
+        engine
+            .sync_forget_device(ForgetDevice {
+                device_ids,
+                authorization,
+                new_passphrase,
+                remember_key,
+            })
+            .await
+    }
+    .map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_resolve_rotation_conflict(
+    engine: State<'_, Engine>,
+    ui: State<'_, SyncUi>,
+    choice: RotationChoiceDto,
+) -> Result<SyncStatus, ErrorSummary> {
+    let choice = match choice {
+        RotationChoiceDto::UseOther { passphrase } => RotationChoice::UseOther(passphrase),
+        RotationChoiceDto::KeepMine {
+            new_passphrase,
+            remember_key,
+        } => RotationChoice::KeepMine {
+            new_passphrase: ui.take(new_passphrase)?,
+            remember_key,
+        },
+    };
+    engine
+        .sync_resolve_rotation_conflict(choice)
+        .await
+        .map_err(summary)
+}
+
+/// "Restore key file" (after the webview's confirmation).
+#[tauri::command]
+pub(crate) async fn sync_restore_bundle(
+    engine: State<'_, Engine>,
+) -> Result<SyncStatus, ErrorSummary> {
+    engine.sync_restore_bundle().await.map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_newer_files(
+    engine: State<'_, Engine>,
+) -> Result<Vec<NewerEpochFile>, ErrorSummary> {
+    engine.sync_newer_files().await.map_err(summary)
+}
+
+/// Removes the device file shown (`fingerprint`: another content is
+/// refused with `sync_not_pending`).
+#[tauri::command]
+pub(crate) async fn sync_discard_newer_file(
+    engine: State<'_, Engine>,
+    device_id: String,
+    fingerprint: String,
+) -> Result<SyncStatus, ErrorSummary> {
+    engine
+        .sync_discard_newer_file(device_id, fingerprint)
+        .await
+        .map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_key_entries(
+    engine: State<'_, Engine>,
+) -> Result<Vec<SyncKeyEntry>, ErrorSummary> {
+    engine.sync_key_entries().await.map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_remove_key_entry(
+    engine: State<'_, Engine>,
+    account: String,
+) -> Result<(), ErrorSummary> {
+    engine.sync_remove_key_entry(account).await.map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_revoked_values(
+    engine: State<'_, Engine>,
+) -> Result<Vec<RevokedValueItem>, ErrorSummary> {
+    engine.sync_revoked_values().await.map_err(summary)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_revoked_value(
+    engine: State<'_, Engine>,
+    key: String,
+    choice: RevokedValueChoice,
+) -> Result<SyncStatus, ErrorSummary> {
+    engine
+        .sync_revoked_value(key, choice)
+        .await
+        .map_err(summary)
 }
 
 #[cfg(test)]
@@ -696,6 +921,72 @@ mod tests {
         let list: Vec<HostDecisionDto> =
             serde_json::from_str(r#"[{"alias":"web","destinationHash":"ab12"}]"#).unwrap();
         assert_eq!(decisions(list), vec![("web".to_owned(), "ab12".to_owned())]);
+    }
+
+    #[test]
+    fn rotation_requests_keep_passphrases_secret() {
+        let dto: RotateDto = serde_json::from_str(
+            r#"{"authorization":{"kind":"current","value":"old horse staple"},"newPassphrase":{"kind":"typed","value":"new horse staple"},"rememberKey":false}"#,
+        )
+        .unwrap();
+        let debug = format!("{dto:?}");
+        assert!(!debug.contains("old horse") && !debug.contains("new horse"));
+        assert!(dto.device_ids.is_empty());
+        assert!(!dto.remember_key);
+        let RotateAuth::CurrentPassphrase(old) = RotateAuth::from(dto.authorization) else {
+            panic!("current");
+        };
+        assert_eq!(old.expose_secret(), "old horse staple");
+
+        let forget: RotateDto = serde_json::from_str(&format!(
+            r#"{{"deviceIds":["{}"],"authorization":{{"kind":"reset_confirmed"}},"newPassphrase":{{"kind":"generated","token":"ab"}},"rememberKey":true}}"#,
+            "3f".repeat(16)
+        ))
+        .unwrap();
+        assert_eq!(forget.device_ids.len(), 1);
+        assert!(matches!(
+            RotateAuth::from(forget.authorization),
+            RotateAuth::ResetConfirmed
+        ));
+    }
+
+    #[test]
+    fn disable_options_from_the_webview() {
+        let o: DisableDto = serde_json::from_str(
+            r#"{"forgetKey":true,"removeMyFile":true,"leaveRoster":true,"keepFolder":false}"#,
+        )
+        .unwrap();
+        assert!(o.forget_key && o.remove_my_file && o.leave_roster && !o.keep_folder);
+        let o: DisableDto =
+            serde_json::from_str(r#"{"forgetKey":false,"removeMyFile":false,"leaveRoster":false}"#)
+                .unwrap();
+        assert!(!o.keep_folder);
+    }
+
+    #[test]
+    fn rotation_conflict_choices() {
+        let other: RotationChoiceDto =
+            serde_json::from_str(r#"{"kind":"use_other","passphrase":"their words here"}"#)
+                .unwrap();
+        assert!(!format!("{other:?}").contains("their words"));
+        let RotationChoiceDto::UseOther { passphrase } = other else {
+            panic!("use_other");
+        };
+        assert_eq!(passphrase.expose_secret(), "their words here");
+        let mine: RotationChoiceDto = serde_json::from_str(
+            r#"{"kind":"keep_mine","newPassphrase":{"kind":"typed","value":"fresh words"},"rememberKey":true}"#,
+        )
+        .unwrap();
+        assert!(!format!("{mine:?}").contains("fresh words"));
+        assert!(matches!(
+            mine,
+            RotationChoiceDto::KeepMine {
+                remember_key: true,
+                ..
+            }
+        ));
+        let choice: RevokedValueChoice = serde_json::from_str(r#""take_synced""#).unwrap();
+        assert_eq!(choice, RevokedValueChoice::TakeSynced);
     }
 
     #[test]

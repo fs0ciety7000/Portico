@@ -97,8 +97,10 @@
     };
   });
 
+  // A checkbox or radio takes no letters: a dialog's single-key answer
+  // (`y` once "I saved it" is ticked) still works from it.
   const isField = (t: EventTarget | null) =>
-    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
+    (t instanceof HTMLInputElement && t.type !== "checkbox" && t.type !== "radio") || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
 
   function onkeydown(e: KeyboardEvent) {
     // Keep every key inside the dialog (no app shortcut, no terminal input).

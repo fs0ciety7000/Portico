@@ -4,17 +4,20 @@
   // one by one (nothing preselected) — and snippets changed by sync (F8),
   // reviewed one by one with their full command. Decisions carry the hash of
   // what is shown: content changed since is refused and shown again.
-  import { type ErrorSummary, type PendingHostChange } from "../api";
+  // S2c-1: values held from forgotten devices (or of unknown origin after a
+  // re-join), each decided on its own: "Keep as mine" or "Take the synced
+  // value", nothing preselected, no bulk choice (§13.4.2, R3, RR4).
+  import { type ErrorSummary, type PendingHostChange, type RevokedValueChoice, type RevokedValueItem } from "../api";
   import { backend } from "../backend";
-  import { HOST_FIELDS, hostField } from "../syncview";
+  import { HOST_FIELDS, hostField, subjectLabel } from "../syncview";
   import { sync } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
   import CodeText from "./CodeText.svelte";
 
   const keyOf = (p: PendingHostChange) => `${p.alias}\u0000${p.destination_hash}`;
   let ticked: Record<string, boolean> = $state({});
-  let busy: string | null = $state(null);
-  let error: ErrorSummary | null = $state(null);
+  let busy = $state<string | null>(null);
+  let error = $state<ErrorSummary | null>(null);
 
   // A destination that changed (another device published again) drops its tick.
   $effect(() => {
@@ -23,6 +26,30 @@
   });
 
   const chosen = $derived(sync.pendingHosts.filter((p) => ticked[keyOf(p)]));
+
+  let heldBusy = $state<string | null>(null);
+  let heldError = $state<ErrorSummary | null>(null);
+
+  async function decideHeld(item: RevokedValueItem, choice: RevokedValueChoice) {
+    if (heldBusy) return;
+    heldBusy = item.key;
+    heldError = null;
+    const failed = await sync.act(() => backend.syncRevokedValue(item.key, choice));
+    heldBusy = null;
+    if (failed) {
+      heldError = failed;
+      return;
+    }
+    await sync.reloadPending();
+    workspace.notify(
+      {
+        code: "sync_held",
+        message: `${subjectLabel(item.subject)}: ${choice === "keep_as_mine" ? "kept as this device's" : "synced value taken"}`,
+        hint: choice === "keep_as_mine" ? "Published as this device's own change." : null,
+      },
+      "info",
+    );
+  }
 
   async function decide(confirm: boolean) {
     const list = chosen.map((p) => ({ alias: p.alias, destinationHash: p.destination_hash }));
@@ -46,6 +73,34 @@
     );
   }
 </script>
+
+{#if sync.held.length}
+  <section class="block" aria-labelledby="received-held" data-testid="sync-held">
+    <div class="block-head">
+      <span class="caption" id="received-held">From forgotten devices</span>
+      <span class="note">Held out of sync until you decide, one by one.</span>
+    </div>
+    <ul class="list">
+      {#each sync.held as item (item.key)}
+        <li class="held">
+          <div class="held-text">
+            <span class="alias mono">{subjectLabel(item.subject)}</span>
+            <span class="from">{item.device ? `written by ${item.device}, now removed` : "origin unknown (this device joined again)"}</span>
+          </div>
+          <div class="held-actions">
+            <button class="secondary small" disabled={!!heldBusy} onclick={() => decideHeld(item, "keep_as_mine")} title="Publish this device's value as its own change">
+              {#if heldBusy === item.key}<span class="spinner"></span>{/if}Keep as mine
+            </button>
+            <button class="secondary small" disabled={!!heldBusy} onclick={() => decideHeld(item, "take_synced")} title="Use what the other devices hold (or remove it here if they hold none)">Take the synced value</button>
+          </div>
+        </li>
+      {/each}
+    </ul>
+    {#if heldError}
+      <div class="inline-error" role="alert"><span><CodeText text={heldError.message} /></span>{#if heldError.hint}<span class="hint"><CodeText text={heldError.hint} capitalize={false} /></span>{/if}</div>
+    {/if}
+  </section>
+{/if}
 
 <section class="block" aria-labelledby="received-hosts">
   <div class="block-head">
@@ -119,6 +174,19 @@
   .caption { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
   .note, .empty { color: var(--text-muted); font-size: var(--text-sm); }
   .list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+  .held {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+    border-left: 2px solid var(--status-warning);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+  }
+  .held-text { display: grid; gap: var(--space-1); min-width: 0; }
+  .held-actions { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); }
   .host {
     display: grid;
     gap: var(--space-2);

@@ -9,16 +9,41 @@
 //   refuse its confirmation: `sync_not_pending`).
 // - A `sync_folder_timeout` answer may still finish in the background: the
 //   UI assumes neither success nor failure and re-reads everything.
-import { asError, type EngineEvent, type ErrorSummary, type PendingHostChange, type SyncConflict, type SyncDevice, type SyncIssue, type SyncOverview, type SyncStatus, type UnconfirmedSnippet } from "../api";
+// - S2c-1: values held from forgotten devices count as received changes
+//   (Received tab); device files that claim newer keys and old keys in the
+//   keychain are read with the panel's lists. Rotation, forget, adoption
+//   and the rotation conflict are their own views.
+import {
+  asError,
+  type EngineEvent,
+  type ErrorSummary,
+  type NewerEpochFile,
+  type PendingHostChange,
+  type PickedFolder,
+  type RevokedValueItem,
+  type SyncConflict,
+  type SyncDevice,
+  type SyncIssue,
+  type SyncKeyEntry,
+  type SyncOverview,
+  type SyncStatus,
+  type UnconfirmedSnippet,
+} from "../api";
 import { backend } from "../backend";
 import { workspace } from "./workspace.svelte";
 
 export type SyncTab = "overview" | "conflicts" | "received" | "issues" | "devices";
 
-export type SyncForm = "unlock" | "change" | "reset" | "rename" | "disable";
+export type SyncForm = "unlock" | "change" | "reset" | "rename" | "disable" | "rejoin" | "restore";
 
 export type SyncView =
-  | { kind: "wizard" }
+  | { kind: "wizard"; rejoin?: PickedFolder }
+  /** "Rotate keys…", or "Forget <device>…" (always a rotation). */
+  | { kind: "rotate"; device: { id: string; label: string } | null }
+  /** Keys changed on another device: enter the new passphrase. */
+  | { kind: "adopt" }
+  /** Two rotations at once: choose the keys. */
+  | { kind: "conflict" }
   | { kind: "panel"; tab: SyncTab }
   | { kind: "form"; form: SyncForm }
   | { kind: "host"; alias: string; hash: string; back: SyncView | null }
@@ -43,6 +68,12 @@ class SyncState {
   devices: SyncDevice[] = $state([]);
   pendingHosts: PendingHostChange[] = $state([]);
   snippets: UnconfirmedSnippet[] = $state([]);
+  /** Values held from forgotten devices (or of unknown origin). */
+  held: RevokedValueItem[] = $state([]);
+  /** Device files that claim newer keys (RR5). */
+  newerFiles: NewerEpochFile[] = $state([]);
+  /** Old sync keys in this keychain (never the one in use). */
+  keyEntries: SyncKeyEntry[] = $state([]);
   /** Panel lists: loading / error state (the overview has its own). */
   lists: Load = $state("idle");
   listError: ErrorSummary | null = $state(null);
@@ -52,7 +83,7 @@ class SyncState {
   pendingByAlias: Record<string, PendingHostChange> = $derived(Object.fromEntries(this.pendingHosts.map((p) => [p.alias, p])));
   /** Ids of snippets changed by sync and not confirmed here (F8). */
   unconfirmedIds: Set<string> = $derived(new Set(this.snippets.map((s) => s.id)));
-  received: number = $derived(this.pendingHosts.length + this.snippets.length);
+  received: number = $derived(this.pendingHosts.length + this.snippets.length + this.held.length);
   #timer: ReturnType<typeof setInterval> | undefined;
   #gen = 0;
   /** Called when snippets.toml changed (the snippets view reloads). */
@@ -70,15 +101,19 @@ class SyncState {
   /** Status, received hosts and snippets (the latter work even when sync is off: F8). */
   async refresh() {
     const gen = ++this.#gen;
-    const [overview, hosts, snippets] = await Promise.allSettled([
+    const [overview, hosts, snippets, held, newer] = await Promise.allSettled([
       backend.syncStatus(),
       backend.syncPendingHosts(),
       backend.syncedSnippetsUnconfirmed(),
+      backend.syncRevokedValues(),
+      backend.syncNewerFiles(),
     ]);
     if (gen !== this.#gen) return;
     if (overview.status === "fulfilled") this.overview = overview.value;
     if (hosts.status === "fulfilled") this.pendingHosts = hosts.value;
     if (snippets.status === "fulfilled") this.snippets = snippets.value;
+    this.held = held.status === "fulfilled" && this.enabled ? held.value : [];
+    this.newerFiles = newer.status === "fulfilled" && this.enabled ? newer.value : [];
     if (this.enabled) void this.loadConflicts();
     this.#closeStale();
   }
@@ -89,10 +124,20 @@ class SyncState {
       this.devices = [];
       this.conflicts = [];
       this.issues = [];
+      this.keyEntries = [];
       this.lists = "ready";
       return;
     }
     if (this.lists !== "ready") this.lists = "loading";
+    // Old keys and newer files are side lists: their failure never hides the rest.
+    void backend.syncKeyEntries().then(
+      (entries) => (this.keyEntries = entries),
+      () => (this.keyEntries = []),
+    );
+    void backend.syncNewerFiles().then(
+      (files) => (this.newerFiles = files),
+      () => {},
+    );
     try {
       const [devices, conflicts, issues] = await Promise.all([backend.syncDevices(), backend.syncConflicts(), backend.syncIssues()]);
       this.devices = devices;
@@ -153,9 +198,10 @@ class SyncState {
   }
 
   async reloadPending() {
-    const [hosts, snippets] = await Promise.allSettled([backend.syncPendingHosts(), backend.syncedSnippetsUnconfirmed()]);
+    const [hosts, snippets, held] = await Promise.allSettled([backend.syncPendingHosts(), backend.syncedSnippetsUnconfirmed(), backend.syncRevokedValues()]);
     if (hosts.status === "fulfilled") this.pendingHosts = hosts.value;
     if (snippets.status === "fulfilled") this.snippets = snippets.value;
+    if (held.status === "fulfilled") this.held = this.enabled ? held.value : [];
     this.#closeStale();
   }
 
@@ -195,7 +241,8 @@ class SyncState {
   back() {
     const v = this.view;
     if (v && (v.kind === "host" || v.kind === "snippet")) this.view = v.back;
-    else if (v?.kind === "form") this.open({ kind: "panel", tab: "overview" });
+    else if (v?.kind === "form" || v?.kind === "adopt" || v?.kind === "conflict") this.open({ kind: "panel", tab: "overview" });
+    else if (v?.kind === "rotate") this.open({ kind: "panel", tab: v.device ? "devices" : "overview" });
     else this.view = null;
   }
 

@@ -875,4 +875,22 @@ Tant que `[updates] check` est absent de `settings.toml`, un bandeau discret au-
 | Fenêtre sans commande (AppImage, .deb, autre) : ouvrir la page de version (action principale) | « Release page » |
 
 Le badge « 0.3.1 available » (accent, à droite de la barre d'état, avant le thème et la version) reste jusqu'à la mise à jour ; aucune fenêtre ne s'ouvre d'elle-même. « Portico never downloads or installs anything itself. »
+
+## Synchronisation (GUI) : clés, appareils oubliés
+
+Panneau Sync (`app.sync`). « Rotate keys… » (Overview, section « Passphrase and keys », et Devices) et « Forget… » sur chaque autre appareil (jamais celui-ci : « Turn sync off… » propose « Leave the device list », cochée avec « Remove this device's file ») ouvrent le même dialogue en trois étapes : ce qui se passe (pour un oubli, d'abord « Also remove <appareil>'s access to your cloud folder », puis les enregistrements qu'il a écrits en dernier), la passphrase actuelle ou « I no longer know it » (taper `reset`), la nouvelle passphrase (générateur, jauge, « I saved it… »). Les états de clés ont leur action principale dans le pied du panneau : « Enter the new passphrase… », « Choose keys… », « Join again as a new device… », « Restore key file… ». Aussi dans la palette : « Rotate sync keys… », « Enter the new sync passphrase… », « Resolve the sync key conflict… ».
+
+| Action | Touches |
+|---|---|
+| Panneau Sync : « Rotate keys… » | `o` |
+| Rotation, étapes 1 et 2 : continuer / revenir / annuler | `↵` / « Back » / `Esc` |
+| Rotation, étape 3 : « Rotate keys » ou « Forget and rotate keys » (bouton danger ; `↵` ne fait rien) | `y`, après 400 ms sans frappe |
+| Rotation terminée (« Keys rotated », appareils qui doivent taper la nouvelle passphrase) : fermer | `↵` ou `Esc` |
+| Nouvelles clés d'un autre appareil : passphrase précédente (appareil sans clé mémorisée) puis nouvelle passphrase | `↵` ; « I don't remember it » passe la première |
+| Conflit de clés : « Use <appareil>'s keys » (sa passphrase, `↵`) ou « Keep this device's keys » (nouvelle passphrase, bouton danger) | choix au clic ou `Tab` puis `Espace` ; `y` pour garder |
+| Fichier qui annonce des clés plus récentes, ancienne clé du trousseau : « Remove… » puis confirmer / garder | `y` / « Keep » ou `Esc` |
+| « Restore key file… » (fichier de clés altéré, rotation en attente) : confirmer | `y` (bouton danger) |
+| Received, « From forgotten devices » : « Keep as mine » / « Take the synced value » (un élément à la fois, rien de présélectionné) | boutons (`Tab` puis `↵`) |
+
+Les passphrases sont effacées dès leur envoi et à la fermeture du dialogue ; une passphrase générée reste côté Rust sous un jeton à usage unique.
 <!-- END GENERATED: gui -->

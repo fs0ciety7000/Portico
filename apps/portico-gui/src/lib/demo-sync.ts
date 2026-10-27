@@ -9,6 +9,18 @@
 // `?sync=waiting`; `?syncsnippet=long` makes the received snippet a
 // 200-line script (its review needs scrolling to the end). Passphrases: anything works but "wrong"; typed ones need
 // 4 words or 20 characters (a rough stand-in for the core's estimate).
+//
+// Key rotation (S2c-1): `?sync=rotated` (keys changed on another device;
+// `&syncnewer=1` adds a file claiming newer keys, `&syncremember=0` asks the
+// previous passphrase first: one starting with "old" is taken as it),
+// `?sync=conflict` (two rotations; the other device's passphrase "removed"
+// gets the E2 refusal), `?sync=forgotten`, `?sync=revoked` (a device relays
+// a removed device's changes, values held in Received), `?sync=pending`
+// (rotation waiting for the folder), `?sync=newkeys` (a device still on the
+// old keys), `?sync=tampered`; `?syncfolder=rejoin` joins a bundle this
+// device held before. A rotation refuses the new passphrase "reused words
+// here again" (`sync_passphrase_reused`); `&syncfolderdown=1` leaves it
+// pending.
 import type {
   EngineEvent,
   ErrorSummary,
@@ -17,8 +29,14 @@ import type {
   JoinBulkChoice,
   JoinPreview,
   NewPassphrase,
+  ForgetPreview,
+  NewerEpochFile,
   PendingHostChange,
   PickedFolder,
+  RevokedValueItem,
+  RotationOutcome,
+  RotationPreview,
+  SyncKeyEntry,
   SyncConflict,
   SyncDevice,
   SyncIssue,
@@ -50,7 +68,12 @@ export function demoSync(emit: (e: EngineEvent) => void) {
   let issues: SyncIssue[] = [];
   let pending: PendingHostChange[] = [];
   let snippets: UnconfirmedSnippet[] = [];
-  let rememberKey = true;
+  let rememberKey = params.get("syncremember") !== "0";
+  let held: RevokedValueItem[] = [];
+  let newer: NewerEpochFile[] = [];
+  let keyEntries: SyncKeyEntry[] = [];
+  let previousOpened = false;
+  const PHONE = "old-phone (5d0e9b33)";
   let thisDevice = THIS;
   let lastPass = nowSecs() - 120;
 
@@ -130,6 +153,10 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         hash: "s-disk-1",
       },
     ];
+    keyEntries = [
+      { account: "sync-key:9c1e4a07b2d35f6e8a0c1d2e3f4a5b6c:1", bundle: "9c1e4a07b2d35f6e8a0c1d2e3f4a5b6c", epoch: 1, this_bundle: true },
+      { account: "sync-key:4b7d0e2a91c8f3d6e5a4b3c2d1e0f9a8:3", bundle: "4b7d0e2a91c8f3d6e5a4b3c2d1e0f9a8", epoch: 3, this_bundle: false },
+    ];
     issues = [
       {
         key: "host:legacy-ftp",
@@ -173,6 +200,42 @@ export function demoSync(emit: (e: EngineEvent) => void) {
     case "waiting":
       fill();
       status = { state: "waiting", reason: "placeholder", device: LAPTOP };
+      break;
+    case "rotated":
+      fill();
+      status = { state: "alert", kind: "keys_rotated_elsewhere", device: LAPTOP };
+      if (params.get("syncnewer") === "1") {
+        newer = [{ device: `a07d51c2${"0".repeat(24)}`, label: DESKTOP, file: `devices/a07d51c2${"0".repeat(24)}.snap`, epoch: 3, fingerprint: "f-newer-1" }];
+      }
+      break;
+    case "conflict":
+      fill();
+      status = { state: "alert", kind: "rotation_conflict", device: LAPTOP };
+      break;
+    case "forgotten":
+      fill();
+      status = { state: "alert", kind: "device_forgotten", device: LAPTOP };
+      break;
+    case "revoked":
+      fill();
+      status = { state: "alert", kind: "revoked_writes", device: DESKTOP };
+      held = [
+        { key: "held:host:db-prod", subject: { type: "host", alias: "db-prod" }, device: PHONE },
+        { key: "held:meta:web-01:tags", subject: { type: "host_meta", alias: "web-01", field: "tags" }, device: PHONE },
+        { key: "held:snippet:tail-logs", subject: { type: "snippet", id: "tail-logs" }, device: null },
+      ];
+      break;
+    case "pending":
+      fill();
+      status = { state: "waiting", reason: "rotation_pending", device: null };
+      break;
+    case "newkeys":
+      fill();
+      status = { state: "waiting", reason: "needs_new_keys", device: DESKTOP };
+      break;
+    case "tampered":
+      fill();
+      status = { state: "alert", kind: "bundle_tampered", device: null };
       break;
     default:
       status = { state: "disabled" };
@@ -237,12 +300,13 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       await sleep(250);
       const which = params.get("syncfolder");
       const probe: FolderProbe =
-        which === "join" ? { kind: "existing_bundle", devices: 2 } : which === "incomplete" ? { kind: "incomplete" } : { kind: "usable" };
-      folder = which === "join" ? "~/Dropbox/Portico" : "~/Library/Mobile Documents/com~apple~CloudDocs/Portico";
+        which === "join" || which === "rejoin" ? { kind: "existing_bundle", devices: 2 } : which === "incomplete" ? { kind: "incomplete" } : { kind: "usable" };
+      folder = which === "join" || which === "rejoin" ? "~/Dropbox/Portico" : "~/Library/Mobile Documents/com~apple~CloudDocs/Portico";
       return { display: folder, probe };
     },
     async syncProbeAgain() {
       await sleep(300);
+      if (!folder) throw fail("sync_no_folder", "no sync folder chosen", "Choose the folder first.");
       return params.get("syncfolder") === "incomplete" ? { kind: "incomplete" } : { kind: "existing_bundle", devices: 2 };
     },
     async syncGeneratePassphrase(): Promise<GeneratedPassphrase> {
@@ -278,7 +342,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         settings: 3,
         conflicts: 2,
         needs_newer: 0,
-        rejoin: false,
+        rejoin: params.get("syncfolder") === "rejoin",
       };
     },
     async syncJoinCommit(_token: string, _bulk: JoinBulkChoice) {
@@ -293,6 +357,25 @@ export function demoSync(emit: (e: EngineEvent) => void) {
     async syncUnlock(passphrase) {
       await sleep(900);
       if (passphrase === "wrong") throw fail("sync_wrong_passphrase", "wrong sync passphrase", "Check Caps Lock and the keyboard layout.");
+      if (status.state === "alert" && status.kind === "keys_rotated_elsewhere") {
+        if (passphrase.startsWith("old") && !rememberKey && !previousOpened) {
+          // RR4: the previous keys, in memory only; the new passphrase is still needed.
+          previousOpened = true;
+          return set(status);
+        }
+        if (passphrase === "reused words here again") {
+          throw fail("sync_passphrase_reused", "this passphrase opens keys this device verified before", "This passphrase opens older keys: choose another one (rotation), or type nothing if you did not change the keys (adoption).");
+        }
+        if (passphrase === "lineage") {
+          throw fail("sync_lineage_unknown", "the new sync keys do not continue the keys this device knows", "This device lost its record of the current keys: turn sync off, then join again as a new device.");
+        }
+        if (!rememberKey && !previousOpened) {
+          // Adopted without the previous keys: every local difference waits (RR4).
+          held = [{ key: "held:snippet:tail-logs", subject: { type: "snippet", id: "tail-logs" }, device: null }];
+          pendingChanged();
+        }
+        newer = [];
+      }
       lastPass = nowSecs();
       return set(idle());
     },
@@ -350,13 +433,127 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       rememberKey = remember;
       return status;
     },
-    async syncDisable() {
+    async syncDisable(_forgetKey, _removeMyFile, _leaveRoster, keepFolder) {
       await sleep(300);
       devices = [];
       conflicts = [];
       issues = [];
       pending = [];
+      held = [];
+      newer = [];
+      keyEntries = [];
+      if (!keepFolder) folder = null;
       return set({ state: "disabled" });
+    },
+    async syncRotationPreview(): Promise<RotationPreview> {
+      await sleep(300);
+      return {
+        devices: devices
+          .filter((d) => !d.revoked)
+          .map((d) => ({
+            id: d.id,
+            label: d.label,
+            this_device: d.this_device,
+            app_version: d.label === DESKTOP ? "0.6.2" : "0.7.0",
+            outdated: d.label === DESKTOP,
+            waiting: false,
+          })),
+        outdated: devices.some((d) => d.label === DESKTOP && !d.revoked) ? [DESKTOP] : [],
+        format_upgrade: true,
+        exposed_accounts: [],
+      };
+    },
+    async syncForgetPreview(deviceId): Promise<ForgetPreview> {
+      await sleep(300);
+      const d = devices.find((x) => x.id === deviceId);
+      if (!d) throw fail("sync_device_unknown", "this device is not in the sync", "Reload the list of devices.");
+      if (d.this_device) throw fail("sync_forget_self", "this device cannot forget itself", "To remove this device, use Turn sync off.");
+      return {
+        id: d.id,
+        label: d.label,
+        last_seen: d.last_seen,
+        last_written: [
+          { type: "host", alias: "metrics-eu" },
+          { type: "host_meta", alias: "db-prod", field: "tags" },
+          { type: "snippet", id: "restart-service" },
+        ],
+        exposed_accounts: [],
+        enter_new_passphrase_on: devices.filter((x) => !x.this_device && !x.revoked && x.id !== d.id).map((x) => x.label),
+      };
+    },
+    async syncRotateKeys(request): Promise<RotationOutcome> {
+      await sleep(1400);
+      if (request.authorization.kind === "current" && request.authorization.value === "wrong") {
+        throw fail("sync_wrong_passphrase", "wrong sync passphrase", "Check Caps Lock and the keyboard layout.");
+      }
+      if (request.newPassphrase.kind === "typed" && request.newPassphrase.value === "reused words here again") {
+        throw fail("sync_passphrase_reused", "the new passphrase opens keys this device verified before", "This passphrase opens older keys: choose another one (rotation), or type nothing if you did not change the keys (adoption).");
+      }
+      checkNew(request.newPassphrase);
+      rememberKey = request.rememberKey;
+      const forgotten = devices.filter((d) => request.deviceIds.includes(d.id)).map((d) => d.label);
+      devices = devices.map((d) => (request.deviceIds.includes(d.id) ? { ...d, revoked: true } : d));
+      lastPass = nowSecs();
+      const next = params.get("syncfolderdown") === "1" ? set({ state: "waiting", reason: "rotation_pending", device: null }) : set(idle());
+      return {
+        epoch: 3,
+        status: next,
+        enter_new_passphrase_on: devices.filter((d) => !d.this_device && !d.revoked).map((d) => d.label),
+        forgotten,
+        exposed_accounts: [],
+      };
+    },
+    async syncResolveRotationConflict(choice) {
+      await sleep(1200);
+      if (!(status.state === "alert" && status.kind === "rotation_conflict")) {
+        throw fail("sync_not_pending", "no key conflict is waiting", "Reload the list of synced changes awaiting confirmation.");
+      }
+      if (choice.kind === "use_other") {
+        if (choice.passphrase === "wrong") throw fail("sync_wrong_passphrase", "wrong sync passphrase", "Check Caps Lock and the keyboard layout.");
+        if (choice.passphrase === "removed") {
+          throw fail(
+            "sync_rotation_conflict",
+            `the keys of ${LAPTOP} still include ${PHONE}, removed by this device`,
+            "The other device's keys still include a device you removed: keep this device's keys instead.",
+          );
+        }
+      } else {
+        checkNew(choice.newPassphrase);
+        rememberKey = choice.rememberKey;
+      }
+      lastPass = nowSecs();
+      return set(idle());
+    },
+    async syncRestoreBundle() {
+      await sleep(700);
+      if (status.state === "alert" && status.kind === "rotation_conflict") {
+        throw fail("sync_rotation_conflict", "two devices changed the keys at the same time", "Two devices changed the keys at the same time: use the other device's keys or keep this device's.");
+      }
+      if (status.state === "waiting" && status.reason === "rotation_pending") return set(status);
+      return set(idle());
+    },
+    syncNewerFiles: async () => structuredClone(newer),
+    async syncDiscardNewerFile(deviceId, fingerprint) {
+      await sleep(400);
+      if (!newer.some((f) => f.device === deviceId && f.fingerprint === fingerprint)) {
+        throw fail("sync_not_pending", "this file changed since it was shown", "Reload the list of synced changes awaiting confirmation.");
+      }
+      newer = newer.filter((f) => f.fingerprint !== fingerprint);
+      // The alert stays: studio-mac really changed the keys in this demo.
+      return set(status);
+    },
+    syncKeyEntries: async () => structuredClone(keyEntries),
+    async syncRemoveKeyEntry(account) {
+      await sleep(300);
+      if (!keyEntries.some((k) => k.account === account)) throw fail("sync_key_entry_invalid", "not an old sync key", "Only old sync keys can be removed here.");
+      keyEntries = keyEntries.filter((k) => k.account !== account);
+    },
+    syncRevokedValues: async () => structuredClone(held),
+    async syncRevokedValue(key) {
+      await sleep(300);
+      held = held.filter((h) => h.key !== key);
+      pendingChanged();
+      return set(held.length || status.state !== "alert" ? status : idle());
     },
   };
 

@@ -4,23 +4,31 @@
   // switch tabs, `s` syncs now. One primary action per view: Sync now in a
   // nominal Overview, Unlock when locked, Acknowledge for an alert that can
   // be acknowledged. A steady height: switching tabs does not resize it.
+  // S2c-1: "Rotate keys…" (Overview, Devices, `o`), "Forget…" per device
+  // (never this one), old keys in this keychain, files claiming newer keys,
+  // and the key states' own primary action: enter the new passphrase, choose
+  // keys in a conflict, join again once removed, restore the key file.
   import { fly } from "svelte/transition";
-  import { type ErrorSummary } from "../api";
+  import { type ErrorSummary, type NewerEpochFile, type SyncKeyEntry } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
-  import { ago, explainAlert, explainFolder, explainWait, subjectLabel, syncLabel } from "../syncview";
+  import { ago, explainAlert, explainFolder, explainWait, keyEntryLabel, keysNeedYou, subjectLabel, syncLabel } from "../syncview";
   import { sync, type SyncTab } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
   import CodeText from "./CodeText.svelte";
   import Modal from "./Modal.svelte";
   import SyncConflicts from "./SyncConflicts.svelte";
+  import SyncNewerFiles from "./SyncNewerFiles.svelte";
   import SyncReceived from "./SyncReceived.svelte";
 
   let { tab }: { tab: SyncTab } = $props();
 
   let armed = $state(false);
-  let busy: string | null = $state(null);
-  let error: ErrorSummary | null = $state(null);
+  let busy = $state<string | null>(null);
+  let error = $state<ErrorSummary | null>(null);
+  let discarding = $state<NewerEpochFile | null>(null);
+  let newer = $state<SyncNewerFiles | undefined>();
+  let removingKey = $state<SyncKeyEntry | null>(null);
 
   const status = $derived(sync.status);
   const head = $derived(syncLabel(status, sync.now));
@@ -53,7 +61,33 @@
   const setRemember = (on: boolean) => run("Saving…", () => backend.syncSetOptions(on), on ? "The key is remembered on this device" : "The key is no longer remembered here");
   const skip = (key: string) => run("Skipping…", () => backend.syncSkipOnThisDevice(key), "Skipped on this device");
 
+  async function removeKey() {
+    const entry = removingKey;
+    if (!entry || busy) return;
+    busy = "Removing the old key…";
+    error = null;
+    const failed = await sync.act(() => backend.syncRemoveKeyEntry(entry.account));
+    busy = null;
+    removingKey = null;
+    if (failed) error = failed;
+    else workspace.notify({ code: "sync", message: `${keyEntryLabel(entry)} removed from this keychain`, hint: null }, "info");
+  }
+
+  const rotate = () => sync.open({ kind: "rotate", device: null });
+
   function onkey(key: string): boolean {
+    if (key === "y" && discarding) {
+      void newer?.remove();
+      return true;
+    }
+    if (key === "y" && removingKey) {
+      void removeKey();
+      return true;
+    }
+    if (key === "o" && canRotate && !busy) {
+      rotate();
+      return true;
+    }
     const n = Number(key);
     const t = TABS[n - 1];
     if (t) {
@@ -71,6 +105,12 @@
 
   const locked = $derived(status?.state === "locked");
   const acknowledgeable = $derived(status?.state === "alert" && status.kind === "passphrase_changed");
+  const keys = $derived(keysNeedYou(status));
+  const tampered = $derived(status?.state === "alert" && status.kind === "bundle_tampered");
+  const pendingRotation = $derived(status?.state === "waiting" && status.reason === "rotation_pending");
+  const revokedWrites = $derived(status?.state === "alert" && status.kind === "revoked_writes");
+  /** The core refuses a rotation during an alert, locked, or a rotation still on its way. */
+  const canRotate = $derived(sync.enabled && !locked && !pendingRotation && status?.state !== "alert" && status?.state !== "error");
   /** Nothing to fix first: Sync now is the view's primary action. */
   const nominal = $derived(tab === "overview" && (status?.state === "idle" || status?.state === "syncing" || status?.state === "waiting"));
 </script>
@@ -104,10 +144,15 @@
 
           {#if status?.state === "alert"}
             {@const why = explainAlert(status.kind, status.device)}
-            <section class="callout" data-tone="error" role="alert">
+            <section class="callout" data-tone={status.kind === "keys_rotated_elsewhere" ? "warning" : "error"} role="alert" data-testid="sync-alert">
               <strong>{why.title}</strong>
               <p>{why.body}</p>
               <p class="hint">{why.hint}</p>
+              {#if tampered}
+                <p class="hint">Or, if nobody changed the keys, restore the key file from this device's verified copy.</p>
+              {:else if revokedWrites && sync.held.length}
+                <div class="row"><button class="link" onclick={() => go("received")}><span class="n warning">{sync.held.length}</span> held {sync.held.length === 1 ? "value" : "values"} to decide</button></div>
+              {/if}
             </section>
           {:else if status?.state === "folder_unavailable"}
             {@const why = explainFolder(status.reason)}
@@ -117,8 +162,12 @@
               <p class="hint">{why.hint}</p>
             </section>
           {:else if status?.state === "waiting"}
-            <section class="callout" data-tone="quiet">
+            <section class="callout" data-tone={status.reason === "needs_new_keys" ? "warning" : "quiet"}>
               <p>{explainWait(status.reason, status.device)} Portico checks again every 30 seconds.</p>
+              {#if pendingRotation}
+                <p class="hint">If the folder's key file was damaged meanwhile, restore it from this device.</p>
+                <div class="row"><button class="secondary small" disabled={!!busy} onclick={() => sync.open({ kind: "form", form: "restore" })}>Restore key file…</button></div>
+              {/if}
             </section>
           {:else if status?.state === "locked"}
             <section class="callout" data-tone="warning">
@@ -131,6 +180,8 @@
               {#if status.summary.hint}<p class="hint"><CodeText text={status.summary.hint} capitalize={false} /></p>{/if}
             </section>
           {/if}
+
+          <SyncNewerFiles bind:this={newer} bind:asking={discarding} bind:busy onerror={(e) => (error = e)} />
 
           {#if sync.conflicts.length || sync.received || issueCount}
             <section class="todo">
@@ -148,10 +199,18 @@
             </label>
             <div class="row">
               <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "rename" })}>Rename device…</button>
-              <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "change" })}>Change passphrase…</button>
-              <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "reset" })} disabled={locked}>Reset passphrase…</button>
-              {#if !acknowledgeable}<button class="secondary small" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>{/if}
+              {#if !acknowledgeable && keys !== "forgotten"}<button class="secondary small" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>{/if}
             </div>
+          </section>
+
+          <section class="group">
+            <span class="caption">Passphrase and keys</span>
+            <div class="row">
+              <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "change" })} disabled={!!keys}>Change passphrase…</button>
+              <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "reset" })} disabled={locked || !!keys}>Reset passphrase…</button>
+              <button class="secondary small" onclick={rotate} disabled={!canRotate} title="New keys and a new passphrase for every device (o)" data-testid="sync-rotate-open">Rotate keys… <kbd>o</kbd></button>
+            </div>
+            <p class="note">Rotating locks out anyone who copied the folder or knows the old passphrase; every other device then needs the new one.</p>
           </section>
         {:else if tab === "conflicts"}
           <SyncConflicts />
@@ -192,9 +251,38 @@
                   {#if d.this_device}<span class="pill">this device</span>{/if}
                   {#if d.revoked}<span class="pill">removed</span>{:else if d.stale}<span class="pill">inactive</span>{/if}
                   <span class="when">published {stamp(d.published_at)} · seen {d.this_device ? "now" : stamp(d.last_seen)}</span>
+                  {#if !d.this_device && !d.revoked}
+                    <button class="secondary small forget" disabled={!canRotate || !!busy} onclick={() => sync.open({ kind: "rotate", device: { id: d.id, label: d.label } })} title="Remove it from the sync and rotate the keys">Forget…</button>
+                  {/if}
                 </li>
               {/each}
             </ul>
+            <div class="devices-foot">
+              <p class="note">To remove this device, use Turn sync off with “Leave the device list”. A lost device: Forget… it here.</p>
+              <button class="secondary small" onclick={rotate} disabled={!canRotate}>Rotate keys… <kbd>o</kbd></button>
+            </div>
+          {/if}
+          {#if sync.keyEntries.length}
+            <section class="group" aria-labelledby="sync-old-keys" data-testid="sync-old-keys">
+              <span class="caption" id="sync-old-keys">Old keys in this keychain</span>
+              <ul class="list">
+                {#each sync.keyEntries as k (k.account)}
+                  <li class="device">
+                    <span class="mono name">{keyEntryLabel(k)}</span>
+                    {#if removingKey?.account === k.account}
+                      <span class="confirm">
+                        <span class="note">Files sealed only with it can no longer be read here.</span>
+                        <button class="secondary small" onclick={() => (removingKey = null)}>Keep</button>
+                        <button class="danger small" disabled={!!busy} onclick={removeKey}>Remove <kbd>y</kbd></button>
+                      </span>
+                    {:else}
+                      <button class="secondary small end" disabled={!!busy} onclick={() => (removingKey = k)}>Remove…</button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              <p class="note">The key in use is never listed: Turn sync off forgets it.</p>
+            </section>
           {/if}
         {/if}
       </div>
@@ -215,6 +303,16 @@
     {:else if acknowledgeable}
       <button class="secondary" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>
       <button class="primary" data-autofocus disabled={!!busy} onclick={acknowledge}>I expected it, acknowledge</button>
+    {:else if keys === "adopt"}
+      <button class="primary" data-autofocus onclick={() => sync.open({ kind: "adopt" })}>Enter the new passphrase…</button>
+    {:else if keys === "conflict"}
+      <button class="primary" data-autofocus onclick={() => sync.open({ kind: "conflict" })}>Choose keys…</button>
+    {:else if keys === "forgotten"}
+      <button class="secondary" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>
+      <button class="primary" data-autofocus onclick={() => sync.open({ kind: "form", form: "rejoin" })}>Join again as a new device…</button>
+    {:else if tampered}
+      <button class="secondary" disabled={!!busy} onclick={syncNow}>Sync now <kbd>s</kbd></button>
+      <button class="primary" data-autofocus onclick={() => sync.open({ kind: "form", form: "restore" })}>Restore key file…</button>
     {:else}
       <button class={nominal ? "primary" : "secondary"} data-autofocus disabled={!!busy || !sync.enabled} onclick={syncNow}>Sync now <kbd>s</kbd></button>
     {/if}
@@ -324,6 +422,12 @@
   .device .when { margin-left: auto; color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
   .pill { padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius-pill); color: var(--text-secondary); font-size: var(--text-xs); }
   .empty { color: var(--text-muted); }
+  .note { color: var(--text-muted); font-size: var(--text-sm); }
+  .device .forget { margin-left: var(--space-1); }
+  .device .end { margin-left: auto; }
+  .confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
+  .devices-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  .devices-foot .note { flex: 1 1 var(--size-menu); }
   .skeleton { height: calc(3 * var(--size-row)); border-radius: var(--radius-md); background: var(--bg-elevated); animation: sync-pulse var(--motion-loop) var(--ease-standard) infinite; }
   .busy { display: inline-flex; align-items: center; gap: var(--space-2); }
 </style>

@@ -298,6 +298,17 @@ fn run_app() {
             sync::sync_rename_device,
             sync::sync_set_options,
             sync::sync_disable,
+            sync::sync_rotation_preview,
+            sync::sync_forget_preview,
+            sync::sync_rotate_keys,
+            sync::sync_resolve_rotation_conflict,
+            sync::sync_restore_bundle,
+            sync::sync_newer_files,
+            sync::sync_discard_newer_file,
+            sync::sync_key_entries,
+            sync::sync_remove_key_entry,
+            sync::sync_revoked_values,
+            sync::sync_revoked_value,
         ])
         .build(tauri::generate_context!());
 

@@ -33,11 +33,24 @@ export function syncLabel(status: SyncStatus | null, nowMs: number): { label: st
       return { label: "Syncing…", tone: "busy" };
     case "waiting":
       // The name only: the id is in the item's title (B14).
+      if (status.reason === "rotation_pending") return { label: "Finishing key rotation…", tone: "busy" };
+      if (status.reason === "needs_new_keys") return { label: status.device ? `New keys needed on ${deviceName(status.device)}` : "New keys needed", tone: "warning" };
       return { label: status.device ? `Waiting for ${deviceName(status.device)}` : "Waiting for the sync folder", tone: "busy" };
     case "folder_unavailable":
       return { label: "Sync folder unavailable", tone: "warning" };
     case "alert":
-      return { label: "Sync alert", tone: "error" };
+      switch (status.kind) {
+        case "keys_rotated_elsewhere":
+          return { label: "Keys changed — enter new passphrase", tone: "warning" };
+        case "rotation_conflict":
+          return { label: "Key conflict", tone: "error" };
+        case "device_forgotten":
+          return { label: "Removed from sync", tone: "error" };
+        case "revoked_writes":
+          return { label: "Changes from a removed device", tone: "error" };
+        default:
+          return { label: "Sync alert", tone: "error" };
+      }
     case "error":
       return { label: "Sync failed", tone: "error" };
     default:
@@ -96,9 +109,27 @@ export function explainAlert(kind: AlertKind, device: string | null): Explanatio
       };
     case "keys_rotated_elsewhere":
       return {
-        title: "The sync keys were replaced on another device",
-        body: `${d} uses newer sync keys than this device knows.`,
-        hint: "Unlock with the current passphrase, or update Portico if this version is older.",
+        title: device ? `Keys were changed on ${device}` : "The sync keys were changed on another device",
+        body: "Enter the NEW passphrase chosen there. Nothing is merged until then; your local data stays as it is.",
+        hint: "If you did not change the keys on another device, type nothing: remove the file that claims newer keys instead.",
+      };
+    case "rotation_conflict":
+      return {
+        title: "Two devices changed the keys at the same time",
+        body: `${d} and this device each replaced the sync keys. Nothing is merged until you choose which keys to keep.`,
+        hint: "Use the other device's keys (with its passphrase), or keep this device's keys.",
+      };
+    case "device_forgotten":
+      return {
+        title: "This device was removed from sync",
+        body: `${device ? `${device} removed this device` : "Another device removed this device"} from the device list and changed the keys. It no longer receives changes. Your local hosts, snippets and settings stay here.`,
+        hint: "Turn sync off, or join again as a new device with the new passphrase.",
+      };
+    case "revoked_writes":
+      return {
+        title: "Changes from a removed device",
+        body: `${d} relays changes written by a device that was removed. They are not applied.`,
+        hint: "Type the new passphrase on that device. Values held on this device wait in Received.",
       };
     case "passphrase_changed":
       return {
@@ -190,6 +221,10 @@ export function explainWait(reason: WaitReason, device: string | null): string {
       return `${d}'s data refers to changes that are not in the folder yet.`;
     case "busy":
       return "The other Portico app (TUI or GUI) is syncing right now.";
+    case "needs_new_keys":
+      return `${d} still uses the old keys: its changes are not merged until someone types the new passphrase there.`;
+    case "rotation_pending":
+      return "The new keys are saved on this device. Portico writes them to the sync folder as soon as it answers; nothing goes back to the old keys.";
     default:
       return "Waiting for the sync folder.";
   }
@@ -383,3 +418,28 @@ export function commandStats(command: string): string {
 export function scrolledToEnd(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {
   return scrollTop + clientHeight >= scrollHeight - 1;
 }
+
+// ── Key rotation and forgetting a device (S2c-1) ─────────────────────────
+
+/** `a, b and c` (labels as given). */
+export function listText(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** `Keys 3 · this sync`, `Keys 2 · another sync (9c1e4a07)`. */
+export function keyEntryLabel(entry: { bundle: string; epoch: number; this_bundle: boolean }): string {
+  return entry.this_bundle ? `Keys ${entry.epoch} · this sync` : `Keys ${entry.epoch} · another sync (${entry.bundle.slice(0, 8)})`;
+}
+
+/** The status says a rotation, adoption or conflict needs this device. */
+export function keysNeedYou(status: SyncStatus | null): "adopt" | "conflict" | "forgotten" | null {
+  if (status?.state !== "alert") return null;
+  if (status.kind === "keys_rotated_elsewhere") return "adopt";
+  if (status.kind === "rotation_conflict") return "conflict";
+  if (status.kind === "device_forgotten") return "forgotten";
+  return null;
+}
+
+/** The word typed for the reset-level confirmation (Q6), as for "Reset passphrase". */
+export const RESET_WORD = "reset";

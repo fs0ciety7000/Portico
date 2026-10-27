@@ -844,6 +844,96 @@ export interface JoinPreview {
 
 export type JoinBulkChoice = "review_each" | "prefer_remote" | "prefer_local";
 
+// ── Key rotation and forgetting a device (S2c-1, `docs/SYNC.md` §13) ──
+
+/** Mirrors `RotationPeer`. */
+export interface RotationPeer {
+  id: string;
+  /** `name (3f9c0ae1)`. */
+  label: string;
+  this_device: boolean;
+  app_version: string | null;
+  /** Portico < 0.7: it stops syncing at this operation (Q5). */
+  outdated: boolean;
+  /** Some of its data is still on its way. */
+  waiting: boolean;
+}
+
+/** Mirrors `RotationPreview`. */
+export interface RotationPreview {
+  devices: RotationPeer[];
+  /** Labels of the outdated devices. */
+  outdated: string[];
+  format_upgrade: boolean;
+  exposed_accounts: string[];
+}
+
+/** Mirrors `ForgetPreview`. */
+export interface ForgetPreview {
+  id: string;
+  label: string;
+  last_seen: number | null;
+  /** Records whose surviving value it wrote (they stay). */
+  last_written: SyncSubject[];
+  exposed_accounts: string[];
+  enter_new_passphrase_on: string[];
+}
+
+/** Mirrors `RotationOutcome`. */
+export interface RotationOutcome {
+  epoch: number;
+  status: SyncStatus;
+  enter_new_passphrase_on: string[];
+  forgotten: string[];
+  /** Server passwords to change (F2). */
+  exposed_accounts: string[];
+}
+
+/** Mirrors `sync::AuthDto` (`value` becomes a SecretString in Rust). */
+export type RotateAuth = { kind: "current"; value: string } | { kind: "reset_confirmed" };
+
+/** Mirrors `sync::RotateDto`: `deviceIds` empty for a plain rotation. */
+export interface RotateRequest {
+  deviceIds: string[];
+  authorization: RotateAuth;
+  newPassphrase: NewPassphrase;
+  rememberKey: boolean;
+}
+
+/** Mirrors `sync::RotationChoiceDto`. */
+export type RotationChoice =
+  | { kind: "use_other"; passphrase: string }
+  | { kind: "keep_mine"; newPassphrase: NewPassphrase; rememberKey: boolean };
+
+/** Mirrors `NewerEpochFile` (RR5). */
+export interface NewerEpochFile {
+  device: string;
+  label: string;
+  /** `devices/<id>.snap`. */
+  file: string;
+  epoch: number;
+  /** Sent back to discard it: identifies the file shown. */
+  fingerprint: string;
+}
+
+/** Mirrors `SyncKeyEntry`: an old key, never the one in use. */
+export interface SyncKeyEntry {
+  account: string;
+  bundle: string;
+  epoch: number;
+  this_bundle: boolean;
+}
+
+/** Mirrors `RevokedValueItem`: held out of sync until a decision. */
+export interface RevokedValueItem {
+  key: string;
+  subject: SyncSubject;
+  /** The removed device's label; null: unknown origin (re-join). */
+  device: string | null;
+}
+
+export type RevokedValueChoice = "keep_as_mine" | "take_synced";
+
 export interface HostDecision {
   alias: string;
   destinationHash: string;
@@ -1002,7 +1092,22 @@ export const api = {
   syncResetPassphrase: (next: NewPassphrase) => invoke<SyncStatus>("sync_reset_passphrase", { new: next }),
   syncRenameDevice: (name: string) => invoke<SyncStatus>("sync_rename_device", { name }),
   syncSetOptions: (rememberKey: boolean) => invoke<SyncStatus>("sync_set_options", { rememberKey }),
-  syncDisable: (forgetKey: boolean, removeMyFile: boolean) => invoke<SyncStatus>("sync_disable", { forgetKey, removeMyFile }),
+  /** `keepFolder`: "Join again as a new device" (the folder stays picked in Rust; `syncProbeAgain` reads it). */
+  syncDisable: (forgetKey: boolean, removeMyFile: boolean, leaveRoster: boolean, keepFolder: boolean) =>
+    invoke<SyncStatus>("sync_disable", { options: { forgetKey, removeMyFile, leaveRoster, keepFolder } }),
+  syncRotationPreview: () => invoke<RotationPreview>("sync_rotation_preview"),
+  syncForgetPreview: (deviceId: string) => invoke<ForgetPreview>("sync_forget_preview", { deviceId }),
+  /** Rotates the keys; forgets `deviceIds` when there are any (always a rotation). */
+  syncRotateKeys: (request: RotateRequest) => invoke<RotationOutcome>("sync_rotate_keys", { request }),
+  syncResolveRotationConflict: (choice: RotationChoice) => invoke<SyncStatus>("sync_resolve_rotation_conflict", { choice }),
+  /** Rewrites bundle.toml from this device's verified copy (after a confirmation). */
+  syncRestoreBundle: () => invoke<SyncStatus>("sync_restore_bundle"),
+  syncNewerFiles: () => invoke<NewerEpochFile[]>("sync_newer_files"),
+  syncDiscardNewerFile: (deviceId: string, fingerprint: string) => invoke<SyncStatus>("sync_discard_newer_file", { deviceId, fingerprint }),
+  syncKeyEntries: () => invoke<SyncKeyEntry[]>("sync_key_entries"),
+  syncRemoveKeyEntry: (account: string) => invoke<void>("sync_remove_key_entry", { account }),
+  syncRevokedValues: () => invoke<RevokedValueItem[]>("sync_revoked_values"),
+  syncRevokedValue: (key: string, choice: RevokedValueChoice) => invoke<SyncStatus>("sync_revoked_value", { key, choice }),
   /** The engine event stream lost events: resync what is derived from them. */
   onEngineLagged: (cb: () => void): Promise<UnlistenFn> => listen<number>("portico://engine-lagged", () => cb()),
   /** Files dropped on the window, already registered as upload tokens. */
