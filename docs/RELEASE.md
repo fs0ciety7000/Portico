@@ -359,7 +359,7 @@ rien n'est reconstruit.
 ### Déroulé
 
 1. La publication de la Release (`release: published` ; un brouillon ne déclenche rien, une
-   *pre-release* est ignorée) lance quatre jobs, et **aucun build** :
+   *pre-release* est ignorée) lance cinq jobs, et **aucun build** :
    - `dist-render` (aucun secret, `contents: read`) : vérifie que la Release est publiée et finale
      (`vX.Y.Z`, ni brouillon ni *pre-release*), télécharge les 9 artefacts utiles (4 tarballs, 2 `.deb`,
      le dmg, le zip Windows, l'installeur NSIS) et `SHA256SUMS`, les vérifie (`sha256sum --strict -c`),
@@ -378,7 +378,13 @@ rien n'est reconstruit.
      `master` de `portico-bin` et `portico-gui-bin` (commit `Update to <v>-<pkgrel>`). L'AUR n'a pas de
      PR. La clé d'hôte de `aur.archlinux.org` n'est acceptée que si son empreinte ed25519 est celle
      publiée sur la page d'accueil de l'AUR (`SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4`).
-2. Les trois jobs à secret n'exécutent **aucun code du dépôt** ni action tierce (sauf
+   - `site` (`permissions: {}`, environnement `website`, secret `SITE_DISPATCH_TOKEN`) : envoie un
+     `repository_dispatch` (`portico-release`, avec le tag) au dépôt du site, `<owner>/Portico-show`
+     (autre nom : variable `SITE_REPO`). Le site se resynchronise aussitôt (version, commandes
+     d'installation, paquets Arch et Scoop servis en attendant l'AUR et le bucket, statuts de
+     `docs/PLAN.md`) au lieu d'attendre sa synchronisation périodique. Une seule requête `curl`, aucun
+     code du dépôt ; sans jeton, avertissement et le site suit à son rythme.
+2. Les jobs à secret n'exécutent **aucun code du dépôt** ni action tierce (sauf
    `download-artifact`) : `git`, `gh` et `ssh` du runner, sur les fichiers rendus. Les jetons du tap et du bucket passent
    en en-tête HTTP de chaque commande (`http.extraheader`), jamais dans une URL ni dans `.git/config` ;
    la clé AUR est écrite en `0600` dans `$RUNNER_TEMP` et supprimée en fin de job (`if: always()`).
@@ -439,6 +445,12 @@ Pour republier la même version avec un `PKGBUILD` corrigé, rendre localement a
       (outil de Microsoft) peut faire les mêmes étapes à partir des URL de la Release.
    Le premier envoi crée les paquets ; l'identifiant (`WINGET_PUBLISHER`, `fs0ciety7000` par défaut) ne
    doit plus changer ensuite.
+8. **Site web** (facultatif, déclenchement immédiat) : jeton *fine-grained* dont le propriétaire de la
+   ressource est celui du site, *Only select repositories* → `Portico-show` seul, permission
+   **Contents : Read and write** (celle qu'exige `repository_dispatch` ; Metadata en lecture, imposé),
+   expiration courte. Secret `SITE_DISPATCH_TOKEN` dans un environnement **`website`** (*Settings →
+   Environments*, règle de tag `v*`). Pas de reviewers requis : le jeton ne touche que le dépôt du site,
+   et le site ne fait que relire la Release publiée et `docs/PLAN.md`.
 
 ### Vérifications
 
