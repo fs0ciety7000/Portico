@@ -1752,3 +1752,56 @@ Aucun CRITIQUE ni ÉLEVÉ ; GO pour les écrans. Tout est corrigé dans `fix(cor
 | FAIBLE-6 : filtres sur le roster non corrigé si la réécriture échoue | Roster corrigé appliqué en mémoire | `observed_revoked_clock_is_used_even_if_rewrite_fails` |
 | Docs : seuil 64 Kio, copies chiffrées après « désactiver », ancienne passphrase de même époque | Tableau des écarts ci-dessus | — |
 
+#### 13.12.2 Livraison S2c-1 : TUI (2026-10-27)
+
+Le panneau Sync de la TUI branche toute l'API de §13.12 « Ce que S2c-1 (UIs) doit brancher » ; mêmes libellés que la GUI
+(livrée en parallèle), touches dans `docs/KEYBINDINGS.md`. Modules : `sync_rotate.rs` (dialogue de rotation, pur),
+`sync_panel.rs` (actions de l'Overview par statut, onglet Devices, valeurs retenues), `app_sync.rs` (appels au moteur),
+`ui/sync/rotate.rs` (vues).
+
+| Parcours | TUI |
+|---|---|
+| « Rotate keys » | `o` (Overview, Devices) : (1) ce qui se passe, appareils qui devront taper la nouvelle passphrase (« some of its data is still on its way » pour un appareil en attente), avertissement Q5 des appareils < 0.7, passage au format 2 ; (2) passphrase actuelle ou « I no longer know it » (Q6) ; (3) nouvelle passphrase (générateur `Ctrl-G`, jauge, « Remember the key on this device », avertissement de récupération et « I saved it… ») ; puis question armée, seul `y` rotate (formulation de niveau réinitialisation sans la passphrase actuelle). Refus sous leur champ (`sync_wrong_passphrase` → étape 2, `sync_passphrase_reused` / `sync_passphrase_weak` → étape 3, indice du moteur), les autres au-dessus des touches ; résultat « Keys rotated. », « Enter the new passphrase on: … », appareils retirés, comptes à changer (F2, vide avant S2b), ou « Finishing the key rotation… » (`RotationPending`) |
+| « Forget <appareil> » | `f` sur un autre appareil de Devices ; sur cet appareil, un message renvoie à « Turn sync off » et « Leave the device list ». Étape 1 : « Also remove <appareil>'s access to your cloud folder » (RR7, même texte que la GUI) en tête, dernière publication, enregistrements dont il a écrit la valeur (`last_written`, cinq puis « +N more »), appareils à mettre à jour ; puis les étapes 2 et 3 et `y` |
+| Adoption | `↵` ou `u` sur « Keys changed — enter new passphrase » : « If you did not change the keys on another device, type nothing. » ; sur un appareil qui ne mémorise pas sa clé, champ « Previous » facultatif d'abord (RR4) : la TUI appelle `sync_unlock(précédente)` puis `sync_unlock(nouvelle)` ; un refus de la précédente se place sous son champ (« If Portico has not restarted since the keys changed, leave it empty. ») ; `sync_device_forgotten`, `sync_lineage_unknown`, `sync_rotation_conflict` ferment le formulaire, le statut dit la suite |
+| Conflit de rotation | « Key conflict » : `u` « Use the other device's keys » (sa passphrase, refus E2 sous le champ avec l'appareil nommé), `o` « Keep this device's keys » (texte R17, nouvelle passphrase, `y`) ; `sync_not_pending` ferme le formulaire et relit l'état |
+| Appareil oublié | « Removed from sync » : `D` désactive, `n` « Join again as a new device » désactive (« Forget the key » coché) puis ouvre l'assistant sur l'étape du dossier, prérempli |
+| Valeurs retenues | Onglet Received, après les snippets : « held · from <appareil> » (ou « unknown origin »), carte « From forgotten devices », `m` « keep as mine » / `t` « take the synced value », armés, un élément à la fois ; `SyncPendingChanged` les recharge (les décisions attendent) ; compte dans « to review » |
+| Fichiers d'époque supérieure | Sous l'alerte, chaque fichier (`devices/….snap`, appareil, époque annoncée), `j` / `k` pour choisir, `x` puis `y` armé → `sync_discard_newer_file(device, fingerprint)` |
+| « Restore key file » | `b` sur `BundleTampered` et pendant `RotationPending`, `y` armé ; un refus (`sync_keys_rotated`, `sync_rotation_conflict`) s'affiche avec son indice |
+| Anciennes clés | Devices, section « Old keys in this keychain » (« Keys <époque> · this sync / another sync (<bundle>) », « not in use »), `x` puis `y` armé ; la clé en service n'est jamais listée (le texte le dit) |
+| « Turn sync off » | Troisième case « Leave the device list » avec le texte R18 (sans rotation, l'appareil garde la clé jusqu'à la prochaine), cochée avec « Remove this device's file » comme dans la GUI (décochable seule) ; masquée pour « Join again » |
+| Rattachement (`JoinPreview::rejoin`) | Seul « Review each conflict » ; les deux autres choix « not offered » avec la raison ; `j` / `k` sans effet |
+| Statuts | Barre et panneau : « Keys changed — enter new passphrase », « Key conflict », « Removed from sync », « Changes from a removed device », « Finishing key rotation… », « New keys needed on <appareil> » ; textes et indices dédiés dans l'Overview |
+| « Ne pas mémoriser » | `m` : « The key is no longer remembered, nor the key of a pending rotation: after a restart, Portico asks for the passphrase » |
+
+Tests : `sync_rotate.rs` (étapes, effacement des secrets, `y` armé, refus ramenés à leur champ),
+`app_sync/tests/s2.rs` (chaque parcours, rendu 80×24 et 120×36 de chaque écran, et
+`lost_device_drill_through_the_panel` : trois moteurs, un dossier ; depuis la TUI, oubli de L par les touches ; B adopte
+P', P n'ouvre plus rien pour L ; B fait tourner, la TUI refuse l'ancienne passphrase puis adopte la nouvelle par le
+formulaire). Captures : `PORTICO_CAPTURE_DIR=… cargo test -p portico-tui s2c1_captures -- --ignored`.
+
+| Écart S2c-1 (TUI) | Raison |
+|---|---|
+| « Rotate keys » est `o`, pas `R` (§13.8) | `R` est déjà « reset passphrase » dans l'Overview ; `o` est aussi la touche de la GUI |
+| « Join again as a new device » est `n`, pas `J` | `J` fait défiler le panneau |
+| Adoption : la passphrase précédente est un champ facultatif (laisser vide), pas un bouton « I don't remember it » | Un champ secret vide suffit au clavier ; l'appareil ne peut pas savoir s'il détient encore la clé courante en mémoire (dans ce cas la précédente est refusée et le texte dit de la laisser vide) |
+| La valeur d'un enregistrement retenu n'est pas affichée | `RevokedValueItem` ne la porte pas (sujet et appareil seulement) |
+
+#### 13.12.3 Livraison S2c-1 : GUI (2026-10-27)
+
+La GUI branche la même API, avec les mêmes libellés que la TUI (§13.12.2) ; touches dans `docs/KEYBINDINGS.md`
+(« Synchronisation chiffrée par dossier (GUI) : principe » et bloc généré).
+
+- **Rotation et oubli** : un dialogue en trois étapes (ce qui se passe, passphrase actuelle ou « I no longer know it »,
+  nouvelle passphrase), confirmé par `y` seul ; pour un oubli, l'étape 1 commence par « Also remove <appareil>'s access to
+  your cloud folder » (RR7).
+- **Adoption** : sur un appareil qui ne mémorise aucune clé, la passphrase précédente est demandée d'abord (RR4), puis la
+  nouvelle.
+- **Conflit de clés** : deux choix explicites, « Use the other device's keys » et « Keep this device's keys » (texte R17).
+- **Appareil oublié** : « Join again » rouvre l'assistant sur le même dossier, conservé côté Rust (la GUI n'envoie pas de
+  chemin).
+- **Valeurs retenues** : dans Received, carte « From forgotten devices », « Keep as mine » / « Take the synced value », un
+  élément à la fois.
+- **Fichiers d'époque supérieure et anciennes clés** : retirables après confirmation.
+- **« Turn sync off »** : case « Leave the device list » (texte R18), cochée avec « Remove this device's file ».

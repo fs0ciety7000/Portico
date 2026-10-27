@@ -40,6 +40,7 @@ mod player;
 mod recordings;
 mod snippets;
 mod sync_panel;
+mod sync_rotate;
 mod sync_wizard;
 mod term_search;
 mod terminal;

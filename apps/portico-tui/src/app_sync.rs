@@ -17,9 +17,18 @@
 //!   lists are reloaded and the panel says to review it again.
 //! - A snippet run refused with `sync_snippet_unconfirmed` opens its review
 //!   (the whole command) instead of a bare error.
+//!
+//! S2c-1 (`docs/SYNC.md` §13.12 "Ce que S2c-1 (UIs) doit brancher"): the
+//! rotation dialogs ([`crate::sync_rotate`]) and their previews, the
+//! adoption (the previous passphrase first on a device that does not
+//! remember its key, RR4, then the new one), the rotation conflict's
+//! "Use the other device's keys", "Restore key file", newer device files
+//! (RR5), old keychain entries, held values (Received), "Leave the device
+//! list" and "Join again as a new device".
 
 use std::time::Instant;
 
+use portico_core::sync::api::{ForgetDevice, RevokedValueChoice, RotateKeys, RotationChoice};
 use portico_core::sync::{SyncCreate, SyncJoin, SyncOptions, SyncStatus};
 use portico_core::{EngineEvent, ErrorSummary};
 use secrecy::ExposeSecret;
@@ -27,7 +36,8 @@ use secrecy::ExposeSecret;
 use crate::action::Action;
 use crate::app::{App, Overlay};
 use crate::keys::{Load, Notice};
-use crate::sync_panel::{PanelMode, SyncOutcome, SyncPanel, SyncTab};
+use crate::sync_panel::{PanelMode, PassField, SyncOutcome, SyncPanel, SyncTab};
+use crate::sync_rotate::{RotateKind, RotateRequest, Rotated};
 use crate::sync_wizard::{SyncWizard, WizardOutcome};
 
 /// A panel operation, to word its result.
@@ -46,6 +56,13 @@ pub(crate) enum SyncOp {
     ConfirmHost(String),
     RejectHost(String),
     ConfirmSnippet(String),
+    /// Turn sync off, then the wizard on `folder` (forgotten device).
+    DisableJoin(Option<std::path::PathBuf>),
+    UseOther,
+    Restore,
+    Discard(String),
+    RemoveKey(String),
+    Held(String, RevokedValueChoice),
 }
 
 /// The status bar's words while an operation runs.
@@ -54,7 +71,9 @@ fn busy_words(op: &SyncOp) -> &'static str {
         SyncOp::SyncNow => "Syncing…",
         SyncOp::Unlock => "Unlocking…",
         SyncOp::Change | SyncOp::Reset => "Deriving the new key…",
-        SyncOp::Disable => "Disabling sync…",
+        SyncOp::Disable | SyncOp::DisableJoin(_) => "Disabling sync…",
+        SyncOp::UseOther => "Checking the other device's keys…",
+        SyncOp::Restore => "Restoring the key file…",
         _ => "Saving…",
     }
 }
@@ -72,6 +91,19 @@ where
     runtime.spawn(async move {
         let _ = tx.send(fut.await);
     });
+}
+
+/// Spawns `make(tx)`, which sends its own actions (several reads in a
+/// row). Outside a runtime nothing is spawned.
+fn spawn_seq<M, F>(app: &App, make: M)
+where
+    M: FnOnce(tokio::sync::mpsc::UnboundedSender<Action>) -> F,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(make(app.tx.clone()));
 }
 
 /// How long a copied passphrase stays in the clipboard (A4, S1c review).
@@ -174,6 +206,53 @@ impl App {
                 }
             }
             Action::SyncGenerated(result) => self.sync_generated(result),
+            Action::SyncHeld(result) => {
+                self.sync.stale_held = false;
+                self.sync
+                    .set_held(result.unwrap_or_default(), Instant::now());
+            }
+            Action::SyncKeyEntries(result) => {
+                if let Some(panel) = &mut self.sync_panel {
+                    panel.keys = match result {
+                        Ok(list) => Load::Ready(list),
+                        Err(e) => Load::Failed(e),
+                    };
+                }
+            }
+            Action::SyncNewerFiles(result) => {
+                if let Some(panel) = &mut self.sync_panel {
+                    panel.newer = match result {
+                        Ok(list) => Load::Ready(list),
+                        Err(e) => Load::Failed(e),
+                    };
+                    panel.newer_index = panel
+                        .newer_index
+                        .min(panel.newer_files().len().saturating_sub(1));
+                }
+            }
+            Action::SyncRotationPreview(result) => {
+                if let Some(PanelMode::Rotate(flow)) = self.sync_panel.as_mut().map(|p| &mut p.mode)
+                {
+                    flow.preview = match result {
+                        Ok(preview) => Load::Ready(preview),
+                        Err(e) => Load::Failed(e),
+                    };
+                }
+            }
+            Action::SyncForgetPreview(result) => {
+                if let Some(PanelMode::Rotate(flow)) = self.sync_panel.as_mut().map(|p| &mut p.mode)
+                {
+                    flow.forget = Some(match result {
+                        Ok(preview) => Load::Ready(preview),
+                        Err(e) => Load::Failed(e),
+                    });
+                }
+            }
+            Action::SyncRotated(result) => self.sync_rotated(result),
+            Action::SyncAdopted {
+                previous_failed,
+                result,
+            } => self.sync_adopted(previous_failed, result),
             Action::SyncPreviewed(result) => {
                 let Some(wizard) = &mut self.sync_wizard else {
                     return;
@@ -244,32 +323,37 @@ impl App {
         }
     }
 
-    /// Received hosts and snippets waiting for this device.
+    /// Received hosts, snippets and held values waiting for this device,
+    /// one after the other: the sync thread's queue is short
+    /// (`SYNC_QUEUE`), a burst of parallel reads would meet `sync_busy`.
     fn reload_received(&self) {
         let engine = self.engine.clone();
-        spawn(self, async move {
-            Action::SyncPending(engine.sync_pending_hosts().await.map_err(|e| e.summary()))
-        });
-        let engine = self.engine.clone();
-        spawn(self, async move {
-            Action::SyncSnippets(
-                engine
-                    .synced_snippets_unconfirmed()
-                    .await
-                    .map_err(|e| e.summary()),
-            )
+        spawn_seq(self, move |tx| async move {
+            let pending = engine.sync_pending_hosts().await.map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncPending(pending));
+            let snippets = engine
+                .synced_snippets_unconfirmed()
+                .await
+                .map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncSnippets(snippets));
+            let held = engine.sync_revoked_values().await.map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncHeld(held));
         });
     }
 
-    /// Devices and issues (conflicts come with `refresh_sync`).
+    /// Devices, issues, old keys and newer files (conflicts come with
+    /// `refresh_sync`), one after the other (see [`Self::reload_received`]).
     fn reload_sync_panel(&self) {
         let engine = self.engine.clone();
-        spawn(self, async move {
-            Action::SyncDevices(engine.sync_devices().await.map_err(|e| e.summary()))
-        });
-        let engine = self.engine.clone();
-        spawn(self, async move {
-            Action::SyncIssues(engine.sync_issues().await.map_err(|e| e.summary()))
+        spawn_seq(self, move |tx| async move {
+            let devices = engine.sync_devices().await.map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncDevices(devices));
+            let issues = engine.sync_issues().await.map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncIssues(issues));
+            let keys = engine.sync_key_entries().await.map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncKeyEntries(keys));
+            let newer = engine.sync_newer_files().await.map_err(|e| e.summary());
+            let _ = tx.send(Action::SyncNewerFiles(newer));
         });
     }
 
@@ -311,6 +395,7 @@ impl App {
                 // What is on screen may be old: decisions wait for the reload.
                 self.sync.stale_hosts = true;
                 self.sync.stale_snippets = true;
+                self.sync.stale_held = true;
                 self.reload_received();
             }
             EngineEvent::SnippetsChanged => {
@@ -431,6 +516,80 @@ impl App {
             SyncOutcome::Disable(options) => self.run_op(SyncOp::Disable, async move {
                 engine.sync_disable(options).await.map(Some)
             }),
+            SyncOutcome::DisableAndJoin(options) => {
+                let folder = self.sync.overview.as_ref().and_then(|o| o.folder.clone());
+                self.run_op(SyncOp::DisableJoin(folder), async move {
+                    engine.sync_disable(options).await.map(Some)
+                });
+            }
+            SyncOutcome::LoadRotation { forget } => {
+                spawn(self, async move {
+                    Action::SyncRotationPreview(
+                        engine
+                            .sync_rotation_preview()
+                            .await
+                            .map_err(|e| e.summary()),
+                    )
+                });
+                if let Some(id) = forget {
+                    let engine = self.engine.clone();
+                    spawn(self, async move {
+                        Action::SyncForgetPreview(
+                            engine
+                                .sync_forget_preview(id)
+                                .await
+                                .map_err(|e| e.summary()),
+                        )
+                    });
+                }
+            }
+            SyncOutcome::Rotate(request) => self.rotate(request),
+            SyncOutcome::Adopt { previous, new } => spawn(self, async move {
+                // RR4: the previous passphrase opens this device's current
+                // keys (in memory only), so the adoption keeps the local
+                // data's provenance.
+                if let Some(previous) = previous
+                    && let Err(e) = engine.sync_unlock(previous).await
+                {
+                    return Action::SyncAdopted {
+                        previous_failed: true,
+                        result: Err(e.summary()),
+                    };
+                }
+                Action::SyncAdopted {
+                    previous_failed: false,
+                    result: engine.sync_unlock(new).await.map_err(|e| e.summary()),
+                }
+            }),
+            SyncOutcome::UseOther(passphrase) => self.run_op(SyncOp::UseOther, async move {
+                engine
+                    .sync_resolve_rotation_conflict(RotationChoice::UseOther(passphrase))
+                    .await
+                    .map(Some)
+            }),
+            SyncOutcome::Restore => self.run_op(SyncOp::Restore, async move {
+                engine.sync_restore_bundle().await.map(Some)
+            }),
+            SyncOutcome::DiscardNewer {
+                device,
+                fingerprint,
+                file,
+            } => self.run_op(SyncOp::Discard(file), async move {
+                engine
+                    .sync_discard_newer_file(device, fingerprint)
+                    .await
+                    .map(Some)
+            }),
+            SyncOutcome::RemoveKey { account, label } => {
+                self.run_op(SyncOp::RemoveKey(label), async move {
+                    engine.sync_remove_key_entry(account).await.map(|()| None)
+                });
+            }
+            SyncOutcome::Held { key, label, choice } => {
+                self.run_op(SyncOp::Held(label, choice), async move {
+                    engine.sync_revoked_value(key, choice).await.map(Some)
+                });
+            }
             SyncOutcome::Acknowledge => self.run_op(SyncOp::Acknowledge, async move {
                 engine.sync_acknowledge_alerts().await.map(Some)
             }),
@@ -520,7 +679,7 @@ impl App {
                     }
                     SyncOp::Remember(true) => "The key is remembered on this device".to_owned(),
                     SyncOp::Remember(false) => {
-                        "The key is no longer remembered: unlock with the passphrase after a restart"
+                        "The key is no longer remembered, nor the key of a pending rotation: after a restart, Portico asks for the passphrase"
                             .to_owned()
                     }
                     SyncOp::Disable => {
@@ -537,6 +696,19 @@ impl App {
                         format!("{alias} rejected on this device")
                     }
                     SyncOp::ConfirmSnippet(name) => format!("{name} confirmed: it can run now"),
+                    SyncOp::DisableJoin(_) => {
+                        "Sync is off. Join the folder again as a new device.".to_owned()
+                    }
+                    SyncOp::UseOther => {
+                        "The other device's keys are in use on this device".to_owned()
+                    }
+                    SyncOp::Restore => "The key file was restored from this device".to_owned(),
+                    SyncOp::Discard(file) => format!("{file} was removed"),
+                    SyncOp::RemoveKey(label) => format!("{label} removed from this keychain"),
+                    SyncOp::Held(label, RevokedValueChoice::KeepAsMine) => {
+                        format!("{label} kept as this device's value")
+                    }
+                    SyncOp::Held(label, _) => format!("{label}: the synced value is back"),
                 };
                 panel.mode = PanelMode::Browse;
                 panel.notice = Some(Notice::ok(message));
@@ -544,6 +716,14 @@ impl App {
             }
             Err(e) => Some(e),
         };
+        if let (SyncOp::DisableJoin(folder), None) = (op, &error) {
+            let notice = panel.notice.take();
+            self.open_wizard_at(folder.as_deref());
+            if let (Some(wizard), Some(notice)) = (&mut self.sync_wizard, notice) {
+                wizard.note = Some(notice.message);
+            }
+            return;
+        }
         if back_to_snippets {
             let notice = panel.notice.take();
             self.close_sync_panel();
@@ -569,6 +749,14 @@ impl App {
                     form.busy = false;
                 }
             }
+            "sync_not_pending" if matches!(panel.mode, PanelMode::UseOther(_)) => {
+                panel.mode = PanelMode::Browse;
+                panel.notice = Some(Notice {
+                    ok: false,
+                    message: "the rotation conflict is over".into(),
+                    hint: Some("The status was read again: see what it says now.".into()),
+                });
+            }
             "sync_not_pending" => {
                 panel.notice = Some(Notice {
                     ok: false,
@@ -577,7 +765,9 @@ impl App {
                 });
             }
             _ => match &mut panel.mode {
-                PanelMode::Unlock(form) | PanelMode::Change(form) => form.refused(e),
+                PanelMode::Unlock(form) | PanelMode::Change(form) | PanelMode::UseOther(form) => {
+                    form.refused(e);
+                }
                 PanelMode::Reset { form, confirm } => {
                     *confirm = None;
                     form.refused(e);
@@ -585,6 +775,115 @@ impl App {
                 PanelMode::Rename { problem, .. } => *problem = Some(e),
                 _ => panel.notice = Some(Notice::error(e)),
             },
+        }
+    }
+
+    /// Runs a rotation dialog's request; the answer comes back as
+    /// `SyncRotated`.
+    fn rotate(&mut self, request: RotateRequest) {
+        let engine = self.engine.clone();
+        spawn(self, async move {
+            let RotateRequest {
+                kind,
+                authorization,
+                new_passphrase,
+                remember_key,
+            } = request;
+            let with_outcome = |o: portico_core::sync::api::RotationOutcome| Rotated {
+                status: o.status.clone(),
+                outcome: Some(o),
+            };
+            let result = match kind {
+                RotateKind::Rotate => engine
+                    .sync_rotate_keys(RotateKeys {
+                        authorization,
+                        new_passphrase,
+                        remember_key,
+                    })
+                    .await
+                    .map(with_outcome),
+                RotateKind::Forget { id, .. } => engine
+                    .sync_forget_device(ForgetDevice {
+                        device_ids: vec![id],
+                        authorization,
+                        new_passphrase,
+                        remember_key,
+                    })
+                    .await
+                    .map(with_outcome),
+                RotateKind::KeepMine => engine
+                    .sync_resolve_rotation_conflict(RotationChoice::KeepMine {
+                        new_passphrase,
+                        remember_key,
+                    })
+                    .await
+                    .map(|status| Rotated {
+                        status,
+                        outcome: None,
+                    }),
+            };
+            Action::SyncRotated(result.map_err(|e| e.summary()))
+        });
+    }
+
+    fn sync_rotated(&mut self, result: Result<Rotated, ErrorSummary>) {
+        // Done or not (a timeout may still finish): read it all again.
+        self.refresh_sync();
+        if let (Ok(rotated), Some(overview)) = (&result, &mut self.sync.overview) {
+            overview.status = rotated.status.clone();
+        }
+        if let Some(PanelMode::Rotate(flow)) = self.sync_panel.as_mut().map(|p| &mut p.mode) {
+            flow.finished(result);
+        } else if let Err(e) = result {
+            self.notify_error(e);
+        }
+    }
+
+    fn sync_adopted(&mut self, previous_failed: bool, result: Result<SyncStatus, ErrorSummary>) {
+        self.refresh_sync();
+        if let (Ok(status), Some(overview)) = (&result, &mut self.sync.overview) {
+            overview.status = status.clone();
+        }
+        let Some(panel) = &mut self.sync_panel else {
+            if let Err(e) = result {
+                self.notify_error(e);
+            }
+            return;
+        };
+        let e = match result {
+            Ok(status) => {
+                panel.mode = PanelMode::Browse;
+                panel.notice = Some(Notice::ok(
+                    if matches!(status, SyncStatus::Alert { .. } | SyncStatus::Locked) {
+                        "The passphrase was taken: see what the status says now"
+                    } else {
+                        "The new keys are in use on this device"
+                    },
+                ));
+                return;
+            }
+            Err(e) => e,
+        };
+        match (e.code.as_str(), &mut panel.mode) {
+            ("sync_wrong_passphrase", PanelMode::Adopt(form)) if previous_failed => {
+                form.refused_at(
+                    PassField::Previous,
+                    ErrorSummary {
+                        hint: Some(
+                            "If Portico has not restarted since the keys changed, leave it empty."
+                                .into(),
+                        ),
+                        ..e
+                    },
+                );
+            }
+            // Nothing to type here: the status says what to do.
+            ("sync_device_forgotten" | "sync_lineage_unknown" | "sync_rotation_conflict", _) => {
+                panel.mode = PanelMode::Browse;
+                panel.notice = Some(Notice::error(e));
+            }
+            (_, PanelMode::Adopt(form)) => form.refused_at(PassField::Old, e),
+            _ => panel.notice = Some(Notice::error(e)),
         }
     }
 
@@ -655,6 +954,15 @@ impl App {
         self.sync_panel = None;
         self.sync_wizard = Some(Box::new(SyncWizard::new(self.device_name())));
         self.overlay = Some(Overlay::SyncWizard);
+    }
+
+    /// "Join again as a new device": the wizard on the folder step, the
+    /// folder this device used filled in (`↵` looks at it).
+    fn open_wizard_at(&mut self, folder: Option<&std::path::Path>) {
+        self.open_wizard();
+        if let (Some(wizard), Some(folder)) = (&mut self.sync_wizard, folder) {
+            wizard.at_folder(&folder.to_string_lossy());
+        }
     }
 
     fn sync_wizard_key(&mut self, key: crossterm::event::KeyEvent) {

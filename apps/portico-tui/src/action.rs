@@ -297,4 +297,18 @@ pub(crate) enum Action {
     SyncSetUp(Result<SyncStatus, ErrorSummary>),
     /// A copied passphrase's 30 s are up (its copy generation).
     SyncClearClipboard(u64),
+    // Key rotation and forgetting a device (phase 11, S2c-1)
+    SyncHeld(Result<Vec<portico_core::sync::api::RevokedValueItem>, ErrorSummary>),
+    SyncKeyEntries(Result<Vec<portico_core::sync::api::SyncKeyEntry>, ErrorSummary>),
+    SyncNewerFiles(Result<Vec<portico_core::sync::api::NewerEpochFile>, ErrorSummary>),
+    SyncRotationPreview(Result<portico_core::sync::api::RotationPreview, ErrorSummary>),
+    SyncForgetPreview(Result<portico_core::sync::api::ForgetPreview, ErrorSummary>),
+    /// A rotation, a forget or "Keep this device's keys" came back.
+    SyncRotated(Result<crate::sync_rotate::Rotated, ErrorSummary>),
+    /// An adoption came back; `previous_failed`: the previous passphrase
+    /// (RR4) was refused, the new one was not tried.
+    SyncAdopted {
+        previous_failed: bool,
+        result: Result<SyncStatus, ErrorSummary>,
+    },
 }

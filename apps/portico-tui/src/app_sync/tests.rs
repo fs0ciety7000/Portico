@@ -25,6 +25,8 @@ use crate::host_list::test_host;
 use crate::sync_panel::{PassKind, SyncData};
 use crate::sync_wizard::Step;
 
+mod s2;
+
 fn screen(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
     terminal.draw(|f| crate::ui::render(app, f)).unwrap();
@@ -499,6 +501,9 @@ fn a_reload_in_flight_blocks_decisions() {
         ..pending().remove(0)
     }])));
     app.update(Action::SyncSnippets(Ok(snippets())));
+    // The held values (S2c-1) come back with the same reload.
+    assert!(app.sync.stale());
+    app.update(Action::SyncHeld(Ok(Vec::new())));
     assert!(!app.sync.stale());
     app.update(Action::SyncKey(key(KeyCode::Char('y'))));
     assert!(app.sync_panel.as_ref().unwrap().busy.is_none());

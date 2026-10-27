@@ -244,7 +244,13 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
     (E1). API `Engine::sync_rotate_keys`, `sync_forget_device`, `sync_unlock` étendue, `sync_resolve_rotation_conflict`,
     `sync_restore_bundle`, `sync_discard_newer_file`, clés orphelines, valeurs retenues. Exercice d'appareil perdu sans
     mots de passe vert ; écarts en `docs/SYNC.md` §13.12. Les UIs (S2c-1) restent à faire
-  - **S2c-1, interfaces de rotation et d'oubli** : à faire (`docs/SYNC.md` §13.8 et §13.12)
+  - **S2c-1, interfaces de rotation et d'oubli** : TUI livrée *(2026-10-27, GUI en parallèle ; revue `agent-design-review`
+    à faire)* : « Rotate keys » (`o`) et « Forget <appareil> » (`f`, rappel du dossier cloud d'abord) en trois étapes et
+    question armée `y`, adoption (passphrase précédente facultative sur un appareil sans clé mémorisée), conflit de rotation
+    (`u` / `o`), appareil oublié (`D` / `n` rejoindre), fichiers d'époque supérieure (`x`), « Restore key file » (`b`),
+    anciennes clés du trousseau, valeurs retenues dans Received (`m` / `t`), « Leave the device list », revue de
+    rattachement « Review each » seul, libellés de statut dédiés ; exercice d'appareil perdu joué par les touches du
+    panneau (`lost_device_drill_through_the_panel`) ; détails et écarts en `docs/SYNC.md` §13.12.2
   - **S2b, mots de passe liés (moteur)** puis **S2c-2 (interfaces)** : à faire
 - **S3, plus tard** : emplacements de clé par appareil (rotation sans ressaisir la passphrase), signatures Ed25519, exclusions
   par réglage, options à décider

@@ -31,6 +31,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portico_core::ErrorSummary;
+use portico_core::sync::api::{NewerEpochFile, RevokedValueChoice, RevokedValueItem, SyncKeyEntry};
 use portico_core::sync::{
     AlertKind, DisableOptions, FolderReason, NewPassphrase, PassphraseStrength, PendingHostChange,
     SyncConflict, SyncDevice, SyncIssue, SyncOverview, SyncResolution, SyncStatus, SyncSubject,
@@ -43,6 +44,7 @@ use zeroize::Zeroize;
 use crate::dialog::ARM_DELAY;
 use crate::form::{MAX_LINE, paste_line, push_char, secret_buffer};
 use crate::keys::{Load, Notice};
+use crate::sync_rotate::{RotateFlow, RotateKind, RotateOutcome, RotateRequest};
 
 /// Longest device name (the core's limit).
 pub(crate) const DEVICE_NAME_MAX: usize = 64;
@@ -59,11 +61,15 @@ pub(crate) struct SyncData {
     pub(crate) pending: Vec<PendingHostChange>,
     /// Snippets changed by sync, not confirmed on this device (F8).
     pub(crate) snippets: Vec<UnconfirmedSnippet>,
+    /// Local values written by a forgotten device (or of unknown origin
+    /// after a re-join), held out of sync until a decision (S2a, R3, RR4).
+    pub(crate) held: Vec<RevokedValueItem>,
     /// `SyncPendingChanged` came and the reload of the received hosts
     /// (`stale_hosts`) or snippets (`stale_snippets`) has not: what is on
     /// screen may be old, decisions wait.
     pub(crate) stale_hosts: bool,
     pub(crate) stale_snippets: bool,
+    pub(crate) stale_held: bool,
     /// Last time the pending hosts or snippets changed (decisions are armed
     /// [`ARM_DELAY`] after it).
     pub(crate) changed_at: Option<Instant>,
@@ -72,7 +78,7 @@ pub(crate) struct SyncData {
 impl SyncData {
     /// A reload is in flight: decisions wait for it.
     pub(crate) fn stale(&self) -> bool {
-        self.stale_hosts || self.stale_snippets
+        self.stale_hosts || self.stale_snippets || self.stale_held
     }
 
     pub(crate) fn status(&self) -> Option<&SyncStatus> {
@@ -84,9 +90,13 @@ impl SyncData {
         self.pending.iter().find(|p| p.alias == alias)
     }
 
-    /// Received hosts and snippets waiting for a decision here.
+    /// Received hosts and snippets, and held values, waiting for a
+    /// decision here.
     pub(crate) fn to_review(&self) -> usize {
-        self.pending.len().saturating_add(self.snippets.len())
+        self.pending
+            .len()
+            .saturating_add(self.snippets.len())
+            .saturating_add(self.held.len())
     }
 
     /// New pending hosts / snippets: arms decisions again when the content
@@ -96,6 +106,13 @@ impl SyncData {
             self.changed_at = Some(now);
         }
         self.pending = pending;
+    }
+
+    pub(crate) fn set_held(&mut self, held: Vec<RevokedValueItem>, now: Instant) {
+        if held != self.held {
+            self.changed_at = Some(now);
+        }
+        self.held = held;
     }
 
     pub(crate) fn set_snippets(&mut self, snippets: Vec<UnconfirmedSnippet>, now: Instant) {
@@ -143,17 +160,30 @@ pub(crate) fn status_label(status: &SyncStatus, now: OffsetDateTime) -> (String,
         SyncStatus::Syncing => ("Syncing…".into(), Tone::Busy),
         SyncStatus::Waiting { reason, device } => {
             let label = match (device, reason) {
-                (Some(device), _) => format!("Waiting for {device}"),
                 (None, WaitReason::PartialSync) => "Waiting for files to arrive".into(),
                 (None, WaitReason::Placeholder) => "Waiting for downloads".into(),
                 (None, WaitReason::Deferred) => "Waiting for other devices".into(),
                 (None, WaitReason::Busy) => "Waiting for the other Portico".into(),
+                (_, WaitReason::RotationPending) => "Finishing key rotation…".into(),
+                (Some(device), WaitReason::NeedsNewKeys) => format!("New keys needed on {device}"),
+                (None, WaitReason::NeedsNewKeys) => "New keys needed".into(),
+                (Some(device), _) => format!("Waiting for {device}"),
                 (None, _) => "Waiting".into(),
             };
             (label, Tone::Busy)
         }
         SyncStatus::FolderUnavailable { .. } => ("Sync folder unavailable".into(), Tone::Warning),
-        SyncStatus::Alert { .. } => ("Sync alert".into(), Tone::Error),
+        SyncStatus::Alert { kind, .. } => (
+            match kind {
+                AlertKind::KeysRotatedElsewhere => "Keys changed — enter new passphrase",
+                AlertKind::RotationConflict => "Key conflict",
+                AlertKind::DeviceForgotten => "Removed from sync",
+                AlertKind::RevokedWrites => "Changes from a removed device",
+                _ => "Sync alert",
+            }
+            .into(),
+            Tone::Error,
+        ),
         SyncStatus::Error { .. } => ("Sync error".into(), Tone::Error),
         _ => ("Sync".into(), Tone::Neutral),
     }
@@ -208,11 +238,29 @@ pub(crate) fn alert_text(kind: AlertKind, device: Option<&str>) -> (String, &'st
         ),
         AlertKind::BundleTampered => (
             "bundle.toml was changed without the key.".into(),
-            "Nothing is applied. Restore it from the folder's version history, or disable sync and create a new sync folder.",
+            "Nothing is applied. If nobody changed the keys, restore the key file from this device; otherwise disable sync and create a new sync folder.",
         ),
         AlertKind::KeysRotatedElsewhere => (
-            format!("The keys were rotated on {who}."),
-            "Unlock with the current passphrase.",
+            match device {
+                Some(device) => format!("The file of {device} announces new keys."),
+                None => "The keys were changed on another device.".into(),
+            },
+            "Enter the NEW passphrase chosen there. If you did not change the keys on another device, type nothing.",
+        ),
+        AlertKind::RotationConflict => (
+            "Two devices changed the keys at the same time.".into(),
+            "Nothing is merged until you choose: use the other device's keys (its passphrase), or keep this device's keys.",
+        ),
+        AlertKind::DeviceForgotten => (
+            match device {
+                Some(device) => format!("This device was removed from sync by {device}."),
+                None => "This device was removed from sync.".into(),
+            },
+            "Its local data stays. Turn sync off, or join again as a new device.",
+        ),
+        AlertKind::RevokedWrites => (
+            format!("{who} relays changes of a removed device."),
+            "They are not applied. Type the new passphrase on that device. Values held here wait in Received.",
         ),
         AlertKind::PassphraseChanged => (
             format!("The passphrase was changed or reset on {who}."),
@@ -332,6 +380,12 @@ pub(crate) enum PassField {
     Remember,
     /// "I saved it" (create): gates the step that writes (Q1, S1c review).
     Saved,
+    /// The previous passphrase, optional (adoption on a device that does
+    /// not remember its key, RR4).
+    Previous,
+    /// "I no longer know it" (rotation without the current passphrase,
+    /// behind the reset-level confirmation, Q6).
+    DontKnow,
 }
 
 /// What a passphrase form is for.
@@ -346,6 +400,19 @@ pub(crate) enum PassKind {
     Change,
     /// Reset from this device (no current passphrase).
     Reset,
+    /// Rotation, first part: the current passphrase or "I no longer know
+    /// it" (S2c-1).
+    Authorize,
+    /// Rotation, second part: the new passphrase, remember, "I saved it".
+    Rotate,
+    /// Adoption of another device's rotation: the new passphrase, after
+    /// the optional previous one on a device that does not remember its
+    /// key (RR4).
+    Adopt {
+        previous: bool,
+    },
+    /// Rotation conflict, "Use the other device's keys": its passphrase.
+    UseOther,
 }
 
 impl PassKind {
@@ -367,9 +434,18 @@ impl PassKind {
                 PassField::Saved,
             ],
             Self::Join => &[PassField::Old, PassField::Name, PassField::Remember],
-            Self::Unlock => &[PassField::Old],
+            Self::Unlock | Self::Adopt { previous: false } | Self::UseOther => &[PassField::Old],
             Self::Change => &[PassField::Old, PassField::New, PassField::Confirm],
             Self::Reset => &[PassField::New, PassField::Confirm],
+            Self::Authorize => &[PassField::Old, PassField::DontKnow],
+            Self::Rotate if generated => &[PassField::New, PassField::Remember, PassField::Saved],
+            Self::Rotate => &[
+                PassField::New,
+                PassField::Confirm,
+                PassField::Remember,
+                PassField::Saved,
+            ],
+            Self::Adopt { previous: true } => &[PassField::Previous, PassField::Old],
         }
     }
 }
@@ -388,12 +464,19 @@ pub(crate) enum PassOutcome {
 }
 
 /// A passphrase form. Secrets are `Zeroizing`, pre-sized, never shown.
+// Independent boxes of one form (saved, remember, I no longer know it,
+// busy), not states of a machine.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct PassForm {
     pub(crate) kind: PassKind,
     pub(crate) focus: usize,
     pub(crate) old: zeroize::Zeroizing<String>,
     pub(crate) new: zeroize::Zeroizing<String>,
     pub(crate) confirm: zeroize::Zeroizing<String>,
+    /// The previous passphrase (adoption, RR4): optional.
+    pub(crate) previous: zeroize::Zeroizing<String>,
+    /// "I no longer know it" (rotation authorization, Q6).
+    pub(crate) dont_know: bool,
     /// A generated passphrase (always `NewPassphrase::Generated`), shown
     /// in place of the input until it is used or discarded.
     pub(crate) generated: Option<NewPassphrase>,
@@ -419,6 +502,7 @@ impl std::fmt::Debug for PassForm {
             .field("generated", &self.generated.is_some())
             .field("name", &self.name)
             .field("remember", &self.remember)
+            .field("dont_know", &self.dont_know)
             .field("busy", &self.busy)
             .finish_non_exhaustive()
     }
@@ -432,6 +516,8 @@ impl PassForm {
             old: secret_buffer(),
             new: secret_buffer(),
             confirm: secret_buffer(),
+            previous: secret_buffer(),
+            dont_know: false,
             generated: None,
             saved: false,
             strength: None,
@@ -494,10 +580,16 @@ impl PassForm {
     pub(crate) fn local_problem(&self) -> Option<(PassField, &'static str)> {
         for field in self.fields() {
             let problem = match field {
-                PassField::Old if self.old.is_empty() => Some(match self.kind {
-                    PassKind::Change => "Type the current passphrase",
-                    _ => "Type the passphrase",
-                }),
+                PassField::Old if self.old.is_empty() => match self.kind {
+                    PassKind::Authorize if self.dont_know => None,
+                    PassKind::Authorize => {
+                        Some("Type the current passphrase, or check “I no longer know it”")
+                    }
+                    PassKind::Change => Some("Type the current passphrase"),
+                    PassKind::Adopt { .. } => Some("Type the new passphrase"),
+                    PassKind::UseOther => Some("Type the other device's passphrase"),
+                    _ => Some("Type the passphrase"),
+                },
                 PassField::New if self.generated.is_none() && self.new.is_empty() => {
                     Some("Type a passphrase, or generate one (Ctrl-G)")
                 }
@@ -522,11 +614,22 @@ impl PassForm {
     pub(crate) fn refused(&mut self, error: ErrorSummary) {
         self.busy = false;
         let field = match error.code.as_str() {
+            "sync_passphrase_weak" | "sync_passphrase_reused"
+                if self.fields().contains(&PassField::New) =>
+            {
+                PassField::New
+            }
             "sync_passphrase_weak" => PassField::New,
             "sync_device_name_invalid" => PassField::Name,
             _ if self.fields().contains(&PassField::Old) => PassField::Old,
             _ => PassField::New,
         };
+        self.refused_at(field, error);
+    }
+
+    /// The core refused the request because of `field`.
+    pub(crate) fn refused_at(&mut self, field: PassField, error: ErrorSummary) {
+        self.busy = false;
         self.problem = Some((field, error.message, error.hint));
         if let Some(i) = self.fields().iter().position(|f| *f == field) {
             self.focus = i;
@@ -536,6 +639,7 @@ impl PassForm {
     fn text_field(&mut self) -> Option<(&mut String, bool)> {
         match self.focused()? {
             PassField::Old => Some((&mut self.old, true)),
+            PassField::Previous => Some((&mut self.previous, true)),
             PassField::New if self.generated.is_none() => Some((&mut self.new, true)),
             PassField::Confirm if self.generated.is_none() => Some((&mut self.confirm, true)),
             PassField::Name => Some((&mut self.name, false)),
@@ -604,6 +708,13 @@ impl PassForm {
             {
                 self.remember = !self.remember;
             }
+            KeyCode::Char(' ') if focused == Some(PassField::DontKnow) => {
+                self.dont_know = !self.dont_know;
+                if self.dont_know {
+                    self.old.zeroize();
+                }
+                self.problem = None;
+            }
             KeyCode::Char(' ') if focused == Some(PassField::Saved) => {
                 self.saved = !self.saved;
                 if self
@@ -643,6 +754,10 @@ impl PassForm {
     }
 
     fn after_edit(&mut self, field: Option<PassField>) {
+        // Typing the current passphrase means it is known after all.
+        if field == Some(PassField::Old) && !self.old.is_empty() {
+            self.dont_know = false;
+        }
         if self
             .problem
             .as_ref()
@@ -674,6 +789,14 @@ impl PassForm {
     pub(crate) fn take_old(&mut self) -> SecretString {
         let secret = SecretString::from(self.old.as_str());
         self.old.zeroize();
+        secret
+    }
+
+    /// The previous passphrase if one was typed (RR4), wiped from the form.
+    pub(crate) fn take_previous(&mut self) -> Option<SecretString> {
+        let secret =
+            (!self.previous.is_empty()).then(|| SecretString::from(self.previous.as_str()));
+        self.previous.zeroize();
         secret
     }
 
@@ -730,16 +853,37 @@ impl SyncTab {
 pub(crate) enum ReceivedItem<'a> {
     Host(&'a PendingHostChange),
     Snippet(&'a UnconfirmedSnippet),
+    /// A value from a forgotten device (or of unknown origin), held.
+    Held(&'a RevokedValueItem),
 }
 
 impl ReceivedItem<'_> {
-    /// What a decision names: the destination or command hash.
+    /// What a decision names: the destination or command hash, the held
+    /// value's key.
     pub(crate) fn hash(&self) -> &str {
         match self {
             Self::Host(h) => &h.destination_hash,
             Self::Snippet(s) => &s.hash,
+            Self::Held(h) => &h.key,
         }
     }
+}
+
+/// A question that only `y` answers, armed [`ARM_DELAY`] after it opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ask {
+    /// "Restore key file": rewrite `bundle.toml` from this device's
+    /// verified copy.
+    Restore,
+    /// Remove a device file that announces newer keys (RR5).
+    Discard {
+        device: String,
+        label: String,
+        file: String,
+        fingerprint: String,
+    },
+    /// Remove an old sync key from the keychain.
+    RemoveKey { account: String, label: String },
 }
 
 /// A form or question over the panel's tab.
@@ -760,13 +904,27 @@ pub(crate) enum PanelMode {
     },
     Disable {
         options: DisableOptions,
-        /// 0: forget the key, 1: remove my file.
+        /// 0: forget the key, 1: remove my file, 2: leave the device list.
         focus: usize,
+        /// "Join again as a new device" (this device was forgotten): the
+        /// wizard opens on the same folder once sync is off.
+        join_again: bool,
     },
     /// "Skip on this device" for an issue's record (armed, `y`).
     Skip {
         key: String,
         label: String,
+        opened_at: Instant,
+    },
+    /// Rotate keys, forget a device, keep this device's keys (S2c-1).
+    Rotate(Box<RotateFlow>),
+    /// "Enter the new passphrase" (adoption of another device's rotation).
+    Adopt(PassForm),
+    /// Rotation conflict: "Use the other device's keys".
+    UseOther(PassForm),
+    /// A question answered by `y` only (armed).
+    Ask {
+        ask: Ask,
         opened_at: Instant,
     },
 }
@@ -787,6 +945,8 @@ pub(crate) enum SyncOutcome {
     Rename(String),
     SetRemember(bool),
     Disable(DisableOptions),
+    /// Turn sync off, then join the same folder again as a new device.
+    DisableAndJoin(DisableOptions),
     Acknowledge,
     Resolve {
         id: String,
@@ -814,6 +974,151 @@ pub(crate) enum SyncOutcome {
     Copy,
     /// The help overlay, over the panel.
     Help,
+    /// Load the previews of a rotation dialog (and of a forget).
+    LoadRotation {
+        forget: Option<String>,
+    },
+    Rotate(RotateRequest),
+    /// Adoption: the previous passphrase first when typed (RR4), then the
+    /// new one.
+    Adopt {
+        previous: Option<SecretString>,
+        new: SecretString,
+    },
+    UseOther(SecretString),
+    Restore,
+    DiscardNewer {
+        device: String,
+        fingerprint: String,
+        file: String,
+    },
+    RemoveKey {
+        account: String,
+        label: String,
+    },
+    Held {
+        key: String,
+        label: String,
+        choice: RevokedValueChoice,
+    },
+}
+
+/// What the Overview offers, by status (keys and hints from one list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverviewAction {
+    SetUp,
+    Unlock,
+    Adopt,
+    UseOther,
+    KeepMine,
+    JoinAgain,
+    Restore,
+    Discard,
+    Acknowledge,
+    SyncNow,
+    Rotate,
+    Change,
+    Rename,
+    Remember,
+    TurnOff,
+    Reset,
+}
+
+impl OverviewAction {
+    /// The key and the hint's words.
+    pub(crate) fn hint(self) -> (&'static str, &'static str) {
+        match self {
+            Self::SetUp => ("↵", "set up sync"),
+            Self::Unlock => ("↵", "unlock"),
+            Self::Adopt => ("↵", "enter the new passphrase"),
+            Self::UseOther => ("u", "use the other device's keys"),
+            Self::KeepMine => ("o", "keep this device's keys"),
+            Self::JoinAgain => ("n", "join again as a new device"),
+            Self::Restore => ("b", "restore key file"),
+            Self::Discard => ("x", "remove that file"),
+            Self::Acknowledge => ("a", "acknowledge"),
+            Self::SyncNow => ("s", "sync now"),
+            Self::Rotate => ("o", "rotate keys"),
+            Self::Change => ("c", "change passphrase"),
+            Self::Rename => ("r", "rename"),
+            Self::Remember => ("m", "remember key"),
+            Self::TurnOff => ("D", "turn sync off"),
+            Self::Reset => ("R", "reset passphrase"),
+        }
+    }
+
+    fn matches(self, code: KeyCode) -> bool {
+        match (self, code) {
+            (Self::SetUp | Self::Adopt | Self::Unlock, KeyCode::Enter)
+            | (Self::Unlock | Self::Adopt, KeyCode::Char('u')) => true,
+            (_, KeyCode::Char(c)) => self.hint().0.starts_with(c) && self.hint().0.len() == 1,
+            _ => false,
+        }
+    }
+}
+
+/// The Overview's actions for `status`, most important first. `newer`:
+/// device files announce newer keys (RR5).
+pub(crate) fn overview_actions(status: &SyncStatus, newer: bool) -> Vec<OverviewAction> {
+    use OverviewAction as A;
+    match status {
+        SyncStatus::Disabled => vec![A::SetUp],
+        SyncStatus::Locked => vec![A::Unlock, A::TurnOff],
+        SyncStatus::Alert { kind, .. } => match kind {
+            AlertKind::KeysRotatedElsewhere => {
+                let mut actions = vec![A::Adopt];
+                if newer {
+                    actions.push(A::Discard);
+                }
+                actions.extend([A::SyncNow, A::Remember, A::TurnOff]);
+                actions
+            }
+            AlertKind::RotationConflict => vec![A::UseOther, A::KeepMine, A::SyncNow, A::TurnOff],
+            AlertKind::DeviceForgotten => vec![A::TurnOff, A::JoinAgain],
+            AlertKind::BundleTampered => vec![A::Restore, A::SyncNow, A::TurnOff],
+            AlertKind::PassphraseChanged => {
+                let mut actions = vec![A::Acknowledge];
+                actions.extend(everyday());
+                actions
+            }
+            _ => everyday(),
+        },
+        SyncStatus::Waiting {
+            reason: WaitReason::RotationPending,
+            ..
+        } => vec![A::SyncNow, A::Restore, A::Remember, A::TurnOff],
+        _ => everyday(),
+    }
+}
+
+fn everyday() -> Vec<OverviewAction> {
+    use OverviewAction as A;
+    vec![
+        A::SyncNow,
+        A::Rotate,
+        A::Change,
+        A::Rename,
+        A::Remember,
+        A::TurnOff,
+        A::Reset,
+    ]
+}
+
+/// A row of the Devices tab: a device, then an old key of the keychain.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeviceRow<'a> {
+    Device(&'a SyncDevice),
+    Key(&'a SyncKeyEntry),
+}
+
+/// `epoch 3 · this sync` / `epoch 1 · another sync (9f0e…)`.
+pub(crate) fn key_entry_label(entry: &SyncKeyEntry) -> String {
+    if entry.this_bundle {
+        format!("Keys {} · this sync", entry.epoch)
+    } else {
+        let short: String = entry.bundle.chars().take(8).collect();
+        format!("Keys {} · another sync ({short})", entry.epoch)
+    }
 }
 
 #[derive(Debug)]
@@ -846,6 +1151,14 @@ pub(crate) struct SyncPanel {
     pub(crate) from_snippets: bool,
     /// This device's name (for the rename form).
     pub(crate) device_name: String,
+    /// Old sync keys in this keychain (Devices tab, S2c-1).
+    pub(crate) keys: Load<Vec<SyncKeyEntry>>,
+    /// Device files that announce newer keys (RR5, Overview).
+    pub(crate) newer: Load<Vec<NewerEpochFile>>,
+    /// Selected row of the Devices tab (devices, then old keys).
+    pub(crate) device: usize,
+    /// Selected newer file (Overview).
+    pub(crate) newer_index: usize,
 }
 
 impl SyncPanel {
@@ -869,36 +1182,83 @@ impl SyncPanel {
             selected_at: now,
             from_snippets: false,
             device_name,
+            keys: Load::Loading,
+            newer: Load::Loading,
+            device: 0,
+            newer_index: 0,
         }
     }
 
     pub(crate) fn busy(&self) -> bool {
         self.busy.is_some()
             || match &self.mode {
-                PanelMode::Unlock(f) | PanelMode::Change(f) | PanelMode::Reset { form: f, .. } => {
-                    f.busy
-                }
-                _ => false,
+                PanelMode::Rotate(flow) => flow.busy(),
+                _ => self.form().is_some_and(|f| f.busy),
             }
     }
 
     /// The open passphrase form, if any.
     pub(crate) fn form_mut(&mut self) -> Option<&mut PassForm> {
         match &mut self.mode {
-            PanelMode::Unlock(f) | PanelMode::Change(f) | PanelMode::Reset { form: f, .. } => {
-                Some(f)
-            }
+            PanelMode::Unlock(f)
+            | PanelMode::Change(f)
+            | PanelMode::Adopt(f)
+            | PanelMode::UseOther(f)
+            | PanelMode::Reset { form: f, .. } => Some(f),
+            PanelMode::Rotate(flow) => flow.form_mut(),
             _ => None,
         }
     }
 
     pub(crate) fn form(&self) -> Option<&PassForm> {
         match &self.mode {
-            PanelMode::Unlock(f) | PanelMode::Change(f) | PanelMode::Reset { form: f, .. } => {
-                Some(f)
-            }
+            PanelMode::Unlock(f)
+            | PanelMode::Change(f)
+            | PanelMode::Adopt(f)
+            | PanelMode::UseOther(f)
+            | PanelMode::Reset { form: f, .. } => Some(f),
+            PanelMode::Rotate(flow) => flow.form(),
             _ => None,
         }
+    }
+
+    /// The rows of the Devices tab: devices, then old keys.
+    pub(crate) fn device_rows(&self) -> Vec<DeviceRow<'_>> {
+        let mut rows: Vec<DeviceRow<'_>> = self
+            .devices
+            .ready()
+            .map(|d| d.iter().map(DeviceRow::Device).collect())
+            .unwrap_or_default();
+        if let Some(keys) = self.keys.ready() {
+            rows.extend(keys.iter().map(DeviceRow::Key));
+        }
+        rows
+    }
+
+    pub(crate) fn selected_device_row(&self) -> Option<DeviceRow<'_>> {
+        let rows = self.device_rows();
+        let index = self.device.min(rows.len().saturating_sub(1));
+        rows.get(index).copied()
+    }
+
+    pub(crate) fn newer_files(&self) -> &[NewerEpochFile] {
+        self.newer.ready().map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn selected_newer(&self) -> Option<&NewerEpochFile> {
+        let list = self.newer_files();
+        list.get(self.newer_index.min(list.len().saturating_sub(1)))
+    }
+
+    /// Opens a rotation dialog (the app loads its previews).
+    pub(crate) fn open_rotation(&mut self, kind: RotateKind, remember: bool) -> SyncOutcome {
+        let forget = match &kind {
+            RotateKind::Forget { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        self.notice = None;
+        self.mode = PanelMode::Rotate(Box::new(RotateFlow::new(kind, remember)));
+        SyncOutcome::LoadRotation { forget }
     }
 
     /// The selected conflict (clamped).
@@ -912,17 +1272,21 @@ impl SyncPanel {
         list.get(self.issue.min(list.len().saturating_sub(1)))
     }
 
-    /// The selected received item (clamped): hosts, then snippets.
+    /// The selected received item (clamped): hosts, snippets, then held
+    /// values.
     pub(crate) fn selected_received<'a>(&self, data: &'a SyncData) -> Option<ReceivedItem<'a>> {
         let total = data.to_review();
         let index = self.received.min(total.saturating_sub(1));
-        match data.pending.get(index) {
-            Some(host) => Some(ReceivedItem::Host(host)),
-            None => data
-                .snippets
-                .get(index.saturating_sub(data.pending.len()))
-                .map(ReceivedItem::Snippet),
+        if let Some(host) = data.pending.get(index) {
+            return Some(ReceivedItem::Host(host));
         }
+        let index = index.saturating_sub(data.pending.len());
+        if let Some(snippet) = data.snippets.get(index) {
+            return Some(ReceivedItem::Snippet(snippet));
+        }
+        data.held
+            .get(index.saturating_sub(data.snippets.len()))
+            .map(ReceivedItem::Held)
     }
 
     /// Selects snippet `id` (the run attempt that opened the panel).
@@ -1010,7 +1374,14 @@ impl SyncPanel {
     /// Moves the selection of the current tab.
     fn step(&mut self, data: &SyncData, delta: isize, now: Instant) {
         let (index, len) = match self.tab {
-            SyncTab::Overview | SyncTab::Devices => return,
+            SyncTab::Overview => {
+                let len = self.newer_files().len();
+                (&mut self.newer_index, len)
+            }
+            SyncTab::Devices => {
+                let len = self.device_rows().len();
+                (&mut self.device, len)
+            }
             SyncTab::Conflicts => {
                 let len = self.selected_conflict().map_or(0, |c| choices(c).len());
                 (&mut self.choice, len)
@@ -1026,7 +1397,7 @@ impl SyncPanel {
             .min(len.saturating_sub(1));
         if next != *index {
             *index = next;
-            if self.tab != SyncTab::Conflicts {
+            if !matches!(self.tab, SyncTab::Conflicts | SyncTab::Devices) {
                 self.reselect(now);
             }
         }
@@ -1156,25 +1527,115 @@ impl SyncPanel {
                 }
                 return SyncOutcome::None;
             }
-            PanelMode::Disable { options, focus } => {
+            PanelMode::Disable {
+                options,
+                focus,
+                join_again,
+            } => {
                 match key.code {
                     KeyCode::Esc => self.mode = PanelMode::Browse,
                     KeyCode::Char('c') if ctrl => self.mode = PanelMode::Browse,
-                    KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => *focus = (*focus + 1) % 2,
-                    KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
-                        *focus = (*focus + 1) % 2;
+                    // Joining again: already off the list, nothing to leave.
+                    KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
+                        let n = if *join_again { 2 } else { 3 };
+                        *focus = (*focus + 1) % n;
                     }
-                    KeyCode::Char(' ') => {
-                        if *focus == 0 {
-                            options.forget_key = !options.forget_key;
-                        } else {
+                    KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
+                        let n = if *join_again { 2 } else { 3 };
+                        *focus = (*focus + n - 1) % n;
+                    }
+                    KeyCode::Char(' ') => match *focus {
+                        0 => options.forget_key = !options.forget_key,
+                        // As in the GUI: removing this device's file also
+                        // ticks "Leave the device list" (it can be unticked).
+                        1 if !*join_again => {
                             options.remove_my_file = !options.remove_my_file;
+                            options.leave_roster = options.remove_my_file;
                         }
+                        1 => options.remove_my_file = !options.remove_my_file,
+                        _ => options.leave_roster = !options.leave_roster,
+                    },
+                    KeyCode::Enter if *join_again => {
+                        return SyncOutcome::DisableAndJoin(*options);
                     }
                     KeyCode::Enter => return SyncOutcome::Disable(*options),
                     _ => {}
                 }
                 return SyncOutcome::None;
+            }
+            PanelMode::Rotate(flow) => {
+                return match flow.handle_key(key, now) {
+                    RotateOutcome::None => SyncOutcome::None,
+                    RotateOutcome::Close => {
+                        self.mode = PanelMode::Browse;
+                        SyncOutcome::None
+                    }
+                    RotateOutcome::Generate => SyncOutcome::Generate,
+                    RotateOutcome::Copy => SyncOutcome::Copy,
+                    RotateOutcome::Submit(request) => SyncOutcome::Rotate(request),
+                };
+            }
+            PanelMode::Adopt(form) => {
+                return match form.handle_key(key) {
+                    PassOutcome::Cancel => {
+                        self.mode = PanelMode::Browse;
+                        SyncOutcome::None
+                    }
+                    PassOutcome::Submit => {
+                        form.busy = true;
+                        let previous = form.take_previous();
+                        SyncOutcome::Adopt {
+                            previous,
+                            new: form.take_old(),
+                        }
+                    }
+                    _ => SyncOutcome::None,
+                };
+            }
+            PanelMode::UseOther(form) => {
+                return match form.handle_key(key) {
+                    PassOutcome::Cancel => {
+                        self.mode = PanelMode::Browse;
+                        SyncOutcome::None
+                    }
+                    PassOutcome::Submit => {
+                        form.busy = true;
+                        SyncOutcome::UseOther(form.take_old())
+                    }
+                    _ => SyncOutcome::None,
+                };
+            }
+            PanelMode::Ask { ask, opened_at } => {
+                if now.saturating_duration_since(*opened_at) < ARM_DELAY {
+                    return SyncOutcome::None;
+                }
+                let ask = ask.clone();
+                return match key.code {
+                    KeyCode::Char('y') => {
+                        self.mode = PanelMode::Browse;
+                        match ask {
+                            Ask::Restore => SyncOutcome::Restore,
+                            Ask::Discard {
+                                device,
+                                file,
+                                fingerprint,
+                                ..
+                            } => SyncOutcome::DiscardNewer {
+                                device,
+                                fingerprint,
+                                file,
+                            },
+                            Ask::RemoveKey { account, label } => {
+                                SyncOutcome::RemoveKey { account, label }
+                            }
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        self.mode = PanelMode::Browse;
+                        SyncOutcome::None
+                    }
+                    _ => SyncOutcome::None,
+                };
             }
             PanelMode::Skip {
                 key: record,
@@ -1244,7 +1705,7 @@ impl SyncPanel {
         self.notice = None;
         let status = data.status().cloned();
         match self.tab {
-            SyncTab::Overview => self.overview_key(key, status.as_ref(), data),
+            SyncTab::Overview => self.overview_key(key, status.as_ref(), data, now),
             SyncTab::Conflicts => match key.code {
                 KeyCode::Char(']' | 'n') => {
                     self.step_conflict(1, now);
@@ -1295,6 +1756,21 @@ impl SyncPanel {
                 let Some(item) = self.selected_received(data) else {
                     return SyncOutcome::None;
                 };
+                if let ReceivedItem::Held(held) = item {
+                    let choice = match key.code {
+                        KeyCode::Char('m') => RevokedValueChoice::KeepAsMine,
+                        KeyCode::Char('t') => RevokedValueChoice::TakeSynced,
+                        _ => return SyncOutcome::None,
+                    };
+                    if !self.armed(data, now) || !self.read_to_end(data) {
+                        return SyncOutcome::None;
+                    }
+                    return SyncOutcome::Held {
+                        key: held.key.clone(),
+                        label: subject_label(&held.subject),
+                        choice,
+                    };
+                }
                 let confirm = match key.code {
                     KeyCode::Char('y') => true,
                     KeyCode::Char('n') if matches!(item, ReceivedItem::Host(_)) => false,
@@ -1304,6 +1780,7 @@ impl SyncPanel {
                     return SyncOutcome::None;
                 }
                 match item {
+                    ReceivedItem::Held(_) => SyncOutcome::None,
                     ReceivedItem::Host(host) => {
                         let (alias, hash) = (host.alias.clone(), host.destination_hash.clone());
                         if confirm {
@@ -1319,7 +1796,70 @@ impl SyncPanel {
                     },
                 }
             }
-            SyncTab::Devices => SyncOutcome::None,
+            SyncTab::Devices => self.devices_key(key, data, now),
+        }
+    }
+
+    /// Rotation is offered while sync runs normally (not off, locked, nor
+    /// waiting for a key decision).
+    fn can_rotate(data: &SyncData) -> bool {
+        data.status()
+            .is_some_and(|status| overview_actions(status, false).contains(&OverviewAction::Rotate))
+    }
+
+    fn remember(data: &SyncData) -> bool {
+        data.overview.as_ref().is_none_or(|o| o.remember_key)
+    }
+
+    fn devices_key(&mut self, key: KeyEvent, data: &SyncData, now: Instant) -> SyncOutcome {
+        match key.code {
+            KeyCode::Char('o') if Self::can_rotate(data) => {
+                self.open_rotation(RotateKind::Rotate, Self::remember(data))
+            }
+            KeyCode::Char('f') => {
+                let target = match self.selected_device_row() {
+                    Some(DeviceRow::Device(d)) if d.this_device => Err(()),
+                    Some(DeviceRow::Device(d)) if !d.revoked => Ok((d.id.clone(), d.label.clone())),
+                    _ => return SyncOutcome::None,
+                };
+                match target {
+                    Err(()) => {
+                        self.notice = Some(Notice {
+                            ok: false,
+                            message: "this device cannot forget itself".into(),
+                            hint: Some(
+                                "To leave, use Turn sync off (Overview, D) with “Leave the device list”."
+                                    .into(),
+                            ),
+                        });
+                        SyncOutcome::None
+                    }
+                    Ok(_) if !Self::can_rotate(data) => {
+                        self.notice = Some(Notice {
+                            ok: false,
+                            message: "a device can be forgotten only while sync runs here".into(),
+                            hint: Some("Settle what the Overview shows first.".into()),
+                        });
+                        SyncOutcome::None
+                    }
+                    Ok((id, label)) => {
+                        self.open_rotation(RotateKind::Forget { id, label }, Self::remember(data))
+                    }
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(DeviceRow::Key(entry)) = self.selected_device_row() {
+                    self.mode = PanelMode::Ask {
+                        ask: Ask::RemoveKey {
+                            account: entry.account.clone(),
+                            label: key_entry_label(entry),
+                        },
+                        opened_at: now,
+                    };
+                }
+                SyncOutcome::None
+            }
+            _ => SyncOutcome::None,
         }
     }
 
@@ -1328,74 +1868,115 @@ impl SyncPanel {
         key: KeyEvent,
         status: Option<&SyncStatus>,
         data: &SyncData,
+        now: Instant,
     ) -> SyncOutcome {
-        match status {
-            None => SyncOutcome::None,
-            Some(SyncStatus::Disabled) => match key.code {
-                KeyCode::Enter => SyncOutcome::OpenWizard,
-                _ => SyncOutcome::None,
-            },
-            Some(SyncStatus::Locked) => match key.code {
-                KeyCode::Enter | KeyCode::Char('u') => {
-                    self.open_form(PassKind::Unlock);
-                    SyncOutcome::None
-                }
-                KeyCode::Char('D') => {
-                    self.mode = PanelMode::Disable {
-                        options: DisableOptions::default(),
-                        focus: 0,
+        let Some(status) = status else {
+            return SyncOutcome::None;
+        };
+        let newer = !self.newer_files().is_empty();
+        let Some(action) = overview_actions(status, newer)
+            .into_iter()
+            .find(|a| a.matches(key.code))
+        else {
+            return SyncOutcome::None;
+        };
+        let remember = Self::remember(data);
+        match action {
+            OverviewAction::SetUp => SyncOutcome::OpenWizard,
+            OverviewAction::Unlock => {
+                self.open_form(PassKind::Unlock);
+                SyncOutcome::None
+            }
+            OverviewAction::Adopt => {
+                self.notice = None;
+                self.mode = PanelMode::Adopt(PassForm::new(
+                    PassKind::Adopt {
+                        previous: !remember,
+                    },
+                    String::new(),
+                ));
+                SyncOutcome::None
+            }
+            OverviewAction::UseOther => {
+                self.notice = None;
+                self.mode = PanelMode::UseOther(PassForm::new(PassKind::UseOther, String::new()));
+                SyncOutcome::None
+            }
+            OverviewAction::KeepMine => self.open_rotation(RotateKind::KeepMine, remember),
+            OverviewAction::Rotate => self.open_rotation(RotateKind::Rotate, remember),
+            OverviewAction::JoinAgain => {
+                self.mode = PanelMode::Disable {
+                    options: DisableOptions::default(),
+                    focus: 0,
+                    join_again: true,
+                };
+                SyncOutcome::None
+            }
+            OverviewAction::TurnOff => {
+                self.mode = PanelMode::Disable {
+                    options: DisableOptions::default(),
+                    focus: 0,
+                    join_again: false,
+                };
+                SyncOutcome::None
+            }
+            OverviewAction::Restore => {
+                self.mode = PanelMode::Ask {
+                    ask: Ask::Restore,
+                    opened_at: now,
+                };
+                SyncOutcome::None
+            }
+            OverviewAction::Discard => {
+                if let Some(file) = self.selected_newer() {
+                    self.mode = PanelMode::Ask {
+                        ask: Ask::Discard {
+                            device: file.device.clone(),
+                            label: file.label.clone(),
+                            file: file.file.clone(),
+                            fingerprint: file.fingerprint.clone(),
+                        },
+                        opened_at: now,
                     };
-                    SyncOutcome::None
                 }
-                _ => SyncOutcome::None,
-            },
-            Some(status) => match key.code {
-                KeyCode::Char('s') => SyncOutcome::SyncNow,
-                KeyCode::Char('c') => {
-                    self.open_form(PassKind::Change);
-                    SyncOutcome::None
-                }
-                KeyCode::Char('R') => {
-                    self.open_form(PassKind::Reset);
-                    SyncOutcome::None
-                }
-                KeyCode::Char('r') => {
-                    self.mode = PanelMode::Rename {
-                        name: self.device_name.clone(),
-                        problem: None,
-                    };
-                    SyncOutcome::None
-                }
-                KeyCode::Char('m') => SyncOutcome::SetRemember(
-                    !data.overview.as_ref().is_some_and(|o| o.remember_key),
-                ),
-                KeyCode::Char('D') => {
-                    self.mode = PanelMode::Disable {
-                        options: DisableOptions::default(),
-                        focus: 0,
-                    };
-                    SyncOutcome::None
-                }
-                KeyCode::Char('a')
-                    if matches!(
-                        status,
-                        SyncStatus::Alert {
-                            kind: AlertKind::PassphraseChanged,
-                            ..
-                        }
-                    ) =>
-                {
-                    SyncOutcome::Acknowledge
-                }
-                _ => SyncOutcome::None,
-            },
+                SyncOutcome::None
+            }
+            OverviewAction::Acknowledge => SyncOutcome::Acknowledge,
+            OverviewAction::SyncNow => SyncOutcome::SyncNow,
+            OverviewAction::Change => {
+                self.open_form(PassKind::Change);
+                SyncOutcome::None
+            }
+            OverviewAction::Reset => {
+                self.open_form(PassKind::Reset);
+                SyncOutcome::None
+            }
+            OverviewAction::Rename => {
+                self.mode = PanelMode::Rename {
+                    name: self.device_name.clone(),
+                    problem: None,
+                };
+                SyncOutcome::None
+            }
+            OverviewAction::Remember => SyncOutcome::SetRemember(!remember),
         }
     }
 
     /// Key hints for the status bar, most important first.
+    #[allow(clippy::too_many_lines)] // one arm per mode, then per tab
     pub(crate) fn hints(&self, data: &SyncData, now: Instant) -> Vec<(&'static str, &'static str)> {
+        let armed = |at: Instant| now.saturating_duration_since(at) >= ARM_DELAY;
         match &self.mode {
             PanelMode::Unlock(_) => return vec![("↵", "unlock"), ("Esc", "back")],
+            PanelMode::Adopt(_) => {
+                return vec![
+                    ("↵", "use the new keys"),
+                    ("Tab", "next field"),
+                    ("Esc", "back"),
+                ];
+            }
+            PanelMode::UseOther(_) => return vec![("↵", "use their keys"), ("Esc", "back")],
+            PanelMode::Rotate(flow) => return flow.hints(now),
             PanelMode::Change(f)
             | PanelMode::Reset {
                 form: f,
@@ -1411,44 +1992,36 @@ impl SyncPanel {
                 hints.push(("Esc", "back"));
                 return hints;
             }
-            PanelMode::Reset { .. } | PanelMode::Skip { .. } => {
+            PanelMode::Ask { opened_at, .. } if !armed(*opened_at) => return Vec::new(),
+            PanelMode::Reset { .. } | PanelMode::Skip { .. } | PanelMode::Ask { .. } => {
                 return vec![("y", "confirm"), ("n / Esc", "keep")];
             }
             PanelMode::Rename { .. } => return vec![("↵", "rename"), ("Esc", "back")],
-            PanelMode::Disable { .. } => {
-                return vec![("↵", "turn sync off"), ("Space", "toggle"), ("Esc", "back")];
+            PanelMode::Disable { join_again, .. } => {
+                let enter = if *join_again {
+                    "turn off, then join again"
+                } else {
+                    "turn sync off"
+                };
+                return vec![("↵", enter), ("Space", "toggle"), ("Esc", "back")];
             }
             PanelMode::Browse => {}
         }
         let mut hints: Vec<(&'static str, &'static str)> = Vec::new();
         match self.tab {
-            SyncTab::Overview => match data.status() {
-                Some(SyncStatus::Disabled) => hints.push(("↵", "set up sync")),
-                Some(SyncStatus::Locked) => {
-                    hints.push(("↵", "unlock"));
-                    hints.push(("D", "turn sync off"));
-                }
-                Some(status) => {
-                    if matches!(
-                        status,
-                        SyncStatus::Alert {
-                            kind: AlertKind::PassphraseChanged,
-                            ..
-                        }
-                    ) {
-                        hints.push(("a", "acknowledge"));
+            SyncTab::Overview => {
+                if let Some(status) = data.status() {
+                    let newer = !self.newer_files().is_empty();
+                    hints.extend(
+                        overview_actions(status, newer)
+                            .into_iter()
+                            .map(OverviewAction::hint),
+                    );
+                    if self.newer_files().len() > 1 {
+                        hints.push(("j k", "file"));
                     }
-                    hints.extend([
-                        ("s", "sync now"),
-                        ("c", "change passphrase"),
-                        ("r", "rename"),
-                        ("m", "remember key"),
-                        ("D", "turn sync off"),
-                        ("R", "reset passphrase"),
-                    ]);
                 }
-                None => {}
-            },
+            }
             SyncTab::Conflicts if self.selected_conflict().is_some() => {
                 if self.conflict_armed(now) {
                     hints.push(("↵", "resolve"));
@@ -1465,15 +2038,39 @@ impl SyncPanel {
                     if !self.read_to_end(data) {
                         hints.push(("PgDn", "read to the end"));
                     } else if self.armed(data, now) {
-                        hints.push(("y", "confirm"));
-                        if matches!(item, ReceivedItem::Host(_)) {
-                            hints.push(("n", "reject"));
+                        match item {
+                            ReceivedItem::Held(_) => {
+                                hints.push(("m", "keep as mine"));
+                                hints.push(("t", "take the synced value"));
+                            }
+                            ReceivedItem::Host(_) => {
+                                hints.push(("y", "confirm"));
+                                hints.push(("n", "reject"));
+                            }
+                            ReceivedItem::Snippet(_) => hints.push(("y", "confirm")),
                         }
                     }
                     hints.push(("j k", "move"));
                     if self.read_to_end(data) {
                         hints.push(("PgDn", "scroll"));
                     }
+                }
+            }
+            SyncTab::Devices => {
+                match self.selected_device_row() {
+                    Some(DeviceRow::Device(d)) if !d.this_device && !d.revoked => {
+                        if Self::can_rotate(data) {
+                            hints.push(("f", "forget…"));
+                        }
+                    }
+                    Some(DeviceRow::Key(_)) => hints.push(("x", "remove")),
+                    _ => {}
+                }
+                if Self::can_rotate(data) {
+                    hints.push(("o", "rotate keys"));
+                }
+                if self.device_rows().len() > 1 {
+                    hints.push(("j k", "move"));
                 }
             }
             _ => {}

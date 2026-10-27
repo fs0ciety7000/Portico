@@ -17,14 +17,21 @@
 //! - **Wizard**: one step at a time, its keys under it; the step number
 //!   has no total (it depends on the folder).
 //!
+//! - **S2c-1**: the rotation dialogs, the adoption and the rotation
+//!   conflict ([`rotate`]), newer device files under the alert, old keys
+//!   in this keychain (Devices), values from forgotten devices (Received),
+//!   "Leave the device list" (Turn sync off), the re-join review.
+//!
 //! At 82 columns or less, the panel takes the full width. Only theme
 //! tokens (`Styles`).
+
+mod rotate;
 
 use std::time::Instant;
 
 use portico_core::sync::{
-    ConflictSide, FolderProbe, PassphraseStrength, PendingHostChange, SyncHostValue, SyncStatus,
-    SyncValue,
+    AlertKind, ConflictSide, FolderProbe, PassphraseStrength, PendingHostChange, SyncHostValue,
+    SyncStatus, SyncValue, WaitReason,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -39,10 +46,11 @@ use crate::form::{Cell, display_cells, display_safe};
 use crate::keys::Load;
 use crate::sync_panel::{
     Choice, GLYPH, PanelMode, PassField, PassForm, PassKind, ReceivedItem, SyncData, SyncPanel,
-    SyncTab, TABS, Tone, alert_text, choices, folder_reason, status_label, subject_label,
+    SyncTab, TABS, Tone, alert_text, choices, folder_reason, key_entry_label, status_label,
+    subject_label,
 };
 use crate::sync_wizard::{
-    BULK, BULK_NOTE, JOIN_TTL_SECS, RECOVERY, SAVED, SAVED_PROBLEM, Step, SyncWizard,
+    BULK, BULK_NOTE, JOIN_TTL_SECS, RECOVERY, REJOIN_NOTE, SAVED, SAVED_PROBLEM, Step, SyncWizard,
 };
 use crate::theme::Styles;
 use crate::ui::{fmt, form, spinner};
@@ -281,7 +289,11 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     let total = lines.len();
     let max_first = total.saturating_sub(body_height);
     panel.max_scroll = u16::try_from(max_first).unwrap_or(u16::MAX);
-    let mut first = usize::from(panel.scroll).min(max_first);
+    let scroll = match &panel.mode {
+        PanelMode::Rotate(flow) => flow.scroll,
+        _ => panel.scroll,
+    };
+    let mut first = usize::from(scroll).min(max_first);
     if let Some(focus) = focus_line
         && (focus < first || focus >= first + body_height)
     {
@@ -383,7 +395,12 @@ impl Body {
 
 fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize) -> Body {
     match &panel.mode {
-        PanelMode::Browse | PanelMode::Skip { .. } => {}
+        PanelMode::Browse | PanelMode::Skip { .. } | PanelMode::Ask { .. } => {}
+        PanelMode::Rotate(flow) => return Body::focused(rotate::rotate_lines(flow, s, tick, w)),
+        PanelMode::Adopt(f) => {
+            return form_body(f, rotate::adopt_lines(f, data.status(), s, tick, w));
+        }
+        PanelMode::UseOther(f) => return form_body(f, rotate::use_other_lines(f, s, tick, w)),
         PanelMode::Unlock(f) => return Body::plain(unlock_lines(f, s, tick, w)),
         PanelMode::Change(f) => return Body::plain(change_lines(f, s, tick, w)),
         PanelMode::Reset { form, confirm } => {
@@ -414,15 +431,19 @@ fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize
             }
             return Body::plain(lines);
         }
-        PanelMode::Disable { options, focus } => {
-            return Body::plain(disable_lines(*options, *focus, s, w));
+        PanelMode::Disable {
+            options,
+            focus,
+            join_again,
+        } => {
+            return Body::plain(disable_lines(*options, *focus, *join_again, s, w));
         }
     }
     let (mut lines, focus) = match panel.tab {
         SyncTab::Overview => (overview_lines(panel, data, s, tick, w), None),
         SyncTab::Conflicts => return Body::focused(conflict_lines(panel, s, tick, w)),
         SyncTab::Received => return received_lines(panel, data, s, tick, w),
-        SyncTab::Devices => (device_lines(panel, data, s, tick, w), None),
+        SyncTab::Devices => device_lines(panel, data, s, tick, w),
         // The question of "Skip on this device" follows the issues.
         SyncTab::Issues => issue_lines(panel, s, tick, w),
     };
@@ -438,6 +459,18 @@ fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize
         // The question stays in view.
         return Body::focused((lines, Some(asked)));
     }
+    if let PanelMode::Ask { ask, .. } = &panel.mode {
+        lines.extend(rotate::ask_lines(ask, s, w));
+        let end = lines.len().saturating_sub(1);
+        return Body::focused((lines, Some(end)));
+    }
+    Body::focused((lines, focus))
+}
+
+/// A form's body: on its last field, its end stays in view (80×24).
+fn form_body(f: &PassForm, lines: Vec<Line<'static>>) -> Body {
+    let last = f.fields().len().saturating_sub(1);
+    let focus = (f.focus == last).then(|| lines.len().saturating_sub(1));
     Body::focused((lines, focus))
 }
 
@@ -588,6 +621,27 @@ fn overview_lines(
             "Sync is paused on this device; your local data stays as it is.",
             error(s),
         )),
+        SyncStatus::Waiting {
+            reason: WaitReason::NeedsNewKeys,
+            device,
+        } => Some((
+            format!(
+                "{} still uses the previous keys.",
+                device
+                    .as_deref()
+                    .map_or_else(|| "A device".to_owned(), display_safe)
+            ),
+            "Type the new passphrase on that device. Its changes wait meanwhile; nothing of it is merged.",
+            warning(s),
+        )),
+        SyncStatus::Waiting {
+            reason: WaitReason::RotationPending,
+            ..
+        } => Some((
+            "Finishing the key rotation…".to_owned(),
+            "The new keys are saved on this device: Portico writes them to the folder as soon as it answers. If the key file was replaced meanwhile, b restores it.",
+            warning(s),
+        )),
         SyncStatus::Waiting { .. } => Some((
             "Some data is not in the folder yet.".to_owned(),
             "It usually arrives on its own once your sync app has finished.",
@@ -614,19 +668,53 @@ fn overview_lines(
             ]));
         }
     }
+    if let SyncStatus::Alert {
+        kind: AlertKind::KeysRotatedElsewhere,
+        ..
+    } = &overview.status
+    {
+        lines.extend(rotate::newer_lines(
+            panel.newer_files(),
+            panel.newer_index,
+            s,
+            w,
+        ));
+    }
+    if let SyncStatus::Alert {
+        kind: AlertKind::RevokedWrites,
+        ..
+    } = &overview.status
+        && !data.held.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.extend(paragraph(
+            warning(s),
+            &format!(
+                "{} held on this device: decide each in Received.",
+                plural(data.held.len(), "value", "values")
+            ),
+            w,
+        ));
+    }
     lines
 }
 
-/// The Devices tab: every device of the sync, this one first marked.
+/// The Devices tab: every device of the sync, this one marked, then the
+/// old keys in this keychain; the selected row is marked.
+#[allow(clippy::too_many_lines)] // devices, then old keys
 fn device_lines(
     panel: &SyncPanel,
     data: &SyncData,
     s: Styles,
     tick: u64,
     w: usize,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = Vec::new();
+    let mut focus = None;
     let locked = matches!(data.status(), Some(SyncStatus::Locked));
+    let rows = panel.device_rows();
+    let selected = panel.device.min(rows.len().saturating_sub(1));
+    let browsing = matches!(panel.mode, PanelMode::Browse);
     match &panel.devices {
         _ if matches!(data.status(), Some(SyncStatus::Disabled)) => {
             lines.push(Line::from(Span::styled(
@@ -638,6 +726,7 @@ fn device_lines(
                 "Once sync is on, every device that shares the folder shows here, with when it last published.",
                 w,
             ));
+            return (lines, None);
         }
         Load::Loading => lines.push(loading(s, tick, "Reading the devices…")),
         Load::Failed(e) if !locked => {
@@ -656,16 +745,24 @@ fn device_lines(
                 .map(|d| display_safe(&d.label).chars().count())
                 .max()
                 .unwrap_or(0)
-                .min(w.saturating_sub(30).max(12));
-            for d in devices {
+                .min(w.saturating_sub(32).max(12));
+            for (i, d) in devices.iter().enumerate() {
+                let on = browsing && i == selected;
+                if on {
+                    focus = Some(lines.len());
+                }
                 let label = fmt::truncate(&display_safe(&d.label), label_w);
                 // The accent marks this device's dot only; words stay text.
                 let mut spans = vec![
+                    Span::styled(if on { "▍" } else { " " }, s.accent()),
                     Span::styled(
                         if d.this_device { "● " } else { "○ " },
                         if d.this_device { s.accent() } else { s.muted() },
                     ),
-                    Span::styled(format!("{label:<label_w$}"), s.primary()),
+                    Span::styled(
+                        format!("{label:<label_w$}"),
+                        if on { s.title() } else { s.primary() },
+                    ),
                     Span::raw("  "),
                 ];
                 if d.this_device {
@@ -687,12 +784,48 @@ fn device_lines(
             lines.push(Line::from(""));
             lines.extend(paragraph(
                 s.muted(),
-                "A device is named with its id: a copy can never pass for another. Inactive: nothing published for a long time.",
+                "A device is named with its id: a copy can never pass for another. Inactive: nothing published for a long time. Forget a lost device (f): the keys change, and it can no longer read what is synced next.",
                 w,
             ));
         }
     }
-    lines
+    // Old keys in this keychain (§13.3.8): never the key in use.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Old keys in this keychain",
+        s.title(),
+    )));
+    match &panel.keys {
+        Load::Loading => lines.push(loading(s, tick, "Reading the keychain…")),
+        Load::Failed(e) => lines.extend(paragraph(s.muted(), &fmt::sentence(&e.message), w)),
+        Load::Ready(keys) if keys.is_empty() => {
+            lines.extend(paragraph(s.muted(), "None.", w));
+        }
+        Load::Ready(keys) => {
+            let devices = panel.devices.ready().map_or(0, Vec::len);
+            for (i, entry) in keys.iter().enumerate() {
+                let on = browsing && devices + i == selected;
+                if on {
+                    focus = Some(lines.len());
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(if on { "▍" } else { " " }, s.accent()),
+                    Span::styled("  ", s.muted()),
+                    Span::styled(
+                        key_entry_label(entry),
+                        if on { s.title() } else { s.primary() },
+                    ),
+                    Span::styled("  not in use", s.muted()),
+                ]));
+            }
+        }
+    }
+    lines.extend(paragraph(
+        s.muted(),
+        "The key in use is not listed: Turn sync off forgets it. An old key opens only what was synced before the keys changed.",
+        w,
+    ));
+    (lines, focus)
 }
 
 fn strength_line(strength: Option<PassphraseStrength>, s: Styles) -> Line<'static> {
@@ -807,7 +940,8 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
         match field {
             PassField::Old => {
                 let label = match f.kind {
-                    PassKind::Change => "Current",
+                    PassKind::Change | PassKind::Authorize => "Current",
+                    PassKind::Adopt { .. } => "New",
                     _ => "Passphrase",
                 };
                 lines.push(form::secret(
@@ -894,6 +1028,35 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
                     ]));
                 }
             }
+            PassField::Previous => {
+                lines.push(form::secret(
+                    s,
+                    "Previous",
+                    LABEL,
+                    !f.previous.is_empty(),
+                    on,
+                    input_w,
+                ));
+                push_problem(&mut lines, *field);
+            }
+            PassField::DontKnow => {
+                lines.push(form::toggle(
+                    s,
+                    "",
+                    LABEL,
+                    f.dont_know,
+                    "I no longer know it",
+                    on,
+                ));
+                let note =
+                    "This device's key authorizes the rotation instead, after a confirmation.";
+                for l in fmt::wrap(note, w.saturating_sub(LABEL + 3).max(10)) {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(LABEL + 3)),
+                        Span::styled(l, s.muted()),
+                    ]));
+                }
+            }
             PassField::Saved => {
                 lines.push(Line::from(""));
                 lines.extend(saved_box(s, f.saved, on, w));
@@ -973,19 +1136,29 @@ fn reset_lines(
     lines
 }
 
+/// "Leave the device list" (R18), word for word as in the GUI.
+pub(crate) const LEAVE_NOTE: &str = "Leaves the list without changing the keys: unless its key is forgotten too, this device can still read the current sync until the next rotation. To really exclude a device, forget it from another device.";
+
 fn disable_lines(
     options: portico_core::sync::DisableOptions,
     focus: usize,
+    join_again: bool,
     s: Styles,
     w: usize,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(Span::styled("Turn sync off on this device", s.title())),
-        Line::from(""),
-    ];
+    let title = if join_again {
+        "Turn sync off, then join again"
+    } else {
+        "Turn sync off on this device"
+    };
+    let mut lines = vec![Line::from(Span::styled(title, s.title())), Line::from("")];
     lines.extend(paragraph(
         s.secondary(),
-        "Your local hosts, snippets and settings stay on this device. The other devices keep syncing.",
+        if join_again {
+            "This device was removed from sync. Its local hosts, snippets and settings stay. Once sync is off, the wizard joins the folder again as a new device, with the current passphrase."
+        } else {
+            "Your local hosts, snippets and settings stay on this device. The other devices keep syncing."
+        },
         w,
     ));
     lines.push(Line::from(""));
@@ -1005,6 +1178,22 @@ fn disable_lines(
         "Remove this device's file from the sync folder",
         focus == 1,
     ));
+    if !join_again {
+        lines.push(form::toggle(
+            s,
+            "",
+            2,
+            options.leave_roster,
+            "Leave the device list",
+            focus == 2,
+        ));
+        for l in fmt::wrap(LEAVE_NOTE, w.saturating_sub(5).max(10)) {
+            lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(l, s.muted()),
+            ]));
+        }
+    }
     lines.push(Line::from(""));
     lines.extend(paragraph(
         s.muted(),
@@ -1428,14 +1617,27 @@ fn received_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: u
     let first = selected.saturating_sub(LIST_ROWS.saturating_sub(1));
     for i in (first..total).take(LIST_ROWS) {
         let on = i == selected;
+        let snippet_index = i.saturating_sub(data.pending.len());
         let (name, label) = match data.pending.get(i) {
             Some(change) => (display_safe(&change.alias), received_label(change)),
-            None => match data.snippets.get(i.saturating_sub(data.pending.len())) {
+            None => match data.snippets.get(snippet_index) {
                 Some(sn) => (
                     display_safe(&sn.snippet.name),
                     "snippet · not confirmed".to_owned(),
                 ),
-                None => continue,
+                None => match data
+                    .held
+                    .get(snippet_index.saturating_sub(data.snippets.len()))
+                {
+                    Some(held) => (
+                        display_safe(&subject_label(&held.subject)),
+                        held.device.as_deref().map_or_else(
+                            || "held · unknown origin".to_owned(),
+                            |d| format!("held · from {}", display_safe(d)),
+                        ),
+                    ),
+                    None => continue,
+                },
             },
         };
         let name_w = name.chars().count().min(w / 2);
@@ -1464,6 +1666,7 @@ fn received_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: u
     let end = match item {
         ReceivedItem::Host(change) => host_card(change, data.stale_hosts, &mut lines, s, tick, w),
         ReceivedItem::Snippet(sn) => snippet_card(sn, data.stale_snippets, &mut lines, s, tick, w),
+        ReceivedItem::Held(held) => held_card(held, data.stale_held, &mut lines, s, tick, w),
     };
     Body {
         lines,
@@ -1559,6 +1762,51 @@ fn host_card(
     lines.extend(paragraph(
         s.muted(),
         "y writes this destination to hosts.conf on this device. n keeps it out here; the other devices keep it.",
+        w,
+    ));
+    end
+}
+
+/// The card of a value from a forgotten device (or of unknown origin):
+/// two explicit choices, nothing preselected, one value at a time (R3,
+/// RR4). Returns the index of its last line before the keys.
+fn held_card(
+    held: &portico_core::sync::api::RevokedValueItem,
+    stale: bool,
+    lines: &mut Vec<Line<'static>>,
+    s: Styles,
+    tick: u64,
+    w: usize,
+) -> usize {
+    lines.push(Line::from(vec![Span::styled(
+        "From forgotten devices",
+        s.muted(),
+    )]));
+    lines.push(Line::from(Span::styled(
+        display_safe(&subject_label(&held.subject)),
+        s.title(),
+    )));
+    let who = match &held.device {
+        Some(device) => format!(
+            "Written on this device by changes from {}, a removed device.",
+            display_safe(device)
+        ),
+        None => "Of unknown origin: this device joined again without its previous keys.".to_owned(),
+    };
+    lines.extend(paragraph(s.secondary(), &who, w));
+    if stale {
+        lines.push(loading(s, tick, "Updating: it changed on another device…"));
+    }
+    lines.extend(paragraph(
+        s.secondary(),
+        "It is held out of sync on this device until you choose. Nothing is chosen for you.",
+        w,
+    ));
+    let end = lines.len().saturating_sub(1);
+    lines.push(Line::from(""));
+    lines.extend(paragraph(
+        s.muted(),
+        "m keeps it as this device's value and shares it. t takes the value the other devices hold, or removes it here if they hold none.",
         w,
     ));
     end
@@ -1760,6 +2008,9 @@ fn wizard_hints(wizard: &SyncWizard) -> Vec<(&'static str, &'static str)> {
             hints
         }
         Step::Join => vec![("↵", "review"), ("Tab", "next field"), ("Esc", "back")],
+        Step::Review if wizard.rejoin() => {
+            vec![("↵", "join"), ("Space", "I saved it"), ("Esc", "back")]
+        }
         Step::Review => vec![
             ("↵", "join"),
             ("Space", "I saved it"),
@@ -1797,6 +2048,10 @@ fn wizard_lines(wizard: &SyncWizard, s: Styles, tick: u64, w: usize) -> Vec<Line
                 s.title(),
             )));
             lines.push(blank.clone());
+            if let Some(note) = &wizard.note {
+                lines.extend(paragraph(warning(s), note, w));
+                lines.push(blank.clone());
+            }
             lines.extend(paragraph(
                 s.secondary(),
                 "A folder your cloud or sync app keeps in step, for example ~/Dropbox/Portico. Portico creates a portico-sync folder inside.",
@@ -1892,16 +2147,35 @@ fn wizard_lines(wizard: &SyncWizard, s: Styles, tick: u64, w: usize) -> Vec<Line
                 }
                 lines.push(blank.clone());
                 lines.push(Line::from(Span::styled("Conflicts", s.title())));
+                let rejoin = wizard.rejoin();
                 for (i, (_, label, note)) in BULK.iter().enumerate() {
                     let on = i == wizard.bulk;
-                    lines.push(Line::from(vec![
+                    let offered = !rejoin || i == 0;
+                    let mut row = vec![
                         Span::styled(
                             if on { "▍● " } else { " ○ " },
                             if on { s.accent() } else { s.muted() },
                         ),
-                        Span::styled(*label, if on { s.title() } else { s.secondary() }),
-                    ]));
-                    if on {
+                        Span::styled(
+                            *label,
+                            if on {
+                                s.title()
+                            } else if offered {
+                                s.secondary()
+                            } else {
+                                s.muted()
+                            },
+                        ),
+                    ];
+                    if !offered {
+                        row.push(Span::styled("  not offered", s.muted()));
+                    }
+                    lines.push(Line::from(row));
+                    if on && rejoin {
+                        lines.extend(fmt::wrap(REJOIN_NOTE, w.saturating_sub(3)).into_iter().map(
+                            |l| Line::from(vec![Span::raw("   "), Span::styled(l, s.secondary())]),
+                        ));
+                    } else if on {
                         lines.extend(fmt::wrap(note, w.saturating_sub(3)).into_iter().map(|l| {
                             Line::from(vec![Span::raw("   "), Span::styled(l, s.muted())])
                         }));
