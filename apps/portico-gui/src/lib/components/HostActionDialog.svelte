@@ -3,11 +3,12 @@
   // a host Portico does not own, duplicate offered), "Duplicate as Portico
   // host…" (a new alias) and the armed "Delete host" confirmation.
   import { untrack } from "svelte";
-  import { asError, sentence, type ErrorSummary, type Host } from "../api";
+  import { asError, type ErrorSummary, type Host } from "../api";
   import { backend } from "../backend";
   import { cannotDeleteTitle, capitalizable, deleteConfirmation, READ_ONLY_IMPORTED, READ_ONLY_SSH_CONFIG, suggestAlias } from "../hostform";
   import { hosts, type HostDialog } from "../state/hosts.svelte";
   import { workspace } from "../state/workspace.svelte";
+  import CodeText from "./CodeText.svelte";
   import Modal from "./Modal.svelte";
   import OriginBadge from "./OriginBadge.svelte";
 
@@ -88,7 +89,7 @@
 
 {#snippet errorView()}
   {#if error}
-    <p class="inline-error" role="alert"><span>{capitalizable(error.code) ? sentence(error.message) : error.message}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</p>
+    <p class="inline-error" role="alert"><span><CodeText text={error.message} capitalize={capitalizable(error.code)} /></span>{#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}</p>
   {/if}
 {/snippet}
 

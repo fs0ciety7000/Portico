@@ -1,49 +1,68 @@
 <script lang="ts">
   // "Sync…" when sync is off (phase 11, docs/SYNC.md §6): what it does, the
   // folder (native picker, in Rust), then create (first device) or join
-  // (review before anything is written), and a last recovery warning to
-  // acknowledge. Passphrase fields are cleared as soon as they are sent.
-  import { onMount } from "svelte";
+  // (review before anything is written). The recovery warning comes before
+  // the irreversible step, merged into it: "I saved it" gates Create and
+  // Join. Passphrase fields are cleared as soon as they are sent; a
+  // generated passphrase is dropped in Rust when the wizard closes.
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { fly } from "svelte/transition";
-  import { asError, sentence, type ErrorSummary, type GeneratedPassphrase, type JoinBulkChoice, type JoinPreview, type PickedFolder } from "../api";
+  import { asError, type ErrorSummary, type GeneratedPassphrase, type JoinBulkChoice, type JoinPreview, type PickedFolder } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
-  import { JOIN_TTL_MS, probeVerdict } from "../syncview";
+  import { JOIN_TTL_MS, probeVerdict, validityLeft } from "../syncview";
   import { sync } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
+  import CodeText from "./CodeText.svelte";
   import Modal from "./Modal.svelte";
   import SyncPassphraseFields, { newPassphrase } from "./SyncPassphraseFields.svelte";
 
-  type Step = "intro" | "folder" | "create" | "join" | "review" | "done";
+  type Step = "intro" | "folder" | "create" | "join" | "review";
 
   let step: Step = $state("intro");
   let armed = $state(false);
   let busy: string | null = $state(null);
-  let error: ErrorSummary | null = $state(null);
+  let error = $state<ErrorSummary | null>(null);
   let picked = $state<PickedFolder | null>(null);
   // Passphrases: cleared once sent.
   let passphrase = $state("");
   let confirm = $state("");
   let generated = $state<GeneratedPassphrase | null>(null);
-  let wroteDown = $state(false);
   let passReady = $state(false);
+  /** "I saved it": gates Create (typed or generated) and Join. */
+  let saved = $state(false);
   let deviceName = $state("");
   let rememberKey = $state(true);
   let preview = $state<JoinPreview | null>(null);
-  let previewAt = 0;
+  let previewAt = $state(0);
   let bulk: JoinBulkChoice = $state("review_each");
-  let understood = $state(false);
-  let joined = $state(false);
+  let now = $state(Date.now());
+  let root: HTMLDivElement | undefined = $state();
 
   onMount(() => {
     backend.syncDefaultDeviceName().then(
       (name) => (deviceName ||= name),
       () => {},
     );
+    // The review's remaining validity.
+    const timer = setInterval(() => (now = Date.now()), 15_000);
+    return () => clearInterval(timer);
+  });
+
+  // A generated passphrase not used yet: Rust drops it with the dialog.
+  onDestroy(() => void backend.syncForgetGenerated().catch(() => {}));
+
+  // A new step takes the focus to its first field or its gating checkbox
+  // (the Modal does it for the first step, once armed).
+  $effect(() => {
+    void step;
+    if (!untrack(() => armed)) return;
+    void tick().then(() => root?.closest(".modal")?.querySelector<HTMLElement>("[data-autofocus]")?.focus());
   });
 
   const verdict = $derived(picked ? probeVerdict(picked.probe) : null);
   const nameOk = $derived(deviceName.trim().length > 0);
+  const refused = $derived(error?.code === "sync_passphrase_weak");
 
   async function pick() {
     error = null;
@@ -80,7 +99,7 @@
   }
 
   async function create() {
-    if (!passReady || !nameOk || busy) return;
+    if (!passReady || !nameOk || !saved || busy) return;
     const secret = newPassphrase(generated, passphrase);
     forget();
     busy = "Deriving the key… (a few seconds)";
@@ -89,14 +108,13 @@
       const status = await backend.syncCreate(secret, deviceName.trim(), rememberKey);
       generated = null;
       await sync.act(async () => status);
-      joined = false;
-      step = "done";
+      finish(false);
     } catch (e) {
       error = asError(e);
       // A generated passphrase serves once: generate it again.
       if (generated) {
         generated = null;
-        wroteDown = false;
+        saved = false;
       }
       await sync.refresh();
     } finally {
@@ -113,7 +131,9 @@
     try {
       preview = await backend.syncJoinPreview(secret, deviceName.trim(), rememberKey);
       previewAt = Date.now();
+      now = previewAt;
       bulk = "review_each";
+      saved = false;
       step = "review";
     } catch (e) {
       error = asError(e);
@@ -123,7 +143,7 @@
   }
 
   async function join() {
-    if (!preview || busy) return;
+    if (!preview || !saved || busy) return;
     if (Date.now() - previewAt > JOIN_TTL_MS) return expired();
     busy = "Joining…";
     error = null;
@@ -131,8 +151,7 @@
       const status = await backend.syncJoinCommit(preview.token, bulk);
       preview = null;
       await sync.act(async () => status);
-      joined = true;
-      step = "done";
+      finish(true);
     } catch (e) {
       const failed = asError(e);
       if (failed.code === "sync_join_expired") return expired();
@@ -150,8 +169,8 @@
     error = { code: "sync_join_expired", message: "this review expired", hint: "Enter the passphrase again to see what joining brings now." };
   }
 
-  function finish() {
-    if (!understood) return;
+  /** Success: a notice, and the received changes after a join. */
+  function finish(joined: boolean) {
     sync.close();
     workspace.notify({ code: "sync_on", message: "Sync is on", hint: joined ? "Received hosts wait for your confirmation in Sync, Received." : null }, "info");
     if (joined && sync.received) sync.open({ kind: "panel", tab: "received" });
@@ -159,7 +178,6 @@
 
   function close() {
     forget();
-    if (step === "done") return finish();
     sync.close();
   }
 
@@ -169,7 +187,6 @@
     if (step === "create") void create();
     else if (step === "join") void review();
     else if (step === "review") void join();
-    else if (step === "done") finish();
   }
 
   const titles: Record<Step, string> = {
@@ -178,7 +195,6 @@
     create: "Create the sync",
     join: "Join the sync",
     review: "What joining brings",
-    done: "Before you go",
   };
   const BULK: { id: JoinBulkChoice; label: string; help: string }[] = [
     { id: "review_each", label: "Review each", help: "Every conflict waits for you in Sync, Conflicts." },
@@ -190,7 +206,7 @@
 <Modal bind:armed onescape={close} labelledBy="sync-wizard-title" size="wide">
   {#snippet title()}{titles[step]}{/snippet}
 
-  <div class="wizard" role="presentation" {onkeydown}>
+  <div class="wizard" role="presentation" {onkeydown} bind:this={root}>
     {#key step}
       <div class="step" in:fly={{ y: 6, duration: dur("base") }}>
         {#if step === "intro"}
@@ -207,14 +223,15 @@
             <code class="path">{picked.display}</code>
           </div>
           <div class="verdict" data-tone={verdict.tone} data-testid="sync-probe">
-            <strong>{sentence(verdict.title)}</strong>
+            <strong><CodeText text={verdict.title} /></strong>
             {#if verdict.body}<p>{verdict.body}</p>{/if}
-            {#if verdict.hint}<p class="hint">{verdict.hint}</p>{/if}
+            {#if verdict.hint}<p class="hint"><CodeText text={verdict.hint} capitalize={false} /></p>{/if}
           </div>
         {:else if step === "create"}
           <p>Choose the passphrase every device will use to join. It never leaves this machine; only what it encrypts does.</p>
-          <SyncPassphraseFields bind:value={passphrase} bind:confirm bind:generated bind:wroteDown bind:ready={passReady} autofocus />
+          <SyncPassphraseFields bind:value={passphrase} bind:confirm bind:generated bind:ready={passReady} {refused} savedOutside autofocus />
           {@render device()}
+          {@render recovery()}
         {:else if step === "join"}
           <p>Enter the sync passphrase chosen on your first device. Nothing is written before you review what joining brings.</p>
           <label class="field">
@@ -243,22 +260,14 @@
             </div>
             <p class="note">{BULK.find((b) => b.id === bulk)?.help}</p>
           {/if}
-          <p class="note">Received hosts stay off ~/.ssh until you confirm each destination, whatever you choose here.</p>
-        {:else if step === "done"}
-          <div class="recovery" data-testid="sync-recovery">
-            <strong>Keep the passphrase safe</strong>
-            <p>
-              Lose it and every device that does not remember the key cannot read the sync folder again: by design, nobody can
-              recover it. A device that remembers the key can still set a new passphrase.
-            </p>
-            <p>Your local hosts, snippets and settings are never deleted, even when you turn sync off.</p>
-          </div>
-          <label class="check"><input type="checkbox" bind:checked={understood} data-autofocus /> I understand</label>
+          <p class="note">Received hosts are not used until you confirm each destination, whatever you choose here.</p>
+          <p class="note validity" data-testid="sync-validity">{validityLeft(previewAt, now)} · single use</p>
+          {@render recovery(true)}
         {/if}
       </div>
     {/key}
     {#if error}
-      <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span><CodeText text={error.message} /></span>{#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}</div>
     {/if}
   </div>
 
@@ -274,15 +283,13 @@
       {#if verdict?.tone === "join"}<button class="primary" data-autofocus onclick={() => ((error = null), (step = "join"))}>Join this sync</button>{/if}
     {:else if step === "create"}
       <button class="secondary" disabled={!!busy} onclick={() => ((step = "folder"), forget())}>Back</button>
-      <button class="primary" disabled={!passReady || !nameOk || !!busy} onclick={create}>Create sync <kbd>↵</kbd></button>
+      <button class="primary" disabled={!passReady || !nameOk || !saved || !!busy} onclick={create}>Create sync <kbd>↵</kbd></button>
     {:else if step === "join"}
       <button class="secondary" disabled={!!busy} onclick={() => ((step = "folder"), forget())}>Back</button>
       <button class="primary" disabled={!passphrase || !nameOk || !!busy} onclick={review}>Review <kbd>↵</kbd></button>
     {:else if step === "review"}
       <button class="secondary" disabled={!!busy} onclick={() => ((preview = null), (step = "join"))}>Back</button>
-      <button class="primary" data-autofocus disabled={!!busy} onclick={join}>Join <kbd>↵</kbd></button>
-    {:else}
-      <button class="primary" disabled={!understood} onclick={finish}>Done <kbd>↵</kbd></button>
+      <button class="primary" disabled={!saved || !!busy} onclick={join}>Join <kbd>↵</kbd></button>
     {/if}
   {/snippet}
 </Modal>
@@ -295,6 +302,20 @@
   </label>
   <label class="check"><input type="checkbox" bind:checked={rememberKey} /> Remember the key on this device</label>
   <p class="note">{rememberKey ? "Stored in the system keychain: no passphrase at each start." : "Portico asks for the passphrase at each start (shared machines)."}</p>
+{/snippet}
+
+{#snippet recovery(gates = false)}
+  <div class="recovery" data-testid="sync-recovery">
+    <strong>Keep the passphrase safe</strong>
+    <p>
+      Lose it and every device that does not remember the key cannot read the sync folder again: by design, nobody can recover it. A
+      device that remembers the key can still set a new passphrase. Your local hosts, snippets and settings are never deleted.
+    </p>
+    <label class="check">
+      <input type="checkbox" bind:checked={saved} data-autofocus={gates ? "" : undefined} data-testid="sync-saved" />
+      I saved it. A lost passphrase cannot be recovered unless a device remembers the key.
+    </label>
+  </div>
 {/snippet}
 
 <style>
@@ -316,7 +337,7 @@
     background: var(--bg-elevated);
   }
   .verdict strong { color: var(--text-primary); font-weight: 550; }
-  .verdict[data-tone="ok"], .verdict[data-tone="join"] { --c: var(--accent); }
+
   .verdict[data-tone="wait"] { --c: var(--status-warning); }
   .verdict[data-tone="error"] { --c: var(--status-error); }
   .verdict .hint { color: var(--text-muted); font-size: var(--text-sm); }

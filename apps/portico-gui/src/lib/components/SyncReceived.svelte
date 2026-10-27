@@ -4,11 +4,12 @@
   // one by one (nothing preselected) — and snippets changed by sync (F8),
   // reviewed one by one with their full command. Decisions carry the hash of
   // what is shown: content changed since is refused and shown again.
-  import { sentence, type ErrorSummary, type PendingHostChange } from "../api";
+  import { type ErrorSummary, type PendingHostChange } from "../api";
   import { backend } from "../backend";
   import { HOST_FIELDS, hostField } from "../syncview";
   import { sync } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
+  import CodeText from "./CodeText.svelte";
 
   const keyOf = (p: PendingHostChange) => `${p.alias}\u0000${p.destination_hash}`;
   let ticked: Record<string, boolean> = $state({});
@@ -49,7 +50,7 @@
 <section class="block" aria-labelledby="received-hosts">
   <div class="block-head">
     <span class="caption" id="received-hosts">Hosts</span>
-    <span class="note">Written to ~/.ssh only once you confirm each destination.</span>
+    <span class="note">Added to Portico's hosts.conf only once you confirm each destination.</span>
   </div>
   {#if !sync.pendingHosts.length}
     <p class="empty">No received host waits for a confirmation.</p>
@@ -65,7 +66,7 @@
           </label>
           {#if p.renamed_from}<p class="note">Renamed from <span class="mono">{p.renamed_from}</span> on that device: a new host here.</p>{/if}
           <div class="dest" role="table" aria-label={`${p.alias} destination`}>
-            <div class="tr th" role="row"><span role="columnheader"></span><span role="columnheader">Now</span><span role="columnheader">Received</span></div>
+            <div class="tr th" role="row"><span role="columnheader"></span><span role="columnheader">On this device</span><span role="columnheader">Received</span></div>
             {#each HOST_FIELDS as [key, label] (key)}
               {@const before = hostField(p.current, key)}
               {@const after = hostField(p.incoming, key)}
@@ -79,8 +80,8 @@
         </li>
       {/each}
     </ul>
-    <div class="actions">
-      <span class="note">{chosen.length ? `${chosen.length} selected` : "Select the hosts you checked."}</span>
+    <div class="actions" data-testid="sync-received-actions">
+      <span class="note">{chosen.length ? `${chosen.length} selected` : "Check hosts to confirm or reject them."}</span>
       <button class="secondary small" disabled={!chosen.length || !!busy} onclick={() => decide(false)}>Reject selected</button>
       <button class="primary small" disabled={!chosen.length || !!busy} onclick={() => decide(true)}>
         {#if busy}<span class="spinner"></span>{/if}Confirm selected
@@ -88,7 +89,7 @@
     </div>
   {/if}
   {#if error}
-    <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+    <div class="inline-error" role="alert"><span><CodeText text={error.message} /></span>{#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}</div>
   {/if}
 </section>
 
@@ -104,7 +105,7 @@
       {#each sync.snippets as s (s.id + s.hash)}
         <li class="snippet">
           <span class="name">{s.snippet.name}</span>
-          <span class="pill" data-kind="changed">{s.snippet.run ? "runs on ↵" : "pasted only"}</span>
+          <span class="pill" data-kind="changed">{s.snippet.run ? "Runs when sent" : "Pasted only"}</span>
           <button class="secondary small" onclick={() => sync.reviewSnippet(s)}>Review command…</button>
         </li>
       {/each}
@@ -168,7 +169,20 @@
   .tr.differs { border-radius: var(--radius-sm); background: var(--bg-elevated); box-shadow: inset 2px 0 0 var(--status-warning); }
   .tr.differs .after { color: var(--text-primary); }
   .mono { font-family: var(--font-mono); }
-  .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+  /* Always reachable under a long list: it sticks to the panel's bottom. */
+  .actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-overlay);
+  }
   .actions .note { margin-right: auto; }
   .snippet {
     display: flex;

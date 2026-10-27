@@ -46,7 +46,6 @@
   const received = $derived(Object.values(pending));
   const newCount = $derived(received.filter((p) => p.new).length);
   /** `laptop` from `laptop (3f9c0ae1)`: the row stays short, the title has it all. */
-  const deviceName = (label: string | undefined) => label?.replace(/\s*\([0-9a-f]{8}\)$/, "") ?? "another device";
 
   let listEl: HTMLUListElement | undefined = $state();
 
@@ -171,9 +170,8 @@
               {#if host.origin !== "ssh_config"}<OriginBadge origin={host.origin} compact />{/if}
               {#if pending[host.alias]}
                 {@const change = pending[host.alias]}
-                <span class="changed" title={`Changed by ${change?.devices.join(", ")}: the new destination waits for your confirmation (Sync, Received)`}>
-                  changed by {deviceName(change?.devices[0])}
-                </span>
+                {@const by = `${change?.new ? "New from" : "Changed by"} ${change?.devices.join(", ") || "another device"}`}
+                <span class="changed" role="img" title={`${by}: the destination waits for your confirmation (Sync, Received)`} aria-label={by} data-testid="host-changed">⇅</span>
               {/if}
             </span>
             <span class="target mono">{host.user ? `${host.user}@` : ""}{host.hostname}</span>
@@ -260,19 +258,22 @@
   }
   .received:hover { border-color: var(--border-strong); }
   .received:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .received-dot { flex: 0 0 auto; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; background: var(--status-authenticating); }
+  .received-dot { flex: 0 0 auto; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; background: var(--status-warning); }
   .received .review { margin-left: auto; color: var(--accent); }
+  /* A received destination waits (sync): a compact pill, the full text in
+     its title and in the host details. */
   .changed {
-    flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
+    display: inline-grid;
+    flex: 0 0 auto;
+    place-items: center;
+    min-width: var(--size-badge-sm);
+    height: var(--size-badge-sm);
     padding: 0 var(--space-1);
-    border: 1px solid color-mix(in srgb, var(--status-authenticating) 55%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent);
     border-radius: var(--radius-pill);
-    color: var(--status-authenticating);
+    color: var(--status-warning);
     font-size: var(--text-xs);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1;
   }
   .search-row .search { flex: 1; min-width: 0; }
   /* "Add host…": a quiet square beside the search, the accent on hover and focus. */

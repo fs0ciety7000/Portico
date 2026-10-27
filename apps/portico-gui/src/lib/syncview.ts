@@ -32,7 +32,8 @@ export function syncLabel(status: SyncStatus | null, nowMs: number): { label: st
     case "syncing":
       return { label: "Syncing…", tone: "busy" };
     case "waiting":
-      return { label: status.device ? `Waiting for ${status.device}` : "Waiting for the sync folder", tone: "busy" };
+      // The name only: the id is in the item's title (B14).
+      return { label: status.device ? `Waiting for ${deviceName(status.device)}` : "Waiting for the sync folder", tone: "busy" };
     case "folder_unavailable":
       return { label: "Sync folder unavailable", tone: "warning" };
     case "alert":
@@ -42,6 +43,18 @@ export function syncLabel(status: SyncStatus | null, nowMs: number): { label: st
     default:
       return { label: "Sync", tone: "muted" };
   }
+}
+
+/** `studio-mac (3f9c0ae1)` → `studio-mac`: where room is short. */
+export function deviceName(label: string): string {
+  return label.replace(/\s*\([0-9a-f]{8}\)$/, "") || label;
+}
+
+/** The status item's counts as words (wide windows): `2 conflicts · 3 to review`. */
+export function countsText(conflicts: number, toReview: number): string {
+  return [conflicts ? `${conflicts} ${conflicts === 1 ? "conflict" : "conflicts"}` : null, toReview ? `${toReview} to review` : null]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /** One explanation: what happened, and what to do. */
@@ -321,3 +334,52 @@ export function defaultChoice(sides: ConflictSide[]): { type: "pick"; index: num
 
 /** The join token lives 10 minutes (core: F14). */
 export const JOIN_TTL_MS = 10 * 60_000;
+
+/** `Valid for 10 more min` … `Valid for 1 more min`, then `Expired`. */
+export function validityLeft(sinceMs: number, nowMs: number): string {
+  const left = JOIN_TTL_MS - Math.max(0, nowMs - sinceMs);
+  if (left <= 0) return "Expired";
+  return `Valid for ${Math.ceil(left / 60_000)} more min`;
+}
+
+// ── A received command, shown before it may run (F8, S1c review A1/A2) ──
+
+/** One piece of a command line: plain text, or an invisible character
+ * drawn as a visible mark (`→` for a tab, `␍` `␛`… for other controls). The
+ * real character stays in `text` (copied as is); `mark` is only drawn. */
+export interface CommandPiece {
+  text: string;
+  mark: string | null;
+}
+
+const controlMark = (c: string): string => {
+  if (c === "\t") return "→";
+  const code = c.codePointAt(0) ?? 0;
+  return code === 0x7f ? "␡" : String.fromCodePoint(0x2400 + code);
+};
+
+/** The command cut in lines (a trailing newline makes a last, empty line:
+ * it is an extra Enter, so it is shown and numbered), each cut at its tabs
+ * and other control characters. */
+export function commandLines(command: string): CommandPiece[][] {
+  return command.split("\n").map((line) => {
+    const pieces: CommandPiece[] = [];
+    for (const part of line.split(/([\u0000-\u0009\u000b-\u001f\u007f])/)) {
+      if (!part) continue;
+      pieces.push(part.length === 1 && /[\u0000-\u0009\u000b-\u001f\u007f]/.test(part) ? { text: part, mark: controlMark(part) } : { text: part, mark: null });
+    }
+    return pieces;
+  });
+}
+
+/** `1 line · 12 characters`, `200 lines · 8,400 characters`. */
+export function commandStats(command: string): string {
+  const lines = commandLines(command).length;
+  const chars = [...command].length;
+  return `${lines.toLocaleString("en-US")} ${lines === 1 ? "line" : "lines"} · ${chars.toLocaleString("en-US")} ${chars === 1 ? "character" : "characters"}`;
+}
+
+/** The end of a scrollable command is on screen (or it does not scroll). */
+export function scrolledToEnd(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {
+  return scrollTop + clientHeight >= scrollHeight - 1;
+}

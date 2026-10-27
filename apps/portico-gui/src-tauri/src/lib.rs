@@ -281,6 +281,7 @@ fn run_app() {
             sync::sync_pick_folder,
             sync::sync_probe_again,
             sync::sync_generate_passphrase,
+            sync::sync_forget_generated,
             sync::sync_assess_passphrase,
             sync::sync_create,
             sync::sync_join_preview,

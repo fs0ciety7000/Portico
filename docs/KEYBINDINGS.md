@@ -620,6 +620,7 @@ dans la palette et peut recevoir une combinaison dans `settings.toml`.
 | Nouvelle clé | `keys.new` | — | — |
 | Nouveau snippet | `snippets.new` | — | — |
 | Changer de dossier de téléchargement | `files.download-dir` | — | — |
+| Synchronisation chiffrée par dossier : l'assistant si elle est désactivée, sinon le panneau Sync (sections `1`–`5`, `s` synchronise maintenant ; aussi l'élément Sync de la barre d'état) | `app.sync` | `⌘⇧Y` | `Ctrl-Shift-Y` |
 | Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`) | `app.import-termius` | `⌘⇧M` | `Ctrl-Shift-M` |
 
 ## Panneaux (GUI)
@@ -672,6 +673,7 @@ Actives quand la liste des hôtes est affichée et que le focus n'est pas dans u
 | Vider « Recent » (confirmation) | `hosts.clear-recent` | `⇧X` | `Shift-X` |
 | Thème suivant : Obsidian, Basalt, Travertine Night, Marble, puis Auto (mémorisé dans `settings.toml`) | `app.theme` | `t` | `t` |
 | Enregistrements (second raccourci de `recordings.open`, depuis la liste des hôtes) | `hosts.recordings` | `v` | `v` |
+| Synchronisation (second raccourci de `app.sync`, depuis la liste des hôtes, comme `S` en TUI) | `hosts.sync` | `⇧S` | `Shift-S` |
 
 ## Terminal (GUI) : touches fixes
 

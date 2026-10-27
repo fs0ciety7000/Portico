@@ -19,6 +19,7 @@
     onshortcut,
     scroll = true,
     footerWrap = true,
+    steady = false,
     children,
     footer,
   }: {
@@ -41,6 +42,8 @@
     scroll?: boolean;
     /** `false`: the footer stays on one line (short labels, small buttons). */
     footerWrap?: boolean;
+    /** A `wide` dialog whose height does not follow its content (tabs). */
+    steady?: boolean;
     children: Snippet;
     footer: Snippet;
   } = $props();
@@ -138,6 +141,7 @@
     class:danger={tone === "danger"}
     class:wide={size === "wide" || size === "full"}
     class:full={size === "full"}
+    class:steady
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledBy}
@@ -188,6 +192,7 @@
     height: min(780px, calc(100vh - 2 * var(--space-6) - var(--toast-room, 0px)));
     max-height: none;
   }
+  .modal.steady { height: min(640px, 86vh, calc(100vh - 2 * var(--space-6) - var(--toast-room, 0px))); }
   .modal.wide .body { overflow-y: auto; }
   .modal.wide .body.fixed {
     display: flex;

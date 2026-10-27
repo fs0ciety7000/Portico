@@ -160,6 +160,10 @@ export const ACTIONS: ActionDef[] = [
   { id: "files.download-dir", title: "Change download folder", doc: "Changer de dossier de téléchargement", scope: "global", defaults: both() },
   // The id predates Termix: kept, so a rebound key still applies.
   // Free on both platforms and in a terminal (Linux: Ctrl-Shift-M), checked by test-shortcuts.
+  // Phase 11: the encrypted folder sync. Mirrors the TUI (Ctrl-Space y in a
+  // terminal, `S` in the host list).
+  { id: "app.sync", title: "Sync…", doc: "Synchronisation chiffrée par dossier : l'assistant si elle est désactivée, sinon le panneau Sync (sections `1`–`5`, `s` synchronise maintenant ; aussi l'élément Sync de la barre d'état)", scope: "global", defaults: both("Mod+Shift+Y") },
+  { id: "hosts.sync", title: "Sync…", doc: "Synchronisation (second raccourci de `app.sync`, depuis la liste des hôtes, comme `S` en TUI)", scope: "hosts", defaults: both("Shift+S") },
   { id: "app.import-termius", title: "Import hosts…", doc: "Importer des hôtes Termius ou Termix (format détecté ; aperçu, clés privées seulement si cochées, puis hôtes Portico dans `hosts.conf`, voir `docs/IMPORT.md`)", scope: "global", defaults: both("Mod+Shift+M") },
 ];
 

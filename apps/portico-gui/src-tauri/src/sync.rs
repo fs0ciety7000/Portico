@@ -12,7 +12,10 @@
 //!   constructible from text) and only that value gets the diceware credit.
 //!   It stays here under a single-use token; its text is sent to the webview
 //!   once, to be shown and written down, and create / change / reset name it
-//!   by token. A reloading page drops it and the picked folder.
+//!   by token. The token is random (128 bits), the passphrase expires after
+//!   [`GENERATED_TTL`] and the webview drops it as soon as its dialog closes
+//!   ([`sync_forget_generated`]). A reloading page drops it and the picked
+//!   folder.
 //! - Statuses, devices, conflicts, issues and pending confirmations are the
 //!   core's own serializable types (`portico_core::sync::api`): none of them
 //!   holds a secret. Confirmations go back with the hash that was shown
@@ -23,8 +26,8 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use portico_core::sync::{
     DisableOptions, FolderProbe, JoinBulkChoice, JoinPreview, NewPassphrase, PassphraseStrength,
@@ -43,14 +46,28 @@ fn summary(e: portico_core::Error) -> ErrorSummary {
     e.summary()
 }
 
+/// How long a generated passphrase stays usable after it was shown.
+const GENERATED_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// The latest generated passphrase, under its random token (single use).
+#[derive(Debug)]
+struct Generated {
+    token: String,
+    at: Instant,
+    passphrase: NewPassphrase,
+}
+
 /// What the sync dialogs keep on the Rust side between two calls.
 #[derive(Debug, Default)]
 pub(crate) struct SyncUi {
     /// The folder picked for create / join.
     folder: Mutex<Option<PathBuf>>,
-    /// The latest generated passphrase, under its token (single use).
-    generated: Mutex<Option<(u64, NewPassphrase)>>,
-    next: AtomicU64,
+    generated: Mutex<Option<Generated>>,
+}
+
+/// A token the webview cannot guess: 128 random bits, in hex.
+fn random_token() -> String {
+    format!("{:032x}", rand::random::<u128>())
 }
 
 impl SyncUi {
@@ -58,10 +75,29 @@ impl SyncUi {
     /// passphrase (zeroized on drop).
     pub(crate) fn clear(&self) {
         *self.folder.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.forget_generated();
+    }
+
+    /// Drops the generated passphrase (zeroized on drop): its dialog
+    /// closed, or the user types their own.
+    fn forget_generated(&self) {
         *self
             .generated
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    fn hold(&self, passphrase: NewPassphrase) -> String {
+        let token = random_token();
+        *self
+            .generated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Generated {
+            token: token.clone(),
+            at: Instant::now(),
+            passphrase,
+        });
+        token
     }
 
     fn picked(&self) -> Result<PathBuf, ErrorSummary> {
@@ -73,7 +109,7 @@ impl SyncUi {
     }
 
     /// The passphrase a request names: typed, or the generated one by
-    /// token (taken: it serves once).
+    /// token (taken: it serves once, and only within [`GENERATED_TTL`]).
     fn take(&self, passphrase: NewPassphraseDto) -> Result<NewPassphrase, ErrorSummary> {
         match passphrase {
             NewPassphraseDto::Typed { value } => Ok(NewPassphrase::Typed(value)),
@@ -83,7 +119,8 @@ impl SyncUi {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 match slot.take() {
-                    Some((held, generated)) if held == token => Ok(generated),
+                    Some(held) if held.at.elapsed() > GENERATED_TTL => Err(generated_gone()),
+                    Some(held) if held.token == token => Ok(held.passphrase),
                     other => {
                         *slot = other;
                         Err(generated_gone())
@@ -117,7 +154,7 @@ pub(crate) enum NewPassphraseDto {
     /// Deserialized straight into `SecretString`.
     Typed { value: SecretString },
     /// The one [`sync_generate_passphrase`] returned.
-    Generated { token: u64 },
+    Generated { token: String },
 }
 
 /// `PassphraseStrength`, for the meter.
@@ -147,7 +184,7 @@ fn expose<S: Serializer>(secret: &SecretString, serializer: S) -> Result<S::Ok, 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GeneratedDto {
-    pub token: u64,
+    pub token: String,
     /// Shown once (and copyable); the webview drops it with the dialog.
     #[serde(serialize_with = "expose")]
     pub text: SecretString,
@@ -319,13 +356,20 @@ pub(crate) async fn sync_generate_passphrase(
     let text = generated.as_secret().clone();
     let passphrase = NewPassphrase::Generated(generated);
     let strength = passphrase.strength().into();
-    let token = ui.next.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-    *ui.generated.lock().unwrap_or_else(PoisonError::into_inner) = Some((token, passphrase));
+    let token = ui.hold(passphrase);
     Ok(GeneratedDto {
         token,
         text,
         strength,
     })
+}
+
+/// Drops the generated passphrase: its dialog closed, or the user chose to
+/// type their own. Idempotent.
+#[tauri::command]
+pub(crate) async fn sync_forget_generated(ui: State<'_, SyncUi>) -> Result<(), ErrorSummary> {
+    ui.forget_generated();
+    Ok(())
 }
 
 /// The meter while typing (what the core will enforce for a typed one).
@@ -550,30 +594,78 @@ mod tests {
     #[test]
     fn a_generated_passphrase_serves_once_and_only_by_its_token() {
         let ui = SyncUi::default();
-        let generated = portico_core::sync::generate_passphrase().unwrap();
-        *ui.generated.lock().unwrap() = Some((7, NewPassphrase::Generated(generated)));
+        let token = ui.hold(generated());
         // Another token: refused, and the passphrase stays.
         let wrong = ui
-            .take(NewPassphraseDto::Generated { token: 8 })
+            .take(NewPassphraseDto::Generated {
+                token: "8".repeat(32),
+            })
             .unwrap_err();
         assert_eq!(wrong.code, "sync_generated_used");
         assert!(matches!(
-            ui.take(NewPassphraseDto::Generated { token: 7 }).unwrap(),
+            ui.take(NewPassphraseDto::Generated {
+                token: token.clone()
+            })
+            .unwrap(),
             NewPassphrase::Generated(_)
         ));
         // Used: gone.
         assert_eq!(
-            ui.take(NewPassphraseDto::Generated { token: 7 })
+            ui.take(NewPassphraseDto::Generated { token })
                 .unwrap_err()
                 .code,
             "sync_generated_used"
         );
     }
 
+    fn generated() -> NewPassphrase {
+        NewPassphrase::Generated(portico_core::sync::generate_passphrase().unwrap())
+    }
+
+    #[test]
+    fn generated_tokens_are_random() {
+        let ui = SyncUi::default();
+        let first = ui.hold(generated());
+        let second = ui.hold(generated());
+        assert_eq!(first.len(), 32);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+        // Only the latest one is held.
+        assert!(
+            ui.take(NewPassphraseDto::Generated { token: first })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_generated_passphrase_expires() {
+        let ui = SyncUi::default();
+        let token = ui.hold(generated());
+        let past = Instant::now()
+            .checked_sub(GENERATED_TTL + Duration::from_secs(1))
+            .unwrap();
+        ui.generated.lock().unwrap().as_mut().unwrap().at = past;
+        let expired = ui.take(NewPassphraseDto::Generated { token }).unwrap_err();
+        assert_eq!(expired.code, "sync_generated_used");
+        // Dropped, not kept for a later attempt.
+        assert!(ui.generated.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn forget_empties_the_generated_slot() {
+        let ui = SyncUi::default();
+        let token = ui.hold(generated());
+        ui.forget_generated();
+        assert!(ui.generated.lock().unwrap().is_none());
+        assert!(ui.take(NewPassphraseDto::Generated { token }).is_err());
+        // Idempotent.
+        ui.forget_generated();
+    }
+
     #[test]
     fn a_generated_passphrase_is_sent_once_as_text() {
         let dto = GeneratedDto {
-            token: 1,
+            token: "ab".into(),
             text: SecretString::from("alpha bravo"),
             strength: StrengthDto {
                 estimated_bits: 77,

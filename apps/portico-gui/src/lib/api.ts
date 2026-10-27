@@ -814,13 +814,14 @@ export interface PassphraseStrength {
 
 /** Mirrors `sync::GeneratedDto`: shown once, then named by `token`. */
 export interface GeneratedPassphrase {
-  token: number;
+  /** Random, single use, expires after 10 minutes. */
+  token: string;
   text: string;
   strength: PassphraseStrength;
 }
 
 /** Mirrors `sync::NewPassphraseDto` (`value` becomes a SecretString in Rust). */
-export type NewPassphrase = { kind: "typed"; value: string } | { kind: "generated"; token: number };
+export type NewPassphrase = { kind: "typed"; value: string } | { kind: "generated"; token: string };
 
 export interface JoinPreview {
   /** Single use, expires after 10 minutes. */
@@ -975,6 +976,8 @@ export const api = {
   syncPickFolder: () => invoke<PickedFolder | null>("sync_pick_folder"),
   syncProbeAgain: () => invoke<FolderProbe>("sync_probe_again"),
   syncGeneratePassphrase: () => invoke<GeneratedPassphrase>("sync_generate_passphrase"),
+  /** Drops the generated passphrase held in Rust (its dialog closed). */
+  syncForgetGenerated: () => invoke<void>("sync_forget_generated"),
   syncAssessPassphrase: (passphrase: string) => invoke<PassphraseStrength>("sync_assess_passphrase", { passphrase }),
   syncCreate: (passphrase: NewPassphrase, deviceName: string, rememberKey: boolean) =>
     invoke<SyncStatus>("sync_create", { request: { passphrase, deviceName, rememberKey } }),

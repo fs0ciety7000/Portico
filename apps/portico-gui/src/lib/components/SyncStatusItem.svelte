@@ -1,9 +1,12 @@
 <script lang="ts">
   // Status-bar item of the folder sync (phase 11): a monochrome glyph and a
-  // label (`Synced 2 min ago`, `Syncing…`, `Waiting for laptop (3f9c0ae1)`,
-  // `Sync folder unavailable`, `Sync locked`, `Sync off`). Only the counts
-  // (conflicts, received changes to confirm, alerts) carry a status colour.
-  import { syncLabel } from "../syncview";
+  // label (`Synced 2 min ago`, `Syncing…`, `Waiting for laptop` — the id in
+  // the title —, `Sync folder unavailable`, `Sync locked`, `Sync off`). Only
+  // the counts carry a status colour: conflicts and changes to review in the
+  // warning tone, an alert in the error tone. Wide windows spell the counts
+  // out (`2 conflicts · 3 to review`), narrow ones show pills.
+  import { countsText, syncLabel } from "../syncview";
+  import { keymap } from "../state/keymap.svelte";
   import { sync } from "../state/sync.svelte";
 
   const view = $derived(syncLabel(sync.status, sync.now));
@@ -12,14 +15,15 @@
   const issues = $derived(status?.state === "idle" ? status.issues : 0);
   const received = $derived(sync.received);
   const alert = $derived(status?.state === "alert" || status?.state === "error");
+  const shortcut = $derived(keymap.label("app.sync"));
   const title = $derived(
     [
-      view.label,
+      status?.state === "waiting" && status.device ? `Waiting for ${status.device}` : view.label,
       sync.overview?.folder ? `Folder: ${sync.overview.folder}` : null,
       conflicts ? `${conflicts} ${conflicts === 1 ? "conflict" : "conflicts"}` : null,
       received ? `${received} received ${received === 1 ? "change" : "changes"} to confirm` : null,
       issues ? `${issues} ${issues === 1 ? "issue" : "issues"}` : null,
-      status?.state === "disabled" ? "Set up an encrypted folder sync" : "Open the Sync panel",
+      (status?.state === "disabled" ? "Set up an encrypted folder sync" : "Open the Sync panel") + (shortcut ? ` (${shortcut})` : ""),
     ]
       .filter(Boolean)
       .join(" · "),
@@ -39,9 +43,14 @@
     {/if}
   </svg>
   <span class="label">{view.label}</span>
-  {#if alert}<span class="count error" aria-label="alert">!</span>{/if}
-  {#if conflicts}<span class="count warning" aria-label={`${conflicts} conflicts`}>{conflicts}</span>{/if}
-  {#if received}<span class="count accent" aria-label={`${received} to confirm`}>{received}</span>{/if}
+  {#if alert}<span class="count error" aria-label={title}>!</span>{/if}
+  {#if conflicts || received}
+    <span class="counts-text" data-testid="sync-counts-text"><span class="sep">·</span> {countsText(conflicts, received)}</span>
+    <span class="counts-pills">
+      {#if conflicts}<span class="count warning" aria-label={title}>{conflicts}</span>{/if}
+      {#if received}<span class="count pending" aria-label={title}>{received}</span>{/if}
+    </span>
+  {/if}
 </button>
 
 <style>
@@ -80,5 +89,13 @@
   }
   .count.warning { color: var(--status-warning); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-warning) 55%, transparent); }
   .count.error { color: var(--status-error); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 55%, transparent); }
-  .count.accent { color: var(--status-authenticating); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-authenticating) 55%, transparent); }
+  /* To review: the same warning tone as the TUI, a dashed ring tells it from a conflict. */
+  .count.pending { color: var(--status-warning); box-shadow: none; border: 1px dashed color-mix(in srgb, var(--status-warning) 55%, transparent); }
+  .counts-pills { display: inline-flex; gap: var(--space-1); }
+  .counts-text { display: none; color: var(--status-warning); white-space: nowrap; }
+  .counts-text .sep { color: var(--text-muted); }
+  @media (min-width: 1100px) {
+    .counts-text { display: inline; }
+    .counts-pills { display: none; }
+  }
 </style>

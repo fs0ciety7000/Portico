@@ -122,7 +122,7 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     }
     const other = find(alias);
     if (other && other.alias !== except) {
-      throw fail("host_alias_taken", `${other.alias} is already defined in ${other.source}`, HINTS.taken);
+      throw fail("host_alias_taken", `\`${other.alias}\` is already defined in ${other.source}`, HINTS.taken);
     }
     return alias;
   }
@@ -215,7 +215,7 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
   }
 
   function readOnly(host: Host): never {
-    throw fail("host_read_only", `${host.alias} is defined in ${host.source.replace(/:\d+$/, "")}, which Portico does not edit`, HINTS.readOnly);
+    throw fail("host_read_only", `\`${host.alias}\` is defined in ${host.source.replace(/:\d+$/, "")}, which Portico does not edit`, HINTS.readOnly);
   }
 
   return {
@@ -231,13 +231,13 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     async updateHost(alias, draft) {
       await sleep(250);
       const existing = find(alias);
-      if (!existing) throw fail("host_not_found", `no host named ${alias}`, "Reload the host list.");
+      if (!existing) throw fail("host_not_found", `no host named \`${alias}\``, "Reload the host list.");
       if (existing.origin !== "portico") readOnly(existing);
       const host = await build(draft, existing);
       if (host.alias !== existing.alias) {
         // Portico hosts jumping through it follow the rename; others refuse it.
         const outside = hosts.find((h) => h.origin !== "portico" && h.proxyJump.includes(existing.alias));
-        if (outside) throw fail("host_in_use", `${existing.alias} is the jump host of ${outside.alias}`, HINTS.inUse);
+        if (outside) throw fail("host_in_use", `\`${existing.alias}\` is the jump host of \`${outside.alias}\``, HINTS.inUse);
         for (const h of hosts) {
           if (h.proxyJump[0] === existing.alias) {
             h.proxyJump = [host.alias];
@@ -253,10 +253,10 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     async deleteHost(alias) {
       await sleep(200);
       const existing = find(alias);
-      if (!existing) throw fail("host_not_found", `no host named ${alias}`, "Reload the host list.");
+      if (!existing) throw fail("host_not_found", `no host named \`${alias}\``, "Reload the host list.");
       if (existing.origin !== "portico") readOnly(existing);
       const by = hosts.find((h) => h.proxyJump.includes(existing.alias));
-      if (by) throw fail("host_in_use", `${existing.alias} is the jump host of ${by.alias}`, HINTS.inUse);
+      if (by) throw fail("host_in_use", `\`${existing.alias}\` is the jump host of \`${by.alias}\``, HINTS.inUse);
       hosts.splice(hosts.indexOf(existing), 1);
       const values = own.get(existing.alias);
       if (values) remembered.delete(account(values));
@@ -267,7 +267,7 @@ export function demoHostsBackend(hooks: HostsHooks): Pick<Backend, "createHost" 
     async duplicateHost(alias, newAlias) {
       await sleep(250);
       const source = find(alias);
-      if (!source) throw fail("host_not_found", `no host named ${alias}`, "Reload the host list.");
+      if (!source) throw fail("host_not_found", `no host named \`${alias}\``, "Reload the host list.");
       if (source.proxyJump.length > 1) {
         throw fail(
           "host_not_duplicable",

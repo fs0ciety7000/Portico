@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { fly } from "svelte/transition";
   import { SvelteSet } from "svelte/reactivity";
-  import { describe, formatRtt, isTauri, sentence, setHome, type Host } from "./lib/api";
+  import { describe, formatRtt, isTauri, setHome, type Host } from "./lib/api";
   import { backend } from "./lib/backend";
   import { isMac } from "./lib/keys";
   import { guardBrowserFeatures, isWindowsWebview } from "./lib/webview";
@@ -51,6 +51,7 @@
   import SyncPanel from "./lib/components/SyncPanel.svelte";
   import SyncForms from "./lib/components/SyncForms.svelte";
   import SyncReview from "./lib/components/SyncReview.svelte";
+  import CodeText from "./lib/components/CodeText.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -479,11 +480,12 @@
     });
   });
 
-  /** Folder sync (phase 11): palette only (no default key). */
+  /** Folder sync (phase 11): `app.sync` everywhere, `hosts.sync` in the host list. */
   const syncCommands: Command[] = $derived([
     {
-      id: "sync.open",
+      id: "app.sync",
       title: "Sync…",
+      shortcut: k("app.sync") ?? (pane ? undefined : k("hosts.sync")),
       hint: sync.enabled ? (sync.overview?.folder ?? "encrypted folder sync") : "encrypted folder sync · set up",
       run: () => sync.show(),
     },
@@ -795,6 +797,9 @@
       case "recordings.open":
       case "hosts.recordings":
         return recordings.show();
+      case "app.sync":
+      case "hosts.sync":
+        return sync.show();
       default:
         // Palette-only actions bound in settings.toml run their command.
         commands.find((c) => c.id === id)?.run();
@@ -1282,8 +1287,8 @@
       {:else}<circle cx="8" cy="8" r="6.25" /><path d="M8 7.25v4M8 4.9v.1" />{/if}
     </svg>
     <div class="toast-text">
-      <strong>{sentence(toast.message)}</strong>
-      {#if toast.hint}<span>{toast.hint}</span>{/if}
+      <strong><CodeText text={toast.message} /></strong>
+      {#if toast.hint}<span><CodeText text={toast.hint} capitalize={false} /></span>{/if}
     </div>
   </div>
 {/snippet}

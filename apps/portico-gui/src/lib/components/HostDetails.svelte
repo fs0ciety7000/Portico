@@ -472,7 +472,7 @@
     gap: var(--space-3);
     margin-top: var(--space-4);
     padding: var(--space-3) var(--space-4);
-    border-left: 2px solid var(--status-authenticating);
+    border-left: 2px solid var(--status-warning);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
     color: var(--text-secondary);

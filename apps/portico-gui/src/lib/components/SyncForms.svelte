@@ -3,12 +3,15 @@
   // does not protect against a passphrase already leaked), reset it with the
   // remembered key (extra confirmation, blocking alert elsewhere), rename
   // this device, turn sync off (forget the key by default; local data
-  // stays). Passphrase fields are cleared as soon as they are sent.
-  import { untrack } from "svelte";
-  import { sentence, type ErrorSummary, type GeneratedPassphrase } from "../api";
+  // stays). Passphrase fields are cleared as soon as they are sent; a
+  // generated passphrase is dropped in Rust when the form closes. Reset is
+  // destructive: `y` (or its button), never Enter.
+  import { onDestroy, untrack } from "svelte";
+  import { type ErrorSummary, type GeneratedPassphrase } from "../api";
   import { backend } from "../backend";
   import { sync, type SyncForm } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
+  import CodeText from "./CodeText.svelte";
   import Modal from "./Modal.svelte";
   import SyncPassphraseFields, { newPassphrase } from "./SyncPassphraseFields.svelte";
 
@@ -112,11 +115,19 @@
     else sync.open({ kind: "panel", tab: "overview" });
   }
 
+  onDestroy(() => void backend.syncForgetGenerated().catch(() => {}));
+
   function onkeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) {
+    if (e.key === "Enter" && form !== "reset" && !(e.target instanceof HTMLButtonElement)) {
       e.preventDefault();
       void submit();
     }
+  }
+
+  function onkey(key: string): boolean {
+    if (form !== "reset" || key !== "y") return false;
+    void submit();
+    return true;
   }
 
   const titles: Record<SyncForm, string> = {
@@ -129,7 +140,7 @@
   const actions: Record<SyncForm, string> = { unlock: "Unlock", change: "Change", reset: "Reset passphrase", rename: "Rename", disable: "Turn off" };
 </script>
 
-<Modal bind:armed onescape={() => (clear(), sync.back())} labelledBy="sync-form-title" tone={form === "reset" ? "danger" : "default"}>
+<Modal bind:armed onescape={() => (clear(), sync.back())} {onkey} labelledBy="sync-form-title" tone={form === "reset" ? "danger" : "default"}>
   {#snippet title()}{titles[form]}{/snippet}
 
   <div class="form" role="presentation" {onkeydown}>
@@ -177,14 +188,18 @@
       <span class="inline-error" role="alert">Wrong passphrase, try again (attempt {wrong + 1}). Check Caps Lock and the keyboard layout.</span>
     {/if}
     {#if error}
-      <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span><CodeText text={error.message} /></span>{#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}</div>
     {/if}
   </div>
 
   {#snippet footer()}
     {#if busy}<span class="footer-note busy"><span class="spinner"></span>{busy}</span>{/if}
     <button class="secondary" disabled={!!busy} onclick={() => (clear(), sync.back())}>Cancel <kbd>Esc</kbd></button>
-    <button class="primary" disabled={!ready} onclick={submit}>{actions[form]} <kbd>↵</kbd></button>
+    {#if form === "reset"}
+      <button class="danger" disabled={!ready} onclick={submit}>Reset passphrase <kbd>y</kbd></button>
+    {:else}
+      <button class="primary" disabled={!ready} onclick={submit}>{actions[form]} <kbd>↵</kbd></button>
+    {/if}
   {/snippet}
 </Modal>
 

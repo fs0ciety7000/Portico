@@ -1,14 +1,17 @@
 <script lang="ts">
   // The Sync panel (phase 11, docs/SYNC.md §6): status and what to do about
   // it, conflicts, received changes to confirm, issues, devices. Keys: 1–5
-  // switch tabs, `s` syncs now.
+  // switch tabs, `s` syncs now. One primary action per view: Sync now in a
+  // nominal Overview, Unlock when locked, Acknowledge for an alert that can
+  // be acknowledged. A steady height: switching tabs does not resize it.
   import { fly } from "svelte/transition";
-  import { sentence, type ErrorSummary } from "../api";
+  import { type ErrorSummary } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
   import { ago, explainAlert, explainFolder, explainWait, subjectLabel, syncLabel } from "../syncview";
   import { sync, type SyncTab } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
+  import CodeText from "./CodeText.svelte";
   import Modal from "./Modal.svelte";
   import SyncConflicts from "./SyncConflicts.svelte";
   import SyncReceived from "./SyncReceived.svelte";
@@ -65,9 +68,14 @@
   }
 
   const stamp = (secs: number | null) => (secs ? ago(secs, sync.now) : "never");
+
+  const locked = $derived(status?.state === "locked");
+  const acknowledgeable = $derived(status?.state === "alert" && status.kind === "passphrase_changed");
+  /** Nothing to fix first: Sync now is the view's primary action. */
+  const nominal = $derived(tab === "overview" && (status?.state === "idle" || status?.state === "syncing" || status?.state === "waiting"));
 </script>
 
-<Modal bind:armed onescape={() => sync.close()} {onkey} labelledBy="sync-panel-title" size="wide" scroll={false}>
+<Modal bind:armed onescape={() => sync.close()} {onkey} labelledBy="sync-panel-title" size="wide" scroll={false} steady>
   {#snippet title()}Sync{/snippet}
 
   <nav class="tabs" aria-label="Sync sections">
@@ -100,9 +108,6 @@
               <strong>{why.title}</strong>
               <p>{why.body}</p>
               <p class="hint">{why.hint}</p>
-              {#if status.kind === "passphrase_changed"}
-                <div class="row"><button class="secondary small" disabled={!!busy} onclick={acknowledge}>I expected it, acknowledge</button></div>
-              {/if}
             </section>
           {:else if status?.state === "folder_unavailable"}
             {@const why = explainFolder(status.reason)}
@@ -122,15 +127,15 @@
             </section>
           {:else if status?.state === "error"}
             <section class="callout" data-tone="error" role="alert">
-              <strong>{sentence(status.summary.message)}</strong>
-              {#if status.summary.hint}<p class="hint">{status.summary.hint}</p>{/if}
+              <strong><CodeText text={status.summary.message} /></strong>
+              {#if status.summary.hint}<p class="hint"><CodeText text={status.summary.hint} capitalize={false} /></p>{/if}
             </section>
           {/if}
 
           {#if sync.conflicts.length || sync.received || issueCount}
             <section class="todo">
               {#if sync.conflicts.length}<button class="link" onclick={() => go("conflicts")}><span class="n warning">{sync.conflicts.length}</span> {sync.conflicts.length === 1 ? "conflict" : "conflicts"} to settle</button>{/if}
-              {#if sync.received}<button class="link" onclick={() => go("received")}><span class="n accent">{sync.received}</span> received {sync.received === 1 ? "change" : "changes"} to confirm</button>{/if}
+              {#if sync.received}<button class="link" onclick={() => go("received")}><span class="n pending">{sync.received}</span> received {sync.received === 1 ? "change" : "changes"} to confirm</button>{/if}
               {#if issueCount}<button class="link" onclick={() => go("issues")}><span class="n">{issueCount}</span> {issueCount === 1 ? "issue" : "issues"}</button>{/if}
             </section>
           {/if}
@@ -138,14 +143,14 @@
           <section class="group">
             <span class="caption">This device</span>
             <label class="check">
-              <input type="checkbox" checked={sync.overview?.rememberKey ?? true} disabled={!!busy || status?.state === "locked"} onchange={(e) => void setRemember(e.currentTarget.checked)} />
-              Remember the key on this device
+              <input type="checkbox" checked={sync.overview?.rememberKey ?? true} disabled={!!busy || locked} onchange={(e) => void setRemember(e.currentTarget.checked)} />
+              {locked ? "Remember the key after unlocking" : "Remember the key on this device"}
             </label>
             <div class="row">
               <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "rename" })}>Rename device…</button>
               <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "change" })}>Change passphrase…</button>
-              <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "reset" })} disabled={status?.state === "locked"}>Reset passphrase…</button>
-              <button class="secondary small danger" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>
+              <button class="secondary small" onclick={() => sync.open({ kind: "form", form: "reset" })} disabled={locked}>Reset passphrase…</button>
+              {#if !acknowledgeable}<button class="secondary small" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>{/if}
             </div>
           </section>
         {:else if tab === "conflicts"}
@@ -163,8 +168,8 @@
                 <li class="issue" data-tone={issue.warning ? "warning" : "error"}>
                   <div class="issue-text">
                     <span class="subject mono">{subjectLabel(issue.subject)}</span>
-                    <strong>{sentence(issue.summary.message)}</strong>
-                    {#if issue.summary.hint}<span class="hint">{issue.summary.hint}</span>{/if}
+                    <strong><CodeText text={issue.summary.message} /></strong>
+                    {#if issue.summary.hint}<span class="hint"><CodeText text={issue.summary.hint} capitalize={false} /></span>{/if}
                     <span class="code mono">{issue.summary.code}</span>
                   </div>
                   {#if issue.skippable}
@@ -195,20 +200,23 @@
       </div>
     {/key}
     {#if sync.lists === "error" && sync.listError}
-      <div class="inline-error" role="alert"><span>{sentence(sync.listError.message)}</span>{#if sync.listError.hint}<span class="hint">{sync.listError.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span><CodeText text={sync.listError.message} /></span>{#if sync.listError.hint}<span class="hint"><CodeText text={sync.listError.hint} capitalize={false} /></span>{/if}</div>
     {/if}
     {#if error}
-      <div class="inline-error" role="alert"><span>{sentence(error.message)}</span>{#if error.hint}<span class="hint">{error.hint}</span>{/if}</div>
+      <div class="inline-error" role="alert"><span><CodeText text={error.message} /></span>{#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}</div>
     {/if}
   </div>
 
   {#snippet footer()}
     {#if busy}<span class="footer-note busy"><span class="spinner"></span>{busy}</span>{:else}<span class="footer-note"><kbd>1</kbd>–<kbd>5</kbd> sections</span>{/if}
     <button class="secondary" onclick={() => sync.close()}>Close <kbd>Esc</kbd></button>
-    {#if status?.state === "locked"}
-      <button class="primary" onclick={() => sync.open({ kind: "form", form: "unlock" })}>Unlock…</button>
+    {#if locked}
+      <button class="primary" data-autofocus onclick={() => sync.open({ kind: "form", form: "unlock" })}>Unlock…</button>
+    {:else if acknowledgeable}
+      <button class="secondary" onclick={() => sync.open({ kind: "form", form: "disable" })}>Turn sync off…</button>
+      <button class="primary" data-autofocus disabled={!!busy} onclick={acknowledge}>I expected it, acknowledge</button>
     {:else}
-      <button class="primary" disabled={!!busy || !sync.enabled} onclick={syncNow}>Sync now <kbd>s</kbd></button>
+      <button class={nominal ? "primary" : "secondary"} data-autofocus disabled={!!busy || !sync.enabled} onclick={syncNow}>Sync now <kbd>s</kbd></button>
     {/if}
   {/snippet}
 </Modal>
@@ -240,9 +248,9 @@
     font-variant-numeric: tabular-nums;
   }
   .badge[data-kind="conflicts"] { color: var(--status-warning); }
-  .badge[data-kind="received"] { color: var(--status-authenticating); }
-  /* A steady height: switching sections does not resize the dialog. */
-  .content { display: grid; flex: 1 1 auto; align-content: start; gap: var(--space-3); min-height: min(440px, 55vh); overflow-y: auto; padding-top: var(--space-3); }
+  .badge[data-kind="received"] { color: var(--status-warning); }
+  /* The dialog's height is fixed (Modal `steady`): the sections scroll inside. */
+  .content { display: grid; flex: 1 1 auto; align-content: start; gap: var(--space-3); min-height: 0; overflow-y: auto; padding-top: var(--space-3); }
   .pane { display: grid; gap: var(--space-4); align-content: start; }
   .status { display: grid; gap: var(--space-2); }
   .headline { display: flex; align-items: center; gap: var(--space-2); }
@@ -280,10 +288,9 @@
   .link:hover { background: var(--bg-elevated); }
   .n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .n.warning { color: var(--status-warning); }
-  .n.accent { color: var(--status-authenticating); }
+  .n.pending { color: var(--status-warning); }
   .group { display: grid; gap: var(--space-2); }
   .caption { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
-  .row .danger { color: var(--status-error); }
   .list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
   .issue {
     --c: var(--status-error);
