@@ -755,6 +755,10 @@ Les deux UIs couvrent tous les parcours de §6 et ce que la liste ci-dessus atte
 11. Passphrase : générateur (6 mots EFF, liste embarquée), jauge, minimum imposé (≈60 bits estimés ou ≥ 5 mots).
 12. S3 : plus tard. **Rotation des clés et « oublier un appareil » livrés avec S2, avant tout mot de passe synchronisé.**
 13. Ce document en français.
+14. S2 (détail en §13.9) : rotation toujours avec une nouvelle passphrase ; « oublier » fait toujours tourner les clés ;
+    consentement par appareil en plus du réglage du bundle ; suppressions **et changements** de mots de passe reçus jamais
+    appliqués sans demander ; `bundle.toml` v2 à la première opération S2 avec la liste des appareils 0.6 ; rotation sans la
+    passphrase actuelle derrière la confirmation de niveau réinitialisation.
 
 ---
 
@@ -867,59 +871,74 @@ Aucun constat CRITIQUE ni ÉLEVÉ. Tous corrigés avant S1c.
 
 ## 13. Conception S2 : rotation, oubli d'un appareil, mots de passe liés (2026-10-27)
 
-> **État : conception, rien n'est implémenté.** Cette section prime sur les mentions « S2 » des sections précédentes en cas
-> d'écart (§2.2, §2.8, §4.8, §5.2, §8). Décisions du propriétaire déjà prises : mots de passe **liés seulement** (F3),
-> « Inclure les mots de passe » **désactivé par défaut** au niveau du bundle (F12), **rotation et oubli d'un appareil livrés
-> avant** tout mot de passe synchronisé (#12). Les questions encore ouvertes sont en §13.9.
+> **État : conception révisée après la revue `agent-security` de la conception (constats R1–R18, §13.11) ; décisions du
+> propriétaire en §13.9. Rien n'est implémenté.** Cette section prime sur les mentions « S2 » des sections précédentes en
+> cas d'écart (§2.2, §2.8, §4.8, §5.2, §8). Décisions de cadrage : mots de passe **liés seulement** (F3), « Inclure les mots
+> de passe » **désactivé par défaut** au niveau du bundle (F12), **rotation et oubli d'un appareil livrés avant** tout mot de
+> passe synchronisé (#12).
 >
 > **S2 est sûr sans S3.** Sans emplacement par appareil, une rotation demande de retaper une passphrase sur chaque appareil
-> restant : c'est un coût d'usage, pas une faille. Rien de S3 n'est nécessaire (les signatures Ed25519 restent hors périmètre ;
-> leur absence est déjà le risque résiduel A5 de §1.2 et ne s'aggrave pas en S2).
+> restant : c'est un coût d'usage, pas une faille. La preuve de filiation (§13.3.2) n'a besoin que de la DK de l'époque
+> précédente, pas de clés par appareil. Les signatures Ed25519 restent hors périmètre ; leur absence est le risque résiduel
+> A5 de §1.2, que S2 n'aggrave pas.
 
 ### 13.1 Principes
 
-1. **La passphrase est la seule autorité d'une époque.** Sans emplacement par appareil (S3), une nouvelle DK ne peut être
-   transmise que sous la KEK d'une passphrase. Tout appareil qui connaît la passphrase d'une époque peut l'ouvrir ; tout
-   appareil qui ne détient que la DK d'une époque ne peut **rien** ouvrir des époques suivantes.
-2. **Exclure un appareil = exclure sa DK et sa passphrase** : une rotation change donc **toujours** la passphrase (§13.9, Q1).
-   Avec la même passphrase, l'appareil oublié (ou quiconque l'a vue taper) rouvrirait la nouvelle époque.
-3. **Le passé reste exposé.** Ce qu'un appareil oublié a déjà lu (son réplica, son trousseau, les instantanés de l'ancienne
-   époque, l'historique de versions du fournisseur) lui reste lisible. La rotation protège l'**avenir** ; d'où la
-   recommandation F2 de changer les mots de passe serveurs déjà synchronisés.
-4. **Une époque ne régresse jamais** et **ne progresse que sur du contenu authentifié** : un `bundle.toml` d'époque supérieure
-   qu'on ne sait pas ouvrir arrête la sync (rien n'est fusionné ni publié) sans faire avancer aucune marque haute.
-5. **Aucune donnée locale n'est perdue par une rotation** : chaque appareil migre **son propre** état (réplica) vers la
-   nouvelle époque et republie ; les fichiers de l'ancienne époque ne sont jamais fusionnés par un appareil qui a adopté la
-   nouvelle.
+1. **La passphrase est la seule autorité d'une époque**, et **seule la DK de l'époque E peut engendrer l'époque E + 1**
+   (preuve de filiation, R1). Sans emplacement par appareil (S3), une nouvelle DK ne se transmet que sous la KEK d'une
+   passphrase.
+2. **Exclure un appareil = exclure sa DK et sa passphrase** : une rotation change **toujours** la passphrase (décision Q1), et
+   un appareil refuse d'adopter une époque avec une passphrase qui ouvre déjà son dernier bundle vérifié (R1).
+3. **Le passé reste exposé.** Ce qu'un appareil oublié a déjà lu (réplica, trousseau, instantanés de l'ancienne époque,
+   historique du fournisseur) lui reste lisible. La rotation protège l'**avenir** ; d'où F2 : changer les mots de passe
+   serveurs déjà synchronisés, et retirer à l'appareil perdu l'accès au dossier cloud.
+4. **Une époque ne régresse jamais, ni dans le dossier ni localement.** `sync.toml` porte un **plancher local d'époque**
+   vérifié avant toute ouverture du réplica, au déverrouillage et à l'adoption (R2) ; une époque ne progresse que sur du
+   contenu authentifié (MAC **et** preuve de filiation, ou passphrase tapée qui n'ouvre pas l'ancien bundle).
+5. **Aucune donnée locale n'est perdue par une rotation** et **la reprise après crash ne va que vers l'avant** (R2) : chaque
+   appareil migre **son propre** réplica et republie ; un fichier d'une époque antérieure n'est jamais fusionné par un appareil
+   qui a adopté la suivante, et aucun appareil ne publie jamais sous une DK d'époque inférieure à son plancher.
 
-### 13.2 Format : version 2 de `bundle.toml` et cliquet
+### 13.2 Format : version 2 de `bundle.toml`, filiation et cliquet
 
-- **`bundle.toml` version 2.** Mêmes champs que la version 1 (§3.3), mêmes règles d'analyse stricte. Seul change le **clair
-  du roster scellé** (toujours sous K_roster, AAD inchangée) :
-  ```json
-  { "devices": [ { "id": "…", "name": "…", "added_at": 0, "revoked": false,
-                   "revoked_at": 0, "revoked_by": "hex(16)", "revoked_clock": 0 } ],
-    "policy":  { "include_passwords": false, "passwords_changed_by": "hex(16)", "passwords_changed_at": 0,
-                 "passwords_policy_id": "hex(16)" } }
+- **`bundle.toml` version 2.** Champs de la version 1 (§3.3), plus une table **`[prev]`** (absente à l'époque 1) :
+  ```toml
+  [prev]                 # preuve de filiation (R1), couverte par le MAC
+  epoch = 7              # doit valoir epoch - 1 (R10)
+  proof = "base64(32)"   # HMAC-SHA256(K_rot_7, canonique(bundle_id, en-tête N+1, emplacements, nonce et chiffré du roster))
   ```
-  `revoked_*` sont absents pour un appareil actif ; `revoked_clock` = plus haut compteur de points de l'appareil oublié que
-  l'appareil qui l'oublie a **vérifié** (max de sa marque haute et de son contexte pour cet appareil) ; `passwords_policy_id`
-  est tiré au hasard à chaque activation (le consentement local s'y rattache, §13.6.2). Le MAC couvre déjà `version`.
-- **Quand passer en version 2.** À la **première** opération S2 (rotation, oubli, activation des mots de passe), jamais à la
-  simple mise à jour de Portico : une flotte mélangée 0.6 / 0.7 continue de synchroniser tant qu'aucune fonction S2 n'est
-  utilisée (un appareil 0.7 réécrit un bundle v1 en v1, `with_roster` compris).
-- **Ce que voit un appareil 0.6.0.** Bundle v2 → `sync_version` (« mettre à jour Portico ») avant toute dérivation : **échec
-  sûr**, rien n'est écrit. Même avec la nouvelle passphrase il ne peut rien ouvrir. Avant l'opération S2, l'UI liste les
-  appareils dont le dernier instantané vérifié annonce `app_version` < 0.7.0 : « ces appareils cesseront de synchroniser
-  jusqu'à leur mise à jour » (avertissement `sync_peers_outdated`, non bloquant).
-- **Cliquet.** `HighWater::ratchet_format("bundle.toml", 2)` après la vérification d'un v2 : un `bundle.toml` v1 présenté
-  ensuite est une rétrogradation (`SyncError::FormatDowngrade`, code `sync_version`), même avec un MAC valide sous une ancienne DK.
-- **Instantanés** : format inchangé (v1). L'époque est dans l'AAD et dans l'en-tête clair ; un appareil lit l'**en-tête clair**
-  avant de tenter le déchiffrement pour classer un fichier d'une autre époque (§13.3.6) au lieu de le compter comme altéré.
-- **Fichiers locaux** : `sync.toml` gagne `next_epoch` (optionnel, absent hors rotation, §13.3.4) et `epoch_origin`
-  (`local` quand cet appareil a créé l'époque courante, §13.3.7) ; le réplica gagne des champs
-  `LocalReplica` en `serde(default)` (consentement, index des secrets, §13.6). Les nouveaux champs ne vont **pas** dans
-  `HighWater` (`deny_unknown_fields`) : un retour à 0.6.0 ne rend pas le réplica illisible.
+  `K_rot` est une **nouvelle sous-clé HKDF** de la DK (`info = "portico-sync/1 rotate"`, usage unique, F14). L'entrée
+  canonique de la preuve est celle du MAC (§2.5) **sans** le champ `prev` ; le MAC du bundle couvre ensuite `prev`.
+- **Clair du roster v2** (toujours sous K_roster, AAD inchangée) :
+  ```json
+  { "devices": [ { "id": "…", "name": "…", "added_at": 0 } ],
+    "revoked": [ { "id": "hex(16)", "revoked_at": 0, "revoked_by": "hex(16)", "revoked_clock": 0 } ],
+    "policy":  { "include_passwords": false, "generation": 0, "changed_by": "hex(16)", "changed_at": 0 } }
+  ```
+  `devices` (actifs, ≤ 64) et `revoked` (liste compacte, **jamais élaguée**, plafond 1024, R4) sont disjoints ;
+  `revoked_clock` est la valeur **exacte** décidée par l'appareil qui oublie (§13.4.2) ; `policy.generation` croît strictement
+  à chaque changement de politique (R8).
+- **Version lue = version liée** (R13) : le MAC, la preuve et le cliquet utilisent la `version` **lue** dans le fichier (pas
+  la constante courante) ; un v1 garde exactement l'encodage S1.
+- **Quand passer en version 2.** À la **première** opération S2 : rotation, oubli, « quitter la liste » (R4), changement de
+  politique des mots de passe. Jamais à la simple mise à jour de Portico : une flotte 0.6 / 0.7 continue de synchroniser tant
+  qu'aucune fonction S2 n'est utilisée (un appareil 0.7 réécrit un bundle v1 en v1, `with_roster` compris).
+- **Ce que voit un appareil 0.6.0.** Bundle v2 → `sync_version` (« mettre à jour Portico ») avant toute dérivation : échec
+  sûr, rien n'est écrit. L'UI liste avant l'opération les appareils dont le dernier instantané vérifié annonce
+  `app_version` < 0.7.0 (avertissement `sync_peers_outdated`, décision Q5).
+- **Cliquet.** `ratchet_format("bundle.toml", 2)` après la vérification d'un v2 ; un v1 ensuite est une rétrogradation
+  (`SyncError::FormatDowngrade`, dont le code devient **`sync_rollback`**, plus `sync_version`, R13).
+- **Instantanés** : format inchangé (v1). L'époque est dans l'AAD et dans l'en-tête clair, lu avant tout déchiffrement
+  (§13.3.6).
+- **Fichiers locaux** (R2, R13) :
+  - `sync.toml` : **inchangé dans sa forme** (0.6.0 le relit toujours, `deny_unknown_fields`) ; son champ `epoch` devient le
+    **plancher local** ;
+  - `data_dir/sync/rotation.toml` (nouveau, non secret, `0600`, présent seulement pendant une rotation ou une adoption) :
+    `next_epoch` ; le plancher effectif est `max(sync.toml.epoch, rotation.toml.next_epoch)` ;
+  - `data_dir/sync/bundle.verified` (nouveau, non secret, `0600`) : **copie exacte du dernier `bundle.toml` vérifié** (ou
+    écrit) par cet appareil ; `bundle.next` pendant une rotation (écrit à l'étape 3, avant l'étape 4) ;
+  - réplica : champs `LocalReplica` en `serde(default)` (`epoch_created_here`, consentement, index des secrets, stockage,
+    provenance). Rien n'est ajouté à `HighWater` (`deny_unknown_fields`) : un retour à 0.6.0 ne rend pas le réplica illisible.
 
 ### 13.3 Rotation des clés (S2a)
 
@@ -927,468 +946,552 @@ Aucun constat CRITIQUE ni ÉLEVÉ. Tous corrigés avant S1c.
 
 | Élément | Avant | Après |
 |---|---|---|
-| époque | N | **N + 1** |
-| DK | DK_N | **DK_{N+1}**, 32 octets aléatoires (`DataKey::generate`) |
-| sous-clés | dérivées de DK_N | toutes rederivées (HKDF, sel = bundle_id ‖ époque) : K_snap, K_secret, K_mac, K_cmp, K_roster, K_local |
-| passphrase | P | **P' obligatoire**, force imposée par le cœur (F18), refusée si elle ouvre l'emplacement courant (`sync_passphrase_reused`) |
+| époque | N | **N + 1** (jamais de saut à l'écriture, R10) |
+| DK | DK_N | **DK_{N+1}**, 32 octets aléatoires |
+| sous-clés | dérivées de DK_N | toutes rederivées : K_snap, K_secret, K_mac, K_cmp, K_roster, K_local, **K_rot** |
+| filiation | — | `prev = { epoch: N, proof: HMAC(K_rot_N, …) }` |
+| passphrase | P | **P' obligatoire** (Q1), force imposée (F18), refusée si elle ouvre l'emplacement courant (`sync_passphrase_reused`) |
 | KDF | paramètres et sel courants | **nouveau sel** ; paramètres = max(courants, `KdfParams::DEFAULT`) |
-| emplacement | id, nonce, enveloppe | nouveaux ; AAD de l'emplacement avec l'époque N + 1 |
-| `keyset_generation`, `revision` | g, r | g + 1, r + 1 (strictement croissants, le tri `(époque, génération, révision)` reste total) |
-| roster | v1 ou v2 | v2, appareils oubliés marqués (`revoked_*`), politique des mots de passe reprise |
-| `bundle_id`, ids d'appareils, points, contexte causal, séquences de publication | — | **inchangés** (les séquences continuent de croître d'une époque à l'autre) |
+| `keyset_generation`, `revision` | g, r | g + 1, r + 1 |
+| roster | v1 ou v2 | v2 ; appareils oubliés déplacés dans `revoked` ; politique reprise |
+| `bundle_id`, ids d'appareils, points, contexte causal, séquences de publication | — | **inchangés** (les séquences croissent d'une époque à l'autre) |
 
-#### 13.3.2 Autorisation
+#### 13.3.2 Autorisation et authenticité d'une nouvelle époque (R1, R10)
 
-La rotation est permise depuis un appareil qui détient DK_N et a fait une passe réussie juste avant (sous `sync.lock`) :
-- **par défaut** : la passphrase courante P est demandée (vérifiée par `bundle::open`, elle doit donner DK_N) ;
-- **passphrase oubliée** : comme la réinitialisation (#8), permise derrière une confirmation supplémentaire. Les autres
-  appareils devront de toute façon taper P', ce qui vaut alerte bloquante.
+**Qui peut faire tourner.** Un appareil qui détient DK_N et vient de faire une passe réussie (sous `sync.lock`) :
+- par défaut, la passphrase courante P est demandée (elle doit ouvrir l'emplacement et donner DK_N) ;
+- passphrase oubliée : permis derrière la confirmation de niveau réinitialisation (#8, décision Q6).
 
-Un voleur muni d'un appareil déverrouillé peut donc faire tourner les clés et tenir les autres appareils dehors : c'est un
-déni de service (il détenait déjà DK_N), réparable par « nouveau bundle », sans perte locale (§1.4 : appareil déverrouillé hors
-périmètre).
+**Comment un appareil d'époque E juge un `bundle.toml` d'époque E' > E** (en-tête clair lu d'abord) :
+
+| Cas | Verdict |
+|---|---|
+| `prev` absent, ou `prev.epoch ≠ E' − 1`, ou `E' − E > 16` (`MAX_EPOCH_JUMP`) | altération : `BundleTampered`, l'appareil **réécrit** `bundle.verified` (§13.3.6) |
+| `E' = E + 1` et la preuve **ne** se vérifie **pas** sous K_rot_E | altération (bundle forgé par qui n'a pas DK_E, ou d'une autre lignée) : idem |
+| `E' = E + 1` et la preuve se vérifie | rotation authentique **par un détenteur de DK_E** : `KeysRotatedElsewhere` |
+| `E + 1 < E' ≤ E + 16` | plusieurs rotations manquées, preuve invérifiable : `KeysRotatedElsewhere` (« plusieurs changements de clés »), l'adoption repose sur la règle de la passphrase ci-dessous |
+
+**Adoption** (`sync_unlock(P')`) : en plus de l'ouverture (bornes KDF, emplacement, MAC, roster, preuve), la passphrase tapée
+**ne doit pas ouvrir l'emplacement de `bundle.verified`** (une dérivation Argon2 de plus) ; sinon `sync_passphrase_reused`
+« Cette passphrase ouvre déjà les anciennes clés : ce changement de clés ne vient pas de vous. » Le dialogue dit : **« Si
+vous n'avez pas changé les clés sur un autre appareil, ne tapez rien. »**
+
+Conséquences, appareil oublié L (DK_N, P, accès en écriture au dossier) :
+- bundle N + 2 (ou N + 1 face à un appareil déjà en N + 1) avec `prev.epoch = N` : refusé par la règle de filiation ;
+- bundle N + 1 face à un appareil encore en N, preuve valide sous K_rot_N, emplacement sous P : refusé par la règle de la
+  passphrase (P ouvre `bundle.verified`) ;
+- même chose avec une passphrase que l'utilisateur ne connaît pas : **déni de service seulement** (l'utilisateur ne peut rien
+  taper qui l'ouvre ; documenté, coût A4) ; le vrai bundle N + 1 de A, s'il arrive, est adopté normalement.
+- Un voleur muni d'un appareil **déverrouillé** peut faire tourner les clés et tenir les autres dehors : déni de service
+  réparable par « nouveau bundle », sans perte locale (§1.4).
 
 #### 13.3.3 Comment les autres appareils apprennent DK_{N+1}
 
-**En retapant P'** (`sync_unlock`, §13.7) : il n'existe aucun autre chemin en S2, et c'est voulu. Ce qui en découle :
+**En retapant P'** : il n'existe aucun autre chemin en S2.
 
 | Appareil | Ce qu'il peut faire après la rotation |
 |---|---|
-| appareil restant, DK_N mémorisée | voit `KeysRotatedElsewhere`, s'arrête (ni fusion, ni publication, ni application), adopte N + 1 quand l'utilisateur tape P' |
-| appareil restant « ne pas mémoriser », éteint pendant la rotation | ne peut plus ouvrir son réplica (scellé sous K_local_N, DK_N introuvable) : P' le fait **rejoindre sous un nouvel id** avec revue de type `ReviewEach` de ce qui diffère dans ses fichiers locaux (limite documentée) |
-| appareil oublié qui ne connaît que P | rien : P n'ouvre pas le nouvel emplacement ; ses instantanés d'époque N sont ignorés |
-| appareil oublié auquel on donne P' | il ouvre N + 1, lit le roster, se voit oublié : `sync_device_forgotten` ; il ne publie **jamais** sous son ancien id ; il peut seulement « désactiver » ou « rejoindre comme nouvel appareil » (flux de rattachement complet). Exclure la personne = ne pas lui donner P' |
-| quiconque détient P et une ancienne copie de `bundle.toml` (historique du fournisseur) | ouvre l'époque N et les instantanés N encore présents ou archivés : le **passé** (principe 3) |
+| restant, DK_N mémorisée | `KeysRotatedElsewhere`, arrêt complet (ni fusion, ni publication, ni application), adopte N + 1 quand l'utilisateur tape P' |
+| restant « ne pas mémoriser », éteint pendant la rotation | tape P' : le bundle N + 1 et sa preuve s'ouvrent ; le réplica (scellé sous K_local_N) ne s'ouvre plus → **nouveau rattachement** sous un nouvel id, revue `ReviewEach`, provenance (§13.4.2) ; **jamais** de retour sous N (R2) |
+| oublié, ne connaît que P | rien : P n'ouvre pas N + 1 ; ses fichiers sont ignorés ; ses bundles forgés sont refusés (§13.3.2) |
+| oublié, à qui on donne P' | ouvre N + 1, se trouve dans `revoked` : `sync_device_forgotten` ; il ne publie jamais sous son ancien id (§13.4.4) |
+| quiconque a P et une ancienne copie de `bundle.toml` (historique) | ouvre l'époque N et les instantanés N archivés : le **passé** |
 
-D'où la règle à l'écran : **« Pour exclure un appareil, faites tourner les clés et changez la passphrase »** — en S2 c'est un
-seul geste (la rotation impose P').
-
-#### 13.3.4 Déroulé sur l'appareil qui fait tourner (sûr en cas de crash)
+#### 13.3.4 Déroulé sur l'appareil qui fait tourner (sûr en cas de crash, vers l'avant seulement)
 
 Sous `sync.lock`, après une passe complète :
-1. Vérifier l'autorisation (§13.3.2) et P' (force, différente de P) ; refuser si une alerte non acquittée, une divergence de
-   `bundle.toml` ou une rotation en attente existe (`sync_busy` avec indice).
-2. Construire en mémoire le bundle N + 1 (`bundle::rotate`, pure) : DK_{N+1}, sel, emplacement, roster v2, politique.
-3. **Intention** : indexer puis écrire `sync-key:<bundle>:<N+1>` au trousseau (si « mémoriser ») ; `sync.toml` :
-   `next_epoch = N+1` (écriture atomique).
-4. Écrire `bundle.toml` (écriture atomique du dossier). Échec → annulation : clé N + 1 supprimée, `next_epoch` retiré, erreur.
-5. **Migrer le réplica** : secrets ré-enveloppés (§13.6.3), marque haute du bundle = N + 1, cliquet v2,
-   `known_keyset_generation` = g + 1 ; réplica scellé sous K_local_{N+1} (un seul fichier atomique, F5).
-6. `sync.toml` : `epoch = N+1`, `next_epoch` retiré.
+1. Vérifier l'autorisation et P' ; refuser si une alerte non acquittée, une divergence de `bundle.toml` ou une rotation en
+   attente existe (`sync_busy`).
+2. Construire en mémoire le bundle N + 1 (`bundle::rotate`, pure) : DK_{N+1}, sel, emplacement, roster v2, politique, `prev`.
+3. **Intention durable** : indexer puis écrire `sync-key:<bundle>:<N+1>` (si « mémoriser ») ; écrire `bundle.next` (texte du
+   bundle N + 1) ; écrire `rotation.toml` (`next_epoch = N+1`) en dernier. À partir d'ici le plancher local est N + 1 et la
+   rotation **ne peut plus être annulée** (R2, R11).
+4. Écrire `bundle.toml`. Toute erreur, y compris ambiguë (`sync_folder_timeout`, qui peut encore aboutir) : rien n'est
+   supprimé ; statut `Waiting { RotationPending }` ; chaque passe réessaie l'écriture à partir de `bundle.next`.
+5. Migrer le réplica : secrets re-scellés (§13.6.3), marque haute du bundle = N + 1, cliquet v2, `known_keyset_generation`,
+   `epoch_created_here = N+1` ; réplica scellé sous K_local_{N+1} (fichier atomique, F5).
+6. `bundle.verified` ← `bundle.next` ; `sync.toml.epoch = N+1` ; suppression de `rotation.toml` et `bundle.next`.
 7. Publier son instantané (séquence + 1) sous N + 1 ; supprimer les fichiers des appareils oubliés (§13.4.3).
-8. Supprimer `sync-key:<bundle>:<N>` du trousseau et de l'index ; DK_N quitte la mémoire (`Zeroizing`).
+8. Supprimer `sync-key:<bundle>:<N>` (trousseau puis index) ; DK_N quitte la mémoire (`Zeroizing`).
 
-**Reprise au démarrage** quand `next_epoch` est présent : le réplica est essayé sous K_local_{N+1} puis K_local_N ;
-- `bundle.toml` d'époque N + 1 qui s'ouvre avec DK_{N+1} (trousseau) → reprendre à l'étape 5 ;
-- `bundle.toml` encore d'époque N (s'ouvre avec DK_N) → l'étape 4 n'a pas eu lieu : annuler (clé N + 1 supprimée,
-  `next_epoch` retiré) ;
-- DK_{N+1} indisponible (« ne pas mémoriser » et crash) et bundle N + 1 → chemin ordinaire `KeysRotatedElsewhere` : taper P'.
+**Reprise au démarrage** quand `rotation.toml` existe : **toujours vers l'avant**. Le dossier ne décide de rien :
+- `bundle.toml` du dossier ≠ `bundle.next` → réécrit depuis `bundle.next` (étape 4) ;
+- réplica essayé sous K_local_{N+1} puis K_local_N, migration reprise à l'étape 5 ;
+- DK_{N+1} indisponible (« ne pas mémoriser » et crash) : `bundle.toml` est quand même réécrit depuis `bundle.next`, puis
+  `Locked` ; P' (que l'utilisateur vient de choisir) reprend l'étape 5 ; si le réplica ne s'ouvre plus sous N, nouveau
+  rattachement **sous N + 1**.
 
-Aucun ordre ne publie un point avant qu'il soit durable localement (§5.1), et le réplica n'est jamais scellé sous une
-époque que `sync.toml` ne permet pas de retrouver.
+**Collecte des clés** (R12) : à chaque passe, les entrées indexées `sync-key:<bundle>:<e>` avec `e` < époque courante (et
+`e` ≠ `next_epoch`) sont supprimées : l'étape 8 est rejouée après un crash.
 
 #### 13.3.5 Adoption sur un autre appareil
 
-1. Une passe lit l'**en-tête clair** de `bundle.toml` avant de l'ouvrir : époque > la sienne → statut
-   `Alert { KeysRotatedElsewhere }`, **arrêt complet** de la passe (aucune lecture d'instantané, aucune fusion, application ni
-   publication) ; aucune marque haute ne bouge (un fichier non authentifié ne fait jamais avancer le cliquet). Les
-   modifications locales restent dans les fichiers locaux et seront projetées après l'adoption.
-2. `sync_unlock(P')` ouvre le bundle N + 1 (bornes KDF d'abord), vérifie MAC et roster, puis :
-   - cet appareil est `revoked` → `sync_device_forgotten` (§13.4.4), rien n'est écrit ;
-   - son état contient un point (F, c) avec F oublié et c > `revoked_clock(F)` → il a fusionné des écritures postérieures à
-     l'oubli (§13.4.2) : adoption **par un nouveau rattachement** (nouvel id, état vide, revue `ReviewEach` de ses
-     différences locales), alerte `RevokedWrites` nommant F ;
-   - sinon : étapes 3, 5, 6, 7 et 8 de §13.3.4 (sans réécrire `bundle.toml`), `known_keyset_generation` = celle du bundle
-     adopté (pas d'alerte `PassphraseChanged` en plus : l'utilisateur vient de taper P').
-3. Deux processus Portico sur l'appareil (§4.9) : celui qui ne fait pas l'adoption, voyant sa DK refusée, relit `sync.toml` et
-   le trousseau (époque N + 1) avant de conclure à `KeysRotatedElsewhere` ; sans clé mémorisée, il passe à `Locked`.
+1. **Arrêt.** Une passe lit l'en-tête clair de `bundle.toml` puis l'en-tête clair de chaque instantané d'un appareil
+   **actif du roster** : époque > plancher → statut `KeysRotatedElsewhere`, **arrêt complet** (aucune fusion, application ni
+   publication), même si `bundle.toml` a été remis à une époque antérieure (R2 : un appareil en retard ne continue pas sous
+   DK_N à fusionner les écritures de l'appareil oublié ; un attaquant du dossier peut provoquer cet arrêt, coût A4). Aucune
+   marque haute ne bouge sur du contenu non authentifié.
+2. `sync_unlock(P')` : règles de §13.3.2 (bornes, emplacement, MAC, roster, filiation, passphrase ≠ `bundle.verified`),
+   **plancher** (époque < plancher → `sync_rollback`, jamais d'adoption ni de stockage de clé), puis :
+   - cet appareil est dans `revoked` → `sync_device_forgotten` (§13.4.4), rien n'est écrit ;
+   - son état contient un point (F, c) avec F oublié et c > `revoked_clock(F)` → nouveau rattachement avec **provenance**
+     (§13.4.2), alerte `RevokedWrites` nommant F, l'ancien id passe dans `revoked` avec son dernier `clock` publié ;
+   - sinon : étapes 3, 5, 6, 7 et 8 de §13.3.4 (`bundle.next` = bundle adopté, aucune réécriture de `bundle.toml`),
+     `known_keyset_generation` = celle du bundle adopté (pas d'alerte `PassphraseChanged` en plus).
+3. **Cache de clé** (R2) : la DK en mémoire est indexée par `(bundle, époque)` et invalidée dès que `sync.toml` ou
+   `rotation.toml` change ; `finish_unlock` range la clé sous `sync-key:<bundle>:<époque du bundle ouvert>`, jamais sous
+   l'époque de `sync.toml`. Le second processus Portico (§4.9) relit `sync.toml` et le trousseau avant de conclure ; sans clé
+   mémorisée, il passe à `Locked`.
+4. **Jamais de rattachement vers le bas** (R2) : un réplica dont l'en-tête clair annonce une époque > celle du bundle ouvert
+   n'est **pas** « illisible » : `sync_rollback`, aucun nouveau rattachement, aucune écriture.
 
 #### 13.3.6 Fichiers d'une autre époque
 
-| Fichier lu par un appareil d'époque E | Verdict |
+| Fichier lu par un appareil de plancher E | Verdict |
 |---|---|
-| `bundle.toml` d'époque > E | `KeysRotatedElsewhere` (ou rotation concurrente, §13.3.7), arrêt |
-| `bundle.toml` d'époque < E | retour arrière (F4) ; l'appareil **réécrit** son bundle vérifié d'époque E (`with_roster`, révision + 1) après le contrôle de son fichier propre : sinon un appareil oublié remettrait l'ancien `bundle.toml` et les appareils en retard continueraient sous DK_N |
+| `bundle.toml` d'époque > E | §13.3.2 : `KeysRotatedElsewhere` ou altération |
+| `bundle.toml` d'époque < E, ou altéré (§13.3.2), ou absent pendant une rotation | `sync_rollback` / `BundleTampered` ; l'appareil **réécrit `bundle.verified`** (texte exact, ou `with_roster` révision + 1 s'il faut s'y ajouter) après le contrôle de son fichier propre, au plus une fois par passe |
 | `bundle.toml` d'époque E illisible avec DK_E | `BundleTampered`, sauf rotation concurrente (§13.3.7) |
-| instantané d'un appareil actif, époque < E | **jamais fusionné** ; `Waiting { NeedsNewKeys, device }` (« attend la nouvelle passphrase sur <appareil> ») |
-| instantané d'époque > E | `Waiting` ; c'est `bundle.toml` qui décide de l'époque |
+| instantané d'un appareil actif, époque < E | jamais fusionné ; `Waiting { NeedsNewKeys, device }` |
+| instantané d'un appareil actif, époque > E | arrêt complet (§13.3.5) |
 | instantané d'un appareil oublié | ignoré quelle que soit son époque, supprimé (§13.4.3) |
-| conteneur scellé sous l'époque E mais dont un secret interne n'est pas sous E | enregistrement refusé (`sync_secret_invalid`) |
+| secret interne d'un conteneur d'époque E scellé sous une autre époque | refusé (`sync_secret_invalid`) |
 
-`Expected.epoch` reste une égalité stricte. Une perte possible : un appareil qui disparaît pour toujours sans avoir adopté
-N + 1 garde dans son dernier instantané d'époque N ce que personne n'a encore fusionné. La passe préalable de la rotation
-(§13.3.4) fusionne tout ce qui est visible ; l'aperçu de rotation liste les appareils « en attente » (`withheld`) avant de
-confirmer.
+**Rattachement** (R2) : `sync_join_preview` refuse un dossier dont un instantané annonce (en-tête clair) une époque supérieure
+à celle de `bundle.toml` (`sync_rollback`, « le fichier de clés a été remis à une version antérieure ; ouvrez Portico sur un
+appareil à jour ») : un nouvel appareil ne rejoint jamais un `bundle.toml` remis en arrière avec P.
+
+Perte possible : un appareil qui disparaît pour toujours sans avoir adopté N + 1 garde dans son dernier instantané d'époque N
+ce que personne n'a fusionné. La passe préalable de la rotation fusionne tout ce qui est visible ; l'aperçu liste les
+appareils « en attente » (`withheld`).
 
 #### 13.3.7 Rotations concurrentes (fourche d'époque)
 
-Deux appareils A et C font tourner N → N + 1 en même temps, avec des DK (et souvent des P') différentes. Le fournisseur garde
-l'un des deux `bundle.toml` (ou une copie en conflit). Il n'existe **aucun arbitrage automatique** : sans la passphrase de
-l'autre, aucun appareil ne peut authentifier l'autre bundle, et un attaquant sans clé peut fabriquer un bundle d'époque N + 1.
+Deux appareils A et C font tourner N → N + 1 en même temps (deux preuves valides sous K_rot_N). Aucun arbitrage automatique.
+- A, qui a lui-même créé N + 1 (`epoch_created_here`, dans le réplica, R13), trouve un `bundle.toml` d'époque N + 1 illisible
+  avec sa DK → `Alert { RotationConflict }`. Actions : « Utiliser les clés de l'autre appareil » (taper sa passphrase ;
+  adoption explicite, `bundle.verified` et la marque haute remplacés par décision de l'utilisateur) ou « Garder les clés de
+  cet appareil » (rotation N + 2 ; N + 2 l'emporte, C voit `KeysRotatedElsewhere`). **Le texte dit** que garder ses clés perd
+  les appareils oubliés par l'autre rotation, que cet appareil ne peut pas lire : « Si l'autre appareil a retiré un appareil,
+  retirez-le à nouveau ici » (R17).
+- Un appareil qui n'a pas créé N + 1 et voit un bundle de son époque illisible : `BundleTampered`.
+- Un tiers encore en N adopte celui qu'il trouve, avec la passphrase qu'on lui donne.
 
-- A, qui a **lui-même** créé l'époque N + 1 (`sync.toml` le retient : `epoch_origin = "local"`), trouve un `bundle.toml`
-  d'époque N + 1 illisible avec sa DK et aucune copie lisible gagnante → `Alert { RotationConflict }`. Deux actions :
-  « Utiliser les clés de l'autre appareil » (taper sa passphrase ; adoption explicite, la marque haute du bundle est remplacée
-  par décision de l'utilisateur) ou « Garder les clés de cet appareil » (nouvelle rotation N + 2 avec une passphrase saisie ;
-  N + 2 l'emporte par le cliquet, l'autre appareil voit `KeysRotatedElsewhere`).
-- Un appareil qui n'a pas créé N + 1 et voit un bundle de son époque illisible : `BundleTampered` (inchangé).
-- Un tiers encore en N adopte le bundle qu'il trouve, avec la passphrase qu'on lui donne.
-
-Aucune donnée n'est perdue : chacun garde son réplica et republie sous l'époque finalement retenue.
-Rotation contre changement de passphrase concurrent (N, g + 1) : l'époque l'emporte, le changement est perdu, l'appareil
-qui l'a fait voit `KeysRotatedElsewhere`. Rotation contre rattachement concurrent en N : l'appareil qui rejoint voit
-`KeysRotatedElsewhere`, tape P', puis s'ajoute au roster (`ensure_in_roster`).
+Rotation contre changement de passphrase concurrent (N, g + 1) : l'époque l'emporte. Rotation contre rattachement concurrent
+en N : l'appareil qui rejoint voit `KeysRotatedElsewhere`, tape P', puis s'ajoute au roster.
 
 #### 13.3.8 Clé mémorisée et entrées orphelines du trousseau
 
-- Chaque appareil, à la rotation ou à l'adoption : `sync-key:<bundle>:<N+1>` écrite **avant** que l'époque soit engagée,
-  `sync-key:<bundle>:<N>` supprimée **après** la migration du réplica (§13.3.4, étapes 3 et 8).
-- L'appareil oublié garde DK_N dans son trousseau tant que personne ne le désactive : elle n'ouvre que le passé.
-- **Index des comptes** (S2a) : `IndexedSecretStore` (§13.6.1) enveloppe le `SecretStore` du moteur et inscrit chaque compte
-  (non secret) **avant** `set` et le retire **après** `delete`. Un crash laisse au pire une entrée d'index sans secret.
-- **Orphelins** (écart S1b, revue 12) : `sync_key_entries()` liste les comptes `sync-key:*` de l'index qui ne sont pas la clé
-  courante (autre époque, autre bundle, rattachement interrompu) ; `sync_remove_key_entry(compte)` les efface
-  (`sync_key_entry_current` pour la clé en service). Les orphelins **antérieurs à S2** ne sont pas indexés : à la mise à jour,
-  l'index est amorcé en sondant `sync-key:<bundle>:1..=N` du bundle courant seulement ; ceux d'un bundle jamais engagé restent
-  introuvables (ils ne déchiffrent que ce bundle, déjà ouvrable par sa passphrase).
-- « Désactiver » supprime toutes les entrées `sync-key:<bundle>:*` de l'index (pas seulement l'époque courante).
+- Rotation ou adoption : `sync-key:<bundle>:<N+1>` écrite avant l'engagement, `sync-key:<bundle>:<N>` supprimée après la
+  migration du réplica, et collectée à chaque passe (R12).
+- L'appareil oublié garde DK_N tant que personne ne le désactive : elle n'ouvre que le passé.
+- **`IndexedSecretStore`** (S2a, §13.6.1) enveloppe le `SecretStore` du moteur : compte inscrit **avant** `set`, marqué absent
+  **après** `delete`, compteur global monotone.
+- **Orphelins** (écart S1b, revue 12) : `sync_key_entries()` liste les comptes indexés `sync-key:*` qui ne sont pas la clé
+  courante ; `sync_remove_key_entry(compte)` **n'accepte qu'un compte indexé de la forme `sync-key:<hex32>:<u32>` différent de
+  la clé courante** (`sync_key_entry_invalid` sinon ; jamais `password:*`, `passphrase:*`, `unbound-password:*`, R15). Les
+  orphelins antérieurs à S2 ne sont pas indexés : amorçage par sondage de `sync-key:<bundle>:1..=N` du bundle courant ; ceux
+  d'un bundle jamais engagé restent introuvables (ils ne déchiffrent que ce bundle, déjà ouvrable par sa passphrase).
+- « Désactiver » supprime toutes les entrées `sync-key:<bundle>:*` indexées.
 
-#### 13.3.9 Alertes existantes
+#### 13.3.9 Alertes
 
-- `KeysRotatedElsewhere` (déjà dans `AlertKind`) devient **actionnable** : « Les clés de sync ont changé sur un autre appareil.
-  Tapez la nouvelle passphrase. » ; elle disparaît à l'adoption, sans acquittement séparé.
-- `PassphraseChanged` reste pour un changement ou une réinitialisation **dans la même époque** (génération supérieure).
-  Une adoption n'en déclenche pas.
-- Nouvelles : `RotationConflict`, `DeviceForgotten` (cet appareil a été oublié), `RevokedWrites` (un appareil relaie des
-  écritures postérieures à l'oubli d'un autre), et l'attente `WaitReason::NeedsNewKeys`.
+- `KeysRotatedElsewhere` devient actionnable : « Les clés de sync ont changé sur un autre appareil. Tapez la nouvelle
+  passphrase. Si vous n'avez pas changé les clés, ne tapez rien. » Elle disparaît à l'adoption.
+- `PassphraseChanged` reste pour un changement dans la même époque ; une adoption n'en déclenche pas.
+- Nouvelles : `RotationConflict`, `DeviceForgotten`, `RevokedWrites` ; attentes `NeedsNewKeys` et `RotationPending`.
 
 ### 13.4 Oublier un appareil (S2a)
 
 #### 13.4.1 Opération
 
-« Oublier » est **toujours** une rotation qui marque en plus un ou plusieurs appareils `revoked` dans le roster de N + 1
-(§13.9, Q2) : un seul `bundle.toml`, une seule étape atomique (§13.3.4). Champs : `revoked_at` (heure locale, affichage),
-`revoked_by` (id de l'appareil qui oublie), `revoked_clock` (§13.2). L'appareil oublié sort du contexte stable (il ne bloque
-plus la collecte des pierres tombales, comme aujourd'hui pour `revoked`). Son id n'est jamais réutilisé (128 bits aléatoires).
-Les entrées révoquées restent dans le roster (plafond de 64 appareils) ; elles sont élaguées après l'horizon de 180 jours.
+« Oublier » est **toujours** une rotation (décision Q2) qui déplace un ou plusieurs appareils de `devices` vers `revoked`
+dans le roster de N + 1 : un seul `bundle.toml`, une seule étape atomique (§13.3.4). Champs : `revoked_at`, `revoked_by`,
+`revoked_clock`. L'appareil oublié sort du contexte stable (collecte des pierres tombales). Son id n'est jamais réutilisé.
+**Les entrées de `revoked` ne sont jamais élaguées** (R4) : sans elles, `check_context_claims` différerait pour toujours tout
+instantané portant ses points, et 64 deviendrait un plafond à vie ; plafond propre de 1024 entrées compactes
+(`sync_roster_full` au-delà : « créez un nouveau bundle »).
 
-#### 13.4.2 Sémantique de fusion
+Le premier écran du dialogue rappelle : **« Retirez aussi à l'appareil perdu l'accès au dossier cloud (session Dropbox,
+iCloud, OneDrive…) »** (R2) : c'est ce qui l'empêche de remettre d'anciens fichiers.
 
-- **Ce qu'il a écrit avant l'oubli reste** : valeurs, pierres tombales et points (F, c ≤ `revoked_clock`) font partie de
-  l'état fusionné et du contexte global, jamais collecté (F6). Les annuler en silence ferait diverger les appareils.
-  L'aperçu d'oubli **compte et liste** les enregistrements dont la valeur survivante a été écrite par cet appareil
-  (`ForgetPreview::last_written`), pour revue ; les garde-fous existants restent : destinations retenues (F1), snippets à
-  confirmer (F8).
-- **Ce qu'il écrit après l'oubli est refusé** : ses fichiers sont ignorés ; un instantané d'époque N + 1 qui contient une
-  entrée (F, c > `revoked_clock`), ou dont le contexte affirme F au-delà, est différé et signalé (`RevokedWrites` nommant
-  l'appareil qui relaie). `guard::check_context_claims` reçoit pour F la borne `max(horloge vérifiée, revoked_clock)`.
-  Un appareil honnête mais en retard qui a fusionné ces écritures avant d'apprendre la rotation les élimine à l'adoption par
-  un nouveau rattachement (§13.3.5) : rien de ce que F a écrit après l'oubli n'entre dans la nouvelle époque.
+#### 13.4.2 Sémantique de fusion et `revoked_clock`
+
+- **`revoked_clock` exact** (R4) : fixé par l'appareil qui oublie (max de son horloge vérifiée pour F et de son contexte pour
+  F, après la passe préalable) et **utilisé tel quel** par tous : `check_context_claims` reçoit pour F la borne
+  `revoked_clock(F)`, jamais `max(marque locale, revoked_clock)`. Tous les appareils acceptent donc les mêmes instantanés,
+  quelles que soient leurs marques hautes (propriété testée).
+- **Ce qu'il a écrit jusqu'à `revoked_clock` reste** : valeurs, pierres tombales, points (F6). L'aperçu d'oubli compte et
+  liste les enregistrements dont la valeur survivante vient de F (`ForgetPreview::last_written`) ; F1 et F8 restent en place.
+- **Au-delà, refusé partout** : un instantané d'époque N + 1 portant une entrée (F, c > `revoked_clock`) ou un contexte qui
+  affirme F au-delà est différé et signalé (`RevokedWrites` nommant le relais).
+- **Appareil en retard qui a appliqué ces écritures** (R3) : il adopte N + 1 par un nouveau rattachement **avec
+  provenance** : avant de vider son état, il calcule, depuis son réplica (projection appliquée et points des registres), les
+  clés dont la valeur appliquée localement vient d'un point (F, c > `revoked_clock`). Ces clés sont marquées « écrites par
+  l'appareil oublié F » et **exclues de la projection** jusqu'à une décision explicite, sans choix par défaut (issue
+  `sync_revoked_value`) : « Garder cette valeur (la publier comme la mienne) » ou « Reprendre la valeur synchronisée » (celle
+  des autres appareils dans N + 1, ou suppression locale s'ils n'en ont pas). Les mots de passe concernés reviennent à leur
+  valeur précédente conservée (§13.6.4) ou restent retenus. Le contenu de F n'entre donc jamais dans N + 1 sous le nom d'un
+  autre appareil sans un geste.
+- Effet de bord accepté : un appareil qui avait fusionné des écritures **antérieures** à l'oubli mais postérieures à
+  `revoked_clock` (l'appareil qui oublie ne les avait pas vues) passe aussi par ce chemin.
 - Fenêtre résiduelle : avant la rotation, F est un appareil compromis ordinaire (A5).
-- Effet de bord accepté : un appareil C qui avait fusionné des écritures **antérieures** à l'oubli que l'appareil qui oublie
-  n'avait pas encore vues (au-delà de `revoked_clock`) passe aussi par le nouveau rattachement ; la passe préalable à la
-  rotation réduit ce cas (le dernier fichier de F visible dans le dossier est fusionné avant de fixer `revoked_clock`).
 
 #### 13.4.3 Fichiers de l'appareil oublié
 
-L'appareil qui oublie supprime `devices/<F>.snap` et les copies du fournisseur de cet id (exception explicite à « un appareil
-ne supprime que ses propres copies », justifiée par le roster authentifié) ; tout appareil d'époque N + 1 qui retrouve un
-fichier d'un appareil oublié l'ignore et le supprime (au plus une fois par passe). Ce fichier n'était de toute façon lisible
-qu'avec DK_N.
+L'appareil qui oublie supprime `devices/<F>.snap` et les copies du fournisseur de cet id (exception justifiée par le roster
+authentifié) ; tout appareil d'époque N + 1 qui retrouve un fichier d'un appareil de `revoked` l'ignore et le supprime (au plus
+une fois par passe).
 
 #### 13.4.4 Ce que voit l'appareil oublié
 
-- Tant qu'il n'a que P / DK_N : `KeysRotatedElsewhere` ; P échoue (`sync_wrong_passphrase`). Il ne peut ni lire ni écrire
-  quoi que ce soit que les autres acceptent ; s'il remet l'ancien `bundle.toml`, les appareils à jour le réécrivent
-  (§13.3.6).
-- Avec P' : `Alert { DeviceForgotten }` « Cet appareil a été retiré de la sync par <appareil> le <date> ». Actions :
-  « Désactiver la sync » (oublie toutes les clés, garde les données locales) ou « Rejoindre comme nouvel appareil » (flux de
-  rattachement avec revue, nouvel id).
+- Avec P / DK_N seulement : `KeysRotatedElsewhere` ; P échoue ; ses bundles forgés et ses anciens fichiers remis en place sont
+  refusés et réécrits par les appareils à jour (§13.3.2, §13.3.6).
+- Avec P' : `Alert { DeviceForgotten }` « Cet appareil a été retiré de la sync par <appareil> le <date> » ; « Désactiver la
+  sync » (oublie toutes les clés, garde les données locales) ou « Rejoindre comme nouvel appareil » (flux de rattachement).
 
 #### 13.4.5 Soi-même ou un autre
 
-- **Oublier un autre appareil** : `sync_forget_device` (rotation forcée, P' demandée).
-- **Oublier cet appareil** : refusé par `sync_forget_device` (`sync_forget_self`, indice « utilisez Désactiver ») ;
-  `sync_disable(DisableOptions { forget_key, remove_my_file, leave_roster })` : `leave_roster` (nouveau, vrai par défaut
-  quand `remove_my_file` l'est) marque l'appareil `revoked` dans le roster de l'époque courante (`with_roster`, révision + 1,
-  sans rotation : un départ honnête n'expose rien de plus). C'est le chemin « appareil revendu, effacé par moi ».
+- **Un autre** : `sync_forget_device` (rotation forcée, P').
+- **Cet appareil** : refusé par `sync_forget_device` (`sync_forget_self`) ; `sync_disable(DisableOptions { forget_key,
+  remove_my_file, leave_roster })`. `leave_roster` (vrai par défaut avec `remove_my_file`) est une **opération S2** (R4) :
+  bundle passé en v2, l'appareil déplacé dans `revoked` avec `revoked_clock` = **son propre compteur** ; si des appareils 0.6
+  sont connus, l'avertissement Q5 s'affiche (ils reçoivent `sync_version` plutôt que de tout différer en silence). Sans
+  rotation : un départ honnête n'expose rien de plus. **Le texte dit** (R18) que sans « oublier la clé » l'appareil reste
+  capable de lire la sync actuelle : « retiré de la liste sans changement de clés ; pour l'en exclure vraiment, oubliez-le
+  depuis un autre appareil ».
+
+#### 13.4.6 Fusion de rosters divergents (R4)
+
+Deux `bundle.toml` de même triplet, contenu différent (§10, S1b) : union **champ par champ** en v2 :
+- `revoked` **collant** : un appareil présent dans `revoked` d'une copie y reste et sort de `devices` ; deux `revoked_clock`
+  pour un même appareil → le plus grand (les deux sont des horloges que F a publiées avant son oubli, vérifiées par un
+  appareil honnête) ;
+- `policy` **fermée en cas de doute** : `generation` = max ; à génération égale, désactivée l'emporte ; une copie désactivée de
+  génération ≥ à celle d'une copie activée l'emporte ;
+- réécriture dès qu'un champ diffère (plus seulement le nombre d'appareils), sans jamais perdre un appareil actif.
 
 ### 13.5 Mots de passe liés : modèle (S2b)
 
 #### 13.5.1 Enregistrement
 
-- **Clé** : `Secret { account }` (réservée en S1a), `account` = exactement `SecretKey::HostPassword::account()` :
+- **Clé** : `Secret { account }`, `account` = exactement `SecretKey::HostPassword::account()` :
   `password:<user>@<host>:<port>#<empreinte>`. Analyse stricte et canonique : `#` le dernier, `:` le dernier avant lui, `@` le
-  dernier avant lui (un `User` peut contenir `@`) ; `user` non vide, borné, sans contrôle ni invisible ; `host` = nom
-  `known_hosts` (`HostKeyAlias` ou `HostName` en minuscules) validé comme un nom d'hôte ou une IP ; `port` 1–65535 ;
-  empreinte `SHA256:` + 43 caractères base64. Le rendu doit redonner la même chaîne. Un compte `unbound-password:*`,
-  `passphrase:*` ou `sync-key:*` **n'est pas représentable** : le type `BoundAccount` ne se construit que depuis un
-  `HostPassword` à empreinte bien formée.
-- **Empreinte liée** : SHA-256 de la clé hôte acceptée pour la connexion (`HostIdentity::fingerprint`), c'est-à-dire la clé
-  vue dans `known_hosts`, acceptée à l'invite TOFU, ou la clé **certifiée** par un `@cert-authority` (jamais l'empreinte de
-  l'autorité). Tous les types de clés hôtes sont admis (ed25519, ecdsa, rsa). Un serveur aux clés multiples donne un
-  enregistrement **par clé liée**, comme localement (un `HostPassword` par `host_key`).
-- **Valeur** (`WireValue` de genre `secret`, version 1) : `{ v: 1, nonce: b64(24), ct: b64, mac: b64(32), algorithm }`.
-  `algorithm` (type de la clé liée, non secret) sert à l'affichage. Aucune valeur n'apparaît ailleurs.
+  dernier avant lui (un `User` peut contenir `@`) ; `user` non vide, borné, sans contrôle ni invisible ; `host` validé par
+  **`known_hosts::validate_host_name`** (R16), aller-retour exact (nom `known_hosts` : `HostKeyAlias` ou `HostName` en
+  minuscules) ; `port` 1–65535 ; empreinte `SHA256:` + 43 caractères base64. Le type `BoundAccount` ne se construit que
+  depuis un `HostPassword` à empreinte bien formée : `unbound-password:*`, `passphrase:*`, `sync-key:*` ne sont pas
+  représentables.
+- **Plafonds de réception** (R16) : au plus 256 comptes `secret` dans l'état et 4 empreintes par `user@host:port` ; au-delà,
+  les nouveaux registres ne sont ni appliqués ni relayés (`sync_secret_limit`), ce qui protège le trousseau, les demandes du
+  trousseau macOS et l'index `[bound_passwords]` (32 empreintes, éviction des plus anciennes).
+- **Empreinte liée** : SHA-256 de la clé hôte acceptée (`HostIdentity::fingerprint`) : clé de `known_hosts`, clé acceptée à
+  l'invite TOFU, ou clé **certifiée** par un `@cert-authority` (jamais l'empreinte de l'autorité). Tous types de clés. Un
+  enregistrement **par clé liée**.
+- **Confiance de la liaison** (R5) : seules les liaisons faites sur une clé `KnownHostsMatch`, `Certificate` ou `UserAccepted`
+  sont projetées. La confiance est enregistrée au moment de la liaison dans l'index non secret de `hosts.toml`
+  (`[bound_password_trust]` : compte → empreinte → confiance), réécrite à chaque connexion réussie avec le mot de passe
+  mémorisé (`auth.rs`) ; une liaison `AutoAccepted` (`StrictHostKeyChecking accept-new|no`) ou sans confiance connue (liaison
+  antérieure à S2, avant sa prochaine connexion) n'est **jamais** projetée.
+- **Valeur** (`WireValue` de genre `secret`, v1) : `{ v: 1, nonce: b64(24), ct: b64, mac: b64(32), algorithm }`.
 
 #### 13.5.2 Couche interne (F11, §2.4, §2.8)
 
-- **Clair** : `u16be longueur ‖ mot de passe UTF-8`, complété à un multiple de 64 octets ; au plus 1 Kio (un mot de passe
-  plus long n'est pas synchronisé, issue `sync_secret_too_long`). Tampons en `Zeroizing<Vec<u8>>`.
+- **Clair** : `u16be longueur ‖ mot de passe UTF-8`, complété à un multiple de 64 octets ; au plus 1 Kio
+  (`sync_secret_too_long`). Tampons `Zeroizing<Vec<u8>>`.
 - **Chiffrement** : XChaCha20-Poly1305 sous **K_secret** de l'époque, nonce aléatoire, AAD =
-  `canonique("portico-sync/1", "secret", bundle_id, époque, JSON canonique de la clé, appareil du point, compteur du point)`.
-  Un secret scellé ne se déplace ni vers un autre compte, ni vers un autre point, ni vers une autre époque.
-- **Comparaison** : `mac = HMAC-SHA256(K_cmp, canonique(account, mot de passe))`. Fusion, conflits, détection de changement
-  et « points divergents » ne comparent **que** `mac` : le modèle reçoit un crochet d'**identité de valeur** par genre
-  (`secret` → `mac` ; les autres genres → JSON canonique, inchangé). Deux scellements d'une même valeur (nonces différents)
-  sont égaux ; un même point avec deux `mac` différents est un point divergent. Les lois de fusion sont reprouvées par
-  proptest avec ce crochet.
-- La fusion, la collecte et l'affichage des conflits ne déchiffrent jamais. Seules l'application locale (§13.6.4) et la
-  migration d'époque (§13.6.3) ouvrent la couche interne.
+  `canonique("portico-sync/1", "secret", bundle_id, époque, JSON canonique de la clé, appareil du point, compteur du point,
+  v, algorithm)` (R6 : `v` et `algorithm` liés).
+- **Comparaison** : `mac = HMAC-SHA256(K_cmp, canonique(account, mot de passe))`. Fusion, conflits, détection de changement et
+  points divergents ne comparent **que** `mac` (crochet d'**identité de valeur** par genre : `secret` → `mac` ; autres genres
+  → JSON canonique inchangé). Lois de fusion reprouvées par proptest avec ce crochet.
+- **Le `mac` est vérifié sur le clair** (R6) : à **chaque** ouverture de la couche interne (application, migration
+  d'époque), le `mac` est recalculé sur le clair déchiffré et comparé en temps constant ; différence → enregistrement refusé
+  (`sync_secret_invalid`) et alerte `Divergent` nommant l'appareil source. Un appareil compromis ne peut donc pas relayer
+  `{ct: Enc(faux), mac: mac(vrai)}` pour se faire passer pour « égal ».
+- Fusion, collecte et affichage des conflits ne déchiffrent jamais.
 
-#### 13.5.3 Politique du bundle et consentement de l'appareil (F12)
+#### 13.5.3 Politique du bundle et consentement de l'appareil (F12, R8)
 
-- `policy.include_passwords` (roster v2, authentifié) : **faux** à la création ; seul un appareil détenant la DK le change,
-  avec un nouvel `passwords_policy_id`, `passwords_changed_by/at`. Libellé : « Inclure les mots de passe dans ce bundle :
-  tout appareil qui détient la clé de ce bundle pourra les lire. Seuls les mots de passe liés à une clé serveur vérifiée sont
-  partagés. »
-- **Consentement local** (défense en profondeur, §13.9 Q3) : un appareil ne projette **ni n'applique** de mot de passe tant
-  que l'utilisateur n'a pas accepté **sur cet appareil** la politique `passwords_policy_id` courante (enregistré dans le
-  réplica). L'appareil qui active la politique donne son consentement dans le même geste ; les autres voient une décision en
-  attente « La sync des mots de passe a été activée par <appareil> le <date>. Partager et recevoir les mots de passe sur cet
-  appareil ? ». Un appareil compromis qui active la politique ne récolte donc rien sans un geste de l'utilisateur ailleurs.
-- **Désactivation** : chaque appareil retire de son état **tous** les registres `secret` (sans pierre tombale) et republie ;
-  les registres reçus sont ignorés tant que la politique est fausse ; les alertes `dropped_live_without_successor` sont tues
-  pour ce genre. **Aucun mot de passe local n'est supprimé**, nulle part. Le texte dit que les instantanés déjà publiés ne
-  sont purgés qu'à la republication de chaque appareil, et jamais de l'historique du fournisseur : pour rendre illisible ce
-  qui a été partagé, faire tourner les clés et changer les mots de passe serveurs (F2) ; la case « Faire aussi tourner les
-  clés » est proposée dans le même dialogue (décochée).
-- Réactivation : nouvel id de politique, nouveau consentement ; la dernière projection appliquée des secrets est vidée à la
-  désactivation, donc tout est republié comme écritures neuves.
+- `policy.include_passwords` (roster v2) : faux à la création. Chaque changement (activation ou désactivation) incrémente
+  **`policy.generation`** (u64, strictement croissant, cliqueté localement comme la révision). Libellé F12 : « Inclure les
+  mots de passe dans ce bundle : tout appareil qui détient la clé de ce bundle pourra les lire. Seuls les mots de passe liés à
+  une clé serveur vérifiée sont partagés. »
+- **Consentement local** (décision Q3) : un appareil ne projette **ni n'applique** de mot de passe sans un consentement donné
+  **sur cet appareil** pour la **génération** courante (`LocalReplica::password_consent = Some(generation)`). Dès qu'une
+  politique désactivée est observée, le consentement local est effacé ; une réactivation (génération supérieure) en demande
+  un nouveau. L'appareil qui active consent dans le même geste ; les autres voient une décision en attente « La sync des mots
+  de passe a été activée par <appareil> le <date>. Partager et recevoir les mots de passe sur cet appareil ? ».
+- **Filtre à la fusion** (R8, livré dès S2a avec la politique) : tant que la politique est désactivée (ou sans
+  consentement local), les registres `secret` reçus ne sont **ni fusionnés ni relayés**, et les siens sont retirés de l'état
+  avant publication ; les alertes `dropped_live_without_successor` sont tues pour ce genre. **Aucun mot de passe local n'est
+  supprimé.** Le dialogue de désactivation dit que l'historique du fournisseur et les anciens instantanés ne sont pas purgés
+  et propose « Faire aussi tourner les clés » (décochée) ; changer les mots de passe serveurs reste la vraie remédiation (F2).
+- Réactivation : nouvelle génération, nouveau consentement, la projection appliquée des secrets est vidée (tout est republié
+  comme écritures neuves).
 
 ### 13.6 Mots de passe liés : moteur (S2b)
 
-#### 13.6.1 Indexation et détection de changement (F11)
+#### 13.6.1 Indexation et détection de changement (F11, R9, R14)
 
-- `IndexedSecretStore` (livré en S2a pour les clés de sync, utilisé ici) : `data_dir/secrets-index.toml` (`0600`, non secret,
-  local) : compte → `generation` (u64, + 1 à chaque `set` ou `delete` fait **par Portico**). Rien n'y révèle plus que
-  `[bound_passwords]` de `hosts.toml`, déjà en clair.
-- **Énumération des comptes liés** : `[bound_passwords]` de `hosts.toml` (utilisateur, nom, port → empreintes), déjà tenu à
-  chaque mot de passe lié (`record_bound_password`). L'index des secrets ne sert qu'aux générations.
-- **Projection** d'un compte lié : lecture du trousseau **seulement** si sa génération a changé depuis la dernière projection
-  (gardée dans le réplica avec le `mac`) ; `mac` égal → rien ; différent → écriture locale (nouveau point, nouveau scellement) ;
-  `get` → absent alors qu'une valeur avait été projetée → pierre tombale (oubli local). Une **erreur** de lecture (trousseau
-  indisponible, vault verrouillé) n'est **jamais** une absence : le compte est sauté, issue `sync_secrets_pending`.
-- **Amorçage** au consentement et sur « Relire les mots de passe » (Overview) : lecture de tous les comptes liés une fois (les
-  modifications faites hors de Portico, par exemple dans Trousseau d'accès, ne sont vues qu'ainsi).
-- Jamais projetés : `UnboundHostPassword` (F3), `KeyPassphrase` (§4.8), `SyncDataKey`, tout compte refusé par
-  `sync_skip_on_this_device`.
+- **`IndexedSecretStore`** (livré en S2a) : `data_dir/secrets-index.toml` (`0600`, local, non secret) : compte →
+  `{ generation, present }`. **Compteur global monotone** : chaque `set` ou `delete` prend la valeur suivante du compteur ;
+  une entrée supprimée reste avec `present = false` (un `set`, `delete`, `set` de même valeur est vu, R9). **Tous** les
+  chemins d'écriture passent par lui : sessions (`auth.rs`), `managed_hosts` (`forget`, `forget_bound`, création), vault,
+  sync.
+- **Énumération** : `[bound_passwords]` de `hosts.toml` **∪** `LocalReplica::secrets` (R9 : `forget_bound` retire le compte de
+  `[bound_passwords]` ; sans l'union, l'oubli local ne produirait pas de pierre tombale et la sync le ressusciterait).
+- **Projection** d'un compte lié (consentement donné, confiance projetable) : lecture seulement si sa génération a changé ;
+  `mac` égal → rien ; différent → écriture locale ; absent alors qu'une valeur avait été projetée ou appliquée → **pierre
+  tombale** et marque locale **« oublié ici »** qui bloque toute ré-application automatique de ce compte (seul un geste
+  explicite la lève).
+- **Erreur ≠ absence** : un trousseau indisponible ou un vault verrouillé ne produisent jamais de pierre tombale
+  (`sync_secrets_pending`). **Changement de stockage** (R14) : le réplica retient le stockage utilisé (`keyring` ou `vault`,
+  `default_store` peut basculer, par exemple TUI lancée en SSH sans Secret Service) ; une absence ne compte comme suppression
+  que **dans le même stockage** ; après une bascule, tout est « à relire » sans pierre tombale.
+- **Amorçage** au consentement et sur « Relire les mots de passe » ; jamais projetés : `UnboundHostPassword`,
+  `KeyPassphrase`, `SyncDataKey`, comptes ignorés sur cet appareil, liaisons non projetables (R5).
 
 #### 13.6.2 Où vit l'état
 
-Réplica (scellé sous K_local) : registres `secret` sous leur forme scellée interne ; `LocalReplica::secrets` : compte →
-(génération vue, `mac` appliqué ou projeté, appareil d'origine) ; `password_consent: Option<policy_id>`. Jamais de clair
-sur disque hors du trousseau ou du vault.
+Réplica (sous K_local) : registres `secret` scellés ; `LocalReplica::secrets` : compte → (génération vue, `mac` appliqué ou
+projeté, appareil d'origine, « oublié ici », provenance) ; `password_consent` ; `secrets_backend`. Jamais de clair sur disque
+hors du trousseau ou du vault.
 
 #### 13.6.3 Migration d'époque
 
-À la rotation et à l'adoption (§13.3.4 étape 5), chaque appareil ouvre chacune de **ses** entrées `secret` sous K_secret_N
-et la rescelle sous K_secret_{N+1}, **même point**, `mac` recalculé sous K_cmp_{N+1}. Les scellements diffèrent d'un appareil
-à l'autre, les `mac` sont identiques : grâce au crochet d'identité, aucune divergence ni conflit. Une entrée qui ne s'ouvre
-pas est abandonnée avec une alerte (jamais republiée sous l'ancienne époque).
+À la rotation et à l'adoption, chaque appareil ouvre **ses** entrées `secret` sous K_secret_N, **vérifie le `mac`** (R6), la
+rescelle sous K_secret_{N+1} (même point), `mac` recalculé sous K_cmp_{N+1}. Scellements différents, `mac` identiques :
+aucune divergence. Une entrée qui ne s'ouvre pas ou dont le `mac` ne correspond pas est abandonnée avec une alerte.
 
-#### 13.6.4 Réception et application (F3)
+#### 13.6.4 Réception et application (F3, R7, décision Q4)
 
-- Un registre `secret` reçu passe `validate_record` (clé canonique, valeur v1, tailles) ; sinon quarantaine
-  `sync_secret_invalid` (nomme le compte, jamais la valeur).
-- **Valeur unique, consentement donné, `mac` ≠ local** : ouverture de la couche interne, `SecretStore::set` de
-  `SecretKey::HostPassword { user, host, port, host_key: empreinte }`, puis `record_bound_password` dans `hosts.toml` (pour
-  que « oublier » le trouve), puis génération et `mac` notés dans le réplica (sa propre écriture n'est pas reprojetée). Le
-  clair est remis à zéro dès l'appel au trousseau rendu.
-- **La liaison est structurelle** : le mot de passe est rangé sous la clé du trousseau qui contient l'empreinte. La session
-  (`session/auth.rs`, inchangée) ne l'envoie que si **sa propre** vérification de la clé hôte (ligne `known_hosts`, certificat
-  d'une autorité de confiance, ou acceptation TOFU) donne **cette** empreinte. Une autre clé n'obtient rien ; une clé changée
-  reste un refus bloquant ; rien n'est jamais écrit dans `known_hosts` ; aucun mot de passe synchronisé n'est rangé sous une
-  clé non liée.
-- **Invite TOFU** (lecture seule) : `PromptKind::UnknownHostKey` gagne `synced_binding: Option<SyncedBinding { device, matches }>` :
-  « correspond à la clé vérifiée sur <appareil> » quand l'empreinte présentée est celle d'un mot de passe reçu pour ce
-  compte, « DIFFÈRE de la clé vérifiée sur <appareil> » quand le compte a un mot de passe reçu lié à une **autre** empreinte.
-  Jamais de bouton ni de raccourci d'acceptation supplémentaire ; `sends_remembered_password` garde son sens. Renseigné
-  seulement quand la sync est déverrouillée (carte en mémoire du `SyncCore`, sinon `None`).
-- **Vault verrouillé / trousseau indisponible** : application en attente (forme scellée dans le réplica),
-  `sync_secrets_pending(n)` ; un déverrouillage du vault déclenche une passe.
-- **Suppression reçue** (pierre tombale d'un autre appareil) : **jamais appliquée automatiquement** (un appareil compromis ne
-  doit pas effacer des secrets locaux, comme pour les hôtes en S1b) : issue `sync_secret_deletion_received` « Le mot de passe
-  de <compte> a été oublié sur <appareil> », actions « L'oublier ici aussi » (suppression locale, sans nouvelle écriture) ou
-  « Le garder et le repartager » (écriture locale qui couvre la pierre tombale).
-- **Changement reçu** d'un compte existant : appliqué (il n'est envoyé qu'au serveur à la clé liée) et marqué « changé par
-  <appareil> » ; une valeur hostile ne peut au pire que faire échouer une authentification sur ce serveur (§13.10).
-- **Conflit** (deux valeurs, `mac` différents) : rien n'est appliqué, la valeur locale reste. DTO sans valeur : « défini sur
-  <appareil>, <heure> » par côté ; résolution `Pick` uniquement (pas d'`Union`, pas de `KeepBoth`), liée à `sides_hash`.
+- Validation (`validate_record`, plafonds R16) ; sinon quarantaine `sync_secret_invalid` (nomme le compte, jamais la valeur).
+- **Compte inconnu localement**, valeur unique, consentement donné, pas marqué « oublié ici » : ouverture, vérification du
+  `mac` (R6), `SecretStore::set` de `SecretKey::HostPassword { user, host, port, host_key: empreinte }`, `record_bound_password`
+  (pour que « oublier » le trouve), génération et `mac` notés. Le clair est remis à zéro dès l'appel rendu.
+- **Changement reçu d'un compte qui a une valeur locale** (R7, Q4 étendue) : **jamais appliqué automatiquement**. Issue
+  `sync_secret_change_received` « Le mot de passe de <compte> a changé sur <appareil> » : « Utiliser le nouveau » ou « Garder
+  le mien (et le repartager) ». « Utiliser le nouveau » conserve l'ancienne valeur dans une entrée locale
+  **`previous-password:<compte>`** (nouvelle variante `SecretKey::PreviousHostPassword`, jamais synchronisée, jamais projetée,
+  jamais envoyée par l'authentification), avec « Restaurer l'ancien » (une écriture locale) tant que l'utilisateur ne l'a pas
+  écartée ; une seule valeur précédente par compte.
+- **Suppression reçue** : jamais appliquée automatiquement (Q4) : issue `sync_secret_deletion_received`, « L'oublier ici
+  aussi » (suppression locale, valeur gardée en `previous-password:` de la même façon) ou « Le garder et le repartager ».
+- **Conflit** (deux `mac`) : rien n'est appliqué ; DTO sans valeur (« défini sur <appareil>, <heure> ») ; `Pick` seulement,
+  lié à `sides_hash`.
+- **Liaison structurelle** : le mot de passe est rangé sous la clé du trousseau qui contient l'empreinte ; la session ne
+  l'envoie que si **sa propre** vérification donne cette empreinte, par mot de passe **comme** par keyboard-interactive. Une
+  autre clé n'obtient rien ; une clé changée reste un refus bloquant ; rien n'est écrit dans `known_hosts`.
+- **Invite TOFU** (R5, lecture seule) : `PromptKind::UnknownHostKey` gagne `synced_binding: Option<SyncedBinding { device,
+  matches }>`, rendu en texte **neutre**, jamais en couleur de réussite : « Un mot de passe synchronisé depuis <appareil> est
+  lié à cette clé » quand l'empreinte présentée est liée ; « Cette clé DIFFÈRE de celle à laquelle un mot de passe
+  synchronisé depuis <appareil> est lié » (`status-warning`) sinon. **Jamais** de `synced_binding` sur `HostKeyChanged` ;
+  jamais de bouton ni de raccourci d'acceptation ; renseigné seulement quand la sync est déverrouillée.
+- **Vault verrouillé / trousseau indisponible** : en attente, `sync_secrets_pending(n)` ; un déverrouillage déclenche une
+  passe.
 
 #### 13.6.5 Hygiène
 
 `SealedSecret`, `BoundAccount`, DTO de conflit et d'issue : `Debug` sans chiffré ni valeur ; erreurs, événements, `tracing`
-et `LogRecord` nomment au plus le compte (`user@host:port`, comme aujourd'hui) ; test de motif `"hunter2"` sur tous les types
-et DTO de sync, événements et journaux d'une passe complète.
+et `LogRecord` nomment au plus `user@host:port` ; test de motif `"hunter2"` sur tous les types et DTO de sync, les événements
+et les journaux d'une passe complète et de l'exercice d'appareil perdu.
 
 ### 13.7 API du moteur, événements, erreurs
 
-**Ajouts** (toutes `async`, travail bloquant sur le thread `portico-sync`, Argon2 en `spawn_blocking`) :
-
 | Méthode | Rôle |
 |---|---|
-| `sync_rotation_preview() -> RotationPreview` | appareils (label, `app_version`, en attente, ancienneté), appareils à mettre à jour (`sync_peers_outdated`), nombre de mots de passe partagés |
-| `sync_rotate_keys(RotateKeys { authorization: RotateAuth::{CurrentPassphrase(SecretString), ResetConfirmed}, new_passphrase: NewPassphrase, remember_key }) -> RotationOutcome` | §13.3 ; rend l'époque, les appareils qui devront taper P', `exposed_accounts` (comptes partagés avant la rotation, F2) |
-| `sync_forget_preview(device_id) -> ForgetPreview` | label, dernière publication, `last_written` (enregistrements dont il a écrit la valeur survivante), `exposed_accounts` |
+| `sync_rotation_preview() -> RotationPreview` | appareils (label, `app_version`, en attente), appareils à mettre à jour, mots de passe partagés |
+| `sync_rotate_keys(RotateKeys { authorization: RotateAuth::{CurrentPassphrase(SecretString), ResetConfirmed}, new_passphrase, remember_key }) -> RotationOutcome` | §13.3 ; rend l'époque, les appareils qui devront taper P', `exposed_accounts` (F2) |
+| `sync_forget_preview(device_id) -> ForgetPreview` | label, dernière publication, `last_written`, `exposed_accounts` |
 | `sync_forget_device(ForgetDevice { device_ids, authorization, new_passphrase, remember_key }) -> RotationOutcome` | §13.4 ; `sync_forget_self` pour cet appareil |
-| `sync_unlock(SecretString)` (étendue) | déverrouille, **ou adopte** une époque supérieure (§13.3.5), ou rend `sync_device_forgotten` |
+| `sync_unlock(SecretString)` (étendue) | déverrouille ou adopte (§13.3.5) ; plancher, filiation, passphrase ≠ `bundle.verified` |
 | `sync_resolve_rotation_conflict(UseOther(SecretString) \| KeepMine { new_passphrase })` | §13.3.7 |
-| `sync_disable(DisableOptions { forget_key, remove_my_file, leave_roster })` (étendue) | §13.4.5 ; oublie toutes les époques indexées |
-| `sync_key_entries() -> Vec<SyncKeyEntry>` / `sync_remove_key_entry(account)` | §13.3.8 |
-| `sync_password_status() -> PasswordSync { policy, consent, shared, received, pending }` | état sans valeur |
+| `sync_disable(DisableOptions { forget_key, remove_my_file, leave_roster })` (étendue) | §13.4.5 |
+| `sync_key_entries()` / `sync_remove_key_entry(account)` | §13.3.8, comptes `sync-key:*` non courants seulement (R15) |
+| `sync_password_status() -> PasswordSync { policy, generation, consent, shared, received, pending }` | sans valeur |
 | `sync_set_password_sharing(PasswordSharing { enabled, rotate_keys: Option<RotateKeys> })` | §13.5.3 |
-| `sync_password_consent(policy_id, Accept \| Decline)` | consentement lié à l'id montré (`sync_not_pending` si la politique a changé) |
-| `sync_rescan_passwords()` | amorçage (§13.6.1) |
-| `sync_secret_deletion(account, ForgetHere \| KeepAndShare)` | §13.6.4 |
+| `sync_password_consent(generation, Accept \| Decline)` | lié à la génération montrée (`sync_not_pending` sinon) |
+| `sync_rescan_passwords()` | amorçage |
+| `sync_secret_decision(account, shown_mac_hash, UseReceived \| KeepMine \| ForgetHere \| RestorePrevious \| DismissPrevious)` | §13.6.4, lié au contenu montré |
+| `sync_revoked_value(key, KeepAsMine \| TakeSynced)` | §13.4.2 (R3) |
 
 **Statuts et événements** : `AlertKind` + `RotationConflict`, `DeviceForgotten`, `RevokedWrites` ; `WaitReason` +
-`NeedsNewKeys` ; `SyncStatus::Idle` gagne `pending_password_consent: bool` ; `SyncPendingChanged` couvre aussi le
-consentement et les suppressions de secrets reçues ; `PromptKind::UnknownHostKey::synced_binding`. Aucun événement ne porte
-de valeur, de DK ni de passphrase. Après `Lagged` : relire aussi `sync_password_status`.
+`NeedsNewKeys`, `RotationPending` ; `SyncStatus::Idle` gagne `pending_password_consent` ; `SyncPendingChanged` couvre
+consentement, changements et suppressions de secrets reçus et valeurs d'appareils oubliés ;
+`PromptKind::UnknownHostKey::synced_binding`. Aucun événement ne porte de valeur, de DK ni de passphrase.
 
-**Codes d'erreur** (chacun avec un indice actionnable, jamais de valeur) :
+**Codes d'erreur** (indice actionnable, jamais de valeur) :
 
 | Code | Indice |
 |---|---|
-| `sync_passphrase_reused` | « Choisissez une passphrase différente : l'ancienne rouvrirait les nouvelles clés. » |
-| `sync_keys_rotated` (existant, indice revu) | « Tapez la nouvelle passphrase choisie sur l'autre appareil. » |
+| `sync_passphrase_reused` | « Cette passphrase ouvre les anciennes clés : choisissez-en une autre (rotation), ou ne tapez rien si vous n'avez pas changé les clés (adoption). » |
+| `sync_keys_rotated` (existant, indice revu) | « Tapez la nouvelle passphrase choisie sur l'autre appareil ; si vous n'avez pas changé les clés, ne tapez rien. » |
+| `sync_rollback` (étendu : plancher, format, réplica en avance, rattachement) | « Un fichier de sync a été remis à une version antérieure ; ouvrez Portico sur un appareil à jour. » |
 | `sync_rotation_conflict` | « Deux appareils ont changé les clés en même temps : utilisez celles de l'autre ou gardez celles-ci. » |
 | `sync_device_forgotten` | « Cet appareil a été retiré : désactivez la sync ou rejoignez comme nouvel appareil. » |
 | `sync_forget_self` | « Pour retirer cet appareil, utilisez Désactiver la sync. » |
 | `sync_device_unknown` | « Rechargez la liste des appareils. » |
+| `sync_roster_full` | « Trop d'appareils retirés : créez un nouveau bundle. » |
 | `sync_revoked_writes` | « <appareil> relaie des changements d'un appareil oublié ; tapez la nouvelle passphrase sur <appareil>. » |
+| `sync_revoked_value` (avertissement) | « Valeur écrite par un appareil oublié : gardez-la ou reprenez la valeur synchronisée. » |
 | `sync_peers_outdated` (avertissement) | « Mettez à jour Portico sur ces appareils (0.7 ou plus). » |
-| `sync_key_entry_current` | « C'est la clé en service : utilisez Désactiver la sync. » |
-| `sync_passwords_off` | « Activez d'abord les mots de passe pour ce bundle. » |
-| `sync_password_consent_needed` | « Acceptez le partage des mots de passe sur cet appareil. » |
+| `sync_key_entry_current` / `sync_key_entry_invalid` | « C'est la clé en service : utilisez Désactiver la sync. » / « Seules les anciennes clés de sync peuvent être retirées ici. » |
+| `sync_passwords_off`, `sync_password_consent_needed` | « Activez d'abord les mots de passe pour ce bundle. » / « Acceptez le partage des mots de passe sur cet appareil. » |
 | `sync_secrets_pending` | « Déverrouillez le vault ou le trousseau pour appliquer les mots de passe reçus. » |
-| `sync_secret_invalid` | « Un mot de passe reçu est mal formé ; mettez à jour Portico sur l'appareil qui l'a envoyé. » |
-| `sync_secret_too_long` | « Les mots de passe de plus de 1 Kio ne sont pas synchronisés. » |
-| `sync_secret_deletion_received` (avertissement) | « Choisissez : l'oublier ici aussi, ou le garder et le repartager. » |
+| `sync_secret_invalid` | « Un mot de passe reçu est mal formé ou incohérent ; vérifiez l'appareil qui l'a envoyé. » |
+| `sync_secret_too_long`, `sync_secret_limit` | « Les mots de passe de plus de 1 Kio ne sont pas synchronisés. » / « Trop de mots de passe synchronisés ; les nouveaux sont ignorés. » |
+| `sync_secret_change_received`, `sync_secret_deletion_received` (avertissements) | « Choisissez : utiliser le nouveau ou garder le vôtre. » / « Choisissez : l'oublier ici aussi ou le garder et le repartager. » |
 
-**Modules** : `bundle.rs` (`rotate`, roster v2, `policy`), `runner.rs` (rotation, adoption, reprise `next_epoch`, réécriture
-d'un bundle plus ancien, filtre `revoked_clock`), `guard.rs` (borne des appareils oubliés), `model.rs` (crochet d'identité,
-valeur `secret`), `secret.rs` (nouveau : `BoundAccount`, scellement interne, `mac`), `project.rs` / `apply.rs` (secrets),
-`secrets.rs` (`IndexedSecretStore`), `session/handler.rs` (`synced_binding`).
+**Modules** : `crypto.rs` (sous-clé `rotate`), `bundle.rs` (`rotate`, `prev`, roster v2, `policy`, version lue), `state.rs`
+(`rotation.toml`, `bundle.verified`, `bundle.next`, plancher), `runner.rs` (rotation, adoption, reprise, réécriture,
+arrêt sur en-tête d'époque supérieure, filtres `revoked_clock` et politique, union v2), `guard.rs` (borne exacte des appareils
+oubliés), `model.rs` (crochet d'identité, valeur `secret`), `secret.rs` (nouveau : `BoundAccount`, scellement interne, `mac`),
+`project.rs` / `apply.rs` (secrets, provenance), `secrets.rs` (`IndexedSecretStore`, `PreviousHostPassword`), `hosts.rs`
+(`[bound_password_trust]`), `session/auth.rs` et `session/handler.rs` (confiance, `synced_binding`).
 
 ### 13.8 UIs, tests, découpage, revues
 
-**Parcours UI (S2c, cohérents avec §6 et la livraison S1c ; charger `ui-design-premium`, `tui-patterns`,
-`gui-tauri-patterns`)** :
-- **Devices** : par appareil « Forget… » (pas pour celui-ci : « Turn sync off » y propose « Leave the device list ») ;
-  dialogue en trois étapes : (1) ce que fait l'oubli (rotation, nouvelle passphrase à taper sur chaque autre appareil, le
-  passé reste lisible par l'appareil oublié, `last_written` en lien de revue, appareils à mettre à jour), (2) passphrase
-  actuelle ou « Je ne la connais plus » (confirmation supplémentaire, comme la réinitialisation), (3) nouvelle passphrase
-  (générateur, jauge, case « I saved it… » qui conditionne le bouton « Forget and rotate keys »). Résultat : « Keys
-  rotated. Enter the new passphrase on: <appareils> » et, si des mots de passe étaient partagés, « Change these server
-  passwords: <comptes> » (F2). Section « Old keys in this keychain » (`sync_key_entries`) avec « Remove ».
-- **Overview** : « Rotate keys… » (même dialogue sans l'étape d'oubli) ; ligne « Passwords: Off / On (enabled by <appareil>) »,
-  « Include passwords… » (texte F12, case de rotation à la désactivation), « Rescan passwords ».
-- **Barre de statut** : `Keys changed — enter new passphrase`, `Removed from sync`, `Key conflict` en couleur de statut ;
-  le clic ou `Ctrl-Space y` / `⌘⇧Y` ouvre le dialogue adéquat (saisie de P', choix de §13.3.7, choix de §13.4.4).
-- **Consentement** : bandeau dans Overview et onglet Received (« Share passwords on this device? » avec appareil et date),
-  boutons « Share on this device » / « Not on this device », jamais présélectionné.
-- **Conflits / Issues** : conflit de mot de passe sans valeur (« set on <appareil>, <heure> »), choix d'un côté ; issues
-  « pending (vault locked) » et « forgotten on <appareil> » avec leurs deux actions.
-- **Invite TOFU** (TUI et GUI) : ligne en lecture seule sous l'empreinte, « matches the key verified on <appareil> » (texte
-  discret) ou « DIFFERS from the key verified on <appareil> » (`status-warning`) ; aucun bouton nouveau.
-- TUI : `f` (Devices) oublier, `R` (Overview) faire tourner, `P` (Overview) mots de passe ; `docs/KEYBINDINGS.md` et palette
-  GUI à jour. 80×24 et 880–1200 px, quatre thèmes.
+**Parcours UI (S2c ; charger `ui-design-premium`, `tui-patterns`, `gui-tauri-patterns`)** :
+- **Devices** : « Forget… » par appareil (pas pour celui-ci : « Turn sync off » y propose « Leave the device list », avec le
+  texte R18). Dialogue en trois étapes : (1) ce que fait l'oubli (rotation, nouvelle passphrase sur chaque autre appareil, le
+  passé reste lisible par l'appareil oublié, **retirer son accès au dossier cloud**, `last_written`, appareils à mettre à
+  jour), (2) passphrase actuelle ou « Je ne la connais plus » (confirmation de niveau réinitialisation), (3) nouvelle
+  passphrase (générateur, jauge, case « I saved it… » qui conditionne « Forget and rotate keys »). Résultat : « Keys rotated.
+  Enter the new passphrase on: <appareils> » et, si des mots de passe étaient partagés, « Change these server passwords:
+  <comptes> » (F2). Section « Old keys in this keychain » avec « Remove ».
+- **Overview** : « Rotate keys… » ; « Passwords: Off / On (enabled by <appareil>) », « Include passwords… », « Rescan
+  passwords ».
+- **Barre de statut** : `Keys changed — enter new passphrase`, `Removed from sync`, `Key conflict`, `Rotation pending` ; le
+  dialogue d'adoption porte « If you did not change the keys on another device, type nothing. » ; celui du conflit de
+  rotation, le texte R17.
+- **Consentement**, **valeurs d'un appareil oublié**, **changements et suppressions de mots de passe reçus** : éléments de
+  l'onglet Received, décision explicite élément par élément, rien de présélectionné, liés à l'empreinte montrée.
+- **Conflits** de mot de passe sans valeur ; **issues** « pending (vault locked) ».
+- **Invite TOFU** (TUI et GUI) : ligne en lecture seule, texte neutre ou `status-warning` (R5) ; aucun bouton nouveau.
+- TUI : `f` (Devices), `R` et `P` (Overview) ; `docs/KEYBINDINGS.md` et palette GUI à jour ; 80×24, 880–1200 px, quatre
+  thèmes.
 
-**Tests** :
-- *Unitaires* — `bundle` : `rotate` (époque + 1, nouveau sel, emplacement non transplantable entre époques, DK_N n'ouvre pas
-  N + 1, P n'ouvre pas N + 1), roster v2 aller-retour, v1 toujours lisible, v2 refusé par un analyseur v1 (fixture 0.6.0 :
-  `sync_version`), cliquet v2 → v1 refusé, politique couverte par le MAC. `secret` : grammaire du compte (aller-retour,
-  `@` dans l'utilisateur, IPv6, refus de `unbound-password:` / `passphrase:` / `sync-key:`), AAD liée (compte, point, époque,
-  bundle : chaque champ échangé refusé), remplissage, `mac` déterministe, `Debug` caviardé, 1 Kio + 1 refusé.
-  `guard` : époque inférieure refusée, époque supérieure non authentifiée sans effet sur les marques, borne `revoked_clock`.
-  `IndexedSecretStore` : index avant `set`, après `delete`, génération, crash simulé.
-- *Propriétés* : lois de fusion (commutativité, associativité, idempotence, convergence) **avec** le crochet d'identité et des
-  rescellements aléatoires de mêmes valeurs ; filtre `revoked_clock` idempotent et indépendant de l'ordre.
-- *Plusieurs moteurs, dossier simulé* : `rotation_makes_new_snapshots_unreadable_with_old_dk` ;
-  `rotation_requires_new_passphrase_on_other_devices` ; `offline_device_adopts_and_keeps_its_local_edits` ;
-  `old_epoch_snapshot_is_never_merged_after_adoption` ; `rotation_crash_after_each_step_recovers` (injection entre chaque
-  étape de §13.3.4, avec et sans clé mémorisée) ; `concurrent_rotations_raise_rotation_conflict_and_lose_nothing` ;
-  `rotation_vs_concurrent_passphrase_change` ; `restored_old_bundle_toml_is_rewritten_by_current_device` ;
-  `forgotten_device_cannot_read_or_write_new_epoch` ; `forgotten_device_writes_relayed_by_stale_device_are_dropped` ;
-  `forgotten_device_with_new_passphrase_sees_device_forgotten` ; `leave_roster_on_disable` ; `orphan_key_entries_listed_and_removed` ;
-  `peer_on_0_6_sees_sync_version` ; `unbound_password_is_never_projected` ; `bound_password_not_offered_for_other_key_on_b` ;
-  `password_requires_consent_on_each_device` ; `policy_enabled_by_compromised_device_harvests_nothing_without_consent` ;
-  `keyring_error_is_never_a_deletion` ; `received_password_deletion_needs_a_choice` ; `password_conflict_has_no_value_in_dto` ;
-  `secrets_resealed_on_rotation_merge_without_conflict` ; `turning_passwords_off_purges_registers_but_no_local_password` ;
-  `vault_locked_keeps_received_password_pending`.
-- *Serveur russh en process* (skill `ssh-testing`) : mot de passe défini sur A, reçu sur B, envoyé par B seulement quand la
-  clé hôte présentée est la clé liée ; clé différente → invite TOFU avec « DIFFERS » et aucun envoi ; clé changée → refus
-  bloquant inchangé ; hôte certifié par une autorité.
-- **Exercice d'appareil perdu (critère de sortie S2)** : A, B, L partagent un bundle avec mots de passe ; L « perdu » garde
-  DK_N et P. Depuis A : oublier L (P'), B tape P' et adopte ; puis L : P et DK_N n'ouvrent rien de N + 1, ses instantanés (y
-  compris forgés au nom de B sous N) sont ignorés, son ancien `bundle.toml` remis en place est réécrit par A, ses écritures
-  relayées par un appareil en retard n'entrent pas dans N + 1 ; l'aperçu affiche les comptes à changer (F2) ; aucune donnée
-  de A ni de B perdue ; hygiène `"hunter2"` sur toute la séquence.
-- *UI* : captures TUI et GUI des dialogues d'oubli, de rotation, d'adoption, de conflit de rotation, de consentement, de
-  l'invite TOFU ; E2E bureau « deux profils, un dossier » étendu à la rotation.
+**Tests** (les tests exigés par la revue sont repris dans la table §13.11) :
+- *Unitaires* — `bundle` : `rotate` (époque + 1, `prev` vérifiable sous K_rot_N seulement, DK_N et P n'ouvrent pas N + 1),
+  roster v2 aller-retour, v1 toujours lisible et encodé à l'identique, v2 refusé par un analyseur v1 (fixture 0.6.0 :
+  `sync_version`), cliquet v2 → v1 refusé en `sync_rollback`, politique et `prev` couverts par le MAC, sous-clé `rotate`
+  distincte. `secret` : grammaire du compte (`@` dans l'utilisateur, IPv6, `HostKeyAlias`, refus de `unbound-password:` /
+  `passphrase:` / `sync-key:`), AAD liée (compte, point, époque, bundle, `v`, `algorithm`), remplissage, `mac` déterministe,
+  `Debug` caviardé, 1 Kio + 1 refusé. `guard` : époque inférieure, saut > 16, borne exacte `revoked_clock`.
+  `IndexedSecretStore` : index avant `set`, compteur global, `present = false`, crash simulé.
+- *Propriétés* : lois de fusion avec le crochet d'identité et des rescellements aléatoires ; mêmes acceptations sur tous les
+  appareils quelles que soient leurs marques hautes (R4) ; union de rosters v2 commutative, associative, idempotente, `revoked`
+  collant, politique fermée.
+- *Plusieurs moteurs* : `rotation_makes_new_snapshots_unreadable_with_old_dk`, `rotation_requires_new_passphrase_on_other_devices`,
+  `offline_device_adopts_and_keeps_its_local_edits`, `old_epoch_snapshot_is_never_merged_after_adoption`,
+  `rotation_crash_after_each_step_goes_forward` (avec et sans clé mémorisée, dossier remis en N entre-temps),
+  `rotation_preceded_by_a_timeout_at_step_4`, `concurrent_rotations_raise_rotation_conflict_and_lose_nothing`,
+  `rotation_vs_concurrent_passphrase_change`, `restored_old_bundle_toml_is_rewritten_by_current_device`,
+  `forged_u32_max_epoch_is_tampering`, `forgotten_device_cannot_read_or_write_new_epoch`,
+  `forgotten_device_writes_relayed_by_stale_device_are_dropped`, `forgotten_device_with_new_passphrase_sees_device_forgotten`,
+  `revoked_entries_are_never_pruned`, `orphan_key_entries_listed_and_removed`, `sync_remove_key_entry_refuses_non_sync_key_accounts`,
+  `stale_key_entries_collected_each_pass`, `peer_on_0_6_sees_sync_version`, `unbound_password_is_never_projected`,
+  `bound_password_not_offered_for_other_key_on_b`, `password_requires_consent_on_each_device`,
+  `policy_enabled_by_compromised_device_harvests_nothing_without_consent`, `keyring_error_is_never_a_deletion`,
+  `storage_switch_is_never_a_deletion`, `received_password_deletion_needs_a_choice`, `password_conflict_has_no_value_in_dto`,
+  `secrets_resealed_on_rotation_merge_without_conflict`, `turning_passwords_off_filters_registers_but_no_local_password`,
+  `vault_locked_keeps_received_password_pending`, `received_secrets_over_the_cap_are_ignored`.
+- *Serveur russh en process* : mot de passe défini sur A, reçu sur B, envoyé par B seulement à la clé liée ; clé différente →
+  ligne « DIFFÈRE » et aucun envoi, ni par mot de passe ni par keyboard-interactive ; clé changée → refus bloquant sans
+  `synced_binding` ; hôte certifié par une autorité.
+- **Exercice d'appareil perdu (critère de sortie S2)** : A, B, L (et un appareil en retard S) partagent un bundle avec mots de
+  passe ; L garde DK_N, P et l'accès au dossier. Depuis A : oublier L (P') ; B tape P' et adopte. Puis L : P et DK_N n'ouvrent
+  rien de N + 1 ; ses instantanés (y compris forgés au nom de B) sont ignorés ; son bundle N + 2 forgé sous P n'est pas adopté
+  (R1) ; son ancien `bundle.toml` remis en place est réécrit et ne fait publier personne sous DK_N (R2, variantes) ; S, qui a
+  appliqué des écritures de L avant d'apprendre la rotation, ne les republie pas (R3). Fin : aucun fichier écrit après la
+  rotation ne s'ouvre avec DK_N ; `sync-key:<bundle>:<N>` absente de tous les trousseaux restants, crash compris ; comptes à
+  changer affichés (F2) ; aucune donnée de A, B ou S perdue ; hygiène `"hunter2"` sur toute la séquence.
+- *UI* : captures TUI et GUI des dialogues ; E2E bureau « deux profils, un dossier » étendu à la rotation.
 
 **Découpage** :
 
 | Étape | Contenu | Critère de sortie |
 |---|---|---|
-| **S2a** | Bundle v2 et cliquet, rotation (autorisation, déroulé, reprise, adoption), fichiers d'une autre époque, réécriture d'un bundle plus ancien, rotations concurrentes, oubli d'un appareil (roster, `revoked_clock`, fichiers), `leave_roster`, `IndexedSecretStore`, entrées orphelines, API et erreurs, tests ci-dessus sauf mots de passe | Exercice d'appareil perdu sans mots de passe vert ; revue `agent-security` S2a |
-| **S2c-1** | UIs de rotation, d'oubli, d'adoption, de conflit de rotation, d'entrées orphelines (TUI + GUI) | Exercice d'appareil perdu fait dans les deux UIs ; revue `agent-design-review` |
-| **S2b** | Valeur `secret`, crochet d'identité, projection et application, consentement, politique, TOFU `synced_binding`, suppressions et conflits | Mot de passe mémorisé sur A proposé sur B seulement pour la même clé vérifiée ; revues `agent-security` et `agent-ssh-protocols` |
-| **S2c-2** | UIs des mots de passe (politique, consentement, issues, conflits, ligne TOFU) | Exercice complet avec mots de passe dans les deux UIs ; revue `agent-design-review` ; clôture de phase |
+| **S2a** | Bundle v2 (`prev`, sous-clé `rotate`, roster v2 avec `revoked` et `policy.generation`, version lue), cliquet et code `sync_rollback` pour une rétrogradation de format, plancher local, `rotation.toml`, `bundle.verified` / `bundle.next`, rotation vers l'avant, adoption (filiation, passphrase ≠ ancien bundle, cache par époque, jamais de rattachement vers le bas), arrêt sur en-tête d'époque supérieure, refus du rattachement à un bundle remis en arrière, réécriture d'un bundle refusé, rotations concurrentes, oubli (`revoked_clock` exact, fichiers, provenance au nouveau rattachement), `leave_roster` en v2, union v2, **politique des mots de passe et filtre `secret` à la fusion** (R8), `IndexedSecretStore` (compteur monotone, tous les chemins), collecte et liste des clés orphelines, API et erreurs | Exercice d'appareil perdu sans mots de passe vert (R1, R2, R3 compris) ; revue `agent-security` S2a |
+| **S2c-1** | UIs de rotation, d'oubli, d'adoption, de conflit de rotation, des valeurs d'appareils oubliés, des clés orphelines | Exercice fait dans les deux UIs ; revue `agent-design-review` |
+| **S2b** | Valeur `secret` (`mac` vérifié sur le clair), crochet d'identité, confiance des liaisons, projection (union d'énumération, « oublié ici », stockage), application (inconnus seulement), décisions sur changements et suppressions, `previous-password:`, consentement par génération, plafonds, `synced_binding` | Mot de passe mémorisé sur A proposé sur B seulement pour la même clé vérifiée ; revues `agent-security` et `agent-ssh-protocols` |
+| **S2c-2** | UIs des mots de passe (politique, consentement, décisions, conflits, ligne TOFU) | Exercice complet avec mots de passe dans les deux UIs ; revue `agent-design-review` ; clôture de phase |
 
-S2a et S2c-1 peuvent sortir dans une version sans S2b (décision #12). **Aucune version n'expose S2b sans S2a et S2c-1.**
-À la clôture : `SECURITY.md` (passé exposé après oubli, consentement, liaison, appareil sur « ne pas mémoriser »),
-`CLAUDE.md` §2 (ligne secrets : « synchronisés seulement liés, re-chiffrés, opt-in au niveau du bundle et de l'appareil »),
-`docs/KEYBINDINGS.md`, `docs/PLAN.md`.
+S2a et S2c-1 peuvent sortir sans S2b (décision #12) ; **aucune version n'expose S2b sans S2a et S2c-1**. À la clôture :
+`SECURITY.md` (passé exposé après oubli, accès au dossier cloud, consentement, liaison et confiance, appareil « ne pas
+mémoriser »), `CLAUDE.md` §2 (secrets : « synchronisés seulement liés, re-chiffrés, opt-in au niveau du bundle et de
+l'appareil »), `docs/KEYBINDINGS.md`, `docs/PLAN.md`.
 
-**Points de revue** : `agent-security` sur cette conception, puis après S2a (rotation, crash, cliquet, `revoked_clock`,
-réécriture de bundle, index), après S2b (couche interne, crochet d'identité, consentement, hygiène) et à la clôture ;
-`agent-ssh-protocols` sur la liaison à l'empreinte (certificats, clés multiples, `synced_binding`) ; `agent-design-review`
-sur S2c-1 et S2c-2.
+**Points de revue** : `agent-security` après S2a (rotation, plancher, reprise, filiation, `revoked_clock`, union), après S2b
+(couche interne, `mac`, crochet d'identité, consentement, hygiène) et à la clôture ; `agent-ssh-protocols` sur la liaison
+(certificats, clés multiples, confiance, `synced_binding`, keyboard-interactive) ; `agent-design-review` sur S2c-1 et S2c-2.
 
-### 13.9 Questions ouvertes pour le propriétaire (avec recommandation)
+### 13.9 Décisions du propriétaire (2026-10-27)
 
-| # | Question | Recommandation |
+| # | Question | Décision |
 |---|---|---|
-| Q1 | La rotation impose-t-elle **toujours** une nouvelle passphrase, ou propose-t-on « garder la passphrase » (protège d'une DK volée sur un appareil qui n'a jamais connu la passphrase, pas d'une passphrase vue) ? | **Toujours une nouvelle passphrase.** Un seul message clair (« rotation = nouvelle passphrase »), et un appareil compromis a pu voir la passphrase taper au rattachement ou au déverrouillage |
-| Q2 | « Oublier un appareil » fait-il **toujours** tourner les clés, ou propose-t-on un « retirer de la liste seulement » pour un appareil effacé ? | **Toujours.** Le départ honnête se fait depuis l'appareil lui-même (« Désactiver » avec « quitter la liste », §13.4.5) |
-| Q3 | En plus du réglage du bundle (F12), faut-il un **consentement par appareil** avant de partager ou recevoir des mots de passe ? | **Oui.** Sans lui, un appareil compromis active la politique et récolte les mots de passe de tous les autres à leur passe suivante |
-| Q4 | Une **suppression** de mot de passe reçue s'applique-t-elle automatiquement ? | **Non** : issue « l'oublier ici aussi / le garder et le repartager », comme les hôtes supprimés de S1b qui laissent les secrets locaux |
-| Q5 | Passer `bundle.toml` en version 2 à la première opération S2, ce qui arrête la sync des appareils 0.6 jusqu'à leur mise à jour ? | **Oui**, avec la liste des appareils concernés avant de confirmer ; pas de bascule à la simple mise à jour |
-| Q6 | La rotation sans la passphrase actuelle (« je ne la connais plus ») est-elle permise, comme la réinitialisation (#8) ? | **Oui**, derrière la même confirmation supplémentaire : l'appareil perdu peut être celui où l'utilisateur la tapait |
+| Q1 | La rotation impose-t-elle toujours une nouvelle passphrase ? | **Oui** (propriétaire). |
+| Q2 | « Oublier un appareil » fait-il toujours tourner les clés ? | **Oui** (choix par défaut de l'orchestrateur). Le départ honnête passe par « Désactiver » avec « quitter la liste » |
+| Q3 | Consentement par appareil en plus du réglage du bundle ? | **Oui** (propriétaire), lié à `policy.generation` (R8) |
+| Q4 | Une suppression de mot de passe reçue s'applique-t-elle automatiquement ? | **Non, on demande** (propriétaire). Étendu par la revue aux **changements** reçus d'un compte qui a une valeur locale (R7) ; l'ancienne valeur reste récupérable |
+| Q5 | `bundle.toml` v2 à la première opération S2, avec la liste des appareils 0.6 ? | **Oui** (propriétaire) |
+| Q6 | Rotation sans la passphrase actuelle, derrière la confirmation de niveau réinitialisation ? | **Oui** (choix par défaut de l'orchestrateur) |
 
 ### 13.10 Risques
 
-1. **Friction de la rotation** : chaque appareil doit retaper la nouvelle passphrase ; des utilisateurs éviteront de faire
-   tourner les clés. Seul S3 (emplacements par appareil) l'enlève. Rappel discret dans l'aperçu d'oubli.
-2. **Le passé reste lisible** par l'appareil oublié (réplica, trousseau, instantanés d'époque N, historique du fournisseur
-   avec P) : seuls le changement des mots de passe serveurs et la rotation protègent l'avenir. Le texte de l'UI doit le dire
-   sans ambiguïté (F2).
-3. **Complexité de `revoked_clock`** (filtre, différé, adoption par nouveau rattachement) : surface de bogues dans la fusion ;
-   couverte par proptest et l'exercice d'appareil perdu, revue dédiée.
-4. **Appareil « ne pas mémoriser » éteint pendant une rotation** : réplica perdu, nouveau rattachement avec revue de ses
-   différences locales (rien de local n'est effacé, mais l'expérience est lourde).
-5. **Rotations concurrentes** : rares, mais demandent une décision de l'utilisateur sur chaque appareil concerné ; un
-   attaquant du dossier peut les simuler (déni de service seulement, comme A4).
-6. **Crochet d'identité dans la couche générique** : touche aux lois de fusion ; une erreur produirait des conflits fantômes
-   ou, pire, une fusion de valeurs différentes. Proptest obligatoire.
-7. **Lectures du trousseau** à l'amorçage : sur macOS, la TUI non signée peut afficher une demande par élément ; sous Linux
-   sans Secret Service, le vault verrouillé met tout en attente. Les modifications faites hors de Portico ne sont vues que par
-   « Relire les mots de passe ».
-8. **Valeur hostile d'un appareil compromis** : un mauvais mot de passe envoyé au bon serveur peut déclencher un blocage
-   (fail2ban). Atténué par la marque « changé par <appareil> » et le nombre d'essais existant ; résiduel jusqu'à l'oubli.
-9. **Algorithme de clé hôte négocié différent sur B** (B connaît la clé ecdsa, le mot de passe est lié à la clé ed25519) :
-   le mot de passe n'est pas proposé ; correct pour la sécurité, surprenant pour l'utilisateur (la ligne TOFU l'explique).
-10. **Appareils 0.6** coupés au premier usage d'une fonction S2 (atténué par l'avertissement préalable).
+1. **Friction de la rotation** : chaque appareil retape la nouvelle passphrase ; seul S3 l'enlève.
+2. **Le passé reste lisible** par l'appareil oublié ; seuls le changement des mots de passe serveurs, le retrait de son accès
+   au dossier cloud et la rotation protègent l'avenir.
+3. **Déni de service par le dossier** : un attaquant du dossier (ou l'appareil oublié tant qu'il y a accès) peut forger une
+   époque supérieure invérifiable ou un en-tête d'instantané d'époque supérieure et arrêter la sync (R1, R2 ; coût A4) ;
+   jamais de fuite ni d'adoption.
+4. **Complexité** de `revoked_clock`, de la provenance au nouveau rattachement et de l'union v2 : surface de bogues dans la
+   fusion, couverte par proptest et l'exercice d'appareil perdu.
+5. **Appareil « ne pas mémoriser » éteint pendant une rotation** : nouveau rattachement avec revue.
+6. **Rotations concurrentes** : décision de l'utilisateur sur chaque appareil concerné ; « garder mes clés » peut perdre un
+   oubli fait par l'autre rotation (texte R17).
+7. **Crochet d'identité** : touche aux lois de fusion ; proptest obligatoire.
+8. **Lectures du trousseau** à l'amorçage (demandes macOS pour la TUI non signée, vault verrouillé) ; modifications faites hors
+   de Portico vues seulement par « Relire ».
+9. **Valeur hostile d'un appareil compromis** : un nouveau compte peut être poussé (envoyé seulement à la clé liée, avec une
+   confiance déclarée par l'appareil compromis, d'où le texte neutre de R5) ; les changements et suppressions demandent un
+   geste.
+10. **Algorithme négocié différent sur B** : mot de passe non proposé (sûr, surprenant).
+11. **Appareils 0.6** coupés au premier usage d'une fonction S2, `leave_roster` compris.
+
+### 13.11 Revue de sécurité de la conception S2 (agent-security, 2026-10-27, sur `1686333`)
+
+Verdict initial : « pas encore sûr face à l'appareil oublié » (2 ÉLEVÉ, 7 MOYEN, 9 FAIBLE). Tous intégrés ci-dessus ; à
+vérifier à l'implémentation. Vérifié correct par la revue : un seul chemin d'authentification avec identité vérifiée par
+rebond, aucune API ne rend de secret, clé hôte changée toujours bloquante, échec sûr de 0.6.0 sur un v2, instantanés d'une
+autre époque jamais fusionnés, K_cmp par époque et par compte, comptes du trousseau sans secret, `BoundAccount`, conflits sans
+valeur, suppressions en issues, attente si le vault est verrouillé.
+
+| # | Gravité | Constat | Exigence intégrée | § | Test exigé | État |
+|---|---|---|---|---|---|---|
+| R1 | ÉLEVÉ | Rotation forgée par l'appareil oublié, ouverte avec l'ancienne passphrase, adoptée | `prev` + sous-clé `rotate` sous le MAC ; filiation exigée à E + 1 ; passphrase d'adoption ≠ emplacement de `bundle.verified` ; texte « ne tapez rien » ; DoS documenté | 13.2, 13.3.2, 13.3.5 | `forged_rotation_with_old_passphrase_is_never_adopted`, `rotation_without_valid_prev_proof_is_tampering` | conçu |
+| R2 | ÉLEVÉ | Un ancien `bundle.toml` remis en place ramène des appareils sous DK_N (appareil en retard, rattachement vers le bas, cache de clé, reprise décidée par le dossier, aucune copie locale, nouvel appareil) | plancher local (`sync.toml` + `rotation.toml`) avant toute ouverture ; jamais de rattachement quand le réplica est en avance ; cache par (bundle, époque) ; `bundle.verified` / `bundle.next` ; reprise vers l'avant ; arrêt sur en-tête d'époque supérieure ; rattachement refusé ; rappel « accès au dossier cloud » | 13.2, 13.3.4–13.3.6, 13.4.1 | `restored_old_bundle_never_makes_a_device_publish_under_old_dk` (variantes : « ne pas mémoriser » + P, deux processus, crash après l'étape 5, appareil en retard, nouvel appareil) | conçu |
+| R3 | MOYEN | Écritures de l'appareil oublié blanchies par le nouveau rattachement d'un appareil en retard | provenance calculée avant de vider l'état ; clés exclues de la projection jusqu'à décision sans défaut ; mots de passe restaurés ou retenus | 13.4.2 | `revoked_writes_applied_on_stale_device_are_not_republished_after_rejoin` | conçu |
+| R4 | MOYEN | Mécanique `revoked_clock` / roster v2 | valeur exacte partout ; `revoked` jamais élagué (plafond 1024) ; `leave_roster` en v2 avec son propre compteur ; union champ par champ (`revoked` collant, politique fermée) ; ancien id révoqué au nouveau rattachement | 13.2, 13.3.5, 13.4.1, 13.4.2, 13.4.5, 13.4.6 | proptest « mêmes acceptations », `leave_roster_with_0_6_peer_gives_sync_version_not_a_silent_stall`, `revoked_entries_are_never_pruned` | conçu |
+| R5 | MOYEN | La ligne TOFU « correspond » amplifie la confiance | confiance enregistrée à la liaison ; seules `KnownHostsMatch` / `Certificate` / `UserAccepted` projetées ; texte neutre ; jamais sur `HostKeyChanged` | 13.5.1, 13.6.4 | `auto_accepted_binding_is_never_projected`, `host_key_changed_has_no_synced_binding` | conçu |
+| R6 | MOYEN | `mac` jamais vérifié sur le clair | recalcul en temps constant à chaque ouverture ; `sync_secret_invalid` + `Divergent` ; `v` et `algorithm` dans l'AAD | 13.5.2, 13.6.3 | `secret_with_mismatched_mac_is_refused` | conçu |
+| R7 | MOYEN | Un changement reçu appliqué détruit la valeur locale | changement d'un compte existant = décision (Q4 étendue) ; `previous-password:` récupérable | 13.6.4 | `received_password_change_keeps_previous_value_recoverable` | conçu |
+| R8 | MOYEN | Consentement lié à un id réutilisable | `policy.generation` croissante ; consentement par génération, effacé à la désactivation ; filtre à la fusion dès S2a | 13.2, 13.5.3 | `reenabled_policy_with_same_id_requires_new_consent` | conçu |
+| R9 | MOYEN | Oubli local perdu puis ressuscité ; génération remise à zéro | énumération `[bound_passwords]` ∪ réplica ; compteur global, entrées `present = false` ; marque « oublié ici » ; tous les chemins par le magasin indexé | 13.6.1 | `forgotten_password_is_tombstoned_not_resurrected`, `delete_then_reset_same_value_is_projected` | conçu |
+| R10 | FAIBLE | Époque non authentifiée `u32::MAX` | `epoch = prev.epoch + 1`, saut ≤ 16 ; réécriture d'un bundle refusé | 13.2, 13.3.2 | `forged_u32_max_epoch_is_tampering` | conçu |
+| R11 | FAIBLE | Abandon de l'étape 4 sur une erreur ambiguë | plus d'abandon après l'étape 3 ; réessai depuis `bundle.next` | 13.3.4 | `rotation_preceded_by_a_timeout_at_step_4` | conçu |
+| R12 | FAIBLE | Étape 8 non rejouée après crash | collecte des `sync-key` d'époque inférieure à chaque passe | 13.3.4, 13.3.8 | `stale_key_entries_collected_each_pass` (exercice : clé N absente partout) | conçu |
+| R13 | FAIBLE | Retour à 0.6.0 et cliquet | `sync.toml` inchangé (`rotation.toml` à part, `epoch_created_here` dans le réplica) ; MAC et cliquet sur la version lue ; rétrogradation → `sync_rollback` | 13.2, 13.3.7 | `downgrade_to_0_6_can_still_disable`, `format_downgrade_is_sync_rollback` | conçu |
+| R14 | FAIBLE | Bascule de stockage vue comme une suppression massive | stockage retenu dans le réplica ; absence comptée seulement dans le même stockage | 13.6.1 | `storage_switch_is_never_a_deletion` | conçu |
+| R15 | FAIBLE | `sync_remove_key_entry` trop large | seulement un compte indexé `sync-key:*` non courant | 13.3.8 | `sync_remove_key_entry_refuses_non_sync_key_accounts` | conçu |
+| R16 | FAIBLE | Grammaire et plafonds des secrets reçus | `known_hosts::validate_host_name` + aller-retour ; 256 comptes, 4 empreintes par compte | 13.5.1 | `received_secrets_over_the_cap_are_ignored`, grammaire en unitaires | conçu |
+| R17 | FAIBLE | « Garder mes clés » perd les oublis de l'autre rotation | texte du dialogue | 13.3.7 | capture UI | conçu |
+| R18 | FAIBLE | `leave_roster` sans oublier la clé = retiré sans rotation | texte du dialogue | 13.4.5 | capture UI | conçu |
+
+Ajouts à l'exercice d'appareil perdu demandés par la revue : tests de R1, R2 et R3 (cœur du critère de sortie), proptest de
+convergence `revoked_clock`, entrées révoquées jamais élaguées, `leave_roster` face à un pair 0.6, `mac` incohérent,
+consentement réutilisé, résurrection après oubli, liaison `AutoAccepted` non projetée, pas de `synced_binding` sur clé
+changée, mot de passe reçu jamais envoyé par keyboard-interactive à une autre clé (serveur russh), `sync_remove_key_entry`
+refusant les autres comptes, clé N absente de tous les trousseaux restants (crash compris), époque forgée `u32::MAX`, rotation
+précédée d'un délai dépassé à l'étape 4. Tous figurent en §13.8.
