@@ -725,7 +725,9 @@ mod tests {
             "synced host `web` jumps through `bastion`, which is not known on this device"
         );
         assert_eq!(
-            message(SyncError::SnippetUnconfirmed { id: "deploy".into() }),
+            message(SyncError::SnippetUnconfirmed {
+                id: "deploy".into()
+            }),
             "snippet `deploy` was changed by sync: review and confirm it before running it"
         );
         let taken = crate::managed_hosts::ManagedHostError::AliasTaken {
