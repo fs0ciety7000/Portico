@@ -789,9 +789,33 @@ Les deux UIs couvrent tous les parcours de §6 et ce que la liste ci-dessus atte
 | A1 | MOYEN | GUI : la commande d'un snippet reçu pouvait cacher une charge sous un pli de défilement invisible (F8) | GUI : « N lines · M characters », numéros de ligne, confirmation inactive tant que la fin n'a pas défilé, fondu « ↓ more ». TUI (parité) : `y` refusé tant que la dernière ligne de l'élément reçu n'a pas été affichée (« PgDn read to the end ») | ✅ |
 | A2 | FAIBLE | TUI : les tabulations d'une commande reçue étaient retirées à l'affichage mais tapées | Tabulation affichée en `→` discret (revue des snippets, vues de conflit) ; GUI de même | ✅ |
 | A3 | FAIBLE | GUI : la passphrase générée restait côté Rust après la fermeture du dialogue | `sync_forget_generated` à la fermeture, expiration 10 min, jeton aléatoire | ✅ |
-| A4 | FAIBLE | La passphrase générée restait dans le presse-papiers | Vidé après 30 s (TUI : OSC 52 vide, séquence en `Zeroizing`, sauf copie plus récente ; GUI : voir son commit) ; note « Copied — cleared from the clipboard in 30 s » | ✅ |
+| A4 | FAIBLE | La passphrase générée restait dans le presse-papiers | Vidé après 30 s (TUI : OSC 52 vide, séquence en `Zeroizing`, sauf copie plus récente ; GUI : voir ci-dessous) ; note « Copied — cleared from the clipboard in 30 s » | ✅ |
 | A5 | FAIBLE | Résolution d'un conflit non liée au contenu montré | `SyncConflict::sides_hash`, `sync_resolve(id, resolution, sides_hash)` → `sync_not_pending` si les côtés ont changé ; TUI : `↵` réarmé 400 ms à de nouveaux côtés ; GUI : choix réinitialisés | ✅ |
 | A6 | FAIBLE | La doc disait « aucune confirmation groupée » alors que la GUI a « Confirm selected » | Décision : comportement GUI conservé, doc reformulée (sélection explicite élément par élément, rien de présélectionné, aucun « tout sélectionner ») | ✅ |
+
+Côté GUI, en pratique (`8bb6ffd`, `eaf150c`) :
+
+- **Presse-papiers (A4)** : `apps/portico-gui/src/lib/secretclip.ts` ne garde qu'un SHA-256 de la passphrase copiée,
+  jamais son texte. Après 30 s, il relit le presse-papiers (`readText`, la permission du collage du terminal) et le
+  vide s'il contient toujours cette passphrase. Si la lecture est refusée, il le vide quand même, mais seulement si
+  cette copie est encore la dernière faite par ce module (une copie plus récente a son propre minuteur) : vider un
+  presse-papiers rempli entre-temps est un moindre mal que d'y laisser une passphrase. Le minuteur survit à la
+  fermeture du dialogue.
+- **Revue d'un snippet reçu (A1)** : « N lines · M characters », numéros de ligne, tabulations et caractères de
+  contrôle visibles ; « Confirm » (bouton et touche) inactif tant que la fin de la commande n'a pas été vue (défilement
+  jusqu'en bas, ou tout de suite si elle tient), remis à zéro quand la vue change ; « ↓ more » tant qu'elle n'est pas
+  au bout. La revue nomme l'appareil (« Changed by studio-mac (3f9c0ae1). », `UnconfirmedSnippet::devices`, B14).
+- **Passphrase générée (A3)** : gardée côté Rust sous un jeton aléatoire de 128 bits, à usage unique, expirée après
+  10 min ; `sync_forget_generated` l'efface dès que le dialogue se ferme ou que l'on tape la sienne.
+- **Q1** : case « I saved it. A lost passphrase cannot be recovered unless a device remembers the key. » sur l'étape
+  de création (exigée pour « Create ») et sur la revue de rattachement (exigée pour « Join ») ; plus d'écran final.
+- **Q2** : `app.sync` = `Mod+Shift+Y` partout (`⌘⇧Y` / `Ctrl-Shift-Y`, l'équivalent de `Ctrl-Space y`) ;
+  `hosts.sync` = `Shift+S` dans la liste des hôtes (comme `S` en TUI) ; affichés dans la palette et le titre de
+  l'élément de statut.
+
+`UnconfirmedSnippet::devices` (B14, cœur) : labels des appareils qui ont écrit le contenu retenu, lus dans le registre
+à chaque passe (cet appareil exclu) ; vide tant que la synchronisation est verrouillée ou désactivée depuis le
+lancement (les deux UIs disent alors « another device »).
 
 **Conception** (agent-design-review, verdict « presque ») : tout appliqué. Côté TUI : B2 (identifiants entre accents
 graves dans les messages du cœur ; `sentence()` ne met jamais de majuscule à un mot qui commence par un accent grave et
