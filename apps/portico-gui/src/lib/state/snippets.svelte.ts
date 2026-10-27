@@ -5,6 +5,7 @@
 // and the placeholder values only.
 import { asError, type ErrorSummary, type Snippet, type SnippetDraft } from "../api";
 import { backend } from "../backend";
+import { sync, UNCONFIRMED } from "./sync.svelte";
 import { workspace } from "./workspace.svelte";
 
 /** Where a snippet would run: the active tab's terminal, if it has a shell. */
@@ -143,7 +144,14 @@ class Snippets {
       await backend.runSnippet(target.terminal, snippet.id, values, target.bracketed(), run);
       return null;
     } catch (e) {
-      return asError(e);
+      const error = asError(e);
+      // Changed by sync and not confirmed on this device (F8): its review,
+      // not a bare error.
+      if (error.code === UNCONFIRMED) {
+        this.close();
+        if (await sync.reviewSnippetById(snippet.id)) return null;
+      }
+      return error;
     }
   }
 }

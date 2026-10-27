@@ -43,7 +43,12 @@ import {
   type Recording,
 } from "./api";
 
-export interface Backend {
+/** The folder sync commands (phase 11), same signatures as `api`. */
+export type SyncBackend = {
+  [K in keyof typeof api as K extends `sync${string}` | "confirmSyncedSnippet" ? K : never]: (typeof api)[K];
+};
+
+export interface Backend extends SyncBackend {
   listHosts(): Promise<Host[]>;
   searchHosts(query: string): Promise<Host[]>;
   listThemes(): Promise<ThemeInfo[]>;

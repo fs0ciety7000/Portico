@@ -11,6 +11,7 @@
   import { dur } from "../motion";
   import { isMac } from "../keys";
   import { emptyDraft, NEEDS_PASTE_MODE, scopeLabel, snippets, type SnippetTarget } from "../state/snippets.svelte";
+  import { sync } from "../state/sync.svelte";
   import Modal from "./Modal.svelte";
 
   let { target }: { target: SnippetTarget | null } = $props();
@@ -38,6 +39,13 @@
   });
 
   function startRun(s: Snippet | undefined) {
+    // Changed by sync and not confirmed here (F8): its review first.
+    const received = s ? sync.snippets.find((u) => u.id === s.id) : undefined;
+    if (received) {
+      snippets.close();
+      sync.reviewSnippet(received);
+      return;
+    }
     if (!s || !canRun || !applies(s)) return;
     if (s.placeholders.length) snippets.view = { kind: "run", snippet: s, error: null };
     else void runNow(s, {}, null);
@@ -347,6 +355,7 @@
               <span class="name">{s.name}</span>
               <span class="badge" class:global={s.scope.kind === "global"}>{scopeLabel(s)}</span>
               {#if !s.run}<span class="badge">paste only</span>{/if}
+              {#if sync.unconfirmedIds.has(s.id)}<span class="badge received" title="Changed by sync on another device: review its command before it runs (↵)">received · confirm first</span>{/if}
               {#if !ok && snippets.alias}<span class="not-here">not for {snippets.alias}</span>{/if}
             </div>
             <div class="line sub">
@@ -441,6 +450,7 @@
     white-space: nowrap;
   }
   .badge.global { color: var(--text-muted); border-color: var(--border-subtle); }
+  .badge.received { color: var(--status-authenticating); border-color: color-mix(in srgb, var(--status-authenticating) 55%, transparent); }
   .state { display: grid; gap: var(--space-1); padding: var(--space-3); color: var(--text-secondary); font-size: var(--text-sm); }
   .state strong { color: var(--text-primary); font-weight: 550; font-size: var(--text-base); }
   .state.error strong { color: var(--status-error); }

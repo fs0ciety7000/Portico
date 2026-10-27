@@ -1,6 +1,8 @@
 // Simulated engine so the UI can be designed in a plain browser (`pnpm dev`)
 // without the Tauri runtime. Never used inside the desktop app.
 //
+// Folder sync: see demo-sync.ts (`?sync=on`…).
+//
 // Scenarios: `bastion` connects through the agent, `web-01` asks to trust a
 // new host key, `db-prod` goes through a jump host and asks for a password
 // (anything but "wrong" works), `staging` presents a changed host key.
@@ -12,6 +14,7 @@ import { demoKeys } from "./demo-keys";
 import { demoMeta } from "./demo-meta";
 import { demoImport } from "./demo-import";
 import { demoRecording } from "./demo-recording";
+import { demoSync } from "./demo-sync";
 
 const base = {
   identityFiles: [],
@@ -405,6 +408,8 @@ function demoSearch(q: string): Host[] {
   );
 }
 
+const syncDemo = demoSync(emit);
+
 const managed = demoHostsBackend({ emit, hosts: demoHosts, keys: () => keyDemo.listKeys(), vaultStatus: () => keyDemo.vaultStatus() });
 
 export const demoBackend: Backend = {
@@ -413,6 +418,11 @@ export const demoBackend: Backend = {
   ...demoImport,
   ...rec.backend,
   ...managed,
+  ...syncDemo.backend,
+  async runSnippet(terminal, id, values, bracketed, run) {
+    syncDemo.checkRun(id);
+    return keyDemo.runSnippet(terminal, id, values, bracketed, run);
+  },
   // Copies: the UI's state never aliases the simulation's own objects.
   listHosts: async () => demoHosts.map((h) => structuredClone(h)),
   searchHosts: async (q) => demoSearch(q),

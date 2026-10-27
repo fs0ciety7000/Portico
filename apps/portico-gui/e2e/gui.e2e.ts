@@ -849,6 +849,83 @@ test("Termix re-import that moves a host: skipped by default, accepted only when
   assert.equal(readFileSync(hostsConf, "utf8"), before, "hosts.conf unchanged");
 });
 
+/** The native folder chooser (GTK): type the path, then choose it. */
+async function pickNativeFolder(path: string, title: string): Promise<void> {
+  await pickNativeFile(`${path}/`, title);
+  // A folder chooser may first open the typed folder: Enter again chooses it.
+  for (let i = 0; i < 3; i++) {
+    await sleep(600);
+    let open = "";
+    try {
+      open = execFileSync("xdotool", ["search", "--onlyvisible", "--name", title], { encoding: "utf8" }).trim();
+    } catch {
+      return; // gone: chosen
+    }
+    if (!open) return;
+    execFileSync("xdotool", ["key", "Return"]);
+  }
+}
+
+test("sync: set up a folder with a generated passphrase, then turn it off (local data kept)", async () => {
+  const folder = join(root, "sync-folder");
+  mkdirSync(folder, { recursive: true });
+  const hostsConf = join(configDir, "hosts.conf");
+  const hostsBefore = readFileSync(hostsConf, "utf8");
+  await hostsView();
+  assert.match(await text("[data-testid=sync-status]"), /Sync off/);
+  await palette("Sync…");
+  await dialog("Only encrypted files leave this machine");
+  await clickButton("Choose a folder");
+  await pickNativeFolder(folder, "Sync folder");
+  await dialog("Ready for a new sync");
+  assert.match(await modal(), /sync-folder/);
+  await capture("sync-folder");
+  await clickButton("Create the sync here");
+  await dialog("Create the sync");
+  await clickButton("Generate a passphrase");
+  await waitFor("generated passphrase", () => s.find("[data-testid=sync-generated]"));
+  const words = (await text("[data-testid=sync-generated] .words")).trim();
+  assert.equal(words.split(/\s+/).length, 6, words);
+  assert.match(await modal(), /Strong/);
+  // Not remembered: the test session has no keychain to rely on.
+  await s.exec(
+    `const boxes = [...document.querySelectorAll('.modal label.check')];
+     boxes.find((l) => l.innerText.includes('I wrote it down')).querySelector('input').click();
+     boxes.find((l) => l.innerText.includes('Remember the key')).querySelector('input').click();`,
+  );
+  await capture("sync-create");
+  await clickButton("Create sync");
+  await waitFor("recovery screen", async () => (await modal()).includes("Keep the passphrase safe"), 60_000);
+  await sleep(700);
+  // The folder holds only sealed files: never the passphrase.
+  const bundle = readFileSync(join(folder, "portico-sync/bundle.toml"), "utf8");
+  for (const w of words.split(/\s+/)) assert.ok(!bundle.includes(w), "no passphrase word in bundle.toml");
+  // Done stays off until "I understand".
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal footer button.primary').disabled"), true);
+  await s.exec("document.querySelector('.modal label.check input').click()");
+  await clickButton("Done");
+  await noDialog();
+  await waitFor("synced", async () => /Synced|Syncing/.test(await text("[data-testid=sync-status]")), 30_000);
+  await waitFor("device file", () => readdirSync(join(folder, "portico-sync/devices")).some((f) => f.endsWith(".snap")), 30_000);
+
+  // The panel: this device, then turn off (forget the key by default).
+  await palette("Sync…");
+  await dialog("This device");
+  await clickButton("Devices");
+  await waitFor("device listed", async () => /this device/.test(await modal()));
+  await sleep(400); // the section's entry transition
+  await capture("sync-devices");
+  await clickButton("Overview");
+  await sleep(300);
+  await clickButton("Turn sync off");
+  await dialog("Turn sync off on this device");
+  assert.equal(await s.exec<boolean>("return document.querySelector('.modal label.check input').checked"), true, "forget the key by default");
+  await clickButton("Turn off");
+  await noDialog();
+  await waitFor("sync off", async () => /Sync off/.test(await text("[data-testid=sync-status]")));
+  assert.equal(readFileSync(hostsConf, "utf8"), hostsBefore, "local hosts untouched");
+});
+
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();

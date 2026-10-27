@@ -45,6 +45,12 @@
   import { links } from "./lib/state/links.svelte";
   import RecBadge from "./lib/components/RecBadge.svelte";
   import { recordings } from "./lib/state/recordings.svelte";
+  import { sync } from "./lib/state/sync.svelte";
+  import SyncStatusItem from "./lib/components/SyncStatusItem.svelte";
+  import SyncWizard from "./lib/components/SyncWizard.svelte";
+  import SyncPanel from "./lib/components/SyncPanel.svelte";
+  import SyncForms from "./lib/components/SyncForms.svelte";
+  import SyncReview from "./lib/components/SyncReview.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import HostDetails from "./lib/components/HostDetails.svelte";
@@ -104,7 +110,8 @@
       recordings.open ||
       !!links.pending ||
       settings.open ||
-      updates.open,
+      updates.open ||
+      !!sync.view,
   );
   /** Terminals being recorded (any tab): REC in the status bar. */
   const recCount = $derived(Object.keys(recordings.active).length);
@@ -472,6 +479,26 @@
     });
   });
 
+  /** Folder sync (phase 11): palette only (no default key). */
+  const syncCommands: Command[] = $derived([
+    {
+      id: "sync.open",
+      title: "Sync…",
+      hint: sync.enabled ? (sync.overview?.folder ?? "encrypted folder sync") : "encrypted folder sync · set up",
+      run: () => sync.show(),
+    },
+    ...(sync.enabled && sync.status?.state !== "locked"
+      ? [{ id: "sync.now", title: "Sync now", hint: sync.overview?.folder ?? undefined, run: () => void sync.act(() => backend.syncNow()).then((e) => e && workspace.notify(e)) }]
+      : []),
+    ...(sync.status?.state === "locked" ? [{ id: "sync.unlock", title: "Unlock sync…", run: () => sync.open({ kind: "form", form: "unlock" }) }] : []),
+    ...(sync.received
+      ? [{ id: "sync.received", title: `Review received changes (${sync.received})`, hint: "hosts and snippets from your other devices", run: () => sync.open({ kind: "panel", tab: "received" }) }]
+      : []),
+    ...(sync.conflictCount
+      ? [{ id: "sync.conflicts", title: `Resolve sync conflicts (${sync.conflictCount})`, run: () => sync.open({ kind: "panel", tab: "conflicts" }) }]
+      : []),
+  ]);
+
   // Ids are the stable action ids of `shortcuts.ts` (bindable in settings.toml).
   const commands: Command[] = $derived([
     {
@@ -632,6 +659,7 @@
           { id: "tab.prev", title: "Previous tab", shortcut: k("tab.prev"), run: () => workspace.cycle(-1) },
         ]
       : []),
+    ...syncCommands,
     { id: "app.reload", title: "Reload ~/.ssh/config", shortcut: k("app.reload"), run: load },
     { id: "app.theme", title: "Next theme", shortcut: k("app.theme"), hint: `Now: ${settings.label}`, run: () => settings.cycle() },
     { id: "app.settings", title: "Settings…", hint: "theme, copy on select, updates", shortcut: k("app.settings"), run: () => (settings.open = true) },
@@ -849,6 +877,13 @@
     void vault.init();
     // No request unless the user turned the check on (the core decides).
     void updates.init();
+    // Hosts and snippets received while this view was closed included.
+    sync.onsnippets = () => {
+      if (snippets.open) void snippets.load();
+      void snippets.loadPalette(pane?.alias ?? null);
+    };
+    sync.onsettings = () => void settings.reload();
+    void sync.init();
     const unlisten = [
       backend.onEngineEvent((ev) => {
         workspace.onEvent(ev);
@@ -856,6 +891,7 @@
         hosts.onEvent(ev);
         logs.onEvent(ev);
         updates.onEvent(ev);
+        sync.onEvent(ev);
         if (ev.type === "sftp") files.onEvent(ev.session, ev.event);
         else if (ev.type === "tunnel") tunnels.onEvent(ev.id, ev.session, ev.event);
         else if (ev.type === "session" && ev.event.kind === "phase" && ["closed", "failed"].includes(ev.event.phase)) {
@@ -868,6 +904,7 @@
         // A `hosts_changed` may be among the lost events.
         void load();
         void updates.resync();
+        void sync.resync();
       }),
       backend.onDragging((d) => (files.dragging = d)),
       backend.onDropped((list) => files.dropped(list, showFiles && pane ? pane.session : null)),
@@ -957,6 +994,8 @@
         onforget={(alias) => void hosts.forgetRecent(alias)}
         ontoggle={(id) => hosts.toggleSection(id)}
         onadd={() => (hosts.dialog = { kind: "create" })}
+        pending={sync.pendingByAlias}
+        onreview={() => sync.open({ kind: "panel", tab: "received" })}
       />
       <HostDetails
         host={selectedHost}
@@ -1065,6 +1104,7 @@
         {/each}
       </span>
     {/if}
+    <SyncStatusItem />
     {#if updates.available}
       <button class="update-badge" onclick={() => updates.show()} title="See how to update" data-testid="update-badge">{updates.available.version} available</button>
     {/if}
@@ -1121,6 +1161,20 @@
       {/snippet}
     </Modal>
   {/key}
+{:else if sync.view}
+  {#if sync.view.kind === "wizard"}
+    <SyncWizard />
+  {:else if sync.view.kind === "panel"}
+    <SyncPanel tab={sync.view.tab} />
+  {:else if sync.view.kind === "form"}
+    {#key sync.view.form}
+      <SyncForms form={sync.view.form} />
+    {/key}
+  {:else}
+    {#key sync.view}
+      <SyncReview view={sync.view} />
+    {/key}
+  {/if}
 {:else if vault.dialog}
   {#key vault.dialog}
     <VaultDialog dialog={vault.dialog} />

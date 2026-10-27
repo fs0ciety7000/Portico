@@ -214,7 +214,19 @@ export type EngineEvent =
   /** A terminal recording started or stopped: `REC` shows between the two. */
   | { type: "recording"; terminal: number; session: number; state: RecordingState }
   /** The update status changed (setting changed, or a newer release found). */
-  | { type: "update"; status: UpdateStatus };
+  | { type: "update"; status: UpdateStatus }
+  /** The folder sync status changed (status bar). */
+  | { type: "sync"; status: SyncStatus }
+  /** The number of sync conflicts changed. */
+  | { type: "sync_conflicts"; count: number }
+  /** Received hosts or snippets awaiting a confirmation changed (content
+   * included): reload them and close any screen showing the old content. */
+  | { type: "sync_pending_changed" }
+  /** snippets.toml changed outside the UI (folder sync): reload. */
+  | { type: "snippets_changed" }
+  /** settings.toml changed outside the UI (folder sync): apply theme and
+   * keymaps live (the payload is not used: `getSettings` is read again). */
+  | { type: "settings_changed" };
 
 /** Mirrors `portico_core::update::UpdateStatus` (commands and the `update` event). */
 export interface UpdateStatus {
@@ -648,6 +660,186 @@ export interface WrittenKey {
 }
 
 
+// ── Folder sync (phase 11): mirrors `portico_core::sync::api` (serde
+// snake_case, as the core serializes it) and `sync.rs` (camelCase DTOs).
+
+export type WaitReason = "partial_sync" | "placeholder" | "deferred" | "busy";
+export type FolderReason = "missing" | "not_mounted" | "permission_denied" | "bundle_missing" | "unsafe" | "too_many_entries";
+export type AlertKind =
+  | "rollback"
+  | "fork"
+  | "restored"
+  | "bundle_tampered"
+  | "keys_rotated_elsewhere"
+  | "passphrase_changed"
+  | "third_party_claim"
+  | "merge_refused"
+  | "divergent"
+  | "dropped_values";
+
+/** Mirrors `SyncStatus`. Device labels are `name (3f9c0ae1)` (F16). */
+export type SyncStatus =
+  | { state: "disabled" }
+  | { state: "locked" }
+  | { state: "idle"; last_pass: number; devices: number; conflicts: number; issues: number; pending_confirmations: number }
+  | { state: "syncing" }
+  | { state: "waiting"; reason: WaitReason; device: string | null }
+  | { state: "folder_unavailable"; reason: FolderReason }
+  | { state: "alert"; kind: AlertKind; device: string | null }
+  | { state: "error"; summary: ErrorSummary };
+
+/** Mirrors `sync::OverviewDto`. */
+export interface SyncOverview {
+  status: SyncStatus;
+  /** `~/…` for display. */
+  folder: string | null;
+  device: string | null;
+  rememberKey: boolean;
+}
+
+/** Mirrors `SyncDevice`. */
+export interface SyncDevice {
+  id: string;
+  name: string;
+  /** What to show: `name (3f9c0ae1)`. */
+  label: string;
+  this_device: boolean;
+  seq: number;
+  /** Unix seconds, as the device wrote it (display only). */
+  published_at: number | null;
+  /** Unix seconds, local time this device last saw a new snapshot. */
+  last_seen: number | null;
+  stale: boolean;
+  revoked: boolean;
+}
+
+/** Mirrors `SyncHostValue` (no secret). */
+export interface SyncHostValue {
+  hostname: string;
+  user: string | null;
+  port: number | null;
+  /** `~/…`. */
+  identity_file: string | null;
+  proxy_jump: string | null;
+}
+
+export interface SyncSnippetValue {
+  name: string;
+  command: string;
+  description: string | null;
+  run: boolean;
+}
+
+export type SyncSubject =
+  | { type: "host"; alias: string }
+  | { type: "host_meta"; alias: string; field: string }
+  | { type: "snippet"; id: string }
+  | { type: "setting"; key: string }
+  | { type: "other"; kind: string };
+
+export type SyncValue =
+  | { type: "host"; value: SyncHostValue }
+  | { type: "text"; value: string }
+  | { type: "bool"; value: boolean }
+  | { type: "tags"; value: string[] }
+  | { type: "snippet"; value: SyncSnippetValue }
+  | { type: "deleted" };
+
+export interface ConflictSide {
+  index: number;
+  devices: string[];
+  local: boolean;
+  at: number;
+  value: SyncValue;
+}
+
+export interface SyncConflict {
+  id: string;
+  subject: SyncSubject;
+  sides: ConflictSide[];
+}
+
+export type SyncResolution = { type: "pick"; index: number } | { type: "union" } | { type: "keep_both"; keep: number };
+
+export interface SyncIssue {
+  key: string;
+  subject: SyncSubject | null;
+  summary: ErrorSummary;
+  warning: boolean;
+  skippable: boolean;
+}
+
+/** Mirrors `PendingHostChange` (F1): nothing is written before a confirmation. */
+export interface PendingHostChange {
+  alias: string;
+  new: boolean;
+  current: SyncHostValue | null;
+  incoming: SyncHostValue;
+  renamed_from: string | null;
+  devices: string[];
+  /** Sent back with the decision: identifies the destination shown. */
+  destination_hash: string;
+}
+
+/** Mirrors `UnconfirmedSnippet` (F8). */
+export interface UnconfirmedSnippet {
+  id: string;
+  snippet: SyncSnippetValue;
+  /** Sent back with the confirmation: identifies the content shown. */
+  hash: string;
+}
+
+export type FolderProbe =
+  | { kind: "usable" }
+  | { kind: "existing_bundle"; devices: number }
+  | { kind: "incomplete" }
+  | { kind: "missing" }
+  | { kind: "refused"; summary: ErrorSummary };
+
+/** Mirrors `sync::PickedDto`. */
+export interface PickedFolder {
+  display: string;
+  probe: FolderProbe;
+}
+
+/** Mirrors `sync::StrengthDto`. */
+export interface PassphraseStrength {
+  estimatedBits: number;
+  dicewareWords: number;
+  /** The core accepts it. */
+  acceptable: boolean;
+}
+
+/** Mirrors `sync::GeneratedDto`: shown once, then named by `token`. */
+export interface GeneratedPassphrase {
+  token: number;
+  text: string;
+  strength: PassphraseStrength;
+}
+
+/** Mirrors `sync::NewPassphraseDto` (`value` becomes a SecretString in Rust). */
+export type NewPassphrase = { kind: "typed"; value: string } | { kind: "generated"; token: number };
+
+export interface JoinPreview {
+  /** Single use, expires after 10 minutes. */
+  token: string;
+  devices: SyncDevice[];
+  hosts: number;
+  host_meta: number;
+  snippets: number;
+  settings: number;
+  conflicts: number;
+  needs_newer: number;
+}
+
+export type JoinBulkChoice = "review_each" | "prefer_remote" | "prefer_local";
+
+export interface HostDecision {
+  alias: string;
+  destinationHash: string;
+}
+
+
 export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),
   searchHosts: (query: string) => invoke<Host[]>("search_hosts", { query }),
@@ -767,6 +959,38 @@ export const api = {
   /** Flow control: `total` bytes of playback output were parsed by the player. */
   playbackAck: (id: number, total: number) => invoke<void>("playback_ack", { id, total }),
   playbackClose: (id: number) => invoke<void>("playback_close", { id }),
+  /** Starts the background sync task (nothing runs while sync is off). */
+  syncStart: () => invoke<void>("sync_start"),
+  syncStatus: () => invoke<SyncOverview>("sync_status"),
+  syncNow: () => invoke<SyncStatus>("sync_now"),
+  syncDevices: () => invoke<SyncDevice[]>("sync_devices"),
+  syncConflicts: () => invoke<SyncConflict[]>("sync_conflicts"),
+  syncIssues: () => invoke<SyncIssue[]>("sync_issues"),
+  syncPendingHosts: () => invoke<PendingHostChange[]>("sync_pending_hosts"),
+  syncedSnippetsUnconfirmed: () => invoke<UnconfirmedSnippet[]>("synced_snippets_unconfirmed"),
+  syncDefaultDeviceName: () => invoke<string>("sync_default_device_name"),
+  /** Native folder picker (Rust side): the path stays in Rust; `null` when cancelled. */
+  syncPickFolder: () => invoke<PickedFolder | null>("sync_pick_folder"),
+  syncProbeAgain: () => invoke<FolderProbe>("sync_probe_again"),
+  syncGeneratePassphrase: () => invoke<GeneratedPassphrase>("sync_generate_passphrase"),
+  syncAssessPassphrase: (passphrase: string) => invoke<PassphraseStrength>("sync_assess_passphrase", { passphrase }),
+  syncCreate: (passphrase: NewPassphrase, deviceName: string, rememberKey: boolean) =>
+    invoke<SyncStatus>("sync_create", { request: { passphrase, deviceName, rememberKey } }),
+  syncJoinPreview: (passphrase: string, deviceName: string, rememberKey: boolean) =>
+    invoke<JoinPreview>("sync_join_preview", { request: { passphrase, deviceName, rememberKey } }),
+  syncJoinCommit: (token: string, bulk: JoinBulkChoice) => invoke<SyncStatus>("sync_join_commit", { token, bulk }),
+  syncUnlock: (passphrase: string) => invoke<SyncStatus>("sync_unlock", { passphrase }),
+  syncResolve: (id: string, resolution: SyncResolution) => invoke<SyncStatus>("sync_resolve", { id, resolution }),
+  syncSkipOnThisDevice: (key: string) => invoke<SyncStatus>("sync_skip_on_this_device", { key }),
+  syncConfirmHosts: (hosts: HostDecision[]) => invoke<SyncStatus>("sync_confirm_hosts", { hosts }),
+  syncRejectHosts: (hosts: HostDecision[]) => invoke<SyncStatus>("sync_reject_hosts", { hosts }),
+  confirmSyncedSnippet: (id: string, hash: string) => invoke<void>("confirm_synced_snippet", { id, hash }),
+  syncAcknowledgeAlerts: () => invoke<SyncStatus>("sync_acknowledge_alerts"),
+  syncChangePassphrase: (old: string, next: NewPassphrase) => invoke<SyncStatus>("sync_change_passphrase", { old, new: next }),
+  syncResetPassphrase: (next: NewPassphrase) => invoke<SyncStatus>("sync_reset_passphrase", { new: next }),
+  syncRenameDevice: (name: string) => invoke<SyncStatus>("sync_rename_device", { name }),
+  syncSetOptions: (rememberKey: boolean) => invoke<SyncStatus>("sync_set_options", { rememberKey }),
+  syncDisable: (forgetKey: boolean, removeMyFile: boolean) => invoke<SyncStatus>("sync_disable", { forgetKey, removeMyFile }),
   /** The engine event stream lost events: resync what is derived from them. */
   onEngineLagged: (cb: () => void): Promise<UnlistenFn> => listen<number>("portico://engine-lagged", () => cb()),
   /** Files dropped on the window, already registered as upload tokens. */
