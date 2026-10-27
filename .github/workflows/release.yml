@@ -880,7 +880,7 @@ jobs:
             dist/scoop/bucket/portico.json > /dev/null
           packaging/winget/render.sh "$VERSION" "$sums" dist/winget
           find dist/winget -name '*.yaml' -print0 \
-            | xargs -0 ruby -ryaml -e 'ARGV.each { |f| m = YAML.safe_load_file(f); abort("#{f}: wrong version") unless m["PackageVersion"] == ENV["VERSION"] }'
+            | xargs -0 ruby -ryaml -rdate -e 'ARGV.each { |f| m = YAML.safe_load_file(f, permitted_classes: [Date]); abort("#{f}: wrong version") unless m["PackageVersion"] == ENV["VERSION"] }'
           if grep -qE '_universal-(unsigned|not-notarized)\.dmg' dist/homebrew/Casks/portico.rb; then
             echo "::warning::the cask points to a dmg that is not notarized: a Gatekeeper caveat was added"
           fi
