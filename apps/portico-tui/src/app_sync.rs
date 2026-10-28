@@ -585,9 +585,14 @@ impl App {
                     engine.sync_remove_key_entry(account).await.map(|()| None)
                 });
             }
-            SyncOutcome::Held { key, label, choice } => {
+            SyncOutcome::Held {
+                key,
+                label,
+                choice,
+                hash,
+            } => {
                 self.run_op(SyncOp::Held(label, choice), async move {
-                    engine.sync_revoked_value(key, choice).await.map(Some)
+                    engine.sync_revoked_value(key, choice, hash).await.map(Some)
                 });
             }
             SyncOutcome::Acknowledge => self.run_op(SyncOp::Acknowledge, async move {

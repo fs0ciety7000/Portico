@@ -793,9 +793,10 @@ pub(crate) async fn sync_revoked_value(
     engine: State<'_, Engine>,
     key: String,
     choice: RevokedValueChoice,
+    hash: String,
 ) -> Result<SyncStatus, ErrorSummary> {
     engine
-        .sync_revoked_value(key, choice)
+        .sync_revoked_value(key, choice, hash)
         .await
         .map_err(summary)
 }

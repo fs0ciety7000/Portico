@@ -2093,7 +2093,15 @@ impl SyncCore {
                 });
             }
         }
-        let report = Self::build_report(&session, issues, alerts, &outcome.pending, waiting, at);
+        let report = Self::build_report(
+            &session,
+            &after.records,
+            issues,
+            alerts,
+            &outcome.pending,
+            waiting,
+            at,
+        );
         let status = Self::status_of(&report, at);
         self.peer_versions = session.replica.local.peer_versions.clone();
         self.withheld = guard::withheld(&present, seen_vectors.iter())
@@ -2101,9 +2109,17 @@ impl SyncCore {
             .map(|w| w.device)
             .collect();
         self.bundle_version = session.bundle.header.version;
-        let held_before: BTreeSet<String> =
-            self.report.held.iter().map(|h| h.key.clone()).collect();
-        let held_now: BTreeSet<String> = report.held.iter().map(|h| h.key.clone()).collect();
+        let held_before: BTreeSet<(String, String)> = self
+            .report
+            .held
+            .iter()
+            .map(|h| (h.key.clone(), h.hash.clone()))
+            .collect();
+        let held_now: BTreeSet<(String, String)> = report
+            .held
+            .iter()
+            .map(|h| (h.key.clone(), h.hash.clone()))
+            .collect();
         let count = report.conflicts.len();
         let pending = PendingSet {
             hosts: report
@@ -2217,6 +2233,7 @@ impl SyncCore {
 
     fn build_report(
         session: &Session,
+        records: &BTreeMap<RecordKey, RecordValue>,
         issues: Vec<Issue>,
         alerts: Vec<Alert>,
         pending: &[apply::PendingHost],
@@ -2299,10 +2316,15 @@ impl SyncCore {
             .iter()
             .filter_map(|(wire, value)| {
                 let key = wire.decode()?;
+                let local = records.get(&key);
+                let synced = session.replica.state.value(&key);
                 Some(api::RevokedValueItem {
                     key: conflict_id(&key),
                     subject: subject(&key),
                     device: value.label.clone(),
+                    local: Self::held_shown(&key, local),
+                    synced: Self::held_shown(&key, synced.as_ref()),
+                    hash: Self::held_hash(value.label.as_deref(), local, synced.as_ref()),
                 })
             })
             .collect();

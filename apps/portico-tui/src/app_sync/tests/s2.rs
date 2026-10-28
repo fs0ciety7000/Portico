@@ -116,6 +116,9 @@ fn held() -> Vec<RevokedValueItem> {
             alias: "staging".into(),
         },
         device: Some("old-mac (0b5e7d21)".into()),
+        local: None,
+        synced: None,
+        hash: "h1".into(),
     }]
 }
 

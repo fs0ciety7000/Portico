@@ -495,11 +495,53 @@ impl SyncCore {
         self.report.held.clone()
     }
 
+    /// A held value as the UIs show it: a secret is never shown.
+    pub(super) fn held_shown(
+        key: &RecordKey,
+        value: Option<&RecordValue>,
+    ) -> Option<crate::sync::api::SyncValue> {
+        if matches!(key, RecordKey::Secret { .. }) {
+            return None;
+        }
+        value.map(super::value_dto)
+    }
+
+    /// Hash of what a held value's decision is about (A3, S2c-1 review):
+    /// the device it is attributed to, this device's value and the value
+    /// the other devices hold. A decision names it, so a value that changed
+    /// since it was shown is refused instead of decided unseen.
+    pub(super) fn held_hash(
+        device: Option<&str>,
+        local: Option<&RecordValue>,
+        synced: Option<&RecordValue>,
+    ) -> String {
+        let wire = |value: Option<&RecordValue>| {
+            value.map_or_else(
+                || "-".to_owned(),
+                |v| {
+                    WireValue::encode(v)
+                        .map(|w| format!("+{}", w.as_str()))
+                        .unwrap_or_default()
+                },
+            )
+        };
+        state::content_hash(
+            "portico-sync/1 held value",
+            &format!(
+                "{}\0{}\0{}",
+                device.map_or_else(|| "-".to_owned(), |d| format!("+{d}")),
+                wire(local),
+                wire(synced)
+            ),
+        )
+    }
+
     /// The user's decision on a held value (no default, §13.4.2).
     pub(crate) fn decide_revoked_value(
         &mut self,
         id: &str,
         choice: RevokedValueChoice,
+        shown: &str,
     ) -> crate::Result<SyncStatus> {
         let key = key_of_conflict(id).ok_or(SyncError::NotPending {
             alias: id.to_owned(),
@@ -508,14 +550,28 @@ impl SyncCore {
         let paths = self.config.paths.clone();
         let snippets = std::sync::Arc::clone(&self.snippets);
         self.with_session(|session| {
-            let held = &mut session.replica.local.held_values;
-            let Some(index) = held.iter().position(|(key, _)| *key == wire) else {
-                return Err(SyncError::NotPending {
+            let not_pending = || -> crate::Error {
+                SyncError::NotPending {
                     alias: id.to_owned(),
                 }
-                .into());
+                .into()
             };
-            held.remove(index);
+            let held = &session.replica.local.held_values;
+            let Some(index) = held.iter().position(|(key, _)| *key == wire) else {
+                return Err(not_pending());
+            };
+            let label = held.get(index).and_then(|(_, value)| value.label.clone());
+            let current = project::observe(&paths, &snippets);
+            let hash = Self::held_hash(
+                label.as_deref(),
+                current.records.get(&key),
+                session.replica.state.value(&key).as_ref(),
+            );
+            if hash != shown {
+                // Changed since it was shown (a pass, an edit): reload.
+                return Err(not_pending());
+            }
+            session.replica.local.held_values.remove(index);
             let mut applied = session.replica.local.applied_map();
             match choice {
                 RevokedValueChoice::KeepAsMine => {

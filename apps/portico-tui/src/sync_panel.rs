@@ -1000,6 +1000,8 @@ pub(crate) enum SyncOutcome {
         key: String,
         label: String,
         choice: RevokedValueChoice,
+        /// The hash of the content shown (A3, S2c-1 review).
+        hash: String,
     },
 }
 
@@ -1769,6 +1771,7 @@ impl SyncPanel {
                         key: held.key.clone(),
                         label: subject_label(&held.subject),
                         choice,
+                        hash: held.hash.clone(),
                     };
                 }
                 let confirm = match key.code {

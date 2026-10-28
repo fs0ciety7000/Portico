@@ -544,6 +544,16 @@ pub struct RevokedValueItem {
     pub subject: SyncSubject,
     /// The forgotten device's label, or `None` for "unknown origin".
     pub device: Option<String>,
+    /// The value held on this device (what [`RevokedValueChoice::KeepAsMine`]
+    /// shares). `None`: not shown (a secret).
+    pub local: Option<SyncValue>,
+    /// The value the other devices hold (what
+    /// [`RevokedValueChoice::TakeSynced`] takes). `None`: they hold none,
+    /// so taking it removes the record here (or a secret, never shown).
+    pub synced: Option<SyncValue>,
+    /// Identifies the content shown (both values and the device): pass it
+    /// back so a value that changed since is refused (`sync_not_pending`).
+    pub hash: String,
 }
 
 /// The decision on a [`RevokedValueItem`]: nothing is preselected.

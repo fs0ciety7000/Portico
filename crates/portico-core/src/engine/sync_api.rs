@@ -741,13 +741,15 @@ impl Engine {
     }
 
     /// Decides a held value ([`RevokedValueItem::key`]); nothing is
-    /// preselected.
+    /// preselected. `hash` is the [`RevokedValueItem::hash`] shown: a value
+    /// that changed since is refused with `sync_not_pending` (reload).
     pub async fn sync_revoked_value(
         &self,
         key: String,
         choice: RevokedValueChoice,
+        hash: String,
     ) -> Result<SyncStatus> {
-        self.on_sync(move |core| core.decide_revoked_value(&key, choice))
+        self.on_sync(move |core| core.decide_revoked_value(&key, choice, &hash))
             .await
     }
 
