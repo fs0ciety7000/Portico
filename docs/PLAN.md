@@ -232,7 +232,7 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
 - **S2, rotation puis mots de passe** : rotation des clés et « oublier un appareil » **d'abord** ; ensuite mots de passe
   **liés** seulement (jamais les non liés), opt-in au niveau du bundle et décoché par défaut, envoyés sur B seulement si B
   vérifie la même clé hôte
-  - **S2a, rotation et oubli d'un appareil (moteur)** ✅ *(2026-10-27, revue `agent-security` S2a à faire)* : `bundle.toml`
+  - **S2a, rotation et oubli d'un appareil (moteur)** ✅ *(2026-10-27 ; revue `agent-security` S2a faite et corrigée ; livré en 0.7.0)* : `bundle.toml`
     v2 (engagement d'époque, filiation chaînée sous la sous-clé `rotate`, roster v2 avec appareils oubliés et politique des
     mots de passe), cliquet sur la version lue, plancher local d'époque, rotation sûre en cas de crash et vers l'avant
     seulement (`rotation.toml`, `bundle.next`, `bundle.verified`, historique des 8 derniers emplacements), adoption par la
@@ -243,8 +243,8 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
     relais opaque sinon, `IndexedSecretStore` sur tous les chemins, collecte des anciennes clés, `C_E` retenu dès un v1
     (E1). API `Engine::sync_rotate_keys`, `sync_forget_device`, `sync_unlock` étendue, `sync_resolve_rotation_conflict`,
     `sync_restore_bundle`, `sync_discard_newer_file`, clés orphelines, valeurs retenues. Exercice d'appareil perdu sans
-    mots de passe vert ; écarts en `docs/SYNC.md` §13.12. Les UIs (S2c-1) restent à faire
-  - **S2c-1, interfaces de rotation et d'oubli** : TUI livrée *(2026-10-27, GUI en parallèle ; revue `agent-design-review`
+    mots de passe vert ; écarts en `docs/SYNC.md` §13.12
+  - **S2c-1, interfaces de rotation et d'oubli** ✅ *(livré en 0.7.0 ; exercice « appareil perdu » du propriétaire sur deux machines réussi le 2026-10-28)* : TUI livrée *(2026-10-27, GUI en parallèle ; revue `agent-design-review`
     à faire)* : « Rotate keys » (`o`) et « Forget <appareil> » (`f`, rappel du dossier cloud d'abord) en trois étapes et
     question armée `y`, adoption (passphrase précédente facultative sur un appareil sans clé mémorisée), conflit de rotation
     (`u` / `o`), appareil oublié (`D` / `n` rejoindre), fichiers d'époque supérieure (`x`), « Restore key file » (`b`),
