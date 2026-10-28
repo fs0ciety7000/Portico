@@ -168,7 +168,7 @@ class SyncState {
       case "sync": {
         const status = ev.status;
         const was = this.status?.state;
-        this.overview = this.overview ? { ...this.overview, status } : { status, folder: null, device: null, rememberKey: true };
+        this.overview = this.overview ? { ...this.overview, status } : { status, folder: null, device: null, rememberKey: true, epoch: null };
         // On, off, unlocked: the folder and device changed too.
         if (was === "disabled" || status.state === "disabled" || was === "locked") void this.refresh();
         if (this.view?.kind === "panel") void this.loadLists();

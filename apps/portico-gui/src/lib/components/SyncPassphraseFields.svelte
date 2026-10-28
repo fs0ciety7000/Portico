@@ -31,6 +31,8 @@
     autofocus = false,
     savedOutside = false,
     refused = false,
+    problem = null,
+    onedit,
   }: {
     value?: string;
     confirm?: string;
@@ -44,6 +46,11 @@
     savedOutside?: boolean;
     /** The core refused this passphrase as too weak: the meter turns to error. */
     refused?: boolean;
+    /** A refusal of this passphrase (`sync_passphrase_reused`…), shown under
+     * its field; the dialog clears it through `onedit`. */
+    problem?: { message: string; hint: string } | null;
+    /** The passphrase was edited, generated, or typed again. */
+    onedit?: () => void;
   } = $props();
 
   let strength: PassphraseStrength | null = $state(null);
@@ -79,6 +86,7 @@
   });
 
   async function generate() {
+    onedit?.();
     generating = true;
     error = null;
     try {
@@ -95,6 +103,7 @@
   }
 
   function typeOwn() {
+    onedit?.();
     generated = null;
     wroteDown = false;
     copied = false;
@@ -139,13 +148,20 @@
       autocomplete="new-password"
       spellcheck="false"
       data-autofocus={autofocus ? "" : undefined}
-      aria-invalid={refused && !!strength && !strength.acceptable && value.length > 0}
-      aria-describedby="sync-meter"
+      aria-invalid={!!problem || (refused && !!strength && !strength.acceptable && value.length > 0)}
+      aria-describedby={problem ? "sync-pass-problem sync-meter" : "sync-meter"}
+      oninput={() => onedit?.()}
     />
   </label>
+  {#if problem}
+    <div class="inline-error" role="alert" id="sync-pass-problem" data-testid="sync-pass-problem">
+      <span><CodeText text={problem.message} /></span>
+      <span class="hint">{problem.hint}</span>
+    </div>
+  {/if}
   <label class="field">
     <span>Confirm</span>
-    <input type="password" bind:value={confirm} autocomplete="new-password" spellcheck="false" aria-invalid={mismatch} />
+    <input type="password" bind:value={confirm} autocomplete="new-password" spellcheck="false" aria-invalid={mismatch} oninput={() => onedit?.()} />
   </label>
   <div class="gen-row">
     <button class="secondary small" onclick={generate} disabled={generating}>
@@ -155,11 +171,12 @@
   </div>
 {/if}
 
+<!-- Like a field: its word in the label column, the bar as wide as the fields. -->
 <div class="meter" id="sync-meter" aria-live="polite">
-  <div class="track"><div class="fill" data-tone={tone} style:transform={`scaleX(${meter?.fill ?? 0})`}></div></div>
   <span class="word" data-tone={tone}>
-    {#if meter && shown}{meter.word} · <span class="mono">~{shown.estimatedBits} bits</span>{:else}Strength{/if}
+    {#if meter && shown}Strength · {meter.word} · <span class="mono">~{shown.estimatedBits} bits</span>{:else}Strength{/if}
   </span>
+  <div class="track"><div class="fill" data-tone={tone} style:transform={`scaleX(${meter?.fill ?? 0})`}></div></div>
 </div>
 {#if meter && shown && !shown.acceptable}
   <span class="soft-warning">Not enough yet: at least about 60 bits, or 5 words of the generated kind. Add words, or generate one.</span>
@@ -189,8 +206,8 @@
     user-select: all;
   }
   .row, .gen-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-  .meter { display: flex; align-items: center; gap: var(--space-3); }
-  .track { flex: 1 1 auto; height: 4px; overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-elevated); }
+  .meter { display: grid; gap: var(--space-1); }
+  .track { height: 4px; overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-elevated); }
   .fill {
     width: 100%;
     height: 100%;
@@ -202,7 +219,7 @@
   .fill[data-tone="weak"] { background: var(--status-warning); }
   .fill[data-tone="refused"] { background: var(--status-error); }
   .fill[data-tone="fair"], .fill[data-tone="good"] { background: var(--status-connected); }
-  .word { flex: 0 0 auto; min-width: 16ch; color: var(--text-muted); font-size: var(--text-sm); text-align: right; }
+  .word { color: var(--text-muted); font-size: var(--text-sm); }
   .word[data-tone="weak"] { color: var(--status-warning); }
   .word[data-tone="refused"] { color: var(--status-error); }
   .word[data-tone="fair"], .word[data-tone="good"] { color: var(--status-connected); }

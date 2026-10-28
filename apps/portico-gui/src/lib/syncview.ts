@@ -33,7 +33,7 @@ export function syncLabel(status: SyncStatus | null, nowMs: number): { label: st
       return { label: "Syncing…", tone: "busy" };
     case "waiting":
       // The name only: the id is in the item's title (B14).
-      if (status.reason === "rotation_pending") return { label: "Finishing key rotation…", tone: "busy" };
+      if (status.reason === "rotation_pending") return { label: ROTATION_PENDING_LABEL, tone: "busy" };
       if (status.reason === "needs_new_keys") return { label: status.device ? `New keys needed on ${deviceName(status.device)}` : "New keys needed", tone: "warning" };
       return { label: status.device ? `Waiting for ${deviceName(status.device)}` : "Waiting for the sync folder", tone: "busy" };
     case "folder_unavailable":
@@ -109,9 +109,9 @@ export function explainAlert(kind: AlertKind, device: string | null): Explanatio
       };
     case "keys_rotated_elsewhere":
       return {
-        title: device ? `Keys were changed on ${device}` : "The sync keys were changed on another device",
+        title: newKeysTitle(device),
         body: "Enter the NEW passphrase chosen there. Nothing is merged until then; your local data stays as it is.",
-        hint: "If you did not change the keys on another device, type nothing: remove the file that claims newer keys instead.",
+        hint: ADOPT_UNSURE,
       };
     case "rotation_conflict":
       return {
@@ -129,7 +129,7 @@ export function explainAlert(kind: AlertKind, device: string | null): Explanatio
       return {
         title: "Changes from a removed device",
         body: `${d} relays changes written by a device that was removed. They are not applied.`,
-        hint: "Type the new passphrase on that device. Values held on this device wait in Received.",
+        hint: `Enter the new passphrase on ${d}. Values held on this device wait in Received.`,
       };
     case "passphrase_changed":
       return {
@@ -427,9 +427,10 @@ export function listText(items: string[]): string {
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
-/** `Keys 3 · this sync`, `Keys 2 · another sync (9c1e4a07)`. */
+/** `Old keys (rotation 1) · this sync · not in use`. */
 export function keyEntryLabel(entry: { bundle: string; epoch: number; this_bundle: boolean }): string {
-  return entry.this_bundle ? `Keys ${entry.epoch} · this sync` : `Keys ${entry.epoch} · another sync (${entry.bundle.slice(0, 8)})`;
+  const sync = entry.this_bundle ? "this sync" : `another sync (${entry.bundle.slice(0, 8)})`;
+  return `Old keys (rotation ${entry.epoch}) · ${sync} · not in use`;
 }
 
 /** The status says a rotation, adoption or conflict needs this device. */
@@ -443,3 +444,129 @@ export function keysNeedYou(status: SyncStatus | null): "adopt" | "conflict" | "
 
 /** The word typed for the reset-level confirmation (Q6), as for "Reset passphrase". */
 export const RESET_WORD = "reset";
+
+// ── Shared security texts: word for word as in the TUI (S2c-1 review B8) ──
+
+/** Status-bar label and result title of a rotation still on its way (one wording everywhere). */
+export const ROTATION_PENDING_LABEL = "Finishing the key rotation…";
+
+/** The adoption's title: `studio-mac (3f9c0ae1) reports new keys`. */
+export function newKeysTitle(device: string | null): string {
+  return `${device ?? "Another device"} reports new keys`;
+}
+
+/** The adoption's line (§13.3.2, R1). */
+export const TYPE_NOTHING = "If you did not change the keys on another device, type nothing.";
+
+/** What to do when nobody here changed the keys (B4). */
+export const ADOPT_UNSURE =
+  "If you did not change the keys on another device, type nothing and ask who did: someone with the old passphrase or a lost device may have. Close this, then forget that device from a device you trust.";
+
+/** The same, under the R1 line (the adoption dialog): R1 already says its first sentence. */
+export const ADOPT_UNSURE_AFTER_R1 = "Ask who did: someone with the old passphrase or a lost device may have. Close this, then forget that device from a device you trust.";
+
+/** Only when the core lists files that claim newer keys (RR5). */
+export const NEWER_FILE_HINT = "If nobody changed the keys, remove the file that claims newer keys (below).";
+
+/** Rotate keys, step 1. */
+export const ROTATE_ABOUT =
+  "Rotating makes new keys under a new passphrase. Use it when a passphrase or a device may have leaked: a device without the new passphrase cannot read anything synced from now on. What was synced before stays readable to whoever had the old keys.";
+
+/** Forget a device, step 1. */
+export function forgetAbout(label: string): string {
+  return `Forgetting ${label} rotates the keys: it cannot read anything synced from now on. What it already synced stays readable to it.`;
+}
+
+/** The cloud folder reminder of a forget (RR7). */
+export function cloudTitle(label: string): string {
+  return `Also remove ${label}'s access to your cloud folder`;
+}
+export const CLOUD_TEXT =
+  "Its Dropbox, iCloud or OneDrive session, or its Syncthing share: only that closes the remaining window. Without it, the lost device can still put old files back.";
+
+/** The forget result: `Forgotten: X. It cannot read what is synced from now on.` */
+export function forgottenResult(labels: string[]): string {
+  return `Forgotten: ${listText(labels)}. ${labels.length === 1 ? "It cannot" : "They cannot"} read what is synced from now on.`;
+}
+
+/** The forget result's RR7 reminder. */
+export function cloudReminder(labels: string[]): string {
+  return `${cloudTitle(listText(labels))}, if not done yet: only that closes the remaining window.`;
+}
+
+/** R17: "Keep this device's keys" in a rotation conflict. */
+export const KEEP_MINE_TEXT =
+  "This device rotates the keys again from its own. The other rotation's removals are lost: if the other device removed a device, remove it again here. The other devices then see a conflict and choose in turn.";
+
+/** One-line costs of the two conflict choices (B2). */
+export function useCost(name: string): string {
+  return `Type the passphrase chosen on ${name}. This device switches to its keys.`;
+}
+export function keepCost(name: string): string {
+  return `Devices ${name} removed stay in the list: remove them again here. Portico cannot see which: check on ${name}.`;
+}
+
+/** R18: "Leave the device list" without a rotation. */
+export const LEAVE_NOTE =
+  "Leaves the list without changing the keys: unless its key is forgotten too, this device can still read the current sync until the next rotation. To really exclude a device, forget it from another device.";
+
+/** Removing an old key from this keychain. */
+export const OLD_KEY_CONSEQUENCE = "Files sealed only with it can no longer be read here.";
+
+/** A held value in full (A3): a snippet with its command, what Keep would share. */
+export function heldText(value: SyncValue): string {
+  return value.type === "snippet" ? `${value.value.name} — ${value.value.command}` : valueText(value);
+}
+
+/** Values held from removed devices (B7), adapted to the buttons. */
+export const HELD_TITLE = "From removed devices";
+export const HELD_NOTE = "Held until you decide, one by one.";
+export const HELD_EXPLAIN =
+  "Keep as mine (m) keeps it as this device's value and shares it. Take the synced value (t) takes the value the other devices hold, or removes it here if they hold none.";
+
+/** `sync_passphrase_reused`, said for the dialog it happened in (B3): by code, never by message. */
+export function reusedHint(dialog: "rotation" | "adoption"): string {
+  return dialog === "rotation"
+    ? "Portico accepted this passphrase before. Choose a new one, or generate one."
+    : "This is an old passphrase, not a new one. If nobody gave you a new passphrase, nobody changed the keys: type nothing, close, and check your other devices.";
+}
+export const REUSED = "sync_passphrase_reused";
+
+/** `workstation (a07d51c2) — update Portico first` for a device on Portico < 0.7 (B9). */
+export function deviceToUpdate(label: string, outdated: readonly string[]): string {
+  return outdated.includes(label) ? `${label} — update Portico first` : label;
+}
+
+// ── Arming (S2c-1 review A1–A3) ──
+
+/** A final `y` acts only this long after the dialog became ready (a Space
+ * on "I saved it" then `y` at once is ignored), as in PromptDialog. */
+export const Y_DELAY = 150;
+export function yArmed(readyAt: number | null, nowMs: number): boolean {
+  return readyAt !== null && nowMs - readyAt >= Y_DELAY;
+}
+
+/** Held values: decisions wait this long after the list changed (the TUI's ARM_DELAY). */
+export const HELD_ARM_MS = 400;
+export function heldArmed(changedAt: number, nowMs: number): boolean {
+  return nowMs - changedAt >= HELD_ARM_MS;
+}
+
+/** The Sync panel's `y` answers only the question on screen (A1). */
+export function panelConfirm(tab: string, discarding: boolean, removingKey: boolean): "discard" | "remove" | null {
+  if (tab === "overview" && discarding) return "discard";
+  if (tab === "devices" && removingKey) return "remove";
+  return null;
+}
+
+/** After `sync_folder_timeout` on a rotation (A4): what the status and the
+ * key epoch in use, read again, say. `pending` / `done`: it happened (show the result); `failed`:
+ * it did not (try again); `unknown`: still checking (no new passphrase). */
+export function rotationAfterTimeout(status: SyncStatus | null, epochBefore: number | null, epochAfter: number | null): "pending" | "done" | "failed" | "unknown" {
+  if (!status || status.state === "folder_unavailable" || status.state === "syncing") return "unknown";
+  if (status.state === "waiting" && status.reason === "rotation_pending") return "pending";
+  // The epoch in use (SyncOverview.epoch) moved: the keys changed.
+  if (epochBefore === null || epochAfter === null) return "unknown";
+  return epochAfter > epochBefore ? "done" : "failed";
+}
+

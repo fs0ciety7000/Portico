@@ -13,7 +13,7 @@
   import SyncNewerFiles from "./SyncNewerFiles.svelte";
   import { backend } from "../backend";
   import { dur } from "../motion";
-  import { explainAlert } from "../syncview";
+  import { ADOPT_UNSURE_AFTER_R1, NEWER_FILE_HINT, newKeysTitle, REUSED, reusedHint, TYPE_NOTHING } from "../syncview";
   import { sync, TIMEOUT } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
   import CodeText from "./CodeText.svelte";
@@ -33,7 +33,8 @@
 
   const status = $derived(sync.status);
   const who = $derived(status?.state === "alert" ? status.device : null);
-  const why = $derived(explainAlert("keys_rotated_elsewhere", who));
+  /** A reused passphrase: an old one, said under the field (B3). */
+  const reused = $derived(error?.code === REUSED ? error : null);
 
   onDestroy(() => (passphrase = ""));
 
@@ -119,13 +120,16 @@
   }
 </script>
 
-<Modal bind:armed onescape={() => (discarding ? (discarding = null) : close())} {onkey} labelledBy="sync-adopt-title">
+<Modal bind:armed onescape={() => (discarding ? (discarding = null) : close())} {onkey} labelledBy="sync-adopt-title" top>
   {#snippet title()}Enter the new passphrase{/snippet}
 
   <div class="adopt" role="presentation" {onkeydown} bind:this={root} data-testid="sync-adopt">
     <section class="lead">
-      <strong>{why.title}</strong>
-      <p>Enter the NEW passphrase chosen there. <strong>If you did not change the keys on another device, type nothing.</strong></p>
+      <strong class="title">{newKeysTitle(who)}</strong>
+      <p>Enter the NEW passphrase chosen there.</p>
+      <p class="r1" data-testid="sync-adopt-r1"><span class="mark" aria-hidden="true">▲</span>{TYPE_NOTHING}</p>
+      <p class="unsure">{ADOPT_UNSURE_AFTER_R1}</p>
+      {#if sync.newerFiles.length}<p class="unsure">{NEWER_FILE_HINT}</p>{/if}
     </section>
 
     {#key step}
@@ -145,9 +149,23 @@
         {:else}
           <label class="field">
             <span>New passphrase</span>
-            <input data-autofocus type="password" bind:value={passphrase} autocomplete="current-password" spellcheck="false" aria-invalid={wrong > 0} />
+            <input
+              data-autofocus
+              type="password"
+              bind:value={passphrase}
+              autocomplete="current-password"
+              spellcheck="false"
+              aria-invalid={wrong > 0 || !!reused}
+              aria-describedby={reused ? "sync-adopt-reused" : undefined}
+              oninput={() => reused && (error = null)}
+            />
           </label>
-          {#if wrong > 0}
+          {#if reused}
+            <div class="inline-error" role="alert" id="sync-adopt-reused" data-testid="sync-pass-problem">
+              <span><CodeText text={reused.message} /></span>
+              <span class="hint">{reusedHint("adoption")}</span>
+            </div>
+          {:else if wrong > 0}
             <span class="inline-error" role="alert">Wrong passphrase, try again (attempt {wrong + 1}). It is the one chosen on the other device.</span>
           {/if}
           {#if skipped}<p class="note">Without the previous passphrase: local differences will wait in Received.</p>{/if}
@@ -159,7 +177,7 @@
       <div class="newer-wrap"><SyncNewerFiles bind:this={newer} bind:asking={discarding} bind:busy onerror={(e) => (error = e)} /></div>
     {/if}
 
-    {#if error}
+    {#if error && !reused}
       <div class="inline-error" role="alert">
         <span><CodeText text={error.message} /></span>
         {#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}
@@ -185,6 +203,10 @@
 <style>
   .adopt { display: grid; gap: var(--space-3); }
   .lead { display: grid; gap: var(--space-1); }
+  .lead .title { font-family: var(--font-display); font-size: var(--text-md); font-weight: 600; }
+  .r1 { display: flex; gap: var(--space-2); color: var(--text-primary); font-weight: 550; }
+  .r1 .mark { color: var(--status-warning); font-size: var(--text-xs); line-height: inherit; }
+  .unsure { color: var(--text-secondary); font-size: var(--text-sm); }
   .step { display: grid; gap: var(--space-3); }
   strong { color: var(--text-primary); font-weight: 550; }
   em { color: var(--text-primary); font-style: normal; font-weight: 550; }

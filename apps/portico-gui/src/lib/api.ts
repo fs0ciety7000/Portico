@@ -698,6 +698,8 @@ export interface SyncOverview {
   folder: string | null;
   device: string | null;
   rememberKey: boolean;
+  /** The key epoch in use (null: sync off): it moves when a rotation happened. */
+  epoch: number | null;
 }
 
 /** Mirrors `SyncDevice`. */
@@ -930,6 +932,13 @@ export interface RevokedValueItem {
   subject: SyncSubject;
   /** The removed device's label; null: unknown origin (re-join). */
   device: string | null;
+  /** The value held on this device (what "Keep as mine" shares); null: a secret, not shown. */
+  local: SyncValue | null;
+  /** The value the other devices hold (what "Take the synced value" takes);
+   * null: they hold none, so taking it removes it here (or a secret). */
+  synced: SyncValue | null;
+  /** Identifies the content shown: sent back with the decision (`sync_not_pending` if it changed). */
+  hash: string;
 }
 
 export type RevokedValueChoice = "keep_as_mine" | "take_synced";
@@ -1107,7 +1116,7 @@ export const api = {
   syncKeyEntries: () => invoke<SyncKeyEntry[]>("sync_key_entries"),
   syncRemoveKeyEntry: (account: string) => invoke<void>("sync_remove_key_entry", { account }),
   syncRevokedValues: () => invoke<RevokedValueItem[]>("sync_revoked_values"),
-  syncRevokedValue: (key: string, choice: RevokedValueChoice) => invoke<SyncStatus>("sync_revoked_value", { key, choice }),
+  syncRevokedValue: (key: string, choice: RevokedValueChoice, hash: string) => invoke<SyncStatus>("sync_revoked_value", { key, choice, hash }),
   /** The engine event stream lost events: resync what is derived from them. */
   onEngineLagged: (cb: () => void): Promise<UnlistenFn> => listen<number>("portico://engine-lagged", () => cb()),
   /** Files dropped on the window, already registered as upload tokens. */

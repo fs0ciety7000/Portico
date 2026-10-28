@@ -892,14 +892,20 @@ Panneau Sync (`app.sync`). « Rotate keys… » (Overview, section « Passphrase
 | Action | Touches |
 |---|---|
 | Panneau Sync : « Rotate keys… » | `o` |
+| Panneau Sync : action principale du pied (« Unlock… », « Enter the new passphrase… », « Choose keys… », « Review held values » pour « Changes from a removed device »…) | `↵` |
+| Panneau Sync : « Turn sync off… » ; « Join again as a new device… » (« Removed from sync ») ; « Restore key file… » (fichier de clés altéré, rotation en attente) | `D` ; `n` ; `b` |
+| Overview : retirer le premier fichier qui annonce des clés plus récentes (question, seul `y` confirme) | `x` puis `y` |
+| Devices : choisir une ligne (appareils, puis anciennes clés : barre d'accent de 2 px) ; « Forget… » sur l'appareil choisi ; retirer l'ancienne clé choisie (question, seul `y` confirme) | `j` / `k`, `↓` / `↑` ; `f` ; `x` puis `y` |
+| Panneau Sync : une question (`y`) ne vaut que pour l'onglet où elle est posée ; changer d'onglet l'annule, en poser une autre aussi | — |
 | Rotation, étapes 1 et 2 : continuer / revenir / annuler | `↵` / « Back » / `Esc` |
-| Rotation, étape 3 : « Rotate keys » ou « Forget and rotate keys » (bouton danger ; `↵` ne fait rien) | `y`, après 400 ms sans frappe |
-| Rotation terminée (« Keys rotated », appareils qui doivent taper la nouvelle passphrase) : fermer | `↵` ou `Esc` |
+| Rotation, étape 3 : « Rotate keys » ou « Forget and rotate keys » (bouton danger ; `↵` ne fait rien ; ignoré moins de 150 ms après que l'étape devient prête, et touche maintenue ignorée) | `y`, après 400 ms sans frappe |
+| Rotation sans réponse du dossier (`sync_folder_timeout`) : « Result unknown — Portico is checking », aucune nouvelle passphrase avant de savoir ; vérifier de nouveau / fermer | « Check again » / `Esc` |
+| Rotation terminée (« Keys rotated », appareils qui doivent taper la nouvelle passphrase, « — update Portico first » pour Portico < 0.7) : fermer | `↵` ou `Esc` |
 | Nouvelles clés d'un autre appareil : passphrase précédente (appareil sans clé mémorisée) puis nouvelle passphrase | `↵` ; « I don't remember it » passe la première |
-| Conflit de clés : « Use <appareil>'s keys » (sa passphrase, `↵`) ou « Keep this device's keys » (nouvelle passphrase, bouton danger) | choix au clic ou `Tab` puis `Espace` ; `y` pour garder |
+| Conflit de clés : « Use <appareil>'s keys » (sa passphrase, `↵`) ou « Keep this device's keys » (nouvelle passphrase, bouton danger) ; rien de choisi d'avance ; passer d'une carte à l'autre | `u` / `o` ; `y` pour garder ; `←` / `→` |
 | Fichier qui annonce des clés plus récentes, ancienne clé du trousseau : « Remove… » puis confirmer / garder | `y` / « Keep » ou `Esc` |
 | « Restore key file… » (fichier de clés altéré, rotation en attente) : confirmer | `y` (bouton danger) |
-| Received, « From forgotten devices » : « Keep as mine » / « Take the synced value » (un élément à la fois, rien de présélectionné) | boutons (`Tab` puis `↵`) |
+| Received, « From removed devices » : « Keep as mine » / « Take the synced value » sur la carte qui a le focus (un élément à la fois, rien de présélectionné, armé 400 ms après un changement de la liste) | `Tab` jusqu'à la carte, puis `m` / `t` |
 
 Les passphrases sont effacées dès leur envoi et à la fermeture du dialogue ; une passphrase générée reste côté Rust sous un jeton à usage unique.
 <!-- END GENERATED: gui -->

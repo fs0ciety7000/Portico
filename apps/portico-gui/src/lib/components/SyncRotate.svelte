@@ -11,8 +11,12 @@
   //      the core when it opens older keys (`sync_passphrase_reused`);
   //   4. the result: "Keys rotated. Enter the new passphrase on: …", or
   //      "Finishing the key rotation…" while the folder does not answer.
+  // A `sync_folder_timeout` answer is no refusal (A4): the rotation may
+  // still finish. "Result unknown — Portico is checking": the status is read
+  // again, and no new passphrase is asked before it is known (rotation
+  // pending or the keys moved: the result; nothing happened: try again).
   // The final step is a security action: danger button, `y` only (never
-  // Enter). The new passphrase is cleared when sent; the current one once
+  // Enter, never a held key, never within Y_DELAY of the step becoming ready). The new passphrase is cleared when sent; the current one once
   // the rotation is done, refused as wrong, or the dialog closes. A
   // generated one is dropped in Rust with the dialog.
   import { onDestroy, onMount, tick, untrack } from "svelte";
@@ -20,7 +24,24 @@
   import { asError, type ErrorSummary, type ForgetPreview, type GeneratedPassphrase, type RotationOutcome, type RotationPreview } from "../api";
   import { backend } from "../backend";
   import { dur } from "../motion";
-  import { ago, listText, RESET_WORD, subjectLabel } from "../syncview";
+  import {
+    ago,
+    CLOUD_TEXT,
+    cloudReminder,
+    cloudTitle,
+    deviceToUpdate,
+    forgetAbout,
+    forgottenResult,
+    listText,
+    RESET_WORD,
+    REUSED,
+    reusedHint,
+    ROTATE_ABOUT,
+    ROTATION_PENDING_LABEL,
+    rotationAfterTimeout,
+    subjectLabel,
+    yArmed,
+  } from "../syncview";
   import { sync, TIMEOUT } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
   import Caution from "./Caution.svelte";
@@ -31,7 +52,7 @@
   let { device: initial }: { device: { id: string; label: string } | null } = $props();
   const device = untrack(() => initial);
 
-  type Step = "loading" | "about" | "auth" | "new" | "done";
+  type Step = "loading" | "about" | "auth" | "new" | "checking" | "done";
   let step = $state<Step>("loading");
   let armed = $state(false);
   let busy = $state<string | null>(null);
@@ -53,6 +74,11 @@
   let saved = $state(false);
   let rememberKey = $state(untrack(() => sync.overview?.rememberKey ?? true));
   let root = $state<HTMLDivElement | undefined>();
+  /** When the final step became ready (`y` waits Y_DELAY after it). */
+  let readyAt = $state<number | null>(null);
+  /** The key epoch before sending: it moves when the rotation happened (A4). */
+  let epochBefore: number | null = null;
+  let checks = 0;
 
   const others = $derived(preview?.devices.filter((d) => !d.this_device && d.id !== device?.id) ?? []);
   const needNew = $derived(forget ? forget.enter_new_passphrase_on : others.map((d) => d.label));
@@ -60,9 +86,14 @@
   const waiting = $derived(others.filter((d) => d.waiting).map((d) => d.label));
   const exposed = $derived([...new Set([...(preview?.exposed_accounts ?? []), ...(forget?.exposed_accounts ?? [])])]);
   const refused = $derived(error?.code === "sync_passphrase_weak");
+  /** A reused passphrase: said under its field, for this dialog (B3). */
+  const problem = $derived(error?.code === REUSED ? { message: error.message, hint: reusedHint("rotation") } : null);
   const authReady = $derived(unknown ? resetTyped.trim().toLowerCase() === RESET_WORD : current.length > 0);
   const finalReady = $derived(armed && !busy && passReady && saved && authReady);
   const verb = $derived(device ? "Forget and rotate keys" : "Rotate keys");
+  $effect(() => {
+    readyAt = finalReady ? performance.now() : null;
+  });
 
   onMount(() => {
     void load();
@@ -109,7 +140,7 @@
   }
 
   function back() {
-    if (busy) return;
+    if (busy || step === "checking") return;
     error = null;
     if (step === "new") step = "auth";
     else if (step === "auth") step = "about";
@@ -132,6 +163,10 @@
     confirm = "";
     error = null;
     busy = "Deriving the new keys… (a few seconds)";
+    epochBefore = await backend.syncStatus().then(
+      (o) => o.epoch,
+      () => sync.overview?.epoch ?? null,
+    );
     try {
       outcome = await backend.syncRotateKeys(request);
       clearSecrets();
@@ -155,12 +190,52 @@
         step = "auth";
         return;
       }
+      if (failed.code === TIMEOUT) {
+        // No refusal: the rotation may still finish. Nothing is asked again
+        // before Portico knows (A4).
+        step = "checking";
+        void check();
+        return;
+      }
       error = failed;
       // Refused new passphrase: back to its (now empty) field.
       void tick().then(() => root?.querySelector<HTMLElement>("[data-autofocus]")?.focus());
-      if (failed.code === TIMEOUT || failed.code === "sync_not_pending" || failed.code === "sync_device_unknown") void sync.resync();
+      if (failed.code === "sync_not_pending" || failed.code === "sync_device_unknown") void sync.resync();
     }
   }
+
+  /** After a timeout: the status and the keys, read again. */
+  async function check() {
+    const n = ++checks;
+    await sync.resync();
+    if (n !== checks || step !== "checking") return;
+    const epochAfter = sync.overview?.epoch ?? null;
+    const verdict = rotationAfterTimeout(sync.status, epochBefore, epochAfter);
+    if (verdict === "unknown") return;
+    if (verdict === "failed") {
+      error = { code: TIMEOUT, message: "the keys were not rotated", hint: "Nothing changed. Type or generate the new passphrase again, then rotate." };
+      step = "new";
+      return;
+    }
+    clearSecrets();
+    outcome = {
+      epoch: epochAfter ?? (epochBefore ?? 0) + 1,
+      status: sync.status ?? { state: "waiting", reason: "rotation_pending", device: null },
+      enter_new_passphrase_on: needNew,
+      forgotten: device ? [device.label] : [],
+      exposed_accounts: exposed,
+    };
+    step = "done";
+  }
+
+  // While checking, every new status is a new chance to know. Keyed on the
+  // status's content: a re-read that finds the same status does not check
+  // again (no loop).
+  const statusKey = $derived(JSON.stringify(sync.status));
+  $effect(() => {
+    void statusKey;
+    if (untrack(() => step) === "checking") void untrack(() => check());
+  });
 
   function onkeydown(e: KeyboardEvent) {
     if (e.key !== "Enter" || e.target instanceof HTMLButtonElement) return;
@@ -175,7 +250,7 @@
 
   function onkey(key: string): boolean {
     if (step === "new" && key === "y") {
-      void submit();
+      if (finalReady && yArmed(readyAt, performance.now())) void submit();
       return true;
     }
     if ((step === "about" || step === "done") && key === "Enter") {
@@ -191,12 +266,13 @@
     about: device ? `Forget ${device.label}` : "Rotate sync keys",
     auth: "Current passphrase",
     new: "New passphrase",
-    done: outcome?.status.state === "waiting" ? "Finishing the key rotation…" : "Keys rotated",
+    checking: "Result unknown — Portico is checking",
+    done: outcome?.status.state === "waiting" ? ROTATION_PENDING_LABEL : "Keys rotated",
   });
   const stepNo = $derived(step === "about" ? 1 : step === "auth" ? 2 : step === "new" ? 3 : 0);
 </script>
 
-<Modal bind:armed onescape={close} {onkey} labelledBy="sync-rotate-title" size="wide" tone={step === "new" ? "danger" : "default"}>
+<Modal bind:armed onescape={close} {onkey} labelledBy="sync-rotate-title" size="wide" top tone={step === "new" ? "danger" : "default"}>
   {#snippet title()}
     <span class="title-row">
       {titles[step]}
@@ -216,12 +292,10 @@
         {:else if step === "about"}
           {#if device && forget}
             <Caution testid="sync-forget-cloud">
-              <strong>Also remove {forget.label}'s access to your cloud folder</strong> (its Dropbox, iCloud or OneDrive session, or its
-              Syncthing share): only that closes the remaining window. Without it, the lost device can still put old files back.
+              <strong>{cloudTitle(forget.label)}</strong>. {CLOUD_TEXT}
             </Caution>
             <p>
-              Portico removes <span class="mono">{forget.label}</span> from the device list and replaces the sync keys. It can no longer
-              read anything written from now on; what it could read before stays readable to it.
+              {forgetAbout(forget.label)}
               {#if forget.last_seen}Last seen here {ago(forget.last_seen, sync.now)}.{/if}
             </p>
             {#if forget.last_written.length}
@@ -234,16 +308,14 @@
               </section>
             {/if}
           {:else}
-            <p>
-              Portico replaces the sync keys and the passphrase. Anyone who copied the folder or knows the old passphrase cannot read
-              what is written from now on. Your hosts, snippets and settings stay as they are.
-            </p>
+            <p data-testid="sync-rotate-about">{ROTATE_ABOUT}</p>
+            <p class="note">Your hosts, snippets and settings stay as they are.</p>
           {/if}
           <section class="group">
             <span class="caption">Enter the new passphrase afterwards on</span>
             {#if needNew.length}
               <ul class="devices">
-                {#each needNew as label (label)}<li class="mono">{label}</li>{/each}
+                {#each needNew as label (label)}<li class="mono" class:outdated={outdated.includes(label)}>{deviceToUpdate(label, outdated)}</li>{/each}
               </ul>
               <p class="note">Until then they stop syncing; nothing is lost on them.</p>
             {:else}
@@ -292,7 +364,19 @@
           {/if}
         {:else if step === "new"}
           <p>Choose the passphrase every device will use from now on. It must differ from every earlier one.</p>
-          <SyncPassphraseFields bind:value={passphrase} bind:confirm bind:generated bind:wroteDown bind:ready={passReady} label="New passphrase" autofocus savedOutside {refused} />
+          <SyncPassphraseFields
+            bind:value={passphrase}
+            bind:confirm
+            bind:generated
+            bind:wroteDown
+            bind:ready={passReady}
+            label="New passphrase"
+            autofocus
+            savedOutside
+            {refused}
+            {problem}
+            onedit={() => problem && (error = null)}
+          />
           <label class="check">
             <input type="checkbox" bind:checked={rememberKey} />
             Remember the new key on this device
@@ -303,6 +387,14 @@
               I saved it. A lost passphrase cannot be recovered unless a device remembers the key.
             </label>
           </div>
+        {:else if step === "checking"}
+          <section class="callout" data-tone="quiet" data-testid="sync-rotate-checking" role="status">
+            <strong><span class="spinner"></span> The sync folder did not answer in time</strong>
+            <p>
+              The rotation may still finish. Portico reads the folder and this device's keys
+              again: it asks for nothing before it knows whether the keys changed.
+            </p>
+          </section>
         {:else if step === "done" && outcome}
           {#if outcome.status.state === "waiting"}
             <section class="callout" data-tone="quiet" data-testid="sync-rotate-pending">
@@ -312,14 +404,14 @@
           {:else}
             <section class="callout" data-tone="ok" data-testid="sync-rotate-done">
               <strong>The new keys are in use on this device</strong>
-              {#if outcome.forgotten.length}<p>Forgotten: <span class="mono">{listText(outcome.forgotten)}</span>. It can no longer read new changes.</p>{/if}
+              {#if outcome.forgotten.length}<p data-testid="sync-forgotten-result">{forgottenResult(outcome.forgotten)}</p>{/if}
             </section>
           {/if}
           <section class="group">
             <span class="caption">Enter the new passphrase on</span>
             {#if outcome.enter_new_passphrase_on.length}
               <ul class="devices">
-                {#each outcome.enter_new_passphrase_on as label (label)}<li class="mono">{label}</li>{/each}
+                {#each outcome.enter_new_passphrase_on as label (label)}<li class="mono" class:outdated={outdated.includes(label)}>{deviceToUpdate(label, outdated)}</li>{/each}
               </ul>
               <p class="note">They stop syncing until then. Portico shows them “Keys changed — enter new passphrase”.</p>
             {:else}
@@ -332,13 +424,13 @@
               shared through sync; new keys do not hide what was already readable.
             </Caution>
           {/if}
-          {#if device}
-            <p class="note">If you have not yet, remove {device.label}'s access to your cloud folder.</p>
+          {#if outcome.forgotten.length}
+            <Caution tone="note" testid="sync-forget-cloud-reminder">{cloudReminder(outcome.forgotten)}</Caution>
           {/if}
         {/if}
       </div>
     {/key}
-    {#if error}
+    {#if error && !problem}
       <div class="inline-error" role="alert"><span><CodeText text={error.message} /></span>{#if error.hint}<span class="hint"><CodeText text={error.hint} capitalize={false} /></span>{/if}</div>
     {/if}
   </div>
@@ -347,6 +439,9 @@
     {#if busy}<span class="footer-note busy"><span class="spinner"></span>{busy}</span>{/if}
     {#if step === "done"}
       <button class="primary" data-autofocus onclick={close}>Done <kbd>↵</kbd></button>
+    {:else if step === "checking"}
+      <button class="secondary" onclick={close}>Close <kbd>Esc</kbd></button>
+      <button class="secondary" data-autofocus onclick={() => void check()}>Check again</button>
     {:else}
       <button class="secondary" disabled={!!busy} onclick={close}>Cancel <kbd>Esc</kbd></button>
       {#if step === "auth" || step === "new"}<button class="secondary" disabled={!!busy} onclick={back}>Back</button>{/if}
@@ -380,6 +475,8 @@
     line-height: var(--size-badge);
   }
   .records li { color: var(--text-secondary); }
+  .devices li.outdated { border-color: color-mix(in srgb, var(--status-warning) 55%, var(--border-subtle)); }
+  .callout strong { display: inline-flex; align-items: center; gap: var(--space-2); }
   .note { color: var(--text-muted); font-size: var(--text-sm); }
   .mono { font-family: var(--font-mono); }
   strong { color: var(--text-primary); font-weight: 550; }

@@ -20,7 +20,8 @@
 // old keys), `?sync=tampered`; `?syncfolder=rejoin` joins a bundle this
 // device held before. A rotation refuses the new passphrase "reused words
 // here again" (`sync_passphrase_reused`); `&syncfolderdown=1` leaves it
-// pending.
+// pending, `&syncfolderslow=1` answers after the 60 s limit (the rotation
+// still happens; a conflict choice does not).
 import type {
   EngineEvent,
   ErrorSummary,
@@ -76,7 +77,17 @@ export function demoSync(emit: (e: EngineEvent) => void) {
   const PHONE = "old-phone (5d0e9b33)";
   let thisDevice = THIS;
   let lastPass = nowSecs() - 120;
+  /** The key epoch in use (the old keys of this sync are 1). */
+  let epoch = 2;
 
+  const HELD_TAIL: RevokedValueItem = {
+    key: "held:snippet:tail-logs",
+    subject: { type: "snippet", id: "tail-logs" },
+    device: null,
+    local: { type: "snippet", value: { name: "Tail logs", command: "journalctl -fu nginx", description: null, run: true } },
+    synced: null,
+    hash: "held-tail-logs-1",
+  };
   const device = (label: string, id: string, extra: Partial<SyncDevice> = {}): SyncDevice => ({
     id: `${id}${"0".repeat(24)}`,
     name: label.replace(/ \(.*\)$/, ""),
@@ -220,9 +231,23 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       fill();
       status = { state: "alert", kind: "revoked_writes", device: DESKTOP };
       held = [
-        { key: "held:host:db-prod", subject: { type: "host", alias: "db-prod" }, device: PHONE },
-        { key: "held:meta:web-01:tags", subject: { type: "host_meta", alias: "web-01", field: "tags" }, device: PHONE },
-        { key: "held:snippet:tail-logs", subject: { type: "snippet", id: "tail-logs" }, device: null },
+        {
+          key: "held:host:db-prod",
+          subject: { type: "host", alias: "db-prod" },
+          device: PHONE,
+          local: { type: "host", value: { hostname: "10.0.4.99", user: "postgres", port: 2222, identity_file: null, proxy_jump: null } },
+          synced: { type: "host", value: { hostname: "10.0.4.12", user: "postgres", port: null, identity_file: null, proxy_jump: null } },
+          hash: "held-db-prod-1",
+        },
+        {
+          key: "held:meta:web-01:tags",
+          subject: { type: "host_meta", alias: "web-01", field: "tags" },
+          device: PHONE,
+          local: { type: "tags", value: ["prod", "web", "public"] },
+          synced: { type: "tags", value: ["prod", "web"] },
+          hash: "held-web-01-tags-1",
+        },
+        HELD_TAIL,
       ];
       break;
     case "pending":
@@ -272,6 +297,18 @@ export function demoSync(emit: (e: EngineEvent) => void) {
   }
 
   const pendingChanged = () => emit({ type: "sync_pending_changed" });
+  // The core's own words (sync/mod.rs): the dialogs choose their hint by code.
+  const reusedRefusal = () =>
+    fail("sync_passphrase_reused", "this sync passphrase opens older sync keys", "This passphrase opens older keys: choose another one (rotation), or type nothing if you did not change the keys (adoption).");
+  /** `&syncfolderslow=1`: the folder answers after the 60 s limit (A4). */
+  const slow = params.get("syncfolderslow") === "1";
+  const timedOut = () => fail("sync_folder_timeout", "the sync folder did not answer within 60 seconds", "The folder is slow or stalled (network drive, files being downloaded). Portico retries later.");
+  /** What the core does on its limit: "folder unavailable" until the job ends. */
+  function late(apply: () => void) {
+    set({ state: "folder_unavailable", reason: "not_mounted" });
+    setTimeout(apply, 2500);
+    return timedOut();
+  }
   const unlocked = () => status.state !== "locked" && status.state !== "disabled";
 
   const backend: SyncBackend = {
@@ -281,6 +318,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       folder: status.state === "disabled" ? null : folder,
       device: status.state === "disabled" ? null : thisDevice,
       rememberKey,
+      epoch: status.state === "disabled" ? null : epoch,
     }),
     async syncNow() {
       if (status.state === "disabled") throw fail("sync_disabled", "sync is off on this device", "Set it up from Sync….");
@@ -364,14 +402,14 @@ export function demoSync(emit: (e: EngineEvent) => void) {
           return set(status);
         }
         if (passphrase === "reused words here again") {
-          throw fail("sync_passphrase_reused", "this passphrase opens keys this device verified before", "This passphrase opens older keys: choose another one (rotation), or type nothing if you did not change the keys (adoption).");
+          throw reusedRefusal();
         }
         if (passphrase === "lineage") {
           throw fail("sync_lineage_unknown", "the new sync keys do not continue the keys this device knows", "This device lost its record of the current keys: turn sync off, then join again as a new device.");
         }
         if (!rememberKey && !previousOpened) {
           // Adopted without the previous keys: every local difference waits (RR4).
-          held = [{ key: "held:snippet:tail-logs", subject: { type: "snippet", id: "tail-logs" }, device: null }];
+          held = [HELD_TAIL];
           pendingChanged();
         }
         newer = [];
@@ -487,16 +525,29 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         throw fail("sync_wrong_passphrase", "wrong sync passphrase", "Check Caps Lock and the keyboard layout.");
       }
       if (request.newPassphrase.kind === "typed" && request.newPassphrase.value === "reused words here again") {
-        throw fail("sync_passphrase_reused", "the new passphrase opens keys this device verified before", "This passphrase opens older keys: choose another one (rotation), or type nothing if you did not change the keys (adoption).");
+        throw reusedRefusal();
       }
       checkNew(request.newPassphrase);
       rememberKey = request.rememberKey;
       const forgotten = devices.filter((d) => request.deviceIds.includes(d.id)).map((d) => d.label);
-      devices = devices.map((d) => (request.deviceIds.includes(d.id) ? { ...d, revoked: true } : d));
-      lastPass = nowSecs();
+      const rotate = () => {
+        devices = devices.map((d) => (request.deviceIds.includes(d.id) ? { ...d, revoked: true } : d));
+        // The keys in use until now become old keys of this sync.
+        keyEntries = [...keyEntries, { account: `sync-key:9c1e4a07b2d35f6e8a0c1d2e3f4a5b6c:${epoch}`, bundle: "9c1e4a07b2d35f6e8a0c1d2e3f4a5b6c", epoch, this_bundle: true }];
+        epoch += 1;
+        lastPass = nowSecs();
+      };
+      if (slow) {
+        // It does finish, after the limit: the dialog must find out, not ask again.
+        throw late(() => {
+          rotate();
+          set(idle());
+        });
+      }
+      rotate();
       const next = params.get("syncfolderdown") === "1" ? set({ state: "waiting", reason: "rotation_pending", device: null }) : set(idle());
       return {
-        epoch: 3,
+        epoch,
         status: next,
         enter_new_passphrase_on: devices.filter((d) => !d.this_device && !d.revoked).map((d) => d.label),
         forgotten,
@@ -513,7 +564,7 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         if (choice.passphrase === "removed") {
           throw fail(
             "sync_rotation_conflict",
-            `the keys of ${LAPTOP} still include ${PHONE}, removed by this device`,
+            `the other device's sync keys still include forgotten device ${PHONE}`,
             "The other device's keys still include a device you removed: keep this device's keys instead.",
           );
         }
@@ -522,6 +573,8 @@ export function demoSync(emit: (e: EngineEvent) => void) {
         rememberKey = choice.rememberKey;
       }
       lastPass = nowSecs();
+      // The other device's passphrase "slow": the answer comes after the limit, unchanged.
+      if (slow) throw late(() => set({ state: "alert", kind: "rotation_conflict", device: LAPTOP }));
       return set(idle());
     },
     async syncRestoreBundle() {
@@ -549,8 +602,11 @@ export function demoSync(emit: (e: EngineEvent) => void) {
       keyEntries = keyEntries.filter((k) => k.account !== account);
     },
     syncRevokedValues: async () => structuredClone(held),
-    async syncRevokedValue(key) {
+    async syncRevokedValue(key, _choice, hash) {
       await sleep(300);
+      if (!held.some((h) => h.key === key && h.hash === hash)) {
+        throw fail("sync_not_pending", `${key} no longer waits for this decision`, "Reload the list of synced changes awaiting confirmation.");
+      }
       held = held.filter((h) => h.key !== key);
       pendingChanged();
       return set(held.length || status.state !== "alert" ? status : idle());

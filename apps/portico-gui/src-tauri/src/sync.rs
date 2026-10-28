@@ -270,6 +270,9 @@ pub(crate) struct OverviewDto {
     pub folder: Option<String>,
     pub device: Option<String>,
     pub remember_key: bool,
+    /// The key epoch in use (`None`: sync off): compared before and after a
+    /// rotation whose answer timed out (A4).
+    pub epoch: Option<u32>,
 }
 
 /// The folder picked for create / join, and what it holds.
@@ -328,6 +331,7 @@ pub(crate) async fn sync_status(engine: State<'_, Engine>) -> Result<OverviewDto
         folder: overview.folder.as_deref().map(display_path),
         device: overview.device,
         remember_key: overview.remember_key,
+        epoch: overview.epoch,
     })
 }
 

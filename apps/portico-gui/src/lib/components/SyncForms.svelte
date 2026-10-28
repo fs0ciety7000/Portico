@@ -20,7 +20,7 @@
   import CodeText from "./CodeText.svelte";
   import Caution from "./Caution.svelte";
   import Modal from "./Modal.svelte";
-  import { listText } from "../syncview";
+  import { LEAVE_NOTE, listText, RESET_WORD, yArmed } from "../syncview";
   import SyncPassphraseFields, { newPassphrase } from "./SyncPassphraseFields.svelte";
 
   let { form: initial }: { form: SyncForm } = $props();
@@ -49,7 +49,6 @@
     if (form === "disable") backend.syncRotationPreview().then((p) => (preview = p), () => {});
   });
 
-  const RESET_WORD = "reset";
   const ready = $derived.by(() => {
     if (busy || !armed) return false;
     switch (form) {
@@ -64,6 +63,12 @@
       default:
         return true;
     }
+  });
+
+  /** When the form became ready: a final `y` waits Y_DELAY after it. */
+  let readyAt = $state<number | null>(null);
+  $effect(() => {
+    readyAt = ready ? performance.now() : null;
   });
 
   function clear() {
@@ -167,7 +172,7 @@
 
   function onkey(key: string): boolean {
     if ((form !== "reset" && form !== "restore") || key !== "y") return false;
-    void submit();
+    if (ready && yArmed(readyAt, performance.now())) void submit();
     return true;
   }
 
@@ -248,10 +253,7 @@
       <label class="check"><input type="checkbox" bind:checked={removeMyFile} onchange={() => (leaveRoster = removeMyFile)} /> Remove this device's file from the folder</label>
       <label class="check"><input type="checkbox" bind:checked={leaveRoster} data-testid="sync-leave-roster" /> Leave the device list</label>
       {#if leaveRoster}
-        <p class="note" data-testid="sync-leave-note">
-          Removed from the list without changing the keys{forgetKey ? "" : ": while it keeps the key, this device can still read the current sync"}.
-          To exclude it for real, forget it from another device.
-        </p>
+        <p class="note" data-testid="sync-leave-note">{LEAVE_NOTE}</p>
         {#if outdated.length}
           <Caution>{listText(outdated)} {outdated.length === 1 ? "runs" : "run"} Portico older than 0.7 and will stop syncing after this: update Portico there.</Caution>
         {/if}
