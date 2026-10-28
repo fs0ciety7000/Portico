@@ -47,6 +47,9 @@ pub(crate) const BULK: [(JoinBulkChoice, &str, &str); 3] = [
     ),
 ];
 
+/// Why only "Review each conflict" is offered on a re-join (S2a, FAIBLE-5).
+pub(crate) const REJOIN_NOTE: &str = "This device synced with this folder before: each difference is reviewed one by one, so nothing is settled in bulk.";
+
 /// Under the bulk choices, always: neither confirms a received host (F1).
 pub(crate) const BULK_NOTE: &str =
     "Received hosts still wait for your confirmation, one by one, whichever you choose.";
@@ -114,6 +117,9 @@ pub(crate) struct SyncWizard {
     pub(crate) saved_problem: bool,
     /// The last refusal outside a form field.
     pub(crate) error: Option<ErrorSummary>,
+    /// A line above the folder step ("Sync is off. Join the folder again
+    /// as a new device.", S2c-1).
+    pub(crate) note: Option<String>,
     pub(crate) device_name: String,
 }
 
@@ -131,6 +137,7 @@ impl SyncWizard {
             saved: false,
             saved_problem: false,
             error: None,
+            note: None,
             device_name,
         }
     }
@@ -212,6 +219,19 @@ impl SyncWizard {
                 self.error = Some(error);
             }
         }
+    }
+
+    /// Straight to the folder step with `folder` filled in ("Join again
+    /// as a new device").
+    pub(crate) fn at_folder(&mut self, folder: &str) {
+        self.folder = folder.chars().take(MAX_LINE).collect();
+        self.step = Step::Folder;
+    }
+
+    /// This device verified this bundle before (S2a, `JoinPreview::rejoin`):
+    /// only "Review each conflict" is accepted.
+    pub(crate) fn rejoin(&self) -> bool {
+        self.preview.as_ref().is_some_and(|(p, _)| p.rejoin)
     }
 
     pub(crate) fn previewed(&mut self, preview: JoinPreview, now: Instant) {
@@ -302,6 +322,16 @@ impl SyncWizard {
                     self.step = Step::Join;
                     WizardOutcome::None
                 }
+                // A re-join: each difference is reviewed, nothing else.
+                KeyCode::Down
+                | KeyCode::Up
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Char('j' | 'k')
+                    if self.rejoin() =>
+                {
+                    WizardOutcome::None
+                }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     self.bulk = (self.bulk + 1).min(BULK.len() - 1);
                     WizardOutcome::None
@@ -333,9 +363,12 @@ impl SyncWizard {
                             });
                             return WizardOutcome::None;
                         }
-                        let bulk = BULK
-                            .get(self.bulk)
-                            .map_or(JoinBulkChoice::ReviewEach, |b| b.0);
+                        let bulk = if self.rejoin() {
+                            JoinBulkChoice::ReviewEach
+                        } else {
+                            BULK.get(self.bulk)
+                                .map_or(JoinBulkChoice::ReviewEach, |b| b.0)
+                        };
                         self.step = Step::Working("Joining…");
                         WizardOutcome::Commit { token, bulk }
                     } else {

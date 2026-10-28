@@ -78,6 +78,7 @@ fn idle() -> SyncOverview {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     }
 }
 

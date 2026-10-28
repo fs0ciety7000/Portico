@@ -1545,9 +1545,20 @@ impl App {
     pub(crate) async fn pump_until(
         &mut self,
         events: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
-        mut done: impl FnMut(&App) -> bool,
+        done: impl FnMut(&App) -> bool,
     ) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        self.pump_within(events, done, 20).await;
+    }
+
+    /// [`Self::pump_until`] with its own limit (key derivations under a
+    /// loaded test run).
+    pub(crate) async fn pump_within(
+        &mut self,
+        events: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
+        mut done: impl FnMut(&App) -> bool,
+        secs: u64,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
         while !done(self) {
             let playing = self
                 .player
@@ -1560,7 +1571,7 @@ impl App {
                 msg = player_recv(self.player.as_mut()), if playing => Some(Action::PlayerFeed(msg)),
                 () = sleep_until(next), if next.is_some() => Some(Action::Expire),
                 () = tokio::time::sleep_until(deadline) => {
-                    panic!("not reached in 20 s: {:?} {:?}", self.tabs, self.sessions)
+                    panic!("not reached in {secs} s: {:?} {:?}", self.tabs, self.sessions)
                 }
                 () = tokio::time::sleep(Duration::from_millis(20)) => Some(Action::Tick),
             };

@@ -731,6 +731,12 @@ pub(crate) mod sim {
         /// Device names shown as iCloud placeholders.
         pub(crate) placeholders: Vec<String>,
         pub(crate) writes: usize,
+        /// Every write and create, in order (`key`, bytes): what each
+        /// device published (S2a drills).
+        pub(crate) log: Vec<(String, Vec<u8>)>,
+        /// Writes that time out once (`key`, whether the write lands
+        /// anyway, as an ambiguous timeout can).
+        pub(crate) fail_writes: Vec<(String, bool)>,
     }
 
     #[derive(Debug, Default, Clone)]
@@ -835,8 +841,18 @@ pub(crate) mod sim {
                 if s.read_only {
                     return Err(SyncError::FolderUnwritable);
                 }
+                let key = Self::key(file);
+                if let Some(index) = s.fail_writes.iter().position(|(k, _)| *k == key) {
+                    let (_, lands) = s.fail_writes.remove(index);
+                    if lands {
+                        s.files.insert(key.clone(), bytes.to_vec());
+                        s.log.push((key, bytes.to_vec()));
+                    }
+                    return Err(SyncError::FolderTimeout { secs: 60 });
+                }
                 s.writes = s.writes.saturating_add(1);
-                s.files.insert(Self::key(file), bytes.to_vec());
+                s.log.push((key.clone(), bytes.to_vec()));
+                s.files.insert(key, bytes.to_vec());
                 Ok(())
             })
         }
@@ -851,6 +867,7 @@ pub(crate) mod sim {
                 if s.files.contains_key(&key) {
                     return Err(SyncError::BundleExists);
                 }
+                s.log.push((key.clone(), bytes.to_vec()));
                 s.files.insert(key, bytes.to_vec());
                 Ok(())
             })

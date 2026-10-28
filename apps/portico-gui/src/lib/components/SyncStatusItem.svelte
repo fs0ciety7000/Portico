@@ -4,7 +4,8 @@
   // the title —, `Sync folder unavailable`, `Sync locked`, `Sync off`). Only
   // the counts carry a status colour: conflicts and changes to review in the
   // warning tone, an alert in the error tone. Wide windows spell the counts
-  // out (`2 conflicts · 3 to review`), narrow ones show pills.
+  // out (`2 conflicts · 3 to review`), narrow ones show pills, and the `!`
+  // of an alert in the label's tone (one mapping with the TUI: B5).
   import { countsText, syncLabel } from "../syncview";
   import { keymap } from "../state/keymap.svelte";
   import { sync } from "../state/sync.svelte";
@@ -30,7 +31,7 @@
   );
 </script>
 
-<button class="sync" data-tone={view.tone} onclick={() => sync.show(conflicts ? "conflicts" : received ? "received" : "overview")} {title} data-testid="sync-status">
+<button class="sync" data-tone={view.tone} onclick={() => sync.show(alert ? "overview" : conflicts ? "conflicts" : received ? "received" : "overview")} {title} data-testid="sync-status">
   <svg viewBox="0 0 16 16" aria-hidden="true" class:spin={view.tone === "busy" && status?.state === "syncing"}>
     {#if status?.state === "locked"}
       <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
@@ -43,10 +44,13 @@
     {/if}
   </svg>
   <span class="label">{view.label}</span>
-  {#if alert}<span class="count error" aria-label={title}>!</span>{/if}
   {#if conflicts || received}
     <span class="counts-text" data-testid="sync-counts-text"><span class="sep">·</span> {countsText(conflicts, received)}</span>
+  {/if}
+  {#if alert || conflicts || received}
+    <!-- Compact windows only: the `!` of an alert, in the item's own tone (B5). -->
     <span class="counts-pills">
+      {#if alert}<span class="count" class:error={view.tone === "error"} class:warning={view.tone !== "error"} aria-label={title} data-testid="sync-alert-pill">!</span>{/if}
       {#if conflicts}<span class="count warning" aria-label={title}>{conflicts}</span>{/if}
       {#if received}<span class="count pending" aria-label={title}>{received}</span>{/if}
     </span>
@@ -72,6 +76,9 @@
   .sync:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .sync[data-tone="muted"] { color: var(--text-muted); }
   svg { width: var(--size-icon-xs); height: var(--size-icon-xs); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  /* The glyph carries the tone (the label stays text): the same mapping as the TUI. */
+  .sync[data-tone="warning"] svg { color: var(--status-warning); }
+  .sync[data-tone="error"] svg { color: var(--status-error); }
   svg.spin { animation: sync-spin var(--motion-loop) linear infinite; }
   @keyframes sync-spin { to { transform: rotate(360deg); } }
   .label { white-space: nowrap; }

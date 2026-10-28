@@ -22,6 +22,14 @@
 //! - **Timeout**: after `sync_folder_timeout` the operation may still
 //!   complete in the background: UIs re-read the status, the pending
 //!   confirmations and the conflicts (`docs/SYNC.md` §10).
+//! - **S2a** (`docs/SYNC.md` §13.7): key rotation and forgetting a device
+//!   ([`Engine::sync_rotate_keys`], [`Engine::sync_forget_device`]), the
+//!   extended unlock that adopts another device's rotation, the rotation
+//!   conflict choices, the explicit ways out (`sync_restore_bundle`,
+//!   `sync_discard_newer_file`), old keychain entries, held values. The
+//!   Argon2 work (new slot, history of slots) runs on `spawn_blocking`
+//!   between two steps on the sync thread; the second refuses
+//!   (`sync_busy`) when `bundle.toml` changed meanwhile.
 //! - No network call, ever.
 
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -35,14 +43,18 @@ use super::Engine;
 use crate::error::{Error, Result};
 use crate::events::EngineEvent;
 use crate::sync::api::{
-    DisableOptions, FolderProbe, FolderReason, JoinBulkChoice, JoinPreview, PendingHostChange,
-    SyncConflict, SyncCreate, SyncDevice, SyncIssue, SyncJoin, SyncOptions, SyncOverview,
+    DisableOptions, FolderProbe, FolderReason, ForgetDevice, ForgetPreview, JoinBulkChoice,
+    JoinPreview, NewerEpochFile, PendingHostChange, RevokedValueChoice, RevokedValueItem,
+    RotateAuth, RotateKeys, RotationChoice, RotationOutcome, RotationPreview, SyncConflict,
+    SyncCreate, SyncDevice, SyncIssue, SyncJoin, SyncKeyEntry, SyncOptions, SyncOverview,
     SyncResolution, SyncStatus, UnconfirmedSnippet,
 };
 use crate::sync::bundle::{self, RosterDevice};
 use crate::sync::clock::{DeviceId, DeviceName};
 use crate::sync::passphrase::{GeneratedPassphrase, NewPassphrase};
-use crate::sync::runner::{SyncCore, SyncTuning};
+use crate::sync::runner::{
+    Authorization, SyncCore, SyncTuning, build_rotation, conflict_decide, unlock_decide,
+};
 use crate::sync::{SyncError, state};
 
 /// Operations queued for the sync thread at most (beyond: `sync_busy`).
@@ -276,7 +288,8 @@ impl Engine {
             status,
             folder: config.as_ref().map(|c| c.folder.clone()),
             device: config.as_ref().map(|c| c.device.to_string()),
-            remember_key: config.is_none_or(|c| c.remember_key),
+            remember_key: config.as_ref().is_none_or(|c| c.remember_key),
+            epoch: config.as_ref().map(|c| c.epoch),
         })
     }
 
@@ -376,7 +389,25 @@ impl Engine {
             .on_sync(move |core| core.read_bundle_text(&read_folder))
             .await?;
         let bounds = self.sync_tuning().kdf_bounds;
-        let opened = Self::blocking(move || Ok(bundle::open(&text, &passphrase, &bounds)?)).await?;
+        let paths = self.inner.config.paths.clone();
+        let opened = Self::blocking(move || {
+            let opened = bundle::open(&text, &passphrase, &bounds)?;
+            // A device that joins again keeps refusing its old passphrases
+            // (§13.3.6): every verified slot of this bundle but the one
+            // being joined.
+            let current = bundle::peek(&text)?.slot_id;
+            let history = state::load_history(&paths).unwrap_or_default();
+            let reused = history.into_iter().any(|(_, _, old)| {
+                bundle::peek(&old).is_ok_and(|clear| {
+                    clear.bundle_id == opened.header.bundle_id && clear.slot_id != current
+                }) && bundle::passphrase_opens(&old, &passphrase, &bounds)
+            });
+            if reused {
+                return Err(SyncError::PassphraseReused.into());
+            }
+            Ok(opened)
+        })
+        .await?;
         self.on_sync(move |core| core.join_preview(folder, root, &opened, name, remember_key))
             .await
     }
@@ -397,13 +428,24 @@ impl Engine {
     }
 
     /// Unlocks sync on this device with the passphrase (the key was not
-    /// remembered, or the keychain was unavailable).
+    /// remembered, or the keychain was unavailable), **or adopts** another
+    /// device's key rotation (S2a, §13.3.5): the new bundle must continue
+    /// this device's lineage (checked against its retained commitment), the
+    /// passphrase must open none of the slots this device verified before
+    /// (`sync_passphrase_reused`), and nothing below the local epoch floor
+    /// is ever opened (`sync_rollback`). A forgotten device gets
+    /// `sync_device_forgotten` and nothing is written. On a device that does
+    /// not remember its key, the **previous** passphrase is accepted first
+    /// (RR4): it unlocks the current keys in memory so the adoption that
+    /// follows keeps the local data's provenance.
     pub async fn sync_unlock(&self, passphrase: SecretString) -> Result<SyncStatus> {
-        let (sync, text) = self.on_sync(|core| core.configured_bundle_text()).await?;
+        let context = self.on_sync(SyncCore::unlock_context).await?;
         let bounds = self.sync_tuning().kdf_bounds;
-        let opened = Self::blocking(move || Ok(bundle::open(&text, &passphrase, &bounds)?)).await?;
+        let decide = context.clone();
+        let unlocked =
+            Self::blocking(move || Ok(unlock_decide(&decide, &passphrase, &bounds)?)).await?;
         let status = self
-            .on_sync(move |core| core.finish_unlock(&sync, &opened))
+            .on_sync(move |core| core.finish_unlock(&context, unlocked))
             .await?;
         self.start_sync();
         Ok(status)
@@ -516,9 +558,7 @@ impl Engine {
     /// (F14), optionally removes this device's file; local hosts, snippets
     /// and settings are kept.
     pub async fn sync_disable(&self, options: DisableOptions) -> Result<SyncStatus> {
-        let status = self
-            .on_sync(move |core| core.disable(options.forget_key, options.remove_my_file))
-            .await?;
+        let status = self.on_sync(move |core| core.disable(options)).await?;
         if let Some(task) = self
             .sync_handle()
             .task
@@ -529,6 +569,189 @@ impl Engine {
             task.cancel();
         }
         Ok(status)
+    }
+
+    // ── S2a: rotation, forgetting a device (`docs/SYNC.md` §13.7) ────────
+
+    /// What a rotation would affect: the devices, those still on Portico
+    /// < 0.7 (`sync_peers_outdated`, Q5), whether the bundle switches to
+    /// version 2.
+    pub async fn sync_rotation_preview(&self) -> Result<RotationPreview> {
+        self.on_sync(|core| Ok(core.rotation_preview())).await
+    }
+
+    /// Rotates the keys (§13.3): a new epoch and data key under a
+    /// mandatory new passphrase (refused when it opens a slot this device
+    /// verified: `sync_passphrase_reused`). Crash-safe and forward only: a
+    /// stalled folder leaves `Waiting { RotationPending }` and every pass
+    /// carries it on. Every other device must type the new passphrase.
+    pub async fn sync_rotate_keys(&self, request: RotateKeys) -> Result<RotationOutcome> {
+        let RotateKeys {
+            authorization,
+            new_passphrase,
+            remember_key,
+        } = request;
+        self.rotate(Vec::new(), authorization, new_passphrase, remember_key)
+            .await
+    }
+
+    /// What forgetting a device would affect (§13.4.2).
+    pub async fn sync_forget_preview(&self, device_id: String) -> Result<ForgetPreview> {
+        self.on_sync(move |core| core.forget_preview(&device_id))
+            .await
+    }
+
+    /// Forgets devices (§13.4): always a rotation, the devices moved to the
+    /// roster's forgotten list with their exact `revoked_clock`, their
+    /// files removed. Refused for this device (`sync_forget_self`) and for
+    /// an id not in the list (`sync_device_unknown`).
+    pub async fn sync_forget_device(&self, request: ForgetDevice) -> Result<RotationOutcome> {
+        let ForgetDevice {
+            device_ids,
+            authorization,
+            new_passphrase,
+            remember_key,
+        } = request;
+        if device_ids.is_empty() {
+            return Err(SyncError::DeviceUnknown {
+                device: String::new(),
+            }
+            .into());
+        }
+        self.rotate(device_ids, authorization, new_passphrase, remember_key)
+            .await
+    }
+
+    async fn rotate(
+        &self,
+        forget: Vec<String>,
+        authorization: RotateAuth,
+        new_passphrase: crate::sync::NewPassphrase,
+        remember_key: bool,
+    ) -> Result<RotationOutcome> {
+        let plan = self
+            .on_sync(move |core| core.rotation_plan(&forget))
+            .await?;
+        let authorization = match authorization {
+            RotateAuth::CurrentPassphrase(current) => Authorization::Passphrase(current),
+            RotateAuth::ResetConfirmed => Authorization::HeldKey,
+        };
+        self.finish_rotate(plan, authorization, new_passphrase, remember_key)
+            .await
+    }
+
+    async fn finish_rotate(
+        &self,
+        plan: crate::sync::runner::RotationPlan,
+        authorization: Authorization,
+        new_passphrase: crate::sync::NewPassphrase,
+        remember_key: bool,
+    ) -> Result<RotationOutcome> {
+        let tuning = self.sync_tuning();
+        let (plan, text, next) = Self::blocking(move || {
+            let (text, next) = build_rotation(
+                &plan,
+                &authorization,
+                &new_passphrase,
+                tuning.kdf_params,
+                &tuning.kdf_bounds,
+            )?;
+            Ok((plan, text, next))
+        })
+        .await?;
+        let outcome = self
+            .on_sync(move |core| core.finish_rotation(&plan, &next, &text, remember_key))
+            .await?;
+        self.start_sync();
+        Ok(outcome)
+    }
+
+    /// The user's answer to `RotationConflict` (§13.3.7). `UseOther`
+    /// checks the other device's keys like an adoption and refuses them
+    /// while they still list a device this device forgot (E2);
+    /// `KeepMine` rotates again from this device's keys.
+    pub async fn sync_resolve_rotation_conflict(
+        &self,
+        choice: RotationChoice,
+    ) -> Result<SyncStatus> {
+        match choice {
+            RotationChoice::UseOther(passphrase) => {
+                let context = self.on_sync(SyncCore::conflict_context).await?;
+                let bounds = self.sync_tuning().kdf_bounds;
+                let decide = context.clone();
+                let other =
+                    Self::blocking(move || Ok(conflict_decide(&decide, &passphrase, &bounds)?))
+                        .await?;
+                self.on_sync(move |core| core.finish_use_other(&context, &other))
+                    .await
+            }
+            RotationChoice::KeepMine {
+                new_passphrase,
+                remember_key,
+            } => {
+                let plan = self.on_sync(SyncCore::keep_mine_plan).await?;
+                let outcome = self
+                    .finish_rotate(plan, Authorization::HeldKey, new_passphrase, remember_key)
+                    .await?;
+                Ok(outcome.status)
+            }
+        }
+    }
+
+    /// "Restore the key file from this device" (§13.3.6): rewrites
+    /// `bundle.toml` from this device's verified copy, on explicit request;
+    /// refused during a rotation conflict.
+    pub async fn sync_restore_bundle(&self) -> Result<SyncStatus> {
+        self.on_sync(SyncCore::restore_bundle).await
+    }
+
+    /// Device files that announced a newer epoch at the last pass (RR5).
+    pub async fn sync_newer_files(&self) -> Result<Vec<NewerEpochFile>> {
+        self.on_sync(|core| Ok(core.newer_files())).await
+    }
+
+    /// Removes a device file that announces a newer epoch, when nobody
+    /// changed the keys (RR5). `fingerprint` is the one shown
+    /// ([`NewerEpochFile::fingerprint`]): another content is refused with
+    /// `sync_not_pending`.
+    pub async fn sync_discard_newer_file(
+        &self,
+        device_id: String,
+        fingerprint: String,
+    ) -> Result<SyncStatus> {
+        self.on_sync(move |core| core.discard_newer_file(&device_id, &fingerprint))
+            .await
+    }
+
+    /// Old sync keys in the keychain (never the key in use, §13.3.8).
+    pub async fn sync_key_entries(&self) -> Result<Vec<SyncKeyEntry>> {
+        self.on_sync(|core| core.key_entries()).await
+    }
+
+    /// Removes an old sync key: only an indexed `sync-key:<bundle>:<epoch>`
+    /// that is not the key in use (`sync_key_entry_invalid`,
+    /// `sync_key_entry_current`, R15).
+    pub async fn sync_remove_key_entry(&self, account: String) -> Result<()> {
+        self.on_sync(move |core| core.remove_key_entry(&account))
+            .await
+    }
+
+    /// Local values held out of sync until a decision (R3, RR4).
+    pub async fn sync_revoked_values(&self) -> Result<Vec<RevokedValueItem>> {
+        self.on_sync(|core| Ok(core.revoked_values())).await
+    }
+
+    /// Decides a held value ([`RevokedValueItem::key`]); nothing is
+    /// preselected. `hash` is the [`RevokedValueItem::hash`] shown: a value
+    /// that changed since is refused with `sync_not_pending` (reload).
+    pub async fn sync_revoked_value(
+        &self,
+        key: String,
+        choice: RevokedValueChoice,
+        hash: String,
+    ) -> Result<SyncStatus> {
+        self.on_sync(move |core| core.decide_revoked_value(&key, choice, &hash))
+            .await
     }
 
     // ── Snippets changed by sync (F8) ───────────────────────────────────

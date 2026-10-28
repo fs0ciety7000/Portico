@@ -5,6 +5,9 @@
   // the irreversible step, merged into it: "I saved it" gates Create and
   // Join. Passphrase fields are cleared as soon as they are sent; a
   // generated passphrase is dropped in Rust when the wizard closes.
+  // S2c-1: "Join again as a new device" opens it on the folder step, the
+  // folder still picked in Rust; a bundle this device held before
+  // (`JoinPreview.rejoin`) only offers "Review each".
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import { fly } from "svelte/transition";
   import { asError, type ErrorSummary, type GeneratedPassphrase, type JoinBulkChoice, type JoinPreview, type PickedFolder } from "../api";
@@ -19,11 +22,13 @@
 
   type Step = "intro" | "folder" | "create" | "join" | "review";
 
-  let step: Step = $state("intro");
+  let { rejoin = null }: { rejoin?: PickedFolder | null } = $props();
+
+  let step: Step = $state(untrack(() => (rejoin ? "folder" : "intro")));
   let armed = $state(false);
   let busy: string | null = $state(null);
   let error = $state<ErrorSummary | null>(null);
-  let picked = $state<PickedFolder | null>(null);
+  let picked = $state<PickedFolder | null>(untrack(() => rejoin));
   // Passphrases: cleared once sent.
   let passphrase = $state("");
   let confirm = $state("");
@@ -148,7 +153,7 @@
     busy = "Joining…";
     error = null;
     try {
-      const status = await backend.syncJoinCommit(preview.token, bulk);
+      const status = await backend.syncJoinCommit(preview.token, preview.rejoin ? "review_each" : bulk);
       preview = null;
       await sync.act(async () => status);
       finish(true);
@@ -251,7 +256,18 @@
             From {preview.devices.map((d) => d.label).join(", ") || "no device yet"}.
             {#if preview.needs_newer}<span class="soft-warning">{preview.needs_newer} {preview.needs_newer === 1 ? "record needs" : "records need"} a newer Portico: kept untouched and passed on.</span>{/if}
           </p>
-          {#if preview.conflicts}
+          {#if preview.rejoin}
+            <span class="caption">Conflicts with what this device has</span>
+            <div class="segmented" role="group" aria-label="Conflicts">
+              {#each BULK as b (b.id)}
+                <button aria-pressed={b.id === "review_each"} disabled={b.id !== "review_each"}>{b.label}</button>
+              {/each}
+            </div>
+            <p class="note" data-testid="sync-rejoin-note">
+              This device synced with this folder before: every local difference waits for your decision in Sync, Received. Nothing is
+              settled in bulk.
+            </p>
+          {:else if preview.conflicts}
             <span class="caption">Conflicts with what this device has</span>
             <div class="segmented" role="group" aria-label="Conflicts">
               {#each BULK as b (b.id)}

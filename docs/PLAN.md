@@ -232,6 +232,30 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
 - **S2, rotation puis mots de passe** : rotation des clés et « oublier un appareil » **d'abord** ; ensuite mots de passe
   **liés** seulement (jamais les non liés), opt-in au niveau du bundle et décoché par défaut, envoyés sur B seulement si B
   vérifie la même clé hôte
+  - **S2a, rotation et oubli d'un appareil (moteur)** ✅ *(2026-10-27 ; revue `agent-security` S2a faite et corrigée ; livré en 0.7.0)* : `bundle.toml`
+    v2 (engagement d'époque, filiation chaînée sous la sous-clé `rotate`, roster v2 avec appareils oubliés et politique des
+    mots de passe), cliquet sur la version lue, plancher local d'époque, rotation sûre en cas de crash et vers l'avant
+    seulement (`rotation.toml`, `bundle.next`, `bundle.verified`, historique des 8 derniers emplacements), adoption par la
+    nouvelle passphrase (chaîne entière, historique, cas « ne pas mémoriser »), arrêt sur en-tête d'époque supérieure avec
+    sortie explicite, conflits de rotation sans guerre de réécriture (« garder mes clés », « utiliser les leurs » refusé
+    s'il ramène un appareil oublié, E2), oubli d'un appareil (`revoked_clock` exact et immuable, fichiers supprimés,
+    provenance au nouveau rattachement), `leave_roster`, filtre des registres `secret` quand la politique est désactivée et
+    relais opaque sinon, `IndexedSecretStore` sur tous les chemins, collecte des anciennes clés, `C_E` retenu dès un v1
+    (E1). API `Engine::sync_rotate_keys`, `sync_forget_device`, `sync_unlock` étendue, `sync_resolve_rotation_conflict`,
+    `sync_restore_bundle`, `sync_discard_newer_file`, clés orphelines, valeurs retenues. Exercice d'appareil perdu sans
+    mots de passe vert ; écarts en `docs/SYNC.md` §13.12
+  - **S2c-1, interfaces de rotation et d'oubli** ✅ *(livré en 0.7.0 ; exercice « appareil perdu » du propriétaire sur deux machines réussi le 2026-10-28)* : TUI livrée *(2026-10-27, GUI en parallèle ; revue `agent-design-review`
+    à faire)* : « Rotate keys » (`o`) et « Forget <appareil> » (`f`, rappel du dossier cloud d'abord) en trois étapes et
+    question armée `y`, adoption (passphrase précédente facultative sur un appareil sans clé mémorisée), conflit de rotation
+    (`u` / `o`), appareil oublié (`D` / `n` rejoindre), fichiers d'époque supérieure (`x`), « Restore key file » (`b`),
+    anciennes clés du trousseau, valeurs retenues dans Received (`m` / `t`), « Leave the device list », revue de
+    rattachement « Review each » seul, libellés de statut dédiés ; exercice d'appareil perdu joué par les touches du
+    panneau (`lost_device_drill_through_the_panel`) ; détails et écarts en `docs/SYNC.md` §13.12.2.
+    Revues S2c-1 *(2026-10-28)* : sécurité (quatre faibles) et design (« presque ») corrigées dans les deux UIs ; cœur :
+    valeurs retenues liées à leur empreinte (`RevokedValueItem::hash`, valeurs affichées), `SyncOverview::epoch` (réponse
+    de rotation perdue : « Result unknown — Portico is checking ») ; TUI : alertes de clés toujours visibles à 80×24,
+    tons communs, textes de sécurité identiques, étape 1 lue jusqu'au bout ; tableaux en `docs/SYNC.md` §13.12.4–13.12.5
+  - **S2b, mots de passe liés (moteur)** puis **S2c-2 (interfaces)** : à faire
 - **S3, plus tard** : emplacements de clé par appareil (rotation sans ressaisir la passphrase), signatures Ed25519, exclusions
   par réglage, options à décider
 

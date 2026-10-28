@@ -40,6 +40,7 @@ mod player;
 mod recordings;
 mod snippets;
 mod sync_panel;
+mod sync_rotate;
 mod sync_wizard;
 mod term_search;
 mod terminal;
@@ -229,7 +230,9 @@ async fn run_tui() -> Result<()> {
     let terminal = ratatui::init();
     // Pastes arrive as one event (and can be bracketed for the remote shell).
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
-    let result = app::App::new(engine).run(terminal).await;
+    // Boxed: the app state makes this future cross clippy's `large_futures`
+    // limit.
+    let result = Box::pin(app::App::new(engine).run(terminal)).await;
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     result

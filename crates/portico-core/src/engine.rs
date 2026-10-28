@@ -323,7 +323,10 @@ struct SessionEntry {
 impl Engine {
     /// Creates the engine. Must be called inside a Tokio runtime once sessions
     /// are implemented (they spawn tasks).
-    pub fn new(config: EngineConfig) -> Self {
+    pub fn new(mut config: EngineConfig) -> Self {
+        // Every secret write goes through the index (S2a, `docs/SYNC.md`
+        // §13.6.1): sessions, managed hosts, the vault backend, the sync.
+        config.secrets = crate::secrets::IndexedSecretStore::wrap(&config.paths, config.secrets);
         let (events, _) = broadcast::channel(config.event_capacity.max(16));
         let snippets = Arc::new(crate::snippets::SnippetStore::new(config.paths.snippets()));
         Self {

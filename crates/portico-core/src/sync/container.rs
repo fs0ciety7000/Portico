@@ -364,6 +364,39 @@ pub(crate) fn open<C: DeserializeOwned>(
     })
 }
 
+/// The clear, **unauthenticated** envelope of a container: its device and
+/// epoch, read before any key (S2a, §13.3.5: a pass stops on a snapshot
+/// that announces a newer epoch, and never re-joins downward over a
+/// replica sealed under one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClearEnvelope {
+    pub(crate) device: DeviceId,
+    pub(crate) epoch: u32,
+}
+
+#[derive(Deserialize)]
+struct EnvelopeProbe {
+    format: Option<String>,
+    device: Option<DeviceId>,
+    epoch: Option<u32>,
+}
+
+/// The clear envelope of `bytes` (`None`: not a container of this kind).
+pub(crate) fn peek(kind: ContainerKind, bytes: &[u8]) -> Option<ClearEnvelope> {
+    if bytes.len() > MAX_CONTAINER_FILE_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let probe: EnvelopeProbe = toml::from_str(text).ok()?;
+    if probe.format.as_deref() != Some(kind.format()) {
+        return None;
+    }
+    Some(ClearEnvelope {
+        device: probe.device?,
+        epoch: probe.epoch?,
+    })
+}
+
 fn check_app_version(version: &str) -> Result<(), SyncError> {
     let ok = version.chars().count() <= MAX_APP_VERSION_CHARS
         && version.chars().all(|c| c.is_ascii_graphic());

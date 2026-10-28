@@ -804,6 +804,27 @@ impl SyncState {
         Ok(dot)
     }
 
+    /// Tests: a write without `validate_record` (synthetic `secret`
+    /// registers before S2b, §13.8: RR3 at the merge level).
+    #[cfg(test)]
+    pub(crate) fn write_unvalidated(
+        &mut self,
+        clock: &mut LocalClock,
+        key: &RecordKey,
+        value: &RecordValue,
+        at: i64,
+    ) -> Result<Dot, SyncError> {
+        let wire_key = WireKey::encode(key)?;
+        let wire_value = WireValue::encode(value)?;
+        let dot = clock.next()?;
+        self.context.insert(dot);
+        self.records
+            .entry(wire_key)
+            .or_default()
+            .write(dot, at, wire_value);
+        Ok(dot)
+    }
+
     /// A local deletion: a tombstone under a new dot. `None` when there is
     /// nothing to delete (absent, or already a lone tombstone).
     pub(crate) fn delete(
@@ -1683,7 +1704,13 @@ pub(crate) mod tests {
             (device(1), victim.clock.counter()),
             (device(2), observer.clock.counter()),
         ]);
-        let check = check_context_claims(&device(5), attacker.state.context(), &roster, &verified);
+        let check = check_context_claims(
+            &device(5),
+            attacker.state.context(),
+            &roster,
+            &BTreeMap::new(),
+            &verified,
+        );
         assert_eq!(
             check,
             ClaimCheck::Defer(vec![ContextClaim {
@@ -1691,6 +1718,7 @@ pub(crate) mod tests {
                 claimed: u64::MAX,
                 verified: 2,
                 in_roster: true,
+                revoked: false,
             }])
         );
         // Deferred: not merged, the victim's values survive.
@@ -1717,7 +1745,13 @@ pub(crate) mod tests {
         victim.write(host_key("prod"), host("10.0.0.2"));
         // An honest snapshot is accepted.
         assert_eq!(
-            check_context_claims(&device(2), observer.state.context(), &roster, &verified),
+            check_context_claims(
+                &device(2),
+                observer.state.context(),
+                &roster,
+                &BTreeMap::new(),
+                &verified
+            ),
             ClaimCheck::Accept
         );
     }

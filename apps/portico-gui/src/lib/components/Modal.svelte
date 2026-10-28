@@ -20,6 +20,7 @@
     scroll = true,
     footerWrap = true,
     steady = false,
+    top = false,
     children,
     footer,
   }: {
@@ -44,6 +45,9 @@
     footerWrap?: boolean;
     /** A `wide` dialog whose height does not follow its content (tabs). */
     steady?: boolean;
+    /** Stepped dialogs: anchored at a fixed top, so a step that grows or
+     * shrinks never moves the title and the fields above it. */
+    top?: boolean;
     children: Snippet;
     footer: Snippet;
   } = $props();
@@ -80,7 +84,7 @@
         if (e.key === "Escape") onescape();
         // The focused control went away (a footer that changed with the
         // dialog's state): the key still means what it means in the dialog.
-        else if (onkey && !e.metaKey && !e.ctrlKey && !e.altKey && onkey(e.key)) return;
+        else if (onkey && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && onkey(e.key)) return;
         else focusField();
       }
     };
@@ -97,8 +101,10 @@
     };
   });
 
+  // A checkbox or radio takes no letters: a dialog's single-key answer
+  // (`y` once "I saved it" is ticked) still works from it.
   const isField = (t: EventTarget | null) =>
-    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
+    (t instanceof HTMLInputElement && t.type !== "checkbox" && t.type !== "radio") || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
 
   function onkeydown(e: KeyboardEvent) {
     // Keep every key inside the dialog (no app shortcut, no terminal input).
@@ -112,7 +118,20 @@
       e.preventDefault();
       return;
     }
-    if (armed && onkey && !e.metaKey && !e.ctrlKey && !e.altKey && !isField(e.target) && !(e.key === "Enter" && e.target instanceof HTMLButtonElement) && onkey(e.key)) {
+    // A held key (auto-repeat) never answers; a key a field already handled
+    // (its own Enter) is not answered twice.
+    if (
+      armed &&
+      onkey &&
+      !e.repeat &&
+      !e.defaultPrevented &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !isField(e.target) &&
+      !(e.key === "Enter" && e.target instanceof HTMLButtonElement) &&
+      onkey(e.key)
+    ) {
       e.preventDefault();
       return;
     }
@@ -135,7 +154,7 @@
 </script>
 
 <div class="scrim" transition:fade={{ duration: dur("fast") }}></div>
-<div class="center">
+<div class="center" class:top>
   <div
     class="modal"
     class:danger={tone === "danger"}
@@ -173,6 +192,12 @@
     padding-top: calc(var(--space-6) + var(--toast-room, 0px));
     z-index: 21;
   }
+  .center.top {
+    --modal-top: min(calc(var(--space-7) * 2), 10vh);
+    place-items: start center;
+    padding-top: calc(var(--modal-top) + var(--toast-room, 0px));
+  }
+  .center.top .modal.wide { max-height: min(720px, calc(100vh - var(--modal-top) - var(--space-6) - var(--toast-room, 0px))); }
   .modal {
     width: min(560px, 100%);
     background: var(--bg-overlay);
@@ -200,10 +225,9 @@
     min-height: 0;
     overflow: hidden;
   }
-  .modal.danger {
-    border-color: color-mix(in srgb, var(--status-error) 55%, var(--border-strong));
-    border-top: 3px solid var(--status-error);
-  }
+  /* A 2 px rule in the error tone, not a red outline: in Travertine the
+     error and the accent are close, the rule and the ▲ tell them apart. */
+  .modal.danger { border-top: 2px solid var(--status-error); }
   header {
     padding: var(--space-5) var(--space-5) 0;
     font-size: var(--text-lg);

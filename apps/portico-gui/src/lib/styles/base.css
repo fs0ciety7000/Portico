@@ -58,6 +58,11 @@ kbd {
   color: var(--text-on-accent);
   font-weight: 600;
 }
+/* A leading ▲: never told from the accent by its colour alone (Travertine). */
+.modal button.danger:not(.secondary)::before {
+  content: "▲";
+  font-size: var(--text-xs);
+}
 .modal button.danger:not(.secondary) kbd {
   background: color-mix(in srgb, var(--text-on-accent) 12%, transparent);
   border-color: transparent;

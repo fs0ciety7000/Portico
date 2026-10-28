@@ -51,6 +51,9 @@
   import SyncPanel from "./lib/components/SyncPanel.svelte";
   import SyncForms from "./lib/components/SyncForms.svelte";
   import SyncReview from "./lib/components/SyncReview.svelte";
+  import SyncRotate from "./lib/components/SyncRotate.svelte";
+  import SyncAdopt from "./lib/components/SyncAdopt.svelte";
+  import SyncKeyConflict from "./lib/components/SyncKeyConflict.svelte";
   import CodeText from "./lib/components/CodeText.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
@@ -498,6 +501,16 @@
       : []),
     ...(sync.conflictCount
       ? [{ id: "sync.conflicts", title: `Resolve sync conflicts (${sync.conflictCount})`, run: () => sync.open({ kind: "panel", tab: "conflicts" }) }]
+      : []),
+    // Key rotation (S2c-1): only what the current state allows.
+    ...(sync.status?.state === "idle" || (sync.status?.state === "waiting" && sync.status.reason !== "rotation_pending")
+      ? [{ id: "sync.rotate", title: "Rotate sync keys…", hint: "new keys and passphrase for every device", run: () => sync.open({ kind: "rotate", device: null }) }]
+      : []),
+    ...(sync.status?.state === "alert" && sync.status.kind === "keys_rotated_elsewhere"
+      ? [{ id: "sync.adopt", title: "Enter the new sync passphrase…", hint: sync.status.device ? `keys changed on ${sync.status.device}` : undefined, run: () => sync.open({ kind: "adopt" }) }]
+      : []),
+    ...(sync.status?.state === "alert" && sync.status.kind === "rotation_conflict"
+      ? [{ id: "sync.key-conflict", title: "Resolve the sync key conflict…", run: () => sync.open({ kind: "conflict" }) }]
       : []),
   ]);
 
@@ -1168,7 +1181,15 @@
   {/key}
 {:else if sync.view}
   {#if sync.view.kind === "wizard"}
-    <SyncWizard />
+    <SyncWizard rejoin={sync.view.rejoin ?? null} />
+  {:else if sync.view.kind === "rotate"}
+    {#key sync.view.device?.id}
+      <SyncRotate device={sync.view.device} />
+    {/key}
+  {:else if sync.view.kind === "adopt"}
+    <SyncAdopt />
+  {:else if sync.view.kind === "conflict"}
+    <SyncKeyConflict />
   {:else if sync.view.kind === "panel"}
     <SyncPanel tab={sync.view.tab} />
   {:else if sync.view.kind === "form"}

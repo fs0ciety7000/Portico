@@ -4,17 +4,27 @@
   // one by one (nothing preselected) — and snippets changed by sync (F8),
   // reviewed one by one with their full command. Decisions carry the hash of
   // what is shown: content changed since is refused and shown again.
-  import { type ErrorSummary, type PendingHostChange } from "../api";
+  // S2c-1: values held from forgotten devices (or of unknown origin after a
+  // re-join), each decided on its own: "Keep as mine" or "Take the synced
+  // value", nothing preselected, no bulk choice (§13.4.2, R3, RR4). Keys
+  // `m` / `t` decide the focused card. A decision is armed again
+  // HELD_ARM_MS after the list changed (a value that moved under the
+  // pointer is never decided by accident), and the buttons stay busy until
+  // the list was read again (A3). Each card shows the value held here and
+  // the value the other devices hold (what each button keeps), and the
+  // decision carries the hash of what was shown: a value that changed since
+  // is refused (`sync_not_pending`) and shown again.
+  import { type ErrorSummary, type PendingHostChange, type RevokedValueChoice, type RevokedValueItem } from "../api";
   import { backend } from "../backend";
-  import { HOST_FIELDS, hostField } from "../syncview";
+  import { HELD_ARM_MS, HELD_EXPLAIN, HELD_NOTE, HELD_TITLE, heldText, HOST_FIELDS, hostField, subjectLabel } from "../syncview";
   import { sync } from "../state/sync.svelte";
   import { workspace } from "../state/workspace.svelte";
   import CodeText from "./CodeText.svelte";
 
   const keyOf = (p: PendingHostChange) => `${p.alias}\u0000${p.destination_hash}`;
   let ticked: Record<string, boolean> = $state({});
-  let busy: string | null = $state(null);
-  let error: ErrorSummary | null = $state(null);
+  let busy = $state<string | null>(null);
+  let error = $state<ErrorSummary | null>(null);
 
   // A destination that changed (another device published again) drops its tick.
   $effect(() => {
@@ -23,6 +33,56 @@
   });
 
   const chosen = $derived(sync.pendingHosts.filter((p) => ticked[keyOf(p)]));
+
+  let heldBusy = $state<string | null>(null);
+  let heldError = $state<ErrorSummary | null>(null);
+  /** False for HELD_ARM_MS after the held list changed (A3). */
+  let heldArmed = $state(false);
+  /** What is shown: a re-read with the same values does not disarm. */
+  const heldShown = $derived(sync.held.map((h) => `${h.key}\u0001${h.hash}`).join("\u0000"));
+  $effect(() => {
+    void heldShown;
+    heldArmed = false;
+    const timer = setTimeout(() => (heldArmed = true), HELD_ARM_MS);
+    return () => clearTimeout(timer);
+  });
+
+  async function decideHeld(item: RevokedValueItem, choice: RevokedValueChoice) {
+    if (heldBusy || !heldArmed) return;
+    heldBusy = item.key;
+    heldError = null;
+    const failed = await sync.act(() => backend.syncRevokedValue(item.key, choice, item.hash));
+    if (failed) {
+      heldBusy = null;
+      heldError = failed;
+      if (failed.code === "sync_not_pending") {
+        heldError = { ...failed, hint: "This value changed since it was shown: check it again, nothing was decided." };
+        await sync.reloadPending();
+      }
+      return;
+    }
+    // Busy until the list is read again: the next card is not decided from a stale list.
+    await sync.reloadPending();
+    heldBusy = null;
+    workspace.notify(
+      {
+        code: "sync_held",
+        message: `${subjectLabel(item.subject)}: ${choice === "keep_as_mine" ? "kept as this device's" : "synced value taken"}`,
+        hint: choice === "keep_as_mine" ? "Published as this device's own change." : null,
+      },
+      "info",
+    );
+  }
+
+  /** `m` / `t` on the focused held card (the Sync panel passes its keys). */
+  export function onkey(key: string): boolean {
+    if (key !== "m" && key !== "t") return false;
+    const el = document.activeElement?.closest<HTMLElement>("[data-held-key]");
+    const item = sync.held.find((h) => h.key === el?.dataset.heldKey);
+    if (!item) return false;
+    void decideHeld(item, key === "m" ? "keep_as_mine" : "take_synced");
+    return true;
+  }
 
   async function decide(confirm: boolean) {
     const list = chosen.map((p) => ({ alias: p.alias, destinationHash: p.destination_hash }));
@@ -46,6 +106,42 @@
     );
   }
 </script>
+
+{#if sync.held.length}
+  <section class="block" aria-labelledby="received-held" data-testid="sync-held">
+    <div class="block-head">
+      <span class="caption" id="received-held">{HELD_TITLE}</span>
+      <span class="note">{HELD_NOTE}</span>
+    </div>
+    <p class="note explain">{HELD_EXPLAIN}</p>
+    <ul class="list">
+      {#each sync.held as item (item.key)}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (focusable so m / t act on it) -->
+        <li class="held" tabindex="0" data-held-key={item.key} aria-label={`${subjectLabel(item.subject)}, held: m keeps it as mine, t takes the synced value`}>
+          <div class="held-text">
+            <span class="alias mono">{subjectLabel(item.subject)}</span>
+            <span class="from">{item.device ? `written by ${item.device}, now removed` : "origin unknown (this device joined again)"}</span>
+            <dl class="values" data-testid="sync-held-values">
+              <dt>On this device <span class="what">· m keeps it</span></dt>
+              <dd class:none={!item.local}>{item.local ? heldText(item.local) : "a secret, not shown"}</dd>
+              <dt>Other devices <span class="what">· t takes it</span></dt>
+              <dd class:none={!item.synced}>{item.synced ? heldText(item.synced) : "none: taking it removes it here"}</dd>
+            </dl>
+          </div>
+          <div class="held-actions">
+            <button class="secondary small" disabled={!!heldBusy || !heldArmed} onclick={() => decideHeld(item, "keep_as_mine")} title="Publish this device's value as its own change">
+              {#if heldBusy === item.key}<span class="spinner"></span>{/if}Keep as mine <kbd>m</kbd>
+            </button>
+            <button class="secondary small" disabled={!!heldBusy || !heldArmed} onclick={() => decideHeld(item, "take_synced")} title="Use what the other devices hold (or remove it here if they hold none)">Take the synced value <kbd>t</kbd></button>
+          </div>
+        </li>
+      {/each}
+    </ul>
+    {#if heldError}
+      <div class="inline-error" role="alert"><span><CodeText text={heldError.message} /></span>{#if heldError.hint}<span class="hint"><CodeText text={heldError.hint} capitalize={false} /></span>{/if}</div>
+    {/if}
+  </section>
+{/if}
 
 <section class="block" aria-labelledby="received-hosts">
   <div class="block-head">
@@ -119,6 +215,32 @@
   .caption { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
   .note, .empty { color: var(--text-muted); font-size: var(--text-sm); }
   .list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+  .held {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+    border-left: 2px solid var(--status-warning);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+  }
+  .held:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .held-text { display: grid; gap: var(--space-1); min-width: 0; flex: 1 1 auto; }
+  /* Not the dialog's boxed list: two plain rows inside the card. */
+  .held .values {
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 2px var(--space-3);
+    margin: var(--space-1) 0 0;
+    padding: 0;
+    background: transparent;
+  }
+  .held .values dt { font-size: var(--text-xs); }
+  .held .values .what { color: var(--text-muted); }
+  .held .values dd { font-size: var(--text-sm); }
+  .held .values dd.none { color: var(--text-muted); font-family: inherit; font-style: italic; }
+  .held-actions { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); }
   .host {
     display: grid;
     gap: var(--space-2);

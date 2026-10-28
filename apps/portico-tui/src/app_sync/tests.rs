@@ -25,6 +25,8 @@ use crate::host_list::test_host;
 use crate::sync_panel::{PassKind, SyncData};
 use crate::sync_wizard::Step;
 
+mod s2;
+
 fn screen(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
     terminal.draw(|f| crate::ui::render(app, f)).unwrap();
@@ -72,6 +74,7 @@ fn idle(conflicts: usize) -> SyncOverview {
         folder: Some("/home/alice/Dropbox/Portico".into()),
         device: Some("3f9c0ae1aa".into()),
         remember_key: true,
+        epoch: Some(1),
     }
 }
 
@@ -278,6 +281,7 @@ fn the_status_bar_says_how_sync_is_doing() {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     let wide = screen(&mut app, 160, 24);
     assert!(wide.last().unwrap().contains("⇅ Sync off"));
@@ -499,6 +503,9 @@ fn a_reload_in_flight_blocks_decisions() {
         ..pending().remove(0)
     }])));
     app.update(Action::SyncSnippets(Ok(snippets())));
+    // The held values (S2c-1) come back with the same reload.
+    assert!(app.sync.stale());
+    app.update(Action::SyncHeld(Ok(Vec::new())));
     assert!(!app.sync.stale());
     app.update(Action::SyncKey(key(KeyCode::Char('y'))));
     assert!(app.sync_panel.as_ref().unwrap().busy.is_none());
@@ -556,6 +563,7 @@ fn the_wizard_gates_create_on_the_recovery_box() {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     app.update(Action::OpenSync);
     let all = text(&mut app, 80, 24);
@@ -644,6 +652,7 @@ fn an_expired_review_asks_for_the_passphrase_again() {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     app.update(Action::SyncKey(key(KeyCode::Enter)));
     let wizard = app.sync_wizard.as_mut().unwrap();
@@ -658,6 +667,7 @@ fn an_expired_review_asks_for_the_passphrase_again() {
             settings: 3,
             conflicts: 2,
             needs_newer: 1,
+            rejoin: false,
         },
         Instant::now(),
     );
@@ -917,6 +927,7 @@ fn sync_captures() {
                 folder: None,
                 device: None,
                 remember_key: true,
+                epoch: Some(1),
             });
             open_panel(a, SyncTab::Overview);
         }),
@@ -939,6 +950,7 @@ fn sync_captures() {
                 folder: None,
                 device: None,
                 remember_key: true,
+                epoch: Some(1),
             });
             a.update(Action::SyncKey(key(KeyCode::Enter)));
         }),
@@ -985,6 +997,7 @@ fn sync_captures() {
                     settings: 3,
                     conflicts: 2,
                     needs_newer: 1,
+                    rejoin: false,
                 },
                 Instant::now(),
             );
@@ -1022,6 +1035,7 @@ fn wizard_at_folder(app: &mut App) {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     app.update(Action::OpenSync);
     app.update(Action::SyncKey(key(KeyCode::Enter)));

@@ -315,6 +315,10 @@ pub(crate) struct ContextClaim {
     pub(crate) verified: u64,
     /// `device` is in the verified roster.
     pub(crate) in_roster: bool,
+    /// `device` is forgotten and the claim exceeds its exact
+    /// `revoked_clock` (S2a, §13.4.2): writes of a forgotten device
+    /// relayed by `author`.
+    pub(crate) revoked: bool,
 }
 
 /// Verdict on the causal context of a received snapshot.
@@ -343,16 +347,32 @@ pub(crate) enum ClaimCheck {
 /// device itself, the engine passes its local counter: a context claiming
 /// more of its dots is deferred, and `LocalClock::check_claim` reports it
 /// without marking the clock restored.
+///
+/// A **forgotten** device `d` (S2a, §13.4.2) is bounded by its exact
+/// `revoked_clock`, the same value on every device: `context[d] ≤
+/// revoked_clock(d)` is accepted, whatever this device's own marks; more
+/// is deferred and flagged `revoked` (an alert names the relay). Every
+/// device thus accepts the same snapshots (R4).
 pub(crate) fn check_context_claims(
     author: &DeviceId,
     context: &VersionVector,
     roster: &BTreeSet<DeviceId>,
+    revoked: &BTreeMap<DeviceId, u64>,
     verified_clocks: &BTreeMap<DeviceId, u64>,
 ) -> ClaimCheck {
     let claims: Vec<ContextClaim> = context
         .iter()
         .filter(|(device, _)| *device != author)
         .filter_map(|(device, &claimed)| {
+            if let Some(&bound) = revoked.get(device) {
+                return (claimed > bound).then_some(ContextClaim {
+                    device: *device,
+                    claimed,
+                    verified: bound,
+                    in_roster: false,
+                    revoked: true,
+                });
+            }
             let verified = verified_clocks.get(device).copied().unwrap_or(0);
             let in_roster = roster.contains(device);
             (!in_roster || claimed > verified).then_some(ContextClaim {
@@ -360,6 +380,7 @@ pub(crate) fn check_context_claims(
                 claimed,
                 verified,
                 in_roster,
+                revoked: false,
             })
         })
         .collect();
@@ -749,9 +770,13 @@ mod tests {
         for (device, counter) in [(device(1), 17), (device(2), 6), (device(3), 1)] {
             context.insert(super::super::clock::Dot { device, counter });
         }
-        let ClaimCheck::Defer(claims) =
-            check_context_claims(&device(1), &context, &roster, &marks.verified_clocks())
-        else {
+        let ClaimCheck::Defer(claims) = check_context_claims(
+            &device(1),
+            &context,
+            &roster,
+            &BTreeMap::new(),
+            &marks.verified_clocks(),
+        ) else {
             panic!("deferred");
         };
         assert_eq!(
@@ -761,13 +786,15 @@ mod tests {
                     device: device(2),
                     claimed: 6,
                     verified: 5,
-                    in_roster: true
+                    in_roster: true,
+                    revoked: false,
                 },
                 ContextClaim {
                     device: device(3),
                     claimed: 1,
                     verified: 0,
-                    in_roster: false
+                    in_roster: false,
+                    revoked: false,
                 },
             ]
         );
@@ -778,8 +805,100 @@ mod tests {
             counter: 50,
         });
         assert_eq!(
-            check_context_claims(&device(2), &own, &roster, &marks.verified_clocks()),
+            check_context_claims(
+                &device(2),
+                &own,
+                &roster,
+                &BTreeMap::new(),
+                &marks.verified_clocks()
+            ),
             ClaimCheck::Accept
         );
+    }
+
+    mod revoked_bound {
+        use proptest::prelude::*;
+
+        use super::super::super::clock::Dot;
+        use super::*;
+
+        fn vector(entries: &[(u8, u64)]) -> VersionVector {
+            let mut vector = VersionVector::default();
+            for (n, counter) in entries {
+                for c in 1..=*counter {
+                    vector.insert(Dot {
+                        device: device(*n),
+                        counter: c,
+                    });
+                }
+            }
+            vector
+        }
+
+        fn claims_on(check: &ClaimCheck, forgotten: DeviceId) -> Vec<ContextClaim> {
+            match check {
+                ClaimCheck::Accept => Vec::new(),
+                ClaimCheck::Defer(claims) => claims
+                    .iter()
+                    .filter(|c| c.device == forgotten)
+                    .copied()
+                    .collect(),
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+            /// R4: a forgotten device is bounded by its exact
+            /// `revoked_clock` on every device, whatever each device's own
+            /// marks say about it: all accept the same snapshots.
+            #[test]
+            fn revoked_clock_gives_the_same_verdict_whatever_the_marks(
+                claimed in 0u64..12,
+                bound in 0u64..12,
+                marks_1 in 0u64..20,
+                marks_2 in 0u64..20,
+            ) {
+                let forgotten = device(9);
+                let context = vector(&[(1, 2), (9, claimed)]);
+                let roster: BTreeSet<DeviceId> = [device(1), device(2)].into();
+                let revoked: BTreeMap<DeviceId, u64> = [(forgotten, bound)].into();
+                let first: BTreeMap<DeviceId, u64> = [(device(1), 2), (forgotten, marks_1)].into();
+                let second: BTreeMap<DeviceId, u64> = [(device(1), 2), (forgotten, marks_2)].into();
+                let one = check_context_claims(&device(1), &context, &roster, &revoked, &first);
+                let two = check_context_claims(&device(1), &context, &roster, &revoked, &second);
+                prop_assert_eq!(one.clone(), two);
+                let on_forgotten = claims_on(&one, forgotten);
+                if claimed > bound {
+                    prop_assert_eq!(on_forgotten.len(), 1);
+                    prop_assert!(on_forgotten.iter().all(|c| c.revoked && c.verified == bound));
+                } else {
+                    prop_assert!(on_forgotten.is_empty());
+                }
+            }
+        }
+
+        #[test]
+        fn writes_up_to_the_exact_bound_stay_accepted() {
+            let forgotten = device(9);
+            let roster: BTreeSet<DeviceId> = [device(1)].into();
+            let revoked: BTreeMap<DeviceId, u64> = [(forgotten, 4)].into();
+            let verified: BTreeMap<DeviceId, u64> = [(device(1), 1)].into();
+            assert_eq!(
+                check_context_claims(
+                    &device(1),
+                    &vector(&[(1, 1), (9, 4)]),
+                    &roster,
+                    &revoked,
+                    &verified
+                ),
+                ClaimCheck::Accept,
+                "not in the roster, yet accepted up to its bound"
+            );
+            assert!(matches!(
+                check_context_claims(&device(1), &vector(&[(1, 1), (9, 5)]), &roster, &revoked, &verified),
+                ClaimCheck::Defer(ref claims) if claims.iter().all(|c| c.revoked)
+            ));
+        }
     }
 }

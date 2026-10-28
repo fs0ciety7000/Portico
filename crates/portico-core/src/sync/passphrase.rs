@@ -279,6 +279,12 @@ pub(crate) mod tests {
     pub(crate) const STRONG: &str = "vT9#qLm2!xR7&wZp4@Kd8^";
     /// Another one (passphrase changes).
     pub(crate) const STRONG_2: &str = "Lq7$mW2#zP9!rT4&nB8^cX";
+    /// A third one (key rotations, S2a).
+    pub(crate) const STRONG_3: &str = "Hy3%kD8@pQ1!vN6&sJ5^tM";
+    /// A fourth one (key rotations, S2a).
+    pub(crate) const STRONG_4: &str = "Rb6&fG2^wK9#zC4!yL7@hV";
+    /// A fifth one (key rotations, S2a).
+    pub(crate) const STRONG_5: &str = "Wn5!tP8&cJ3#qF7^mD2@xS";
 
     fn pass(text: &str) -> SecretString {
         SecretString::from(text.to_owned())
@@ -287,6 +293,13 @@ pub(crate) mod tests {
     /// A typed new passphrase.
     pub(crate) fn typed(text: &str) -> NewPassphrase {
         NewPassphrase::Typed(pass(text))
+    }
+
+    #[test]
+    fn test_passphrases_are_acceptable() {
+        for text in [STRONG, STRONG_2, STRONG_3, STRONG_4, STRONG_5] {
+            assert!(assess_passphrase(&pass(text)).acceptable, "{text}");
+        }
     }
 
     #[test]

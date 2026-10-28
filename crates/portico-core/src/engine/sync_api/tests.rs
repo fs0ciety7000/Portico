@@ -43,6 +43,7 @@ fn tuning(sim: &SimFolder) -> SyncTuning {
         op_timeout: Duration::from_secs(60),
         join_ttl: Duration::from_secs(600),
         background: false,
+        crash_at: None,
     }
 }
 
@@ -919,6 +920,7 @@ async fn disable_forgets_the_key_and_keeps_local_data() {
         .sync_disable(DisableOptions {
             forget_key: true,
             remove_my_file: true,
+            leave_roster: false,
         })
         .await
         .expect("disable");
@@ -1859,3 +1861,5 @@ async fn resolve_refuses_a_stale_sides_hash() {
         .expect("resolve");
     assert!(a.engine.sync_conflicts().await.expect("c").is_empty());
 }
+
+mod s2;

@@ -43,7 +43,9 @@ fn key(code: KeyCode) -> KeyEvent {
 struct Lab {
     env: Env,
     events: broadcast::Receiver<EngineEvent>,
-    app: App,
+    // Boxed: an `App` held inline makes every test future cross clippy's
+    // `large_futures` limit (by a few bytes on Windows).
+    app: Box<App>,
 }
 
 impl Lab {
@@ -81,7 +83,7 @@ impl Lab {
 
     async fn from_env(env: Env) -> Self {
         let events = env.engine.subscribe();
-        let mut app = App::new(env.engine.clone());
+        let mut app = Box::new(App::new(env.engine.clone()));
         app.clipboard = false;
         let inventory = env
             .engine

@@ -5,8 +5,16 @@
 //!            ──HKDF-SHA256(salt = bundle_id, info = "portico-sync/1 kek")──► KEK
 //! KEK ──XChaCha20-Poly1305 (AAD = slot AAD)──► wraps DK (32 random bytes per epoch)
 //! DK ──HKDF-SHA256(salt = bundle_id ‖ epoch_be32, info = "portico-sync/1 <name>")──►
-//!     snapshot | secret | header | compare | roster | local
+//!     snapshot | secret | header | compare | roster | local | rotate
 //! ```
+//!
+//! - **Epoch commitment and lineage** (S2a, `docs/SYNC.md` §13.2): the
+//!   `rotate` subkey `K_rot_e` only authenticates the key lineage. The
+//!   commitment `C_e = HMAC(K_rot_e, canonical("epoch", bundle_id, e))` is
+//!   the same for every holder of `DK_e`, stable across revisions and
+//!   passphrase changes; a link `e → e + 1` is proved by
+//!   `HMAC(K_rot_e, canonical("lineage", bundle_id, e, C_e, e + 1, C_{e+1}))`:
+//!   only a holder of `DK_e` can start epoch `e + 1`.
 //!
 //! - **KDF bounds** are sync-specific ([`KdfBounds::PRODUCTION`]: default
 //!   256 MiB / t=3 / p=1, floor 128 MiB / t=3 / p=1, ceiling 512 MiB / t=6 /
@@ -244,16 +252,20 @@ pub(crate) struct Subkeys {
     pub(crate) roster: Subkey,
     /// AEAD of this device's local replica.
     pub(crate) local: Subkey,
+    /// Epoch commitment and lineage proofs (S2a): authenticates links of
+    /// the key lineage, never encrypts anything.
+    pub(crate) rotate: Subkey,
 }
 
 /// HKDF labels of the subkeys, all distinct (tested).
-pub(crate) const SUBKEY_LABELS: [&str; 6] = [
+pub(crate) const SUBKEY_LABELS: [&str; 7] = [
     "portico-sync/1 snapshot",
     "portico-sync/1 secret",
     "portico-sync/1 header",
     "portico-sync/1 compare",
     "portico-sync/1 roster",
     "portico-sync/1 local",
+    "portico-sync/1 rotate",
 ];
 const KEK_LABEL: &str = "portico-sync/1 kek";
 
@@ -309,7 +321,7 @@ pub(crate) fn derive_kek(
     Ok(Kek(kek))
 }
 
-/// DK → the six subkeys of `(bundle_id, epoch)`.
+/// DK → the seven subkeys of `(bundle_id, epoch)`.
 pub(crate) fn derive_subkeys(
     data_key: &DataKey,
     bundle_id: &[u8; ID_LEN],
@@ -324,7 +336,7 @@ pub(crate) fn derive_subkeys(
         hkdf_expand(data_key.bytes(), &salt, label, &mut key)?;
         Ok(Subkey(key))
     };
-    let [snapshot, secret, header, compare, roster, local] = SUBKEY_LABELS;
+    let [snapshot, secret, header, compare, roster, local, rotate] = SUBKEY_LABELS;
     Ok(Subkeys {
         snapshot: derive(snapshot)?,
         secret: derive(secret)?,
@@ -332,7 +344,160 @@ pub(crate) fn derive_subkeys(
         compare: derive(compare)?,
         roster: derive(roster)?,
         local: derive(local)?,
+        rotate: derive(rotate)?,
     })
+}
+
+impl Subkey {
+    /// A copy (the rotate subkey is kept in the lineage memory).
+    pub(crate) fn duplicate(&self) -> Self {
+        Self(Zeroizing::new(*self.0))
+    }
+}
+
+/// 32 key bytes that travel inside sealed JSON (the `K_rot` of the
+/// lineage: `lineage_keys` in `bundle.toml`, the lineage memory of the
+/// replica). Base64 on the wire, encoded through a stack buffer and decoded
+/// straight into a zeroizing array: no intermediate `String` keeps a copy.
+/// `Debug` is redacted; equality is constant time.
+#[derive(Clone)]
+pub(crate) struct KeyBytes(Zeroizing<[u8; KEY_LEN]>);
+
+impl KeyBytes {
+    pub(crate) fn of(key: &Subkey) -> Self {
+        Self(Zeroizing::new(*key.bytes()))
+    }
+
+    pub(crate) fn subkey(&self) -> Subkey {
+        Subkey(Zeroizing::new(*self.0))
+    }
+}
+
+impl std::fmt::Debug for KeyBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyBytes(<redacted>)")
+    }
+}
+
+impl PartialEq for KeyBytes {
+    fn eq(&self, other: &Self) -> bool {
+        bool::from(self.0.as_slice().ct_eq(other.0.as_slice()))
+    }
+}
+
+impl Eq for KeyBytes {}
+
+/// Base64 length of 32 bytes.
+const KEY_B64_LEN: usize = 44;
+
+impl serde::Serialize for KeyBytes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use base64::Engine as _;
+        use serde::ser::Error as _;
+        let mut text = Zeroizing::new([0u8; KEY_B64_LEN]);
+        let len = base64::engine::general_purpose::STANDARD
+            .encode_slice(*self.0, &mut *text)
+            .map_err(|_| S::Error::custom("key encoding"))?;
+        let encoded = text
+            .get(..len)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .ok_or_else(|| S::Error::custom("key encoding"))?;
+        serializer.serialize_str(encoded)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for KeyBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = KeyBytes;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("32 key bytes in base64")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<KeyBytes, E> {
+                use base64::Engine as _;
+                if text.len() != KEY_B64_LEN {
+                    return Err(E::custom("bad key length"));
+                }
+                // 44 base64 characters decode to at most 33 bytes.
+                let mut buffer = Zeroizing::new([0u8; KEY_LEN + 1]);
+                let len = base64::engine::general_purpose::STANDARD
+                    .decode_slice(text, &mut *buffer)
+                    .map_err(|_| E::custom("bad key encoding"))?;
+                let bytes = buffer
+                    .get(..len)
+                    .filter(|bytes| bytes.len() == KEY_LEN)
+                    .ok_or_else(|| E::custom("bad key length"))?;
+                let mut key = Zeroizing::new([0u8; KEY_LEN]);
+                key.copy_from_slice(bytes);
+                Ok(KeyBytes(key))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+
+/// Commitment of epoch `epoch` (S2a, §13.2): `HMAC(K_rot_e,
+/// canonical("epoch", bundle_id, e))`. Not secret: it names the epoch's
+/// lineage without revealing anything about its keys.
+pub(crate) fn epoch_commitment(
+    rotate: &Subkey,
+    bundle_id: &[u8; ID_LEN],
+    epoch: u32,
+) -> Result<[u8; MAC_LEN], SyncError> {
+    let mut input = Canonical::new("epoch");
+    input.bytes(bundle_id).u32(epoch);
+    mac(rotate, input.finish())
+}
+
+/// The canonical input of the proof of link `epoch → epoch + 1`.
+fn lineage_input(
+    bundle_id: &[u8; ID_LEN],
+    epoch: u32,
+    commitment: &[u8; MAC_LEN],
+    next_commitment: &[u8; MAC_LEN],
+) -> Vec<u8> {
+    let mut input = Canonical::new("lineage");
+    input
+        .bytes(bundle_id)
+        .u32(epoch)
+        .bytes(commitment)
+        .u32(epoch.saturating_add(1))
+        .bytes(next_commitment);
+    input.finish().to_vec()
+}
+
+/// Proof that the holder of `DK_epoch` started epoch `epoch + 1` whose
+/// commitment is `next_commitment` (only `K_rot_epoch` can make it).
+pub(crate) fn lineage_proof(
+    rotate: &Subkey,
+    bundle_id: &[u8; ID_LEN],
+    epoch: u32,
+    commitment: &[u8; MAC_LEN],
+    next_commitment: &[u8; MAC_LEN],
+) -> Result<[u8; MAC_LEN], SyncError> {
+    mac(
+        rotate,
+        &lineage_input(bundle_id, epoch, commitment, next_commitment),
+    )
+}
+
+/// Constant-time check of a lineage proof.
+pub(crate) fn verify_lineage_proof(
+    rotate: &Subkey,
+    bundle_id: &[u8; ID_LEN],
+    epoch: u32,
+    commitment: &[u8; MAC_LEN],
+    next_commitment: &[u8; MAC_LEN],
+    proof: &[u8],
+) -> Result<bool, SyncError> {
+    verify_mac(
+        rotate,
+        &lineage_input(bundle_id, epoch, commitment, next_commitment),
+        proof,
+    )
 }
 
 fn hkdf_expand(
@@ -842,14 +1007,57 @@ pub(crate) mod tests {
             &keys.compare,
             &keys.roster,
             &keys.local,
+            &keys.rotate,
         ];
         let distinct: BTreeSet<[u8; KEY_LEN]> = all.iter().map(|k| *k.bytes()).collect();
-        assert_eq!(distinct.len(), 6);
+        assert_eq!(distinct.len(), 7, "the rotate subkey is distinct (S2a)");
         assert!(!distinct.contains(dk.bytes()));
         let other_epoch = derive_subkeys(&dk, &[1; ID_LEN], 2).expect("subkeys");
         let other_bundle = derive_subkeys(&dk, &[2; ID_LEN], 1).expect("subkeys");
         assert_ne!(keys.snapshot.bytes(), other_epoch.snapshot.bytes());
         assert_ne!(keys.snapshot.bytes(), other_bundle.snapshot.bytes());
+    }
+
+    #[test]
+    fn epoch_commitment_and_lineage_proof_are_bound() {
+        let dk = DataKey::from_bytes(&[9; KEY_LEN]).expect("dk");
+        let keys = derive_subkeys(&dk, &[1; ID_LEN], 1).expect("subkeys");
+        let commit = epoch_commitment(&keys.rotate, &[1; ID_LEN], 1).expect("c");
+        assert_eq!(
+            commit,
+            epoch_commitment(&keys.rotate, &[1; ID_LEN], 1).expect("c"),
+            "deterministic for every holder of the data key"
+        );
+        assert_ne!(
+            commit,
+            epoch_commitment(&keys.rotate, &[1; ID_LEN], 2).expect("c")
+        );
+        assert_ne!(
+            commit,
+            epoch_commitment(&keys.rotate, &[2; ID_LEN], 1).expect("c")
+        );
+        let next = [7u8; MAC_LEN];
+        let proof = lineage_proof(&keys.rotate, &[1; ID_LEN], 1, &commit, &next).expect("p");
+        assert!(
+            verify_lineage_proof(&keys.rotate, &[1; ID_LEN], 1, &commit, &next, &proof).expect("v")
+        );
+        let other = derive_subkeys(&dk, &[1; ID_LEN], 2).expect("subkeys");
+        assert!(
+            !verify_lineage_proof(&other.rotate, &[1; ID_LEN], 1, &commit, &next, &proof)
+                .expect("v"),
+            "only K_rot of that epoch proves its link"
+        );
+        assert!(
+            !verify_lineage_proof(
+                &keys.rotate,
+                &[1; ID_LEN],
+                1,
+                &commit,
+                &[8; MAC_LEN],
+                &proof
+            )
+            .expect("v")
+        );
     }
 
     #[test]
