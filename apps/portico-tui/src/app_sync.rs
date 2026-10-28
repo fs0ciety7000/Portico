@@ -141,6 +141,11 @@ impl App {
                 if let SyncStatus::Idle { conflicts, .. } = &overview.status {
                     self.sync.conflicts = *conflicts;
                 }
+                // A rotation whose answer was lost: the status tells (A4).
+                if let Some(PanelMode::Rotate(flow)) = self.sync_panel.as_mut().map(|p| &mut p.mode)
+                {
+                    flow.checked(&overview);
+                }
                 self.sync.overview = Some(overview);
             }
             // Unreadable sync state: the bar says nothing, the panel says why.
@@ -372,7 +377,12 @@ impl App {
                 let was_enabled = !matches!(overview.status, SyncStatus::Disabled);
                 let enabled = !matches!(status, SyncStatus::Disabled);
                 overview.status = status;
-                if was_enabled != enabled {
+                let checking = matches!(
+                    self.sync_panel.as_ref().map(|p| &p.mode),
+                    Some(PanelMode::Rotate(flow)) if flow.step == crate::sync_rotate::RotateStep::Checking
+                );
+                if was_enabled != enabled || checking {
+                    // The epoch comes with the overview (A4).
                     self.refresh_sync();
                     return;
                 }
@@ -543,7 +553,15 @@ impl App {
                     });
                 }
             }
-            SyncOutcome::Rotate(request) => self.rotate(request),
+            SyncOutcome::Rotate(request) => {
+                // What a lost answer is compared with (A4).
+                let epoch = self.sync.overview.as_ref().and_then(|o| o.epoch);
+                if let Some(PanelMode::Rotate(flow)) = self.sync_panel.as_mut().map(|p| &mut p.mode)
+                {
+                    flow.epoch_before = epoch;
+                }
+                self.rotate(request);
+            }
             SyncOutcome::Adopt { previous, new } => spawn(self, async move {
                 // RR4: the previous passphrase opens this device's current
                 // keys (in memory only), so the adoption keeps the local
@@ -654,6 +672,11 @@ impl App {
 
     #[allow(clippy::too_many_lines)] // one message per operation
     fn sync_done(&mut self, op: &SyncOp, result: Result<Option<SyncStatus>, ErrorSummary>) {
+        // A decided held value stays on screen until the reload: nothing
+        // more is decided on it meanwhile (A3).
+        if matches!(op, SyncOp::Held(..)) {
+            self.sync.stale_held = true;
+        }
         // Whatever happened, read it all again (a timeout may still finish).
         self.refresh_sync();
         if let (Ok(Some(status)), Some(overview)) = (&result, &mut self.sync.overview) {
@@ -887,7 +910,11 @@ impl App {
                 panel.mode = PanelMode::Browse;
                 panel.notice = Some(Notice::error(e));
             }
-            (_, PanelMode::Adopt(form)) => form.refused_at(PassField::Old, e),
+            // The adoption's own hint, by code (B3).
+            (_, PanelMode::Adopt(form)) => form.refused_at(
+                PassField::Old,
+                crate::sync_panel::with_reused_hint(e, crate::sync_panel::REUSED_ADOPTION),
+            ),
             _ => panel.notice = Some(Notice::error(e)),
         }
     }

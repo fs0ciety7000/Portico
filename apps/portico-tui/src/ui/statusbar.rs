@@ -100,21 +100,16 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     }
     // `0.3.1 available` before the status, when it fits beside the mode
     // and `quit` (hints give way to it, the status never does).
+    let base = lead + pinned.as_ref().map_or(0, need);
     let badge = badge_spans(app, !right.is_empty());
-    if !badge.is_empty()
-        && lead + pinned.as_ref().map_or(0, need) + width_of(&badge) + width_of(&right) <= width
-    {
+    if !badge.is_empty() && base + width_of(&badge) + width_of(&right) <= width {
         right = badge.into_iter().chain(right).collect();
     }
     // On the host list, the sync item: before the hints when it says
     // something (a state, a count), after them when sync is just off.
-    let quiet_sync = with_sync(
-        app,
-        &mut right,
-        width,
-        lead + pinned.as_ref().map_or(0, need),
-    );
-    let mut used = lead + pinned.as_ref().map_or(0, need) + width_of(&right);
+    let primary = hints.first().map_or(0, need);
+    let quiet_sync = with_sync(app, &mut right, width, base, primary);
+    let mut used = base + width_of(&right);
     let mut shown: Vec<&(String, &str)> = Vec::new();
     for hint in &hints {
         if used + need(hint) > width {
@@ -177,21 +172,57 @@ fn session_spans(app: &App, alias_max: usize, title: bool) -> Vec<Span<'static>>
 
 /// Puts the sync item before `right` when it says something and fits
 /// (`used`: what the bar needs besides); returns it when sync is just off
-/// (shown only if room is left after the hints).
+/// (shown only if room is left after the hints). A short bar drops the
+/// item's parts one by one (`ui::sync::STATUS_LEVELS`); an alert, an
+/// error or "new keys needed" is never dropped: its parts go first while
+/// the first key hint (`primary`: its width) keeps its room, then the
+/// hints give way, then the badge (B1).
 fn with_sync(
     app: &App,
     right: &mut Vec<Span<'static>>,
     width: usize,
     used: usize,
+    primary: usize,
 ) -> Vec<Span<'static>> {
     let width_of = |spans: &[Span<'static>]| spans.iter().map(Span::width).sum::<usize>();
-    let Some((sync, quiet)) = home_sync(app, width.saturating_sub(used + 12)) else {
+    let max = width.saturating_sub(used + 12);
+    let Some((sync, quiet)) = home_sync(app, max, 0) else {
         return Vec::new();
     };
     if quiet {
         return sync;
     }
-    if used + width_of(&sync) + width_of(right) <= width {
+    let room = |right: &[Span<'static>]| width.saturating_sub(used + width_of(right));
+    let must = app.sync.status().is_some_and(crate::sync_panel::must_show);
+    let fits = |keep: usize, right: &[Span<'static>]| {
+        (0..crate::ui::sync::STATUS_LEVELS)
+            .filter_map(|level| home_sync(app, max, level).map(|(spans, _)| spans))
+            .find(|spans| width_of(spans) + keep <= room(right))
+    };
+    // A state that must show shortens itself before the primary hint goes.
+    let mut chosen = if must {
+        fits(primary, right).or_else(|| fits(0, right))
+    } else {
+        fits(0, right)
+    };
+    if chosen.is_none() && must {
+        // `▲ ⇅ ` and the trailing space around the label.
+        const MARKS: usize = 5;
+        let short = |right: &[Span<'static>]| {
+            home_sync(
+                app,
+                room(right).saturating_sub(MARKS),
+                crate::ui::sync::STATUS_LEVELS - 1,
+            )
+            .map(|(spans, _)| spans)
+        };
+        if short(right).is_none_or(|spans| width_of(&spans) > room(right)) {
+            // The badge gives way; `● REC` (a recording) stays.
+            right.retain(|span| span.content.contains("REC"));
+        }
+        chosen = short(right).filter(|spans| width_of(spans) <= room(right));
+    }
+    if let Some(sync) = chosen {
         let rest = std::mem::take(right);
         *right = sync.into_iter().chain(rest).collect();
     }
@@ -199,8 +230,9 @@ fn with_sync(
 }
 
 /// The sync item, on the host list only (a terminal's bar is its
-/// session's). `(spans, quiet)`.
-fn home_sync(app: &App, max: usize) -> Option<(Vec<Span<'static>>, bool)> {
+/// session's). `(spans, quiet)`. `max`: the label's room (at least 8, at
+/// most 40, except the short form of a state that must show).
+fn home_sync(app: &App, max: usize, level: u8) -> Option<(Vec<Span<'static>>, bool)> {
     let home = app.active.is_none()
         && app.overlay.is_none()
         && app.dialogs.is_empty()
@@ -209,7 +241,12 @@ fn home_sync(app: &App, max: usize) -> Option<(Vec<Span<'static>>, bool)> {
     if !home {
         return None;
     }
-    crate::ui::sync::status_spans(app, max.clamp(8, 40))
+    let max = if level + 1 >= crate::ui::sync::STATUS_LEVELS {
+        max.min(40)
+    } else {
+        max.clamp(8, 40)
+    };
+    crate::ui::sync::status_spans(app, max, level)
 }
 
 /// `0.3.1 available ` in the accent (a notice, not a status colour), when

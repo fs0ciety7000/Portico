@@ -16,7 +16,7 @@ mod recordings;
 mod snippets;
 mod status;
 mod statusbar;
-mod sync;
+pub(crate) mod sync;
 mod terminal;
 mod tunnels;
 

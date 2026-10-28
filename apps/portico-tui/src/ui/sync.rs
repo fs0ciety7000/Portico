@@ -25,7 +25,7 @@
 //! At 82 columns or less, the panel takes the full width. Only theme
 //! tokens (`Styles`).
 
-mod rotate;
+pub(crate) mod rotate;
 
 use std::time::Instant;
 
@@ -63,6 +63,10 @@ const FULL_WIDTH_AT: u16 = 82;
 const LABEL: usize = 14;
 /// Rows of a list above the selected item's details (hosts, snippets).
 const LIST_ROWS: usize = 4;
+/// At this screen height or less, the recovery box takes two lines.
+const COMPACT_ROWS: u16 = 24;
+/// The recovery warning in two lines (24 rows).
+const RECOVERY_SHORT: &str = "If the passphrase is lost and no device remembers the key, nobody can decrypt the sync folder. Local data is never deleted.";
 /// Cells of the strength meter.
 const METER_CELLS: usize = 12;
 /// Bits that fill the meter.
@@ -92,21 +96,36 @@ fn ok(s: Styles) -> Style {
 
 // ── status bar item ──────────────────────────────────────────────────────
 
+/// How much of the status item a short bar keeps (B1): everything, then
+/// without "N to review", then without "N conflicts", then the label's
+/// first clause only (`▲ ⇅ Keys changed`).
+pub(crate) const STATUS_LEVELS: u8 = 4;
+
 /// `⇅ Synced 2 min ago · 2 conflicts · 1 to review ` (`None` until the
-/// engine answered). `quiet`: sync is off and nothing waits (shown only
-/// when there is room).
-pub(crate) fn status_spans(app: &App, max_label: usize) -> Option<(Vec<Span<'static>>, bool)> {
+/// engine answered), shortened by `level` (see [`STATUS_LEVELS`]).
+/// `quiet`: sync is off and nothing waits (shown only when there is room).
+pub(crate) fn status_spans(
+    app: &App,
+    max_label: usize,
+    level: u8,
+) -> Option<(Vec<Span<'static>>, bool)> {
     let s = app.styles();
     let status = app.sync.status()?;
     let (label, tone) = status_label(status, OffsetDateTime::now_utc());
+    let label = if level >= 3 {
+        crate::sync_panel::short_label(&label).to_owned()
+    } else {
+        label
+    };
     let mut spans = vec![
         Span::styled(format!("{GLYPH} "), s.secondary()),
         Span::styled(fmt::truncate(&label, max_label), tone_label_style(s, tone)),
     ];
-    if let SyncStatus::Alert { .. } | SyncStatus::Error { .. } = status {
-        spans.insert(0, Span::styled("▲ ", error(s)));
+    // The mark in the state's own tone (B5).
+    if crate::sync_panel::must_show(status) {
+        spans.insert(0, Span::styled("▲ ", tone_style(s, tone)));
     }
-    if app.sync.conflicts > 0 {
+    if app.sync.conflicts > 0 && level < 2 {
         spans.push(Span::styled(" · ", s.muted()));
         spans.push(Span::styled(
             plural(app.sync.conflicts, "conflict", "conflicts"),
@@ -114,7 +133,7 @@ pub(crate) fn status_spans(app: &App, max_label: usize) -> Option<(Vec<Span<'sta
         ));
     }
     let review = app.sync.to_review();
-    if review > 0 {
+    if review > 0 && level < 1 {
         spans.push(Span::styled(" · ", s.muted()));
         spans.push(Span::styled(format!("{review} to review"), warning(s)));
     }
@@ -178,13 +197,32 @@ fn device_name(label: &str) -> &str {
         .map_or(label, |(name, _)| name)
 }
 
-/// The banner under the details: what waits for this device.
+/// The banner under the details: an alert or a wait that needs this
+/// device first (B1, in its tone), then what waits for its confirmation.
 pub(crate) fn banner_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     let s = app.styles();
     let hosts = app.sync.pending.len();
     let snippets = app.sync.snippets.len();
-    if hosts + snippets == 0 {
+    let alert = app
+        .sync
+        .status()
+        .filter(|status| crate::sync_panel::must_show(status))
+        .map(|status| status_label(status, OffsetDateTime::now_utc()));
+    if hosts + snippets == 0 && alert.is_none() {
         return Vec::new();
+    }
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some((label, tone)) = alert {
+        let style = tone_style(s, tone);
+        for (i, l) in fmt::wrap(&label, w.saturating_sub(2))
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(Line::from(vec![
+                Span::styled(if i == 0 { "▲ " } else { "  " }, style),
+                Span::styled(l, style),
+            ]));
+        }
     }
     let mut parts = Vec::new();
     if hosts > 0 {
@@ -193,14 +231,17 @@ pub(crate) fn banner_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     if snippets > 0 {
         parts.push(plural(snippets, "received snippet", "received snippets"));
     }
-    let text = format!(
-        "{} wait for your confirmation. Nothing runs or is written before.",
-        parts.join(" and ")
-    );
-    let mut lines: Vec<Line<'static>> = fmt::wrap(&text, w)
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, s.secondary())))
-        .collect();
+    if !parts.is_empty() {
+        let text = format!(
+            "{} wait for your confirmation. Nothing runs or is written before.",
+            parts.join(" and ")
+        );
+        lines.extend(
+            fmt::wrap(&text, w)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, s.secondary()))),
+        );
+    }
     let key = app.keymap.shown("hosts.sync", 1);
     if !key.is_empty() {
         lines.push(Line::from(vec![
@@ -279,14 +320,23 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
     .areas(inner);
     frame.render_widget(Paragraph::new(tab_row(panel, data, s, w)), tabs_area);
 
-    let body_height = usize::from(body_area.height);
+    // A 24-row screen gets the short recovery box (B12).
+    let compact = screen.height <= COMPACT_ROWS;
     let Body {
         lines,
         focus: focus_line,
         end,
-    } = body_lines(panel, data, s, tick, w);
-    // The selected item stays in view; long text scrolls (`PgDn`).
+    } = body_lines(panel, data, s, tick, w, compact);
+    // The selected item stays in view; long text scrolls (`PgDn`). When
+    // it does not fit, the last row says how much is below, on a row of
+    // its own (B12).
     let total = lines.len();
+    let rows = usize::from(body_area.height);
+    let body_height = if total > rows {
+        rows.saturating_sub(1).max(1)
+    } else {
+        rows
+    };
     let max_first = total.saturating_sub(body_height);
     panel.max_scroll = u16::try_from(max_first).unwrap_or(u16::MAX);
     let scroll = match &panel.mode {
@@ -298,6 +348,13 @@ pub(crate) fn render_panel(app: &mut App, frame: &mut Frame<'_>, band: u16) {
         && (focus < first || focus >= first + body_height)
     {
         first = focus.saturating_sub(1).min(max_first);
+    }
+    // A rotation step is read to its end before `↵` goes on (B9).
+    if let PanelMode::Rotate(flow) = &mut panel.mode {
+        flow.max_scroll = u16::try_from(max_first).unwrap_or(u16::MAX);
+        if first + body_height >= total {
+            flow.seen_end = true;
+        }
     }
     // The last line of the received item was on screen: it can be decided.
     if let Some((end_line, hash)) = end
@@ -393,12 +450,22 @@ impl Body {
     }
 }
 
-fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize) -> Body {
+fn body_lines(
+    panel: &SyncPanel,
+    data: &SyncData,
+    s: Styles,
+    tick: u64,
+    w: usize,
+    compact: bool,
+) -> Body {
     match &panel.mode {
         PanelMode::Browse | PanelMode::Skip { .. } | PanelMode::Ask { .. } => {}
-        PanelMode::Rotate(flow) => return Body::focused(rotate::rotate_lines(flow, s, tick, w)),
+        PanelMode::Rotate(flow) => {
+            return Body::focused(rotate::rotate_lines(flow, s, tick, w, compact));
+        }
         PanelMode::Adopt(f) => {
-            return form_body(f, rotate::adopt_lines(f, data.status(), s, tick, w));
+            let newer = !panel.newer_files().is_empty();
+            return form_body(f, rotate::adopt_lines(f, data.status(), newer, s, tick, w));
         }
         PanelMode::UseOther(f) => return form_body(f, rotate::use_other_lines(f, s, tick, w)),
         PanelMode::Unlock(f) => return Body::plain(unlock_lines(f, s, tick, w)),
@@ -427,7 +494,7 @@ fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize
                 w.saturating_sub(LABEL).min(48),
             ));
             if let Some(e) = problem {
-                lines.extend(form::problem(s, LABEL, &e.message, w));
+                lines.extend(form::problem(s, LABEL + 1, &e.message, w));
             }
             return Body::plain(lines);
         }
@@ -467,10 +534,11 @@ fn body_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: usize
     Body::focused((lines, focus))
 }
 
-/// A form's body: on its last field, its end stays in view (80×24).
+/// A form's body: on its last field, or with a problem to read, its end
+/// stays in view (80×24).
 fn form_body(f: &PassForm, lines: Vec<Line<'static>>) -> Body {
     let last = f.fields().len().saturating_sub(1);
-    let focus = (f.focus == last).then(|| lines.len().saturating_sub(1));
+    let focus = (f.focus == last || f.problem.is_some()).then(|| lines.len().saturating_sub(1));
     Body::focused((lines, focus))
 }
 
@@ -582,18 +650,29 @@ fn overview_lines(
             )],
         ));
     }
-    lines.push(row(
-        s,
-        "Key",
-        vec![Span::styled(
-            if overview.remember_key {
-                "remembered on this device"
-            } else {
-                "not remembered: the passphrase is asked after each restart"
-            },
-            s.secondary(),
-        )],
-    ));
+    // Nothing to do with the passphrase here while removed or in a key
+    // conflict (B12).
+    let key_settled = !matches!(
+        overview.status,
+        SyncStatus::Alert {
+            kind: AlertKind::DeviceForgotten | AlertKind::RotationConflict,
+            ..
+        }
+    );
+    if key_settled {
+        lines.push(row(
+            s,
+            "Key",
+            vec![Span::styled(
+                if overview.remember_key {
+                    "remembered on this device"
+                } else {
+                    "not remembered: the passphrase is asked after each restart"
+                },
+                s.secondary(),
+            )],
+        ));
+    }
     // The devices, counted (listed in the Devices tab).
     if let Some(devices) = panel.devices.ready() {
         let inactive = devices.iter().filter(|d| d.stale).count();
@@ -607,18 +686,18 @@ fn overview_lines(
         lines.push(row(s, "Devices", value));
     }
     // What the status means, and what to do.
-    let explain: Option<(String, &'static str, Style)> = match &overview.status {
+    let explain: Option<(String, String, Style)> = match &overview.status {
         SyncStatus::FolderUnavailable { reason } => {
             let (what, hint) = folder_reason(*reason);
-            Some((what.to_owned(), hint, warning(s)))
+            Some((what.to_owned(), hint.to_owned(), warning(s)))
         }
         SyncStatus::Alert { kind, device } => {
             let (what, hint) = alert_text(*kind, device.as_deref().map(display_safe).as_deref());
-            Some((what, hint, error(s)))
+            Some((what, hint, tone_style(s, crate::sync_panel::alert_tone(*kind))))
         }
         SyncStatus::Error { summary } => Some((
             fmt::sentence(&summary.message),
-            "Sync is paused on this device; your local data stays as it is.",
+            "Sync is paused on this device; your local data stays as it is.".to_owned(),
             error(s),
         )),
         SyncStatus::Waiting {
@@ -631,37 +710,47 @@ fn overview_lines(
                     .as_deref()
                     .map_or_else(|| "A device".to_owned(), display_safe)
             ),
-            "Type the new passphrase on that device. Its changes wait meanwhile; nothing of it is merged.",
+            "Type the new passphrase on that device. Its changes wait meanwhile; nothing of it is merged.".to_owned(),
             warning(s),
         )),
         SyncStatus::Waiting {
             reason: WaitReason::RotationPending,
             ..
         } => Some((
-            "Finishing the key rotation…".to_owned(),
-            "The new keys are saved on this device: Portico writes them to the folder as soon as it answers. If the key file was replaced meanwhile, b restores it.",
-            warning(s),
+            crate::sync_panel::ROTATION_PENDING.to_owned(),
+            "The new keys are saved on this device: Portico writes them to the folder as soon as it answers. If the key file was replaced meanwhile, b restores it.".to_owned(),
+            tone_style(s, Tone::Busy),
         )),
         SyncStatus::Waiting { .. } => Some((
             "Some data is not in the folder yet.".to_owned(),
-            "It usually arrives on its own once your sync app has finished.",
+            "It usually arrives on its own once your sync app has finished.".to_owned(),
             s.secondary(),
         )),
         _ => None,
     };
+    let pending = matches!(
+        overview.status,
+        SyncStatus::Waiting {
+            reason: WaitReason::RotationPending,
+            ..
+        }
+    );
     if let Some((what, hint, style)) = explain {
         lines.push(Line::from(""));
         for (i, l) in fmt::wrap(&what, w.saturating_sub(2))
             .into_iter()
             .enumerate()
         {
-            let lead = if i == 0 { "▲ " } else { "  " };
+            // A rotation on its way is in progress, not a problem: a still
+            // dot (B5).
+            let mark = if pending { "● " } else { "▲ " };
+            let lead = if i == 0 { mark } else { "  " };
             lines.push(Line::from(vec![
                 Span::styled(lead, style),
                 Span::styled(l, style),
             ]));
         }
-        for l in fmt::wrap(hint, w.saturating_sub(2)) {
+        for l in fmt::wrap(&hint, w.saturating_sub(2)) {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(l, s.secondary()),
@@ -673,6 +762,21 @@ fn overview_lines(
         ..
     } = &overview.status
     {
+        // R1 in the primary text under its mark, then what to do when
+        // nobody here changed the keys (B4), as in the GUI.
+        lines.push(Line::from(""));
+        lines.extend(rotate::warn(s, crate::sync_panel::TYPE_NOTHING, w));
+        let mut unsure = crate::sync_panel::ADOPT_UNSURE_AFTER_R1.to_owned();
+        if !panel.newer_files().is_empty() {
+            unsure.push(' ');
+            unsure.push_str(crate::sync_panel::NEWER_FILE_HINT);
+        }
+        for l in fmt::wrap(&unsure, w.saturating_sub(2)) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(l, s.secondary()),
+            ]));
+        }
         lines.extend(rotate::newer_lines(
             panel.newer_files(),
             panel.newer_index,
@@ -784,7 +888,7 @@ fn device_lines(
             lines.push(Line::from(""));
             lines.extend(paragraph(
                 s.muted(),
-                "A device is named with its id: a copy can never pass for another. Inactive: nothing published for a long time. Forget a lost device (f): the keys change, and it can no longer read what is synced next.",
+                "A device is named with its id: a copy can never pass for another. Inactive: nothing published for a long time. To remove a lost device, use Forget… (f) on its row: the keys change, and it cannot read what is synced from now on; the past stays readable to it.",
                 w,
             ));
         }
@@ -815,7 +919,6 @@ fn device_lines(
                         key_entry_label(entry),
                         if on { s.title() } else { s.primary() },
                     ),
-                    Span::styled("  not in use", s.muted()),
                 ]));
             }
         }
@@ -867,12 +970,10 @@ fn strength_line(strength: Option<PassphraseStrength>, s: Styles) -> Line<'stati
 /// The recovery warning in a box, then "I saved it…" (Q1): before the
 /// step that writes, in both create (a field of the form) and join (the
 /// review).
-fn saved_box(s: Styles, saved: bool, focused: bool, w: usize) -> Vec<Line<'static>> {
+fn saved_box(s: Styles, saved: bool, focused: bool, w: usize, compact: bool) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, l) in fmt::wrap(RECOVERY, w.saturating_sub(4))
-        .into_iter()
-        .enumerate()
-    {
+    let text = if compact { RECOVERY_SHORT } else { RECOVERY };
+    for (i, l) in fmt::wrap(text, w.saturating_sub(4)).into_iter().enumerate() {
         lines.push(Line::from(vec![
             Span::styled(if i == 0 { "▲ " } else { "  " }, warning(s)),
             Span::styled(l, s.primary()),
@@ -907,8 +1008,19 @@ fn saved_check(s: Styles, saved: bool, focused: bool, w: usize) -> Vec<Line<'sta
 }
 
 /// The fields of a passphrase form.
-#[allow(clippy::too_many_lines)] // one block per field, in order
 fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static>> {
+    pass_fields_sized(f, s, tick, w, false)
+}
+
+/// [`pass_fields`], with the short recovery box when `compact`.
+#[allow(clippy::too_many_lines)] // one block per field, in order
+fn pass_fields_sized(
+    f: &PassForm,
+    s: Styles,
+    tick: u64,
+    w: usize,
+    compact: bool,
+) -> Vec<Line<'static>> {
     let input_w = w.saturating_sub(LABEL).min(52);
     let mut lines = Vec::new();
     let focused = f.focused();
@@ -919,15 +1031,16 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
             .map(|(_, m, h)| (m.clone(), h.clone()))
     };
     let push_problem = |lines: &mut Vec<Line<'static>>, field: PassField| {
+        // Under the value, not under the label (B3, as `edit_host`).
         if let Some((message, hint)) = problem_of(field) {
-            lines.extend(form::problem(s, LABEL, &message, w));
+            lines.extend(form::problem(s, LABEL + 1, &message, w));
             if let Some(hint) = hint {
                 lines.extend(
-                    fmt::wrap(&hint, w.saturating_sub(LABEL).max(10))
+                    fmt::wrap(&hint, w.saturating_sub(LABEL + 1).max(10))
                         .into_iter()
                         .map(|l| {
                             Line::from(vec![
-                                Span::raw(" ".repeat(LABEL)),
+                                Span::raw(" ".repeat(LABEL + 1)),
                                 Span::styled(l, s.secondary()),
                             ])
                         }),
@@ -1059,7 +1172,7 @@ fn pass_fields(f: &PassForm, s: Styles, tick: u64, w: usize) -> Vec<Line<'static
             }
             PassField::Saved => {
                 lines.push(Line::from(""));
-                lines.extend(saved_box(s, f.saved, on, w));
+                lines.extend(saved_box(s, f.saved, on, w, compact));
                 // Under the box's text, not in the label column.
                 if let Some((message, _)) = problem_of(*field) {
                     lines.extend(form::problem(s, 2, &message, w));
@@ -1633,7 +1746,7 @@ fn received_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: u
                         display_safe(&subject_label(&held.subject)),
                         held.device.as_deref().map_or_else(
                             || "held · unknown origin".to_owned(),
-                            |d| format!("held · from {}", display_safe(d)),
+                            |d| format!("held · from removed {}", display_safe(d)),
                         ),
                     ),
                     None => continue,
@@ -1671,7 +1784,7 @@ fn received_lines(panel: &SyncPanel, data: &SyncData, s: Styles, tick: u64, w: u
     Body {
         lines,
         focus: None,
-        end: Some((end, item.hash().to_owned())),
+        end: Some((end, item.hash())),
     }
 }
 
@@ -1767,9 +1880,16 @@ fn host_card(
     end
 }
 
-/// The card of a value from a forgotten device (or of unknown origin):
-/// two explicit choices, nothing preselected, one value at a time (R3,
-/// RR4). Returns the index of its last line before the keys.
+/// The title of the held values, word for word as in the GUI (B7).
+pub(crate) const HELD_TITLE: &str = "From removed devices";
+pub(crate) const HELD_NOTE: &str = "Held until you decide, one by one.";
+/// What the two keys do (B7).
+pub(crate) const HELD_EXPLAIN: &str = "m keeps it as this device's value and shares it. t takes the value the other devices hold, or removes it here if they hold none.";
+
+/// The card of a value from a removed device (or of unknown origin): the
+/// value held here and the value the other devices hold, side by side
+/// fields, then two explicit choices, nothing preselected, one value at a
+/// time (R3, RR4, A3). Returns the index of its last line before the keys.
 fn held_card(
     held: &portico_core::sync::api::RevokedValueItem,
     stale: bool,
@@ -1778,10 +1898,13 @@ fn held_card(
     tick: u64,
     w: usize,
 ) -> usize {
-    lines.push(Line::from(vec![Span::styled(
-        "From forgotten devices",
-        s.muted(),
-    )]));
+    lines.push(Line::from(vec![
+        Span::styled(HELD_TITLE, s.muted()),
+        Span::styled(
+            format!(" · {}", HELD_NOTE.to_lowercase().trim_end_matches('.')),
+            s.muted(),
+        ),
+    ]));
     lines.push(Line::from(Span::styled(
         display_safe(&subject_label(&held.subject)),
         s.title(),
@@ -1797,18 +1920,46 @@ fn held_card(
     if stale {
         lines.push(loading(s, tick, "Updating: it changed on another device…"));
     }
-    lines.extend(paragraph(
+    // What each key decides, shown before it (A3).
+    let local = held.local.as_ref().map(value_fields);
+    let synced = held.synced.as_ref().map(value_fields);
+    let value_of = |fields: &Option<Vec<(&'static str, String)>>, label: &str| {
+        fields
+            .as_ref()
+            .and_then(|f| f.iter().find(|(l, _)| *l == label).map(|(_, v)| v.clone()))
+    };
+    let differs = |label: &str| value_of(&local, label) != value_of(&synced, label);
+    let secret = matches!(
+        &held.subject,
+        portico_core::sync::SyncSubject::Other { kind } if kind == "secret"
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "On this device (held) — m keeps it",
         s.secondary(),
-        "It is held out of sync on this device until you choose. Nothing is chosen for you.",
-        w,
-    ));
+    )));
+    match &local {
+        Some(fields) => lines.extend(field_lines(fields, &differs, 2, s, w)),
+        None if secret => lines.extend(paragraph(s.muted(), "  Not shown: a secret.", w)),
+        None => lines.extend(paragraph(s.muted(), "  Nothing.", w)),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "On the other devices — t takes it",
+        s.secondary(),
+    )));
+    match &synced {
+        Some(fields) => lines.extend(field_lines(fields, &differs, 2, s, w)),
+        None if secret => lines.extend(paragraph(s.muted(), "  Not shown: a secret.", w)),
+        None => lines.extend(paragraph(
+            s.muted(),
+            "  None: t removes it from this device.",
+            w,
+        )),
+    }
     let end = lines.len().saturating_sub(1);
     lines.push(Line::from(""));
-    lines.extend(paragraph(
-        s.muted(),
-        "m keeps it as this device's value and shares it. t takes the value the other devices hold, or removes it here if they hold none.",
-        w,
-    ));
+    lines.extend(paragraph(s.muted(), HELD_EXPLAIN, w));
     end
 }
 

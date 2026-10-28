@@ -376,15 +376,15 @@ const SYNC: Panel = Panel {
             "`D`",
         ),
         (
-            "Overview ou Devices : « Rotate keys » en trois étapes (ce qui se passe : appareils qui devront taper la nouvelle passphrase, appareils Portico < 0.7 coupés ; passphrase actuelle ou « I no longer know it » ; nouvelle passphrase avec générateur, jauge et « I saved it… »), puis question armée, seul `y` tourne (au niveau d'une réinitialisation sans la passphrase actuelle) ; une passphrase déjà utilisée est refusée sous le champ ; résultat « Keys rotated. Enter the new passphrase on: … » ou « Finishing the key rotation… »",
+            "Overview ou Devices : « Rotate keys » en trois étapes (ce qui se passe : appareils qui devront taper la nouvelle passphrase, appareils Portico < 0.7 coupés, « — update Portico first » ; passphrase actuelle ou « I no longer know it » ; nouvelle passphrase avec générateur, jauge et « I saved it… », `↵` « rotate keys… »), puis question armée, seul `y` tourne (au niveau d'une réinitialisation sans la passphrase actuelle). À l'étape 1, le premier `↵` fait défiler jusqu'à la dernière ligne (« read to the end »), seul le suivant continue. Une passphrase déjà acceptée est refusée sous le champ (« Portico accepted this passphrase before. Choose a new one, or generate one. ») ; si le dossier ne répond pas à temps : « Result unknown — Portico is checking », rien n'est demandé avant que l'état relu tranche (`Esc` ferme) ; résultat « Keys rotated. Enter the new passphrase on: … » ou « Finishing the key rotation… »",
             "`o`",
         ),
         (
-            "Devices : « Forget <appareil> » (jamais cet appareil ; d'abord « Also remove <appareil>'s access to your cloud folder », puis les enregistrements dont il a écrit la valeur, puis la rotation, `y` final) ; retirer une ancienne clé de « Old keys in this keychain » (question armée, seul `y`)",
+            "Devices : « Forget… » sur la ligne sélectionnée (jamais cet appareil ; d'abord « Also remove <appareil>'s access to your cloud folder », puis les enregistrements dont il a écrit la valeur, puis la rotation, `y` final ; résultat « Forgotten: <appareil>. It cannot read what is synced from now on. » et le rappel du dossier cloud) ; retirer une ancienne clé de « Old keys in this keychain » (« Old keys (rotation n) · this sync · not in use » ; « Files sealed only with it can no longer be read here. » ; question armée, seul `y` « remove key »)",
             "`f` ; `x`",
         ),
         (
-            "Overview, « Keys changed — enter new passphrase » : « Enter the new passphrase » (« If you did not change the keys on another device, type nothing. » ; passphrase précédente facultative d'abord quand la clé n'est pas mémorisée) ; retirer un fichier qui annonce des clés plus récentes (question armée, seul `y`) ; choisir ce fichier",
+            "Overview, « Keys changed — enter new passphrase » : « Enter the new passphrase » (« <appareil> reports new keys », « If you did not change the keys on another device, type nothing. » en texte principal sous `▲`, puis qui interroger ; passphrase précédente facultative d'abord quand la clé n'est pas mémorisée ; une ancienne passphrase est refusée avec « This is an old passphrase, not a new one… ») ; retirer un fichier qui annonce des clés plus récentes (question armée, seul `y` « remove file ») ; choisir ce fichier",
             "`↵` ou `u` ; `x` ; `j` / `k`",
         ),
         (
@@ -396,8 +396,12 @@ const SYNC: Panel = Panel {
             "`D` / `n`",
         ),
         (
-            "Overview : « Restore key file » (`bundle.toml` altéré, rotation en attente ; question armée, seul `y` ; refus du moteur affiché avec son indice)",
+            "Overview : « Restore key file » (`bundle.toml` altéré, rotation en attente ; question armée, seul `y` « restore key file » ; refus du moteur affiché avec son indice)",
             "`b`",
+        ),
+        (
+            "Overview, « Changes from a removed device » : ouvrir les valeurs retenues (Received) ; l'indice nomme l'appareil où taper la nouvelle passphrase",
+            "`↵`",
         ),
         (
             "Overview : déverrouiller (état « Sync locked »)",
@@ -416,7 +420,7 @@ const SYNC: Panel = Panel {
             "`y` / `n` ; `y`",
         ),
         (
-            "Received, « From forgotten devices » (valeurs écrites par un appareil oublié ou d'origine inconnue, retenues) : « keep as mine » / « take the synced value », un élément à la fois, rien de présélectionné, armé",
+            "Received, « From removed devices · held until you decide, one by one » (valeurs écrites par un appareil retiré ou d'origine inconnue, retenues ; la valeur de cet appareil et celle des autres affichées, la décision liée à leur empreinte) : « keep as mine » / « take the synced value », un élément à la fois, rien de présélectionné, armé (y compris après un changement de la liste)",
             "`m` / `t`",
         ),
         (
@@ -429,7 +433,7 @@ const SYNC: Panel = Panel {
         ),
         ("Fermer (un formulaire : revenir)", "`Esc`, `q`, `Ctrl-C`"),
     ],
-    outro: "Assistant « Set up sync » (titre « step n », sans total : il dépend du dossier) : explication, dossier (saisie, `Tab` complète les dossiers, `↵` demande au moteur ce qu'il contient : « No Portico sync here yet. », « A Portico sync with N devices. », incomplet, absent, refusé avec son indice), puis premier appareil (passphrase et confirmation, jauge de force du moteur, `Ctrl-G` génère, nom de l'appareil, par défaut le nom de la machine ou `portico-` et quatre chiffres hexadécimaux, « Remember the key on this device » coché, puis l'avertissement de récupération et la case « I saved it. A lost passphrase cannot be recovered unless a device remembers the key. » (`Espace`), exigée pour créer, passphrase tapée ou générée) ou rejoindre (passphrase, puis revue : hôtes, « tags, groups, notes », snippets, réglages, conflits, « nécessite une version plus récente » ; choix Review each / Prefer the folder's / Prefer this device's, qui ne confirment jamais un hôte reçu ; jeton valable 10 min, une fois ; la même case, exigée pour rejoindre). Après la création ou l'adhésion, l'assistant se ferme sur le panneau : « Sync is on ». Un refus du moteur s'affiche sous le champ concerné (code et indice). Une revue de rattachement à un bundle déjà vérifié par cet appareil n'offre que « Review each conflict » (les deux autres choix « not offered », avec la raison). La barre de statut de la liste montre `⇅` et l'état (« Synced 2 min ago », « Syncing… », « Waiting for <appareil> », « Sync folder unavailable », « Sync locked », « Sync off », « Keys changed — enter new passphrase », « Key conflict », « Removed from sync », « Changes from a removed device », « Finishing key rotation… », « New keys needed on <appareil> » quand il y a la place), puis conflits et éléments à revoir en couleur d'avertissement, `▲` en couleur d'erreur pour une alerte. Un hôte dont la destination reçue attend porte `⇅` dans la liste ; ses détails disent « ⇅ changed by <appareil> · S review » (l'id de l'appareil à partir de 120 colonnes) ; un bandeau « Sync » sous les détails compte ce qui attend. Un snippet non confirmé porte « ⇅ to review » ; l'envoyer ouvre sa revue (commande entière) au lieu d'une erreur, puis revient aux snippets.",
+    outro: "Assistant « Set up sync » (titre « step n », sans total : il dépend du dossier) : explication, dossier (saisie, `Tab` complète les dossiers, `↵` demande au moteur ce qu'il contient : « No Portico sync here yet. », « A Portico sync with N devices. », incomplet, absent, refusé avec son indice), puis premier appareil (passphrase et confirmation, jauge de force du moteur, `Ctrl-G` génère, nom de l'appareil, par défaut le nom de la machine ou `portico-` et quatre chiffres hexadécimaux, « Remember the key on this device » coché, puis l'avertissement de récupération et la case « I saved it. A lost passphrase cannot be recovered unless a device remembers the key. » (`Espace`), exigée pour créer, passphrase tapée ou générée) ou rejoindre (passphrase, puis revue : hôtes, « tags, groups, notes », snippets, réglages, conflits, « nécessite une version plus récente » ; choix Review each / Prefer the folder's / Prefer this device's, qui ne confirment jamais un hôte reçu ; jeton valable 10 min, une fois ; la même case, exigée pour rejoindre). Après la création ou l'adhésion, l'assistant se ferme sur le panneau : « Sync is on ». Un refus du moteur s'affiche sous le champ concerné (code et indice). Une revue de rattachement à un bundle déjà vérifié par cet appareil n'offre que « Review each conflict » (les deux autres choix « not offered », avec la raison). La barre de statut de la liste montre `⇅` et l'état (« Synced 2 min ago », « Syncing… », « Waiting for <appareil> », « Sync folder unavailable », « Sync locked », « Sync off », « Keys changed — enter new passphrase », « Key conflict », « Removed from sync », « Changes from a removed device », « Finishing the key rotation… », « New keys needed on <appareil> »), puis conflits et éléments à revoir en couleur d'avertissement, `▲` dans le ton de l'état (avertissement pour « Keys changed » et « New keys needed », erreur pour un conflit de clés, « Removed from sync », « Changes from a removed device » et les autres alertes). Une barre courte retire d'abord « N to review », puis « N conflicts », puis coupe le libellé à sa première partie (« ▲ ⇅ Keys changed »), puis les touches : une alerte, une erreur ou « New keys needed » ne disparaît jamais ; le bandeau « Sync » sous les détails la répète en premier, dans son ton. Un hôte dont la destination reçue attend porte `⇅` dans la liste ; ses détails disent « ⇅ changed by <appareil> · S review » (l'id de l'appareil à partir de 120 colonnes) ; un bandeau « Sync » sous les détails compte ce qui attend. Un snippet non confirmé porte « ⇅ to review » ; l'envoyer ouvre sa revue (commande entière) au lieu d'une erreur, puis revient aux snippets.",
 };
 
 /// Fixed keys of the configurable contexts (not rebindable).

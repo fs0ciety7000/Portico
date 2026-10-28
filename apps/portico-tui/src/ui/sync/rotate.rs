@@ -8,13 +8,19 @@ use portico_core::sync::api::{ForgetPreview, RotationPreview};
 use portico_core::sync::{AlertKind, SyncStatus};
 use ratatui::text::{Line, Span};
 
-use super::{loading, ok, paragraph, pass_fields, question, warning};
+use super::{loading, ok, paragraph, pass_fields, pass_fields_sized, question, warning};
 use crate::form::display_safe;
 use crate::keys::Load;
-use crate::sync_panel::{Ask, PassForm, PassKind, subject_label};
+use crate::sync_panel::{
+    ADOPT_UNSURE_AFTER_R1, Ask, NEWER_FILE_HINT, OLD_KEY_CONSEQUENCE, PassForm, PassKind,
+    TYPE_NOTHING, new_keys_title, subject_label,
+};
 use crate::sync_rotate::{RotateFlow, RotateKind, RotateStep};
 use crate::theme::Styles;
 use crate::ui::form;
+
+/// The rotation's answer was lost to a folder timeout (A4), as in the GUI.
+pub(crate) const CHECKING: &str = "Result unknown — Portico is checking";
 
 /// Records listed by name in the forget preview (then "+N more").
 const LAST_WRITTEN_SHOWN: usize = 5;
@@ -24,13 +30,55 @@ pub(crate) fn cloud_title(label: &str) -> String {
     format!("Also remove {label}'s access to your cloud folder")
 }
 pub(crate) const CLOUD_TEXT: &str = "Its Dropbox, iCloud or OneDrive session, or its Syncthing share: only that closes the remaining window. Without it, the lost device can still put old files back.";
+/// [`CLOUD_TEXT`] in one line, so the reminder takes two at 80 columns (B9).
+pub(crate) const CLOUD_TEXT_SHORT: &str =
+    "Its cloud or Syncthing session: only that closes the remaining window.";
+/// Below this width, the cloud folder reminder takes its short form.
+const CLOUD_FULL_AT: usize = 90;
+
+/// `Forgotten: X. It cannot read what is synced from now on.`, word for
+/// word as in the GUI (B8).
+pub(crate) fn forgotten_result(labels: &[String]) -> String {
+    format!(
+        "Forgotten: {}. {} read what is synced from now on.",
+        list_text(labels),
+        if labels.len() == 1 {
+            "It cannot"
+        } else {
+            "They cannot"
+        }
+    )
+}
+
+/// The result's RR7 reminder, word for word as in the GUI (B8).
+pub(crate) fn cloud_reminder(labels: &[String]) -> String {
+    format!(
+        "{}, if not done yet: only that closes the remaining window.",
+        cloud_title(&list_text(labels))
+    )
+}
+
+/// `a, b and c`.
+fn list_text(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// `workstation (a07d51c2) — update Portico first` for a device on
+/// Portico < 0.7 (B9), as in the GUI.
+pub(crate) fn device_to_update(label: &str, outdated: &[String]) -> String {
+    if outdated.iter().any(|o| o == label) {
+        format!("{label} — update Portico first")
+    } else {
+        label.to_owned()
+    }
+}
 
 /// R17, word for word as in the GUI.
 pub(crate) const KEEP_MINE_TEXT: &str = "This device rotates the keys again from its own. The other rotation's removals are lost: if the other device removed a device, remove it again here. The other devices then see a conflict and choose in turn.";
-
-/// The adoption's line (§13.3.2), word for word as in the GUI.
-pub(crate) const TYPE_NOTHING: &str =
-    "If you did not change the keys on another device, type nothing.";
 
 fn blank() -> Line<'static> {
     Line::from("")
@@ -55,7 +103,7 @@ fn bullets(s: Styles, items: &[String], w: usize) -> Vec<Line<'static>> {
 }
 
 /// `▲ text` in the warning colour, wrapped under its mark.
-fn warn(s: Styles, text: &str, w: usize) -> Vec<Line<'static>> {
+pub(super) fn warn(s: Styles, text: &str, w: usize) -> Vec<Line<'static>> {
     crate::ui::fmt::wrap(text, w.saturating_sub(2))
         .into_iter()
         .enumerate()
@@ -96,10 +144,10 @@ fn devices_block(
                     .devices
                     .iter()
                     .any(|d| d.label == *label && d.waiting);
-                if waiting {
+                if waiting && !preview.outdated.contains(label) {
                     format!("{label} — some of its data is still on its way")
                 } else {
-                    label.clone()
+                    device_to_update(label, &preview.outdated)
                 }
             })
             .collect();
@@ -154,8 +202,13 @@ fn forget_block(
 ) -> Vec<Line<'static>> {
     let label = display_safe(label);
     let mut lines = warn(s, &cloud_title(&label), w);
+    let cloud = if w < CLOUD_FULL_AT {
+        CLOUD_TEXT_SHORT
+    } else {
+        CLOUD_TEXT
+    };
     lines.extend(
-        crate::ui::fmt::wrap(CLOUD_TEXT, w.saturating_sub(2))
+        crate::ui::fmt::wrap(cloud, w.saturating_sub(2))
             .into_iter()
             .map(|l| Line::from(vec![Span::raw("  "), Span::styled(l, s.secondary())])),
     );
@@ -245,8 +298,13 @@ fn done_lines(flow: &RotateFlow, s: Styles, w: usize) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let mut lines = Vec::new();
+    let outdated = flow
+        .preview
+        .ready()
+        .map(|p| p.outdated.clone())
+        .unwrap_or_default();
     if result.pending() {
-        lines.extend(warn(s, "Finishing the key rotation…", w));
+        lines.extend(warn(s, crate::sync_panel::ROTATION_PENDING, w));
         lines.extend(paragraph(
             s.secondary(),
             "The new keys are saved on this device: Portico writes them to the folder as soon as it answers. Nothing goes back to the old keys.",
@@ -260,27 +318,37 @@ fn done_lines(flow: &RotateFlow, s: Styles, w: usize) -> Vec<Line<'static>> {
     }
     lines.push(blank());
     if let Some(outcome) = &result.outcome {
-        if !outcome.forgotten.is_empty() {
-            lines.extend(paragraph(
-                s.secondary(),
-                &format!(
-                    "Removed from sync: {}.",
-                    display_safe(&outcome.forgotten.join(", "))
-                ),
-                w,
-            ));
+        let forgotten: Vec<String> = outcome.forgotten.iter().map(|l| display_safe(l)).collect();
+        if !forgotten.is_empty() {
+            lines.extend(paragraph(s.primary(), &forgotten_result(&forgotten), w));
         }
         if outcome.enter_new_passphrase_on.is_empty() {
             lines.extend(paragraph(s.secondary(), "No other device to update.", w));
         } else {
             lines.extend(paragraph(s.primary(), "Enter the new passphrase on:", w));
-            lines.extend(bullets(s, &outcome.enter_new_passphrase_on, w));
+            let shown: Vec<String> = outcome
+                .enter_new_passphrase_on
+                .iter()
+                .map(|label| device_to_update(label, &outdated))
+                .collect();
+            lines.extend(bullets(s, &shown, w));
         }
         if !outcome.exposed_accounts.is_empty() {
             lines.push(blank());
             lines.extend(warn(s, "Change these server passwords:", w));
             lines.extend(bullets(s, &outcome.exposed_accounts, w));
         }
+        if !forgotten.is_empty() {
+            lines.push(blank());
+            lines.extend(warn(s, &cloud_reminder(&forgotten), w));
+        }
+    } else if flow.kind != RotateKind::KeepMine {
+        // The folder's answer was lost (A4), the status shows the keys moved.
+        lines.extend(paragraph(
+            s.secondary(),
+            "The folder answered late, but the keys did change. The Devices tab lists the devices that need the new passphrase.",
+            w,
+        ));
     } else {
         lines.extend(paragraph(
                 s.secondary(),
@@ -327,6 +395,7 @@ pub(super) fn rotate_lines(
     s: Styles,
     tick: u64,
     w: usize,
+    compact: bool,
 ) -> (Vec<Line<'static>>, Option<usize>) {
     let (step, steps) = match (&flow.kind, flow.step) {
         (RotateKind::KeepMine, RotateStep::About) => (1, 2),
@@ -338,7 +407,10 @@ pub(super) fn rotate_lines(
     let mut lines = vec![Line::from(vec![
         Span::styled(flow.title(), s.title()),
         Span::styled(
-            if matches!(flow.step, RotateStep::Done | RotateStep::Working) {
+            if matches!(
+                flow.step,
+                RotateStep::Done | RotateStep::Working | RotateStep::Checking
+            ) {
                 String::new()
             } else {
                 format!("  ·  {step} of {steps}")
@@ -358,6 +430,21 @@ pub(super) fn rotate_lines(
             ));
             lines.push(blank());
             lines.extend(pass_fields(&flow.auth, s, tick, w));
+            if let Some(e) = &flow.problem {
+                lines.push(blank());
+                lines.extend(form::notice(s, false, &e.message, e.hint.as_deref(), w));
+                focus = Some(lines.len().saturating_sub(1));
+            }
+        }
+        RotateStep::Checking => {
+            lines.extend(warn(s, CHECKING, w));
+            lines.push(loading(s, tick, "Reading the sync status again…"));
+            lines.push(blank());
+            lines.extend(paragraph(
+                s.secondary(),
+                "The folder did not answer in time. The rotation may have gone through: Portico reads the status again before asking for anything. Esc closes this; the status shows the result.",
+                w,
+            ));
         }
         RotateStep::New | RotateStep::Confirm(_) => {
             lines.extend(paragraph(
@@ -366,7 +453,7 @@ pub(super) fn rotate_lines(
                 w,
             ));
             lines.push(blank());
-            let fields = pass_fields(&flow.new, s, tick, w);
+            let fields = pass_fields_sized(&flow.new, s, tick, w, compact);
             let saved_focused = flow.new.focused() == Some(crate::sync_panel::PassField::Saved);
             lines.extend(fields);
             if saved_focused {
@@ -401,10 +488,14 @@ pub(super) fn rotate_lines(
     (lines, focus)
 }
 
-/// "Enter the new passphrase" (adoption, §13.3.5).
+/// "Enter the new passphrase" (adoption, §13.3.5), as in the GUI (B4):
+/// who reports new keys, R1 in the primary text under its mark, then
+/// what to do when nobody here changed them; "remove the file…" only when
+/// a file claims newer keys (`newer`).
 pub(super) fn adopt_lines(
     form_state: &PassForm,
     status: Option<&SyncStatus>,
+    newer: bool,
     s: Styles,
     tick: u64,
     w: usize,
@@ -419,17 +510,18 @@ pub(super) fn adopt_lines(
     let mut lines = vec![
         Line::from(Span::styled("Enter the new passphrase", s.title())),
         blank(),
+        Line::from(Span::styled(new_keys_title(device.as_deref()), s.primary())),
     ];
-    let what = match device {
-        Some(device) => format!(
-            "The file of {device} announces new keys. Enter the NEW passphrase chosen on the device that changed them."
-        ),
-        None => {
-            "Keys were changed on another device. Enter the NEW passphrase chosen there.".to_owned()
-        }
-    };
-    lines.extend(paragraph(s.secondary(), &what, w));
+    lines.extend(paragraph(
+        s.secondary(),
+        "Enter the NEW passphrase chosen there.",
+        w,
+    ));
     lines.extend(warn(s, TYPE_NOTHING, w));
+    lines.extend(paragraph(s.secondary(), ADOPT_UNSURE_AFTER_R1, w));
+    if newer {
+        lines.extend(paragraph(s.secondary(), NEWER_FILE_HINT, w));
+    }
     if form_state.kind == (PassKind::Adopt { previous: true }) {
         lines.push(blank());
         lines.extend(paragraph(
@@ -478,9 +570,9 @@ pub(super) fn ask_lines(ask: &Ask, s: Styles, w: usize) -> Vec<Line<'static>> {
                 display_safe(label)
             ),
         ),
-        Ask::RemoveKey { label, .. } => (
-            format!("Remove {label} from this keychain?"),
-            "An old sync key opens only what was synced before the keys changed. The key in use is never listed here.".to_owned(),
+        Ask::RemoveKey { .. } => (
+            "Remove these old keys from this keychain?".to_owned(),
+            format!("{OLD_KEY_CONSEQUENCE} The key in use is never listed here."),
         ),
     };
     let mut lines = vec![blank(), question(s, &q)];

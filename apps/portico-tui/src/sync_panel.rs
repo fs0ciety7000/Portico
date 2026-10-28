@@ -126,16 +126,44 @@ impl SyncData {
 // ── status words (status bar, panel, wizard) ─────────────────────────────
 
 /// How a status reads: neutral, in progress, needs attention, failed.
+/// One mapping in both UIs (S2c-1 review B5, `docs/SYNC.md` §13.12):
+/// "Keys changed" and "New keys needed on X" are warnings; a key
+/// conflict, "Removed from sync" and "Changes from a removed device" are
+/// errors; "Finishing the key rotation…" is in progress (no animation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tone {
     /// Off, synced.
     Neutral,
-    /// Syncing, waiting.
+    /// Syncing, waiting, finishing the key rotation.
     Busy,
-    /// Locked, folder unavailable.
+    /// Locked, folder unavailable, keys changed, new keys needed.
     Warning,
     /// An alert, an error.
     Error,
+}
+
+/// The status label of a rotation still on its way (one wording
+/// everywhere, S2c-1 review B12).
+pub(crate) const ROTATION_PENDING: &str = "Finishing the key rotation…";
+
+/// The status must stay visible on the host list even when the bar is
+/// short (S2c-1 review B1): alerts, errors, new keys needed.
+pub(crate) fn must_show(status: &SyncStatus) -> bool {
+    matches!(
+        status,
+        SyncStatus::Alert { .. }
+            | SyncStatus::Error { .. }
+            | SyncStatus::Waiting {
+                reason: WaitReason::NeedsNewKeys,
+                ..
+            }
+    )
+}
+
+/// `Keys changed — enter new passphrase` → `Keys changed`: the label's
+/// first clause, where room is short.
+pub(crate) fn short_label(label: &str) -> &str {
+    label.split_once(" — ").map_or(label, |(first, _)| first)
 }
 
 /// The monochrome sync glyph of the status bar.
@@ -164,13 +192,18 @@ pub(crate) fn status_label(status: &SyncStatus, now: OffsetDateTime) -> (String,
                 (None, WaitReason::Placeholder) => "Waiting for downloads".into(),
                 (None, WaitReason::Deferred) => "Waiting for other devices".into(),
                 (None, WaitReason::Busy) => "Waiting for the other Portico".into(),
-                (_, WaitReason::RotationPending) => "Finishing key rotation…".into(),
+                (_, WaitReason::RotationPending) => ROTATION_PENDING.into(),
                 (Some(device), WaitReason::NeedsNewKeys) => format!("New keys needed on {device}"),
                 (None, WaitReason::NeedsNewKeys) => "New keys needed".into(),
                 (Some(device), _) => format!("Waiting for {device}"),
                 (None, _) => "Waiting".into(),
             };
-            (label, Tone::Busy)
+            let tone = if *reason == WaitReason::NeedsNewKeys {
+                Tone::Warning
+            } else {
+                Tone::Busy
+            };
+            (label, tone)
         }
         SyncStatus::FolderUnavailable { .. } => ("Sync folder unavailable".into(), Tone::Warning),
         SyncStatus::Alert { kind, .. } => (
@@ -182,10 +215,58 @@ pub(crate) fn status_label(status: &SyncStatus, now: OffsetDateTime) -> (String,
                 _ => "Sync alert",
             }
             .into(),
-            Tone::Error,
+            alert_tone(*kind),
         ),
         SyncStatus::Error { .. } => ("Sync error".into(), Tone::Error),
         _ => ("Sync".into(), Tone::Neutral),
+    }
+}
+
+/// The tone of an alert (B5): new keys elsewhere ask for a passphrase
+/// (warning); everything else is an error.
+pub(crate) fn alert_tone(kind: AlertKind) -> Tone {
+    if kind == AlertKind::KeysRotatedElsewhere {
+        Tone::Warning
+    } else {
+        Tone::Error
+    }
+}
+
+/// `desk (77a1b2c3) reports new keys` (the adoption's title, as in the
+/// GUI).
+pub(crate) fn new_keys_title(device: Option<&str>) -> String {
+    format!("{} reports new keys", device.unwrap_or("Another device"))
+}
+
+/// The adoption's line (§13.3.2, R1), word for word as in the GUI.
+pub(crate) const TYPE_NOTHING: &str =
+    "If you did not change the keys on another device, type nothing.";
+
+/// What to do when nobody here changed the keys (B4), under the R1 line:
+/// the GUI's text without its first sentence, which R1 already says
+/// (80×24: the TUI does not repeat it, an accepted deviation).
+pub(crate) const ADOPT_UNSURE_AFTER_R1: &str = "Ask who did: someone with the old passphrase or a lost device may have. Close this, then forget that device from a device you trust.";
+
+/// Only when the core lists files that claim newer keys (RR5).
+pub(crate) const NEWER_FILE_HINT: &str =
+    "If nobody changed the keys, remove the file that claims newer keys (below).";
+
+/// `sync_passphrase_reused`, said for the dialog it happened in (B3): by
+/// code, never by message; word for word as in the GUI.
+pub(crate) const REUSED_ROTATION: &str =
+    "Portico accepted this passphrase before. Choose a new one, or generate one.";
+pub(crate) const REUSED_ADOPTION: &str = "This is an old passphrase, not a new one. If nobody gave you a new passphrase, nobody changed the keys: type nothing, close, and check your other devices.";
+
+/// The refusal, with the hint of the dialog when the passphrase was
+/// accepted before (B3).
+pub(crate) fn with_reused_hint(error: ErrorSummary, hint: &str) -> ErrorSummary {
+    if error.code == "sync_passphrase_reused" {
+        ErrorSummary {
+            hint: Some(hint.to_owned()),
+            ..error
+        }
+    } else {
+        error
     }
 }
 
@@ -221,9 +302,14 @@ pub(crate) fn folder_reason(reason: FolderReason) -> (&'static str, &'static str
 }
 
 /// An alert: what happened (naming the device) and what to do.
-pub(crate) fn alert_text(kind: AlertKind, device: Option<&str>) -> (String, &'static str) {
+pub(crate) fn alert_text(kind: AlertKind, device: Option<&str>) -> (String, String) {
+    let (what, hint) = alert_words(kind, device);
+    (what, hint.into())
+}
+
+fn alert_words(kind: AlertKind, device: Option<&str>) -> (String, std::borrow::Cow<'static, str>) {
     let who = device.unwrap_or("a device");
-    match kind {
+    let (what, hint): (String, &'static str) = match kind {
         AlertKind::Rollback => (
             "An older copy of a sync file was put back.".into(),
             "Nothing older is applied. Check the folder's version history, then sync again.",
@@ -241,11 +327,8 @@ pub(crate) fn alert_text(kind: AlertKind, device: Option<&str>) -> (String, &'st
             "Nothing is applied. If nobody changed the keys, restore the key file from this device; otherwise disable sync and create a new sync folder.",
         ),
         AlertKind::KeysRotatedElsewhere => (
-            match device {
-                Some(device) => format!("The file of {device} announces new keys."),
-                None => "The keys were changed on another device.".into(),
-            },
-            "Enter the NEW passphrase chosen there. If you did not change the keys on another device, type nothing.",
+            new_keys_title(device),
+            "Enter the NEW passphrase chosen there. Nothing is merged until then; your local data stays as it is.",
         ),
         AlertKind::RotationConflict => (
             "Two devices changed the keys at the same time.".into(),
@@ -258,10 +341,16 @@ pub(crate) fn alert_text(kind: AlertKind, device: Option<&str>) -> (String, &'st
             },
             "Its local data stays. Turn sync off, or join again as a new device.",
         ),
-        AlertKind::RevokedWrites => (
-            format!("{who} relays changes of a removed device."),
-            "They are not applied. Type the new passphrase on that device. Values held here wait in Received.",
-        ),
+        AlertKind::RevokedWrites => {
+            // The device to update is named (B10).
+            return (
+                format!("{who} relays changes of a removed device."),
+                format!(
+                    "They are not applied. Enter the new passphrase on {who}. Values held here wait in Received."
+                )
+                .into(),
+            );
+        }
         AlertKind::PassphraseChanged => (
             format!("The passphrase was changed or reset on {who}."),
             "If nobody you trust did it, disable sync and create a new sync folder. Otherwise acknowledge it.",
@@ -283,7 +372,8 @@ pub(crate) fn alert_text(kind: AlertKind, device: Option<&str>) -> (String, &'st
             "Its data is held back. Check that device.",
         ),
         _ => ("Sync needs your attention.".into(), "Open the Issues tab."),
-    }
+    };
+    (what, hint.into())
 }
 
 /// `Host web-01`, `Tags of web-01`, `Snippet deploy`, `Setting theme`.
@@ -859,12 +949,12 @@ pub(crate) enum ReceivedItem<'a> {
 
 impl ReceivedItem<'_> {
     /// What a decision names: the destination or command hash, the held
-    /// value's key.
-    pub(crate) fn hash(&self) -> &str {
+    /// value's key and content hash (A3).
+    pub(crate) fn hash(&self) -> String {
         match self {
-            Self::Host(h) => &h.destination_hash,
-            Self::Snippet(s) => &s.hash,
-            Self::Held(h) => &h.key,
+            Self::Host(h) => h.destination_hash.clone(),
+            Self::Snippet(s) => s.hash.clone(),
+            Self::Held(h) => format!("{}:{}", h.key, h.hash),
         }
     }
 }
@@ -1011,6 +1101,8 @@ pub(crate) enum OverviewAction {
     SetUp,
     Unlock,
     Adopt,
+    /// Changes from a removed device: the held values (B10).
+    ReviewHeld,
     UseOther,
     KeepMine,
     JoinAgain,
@@ -1033,6 +1125,7 @@ impl OverviewAction {
             Self::SetUp => ("↵", "set up sync"),
             Self::Unlock => ("↵", "unlock"),
             Self::Adopt => ("↵", "enter the new passphrase"),
+            Self::ReviewHeld => ("↵", "review held values"),
             Self::UseOther => ("u", "use the other device's keys"),
             Self::KeepMine => ("o", "keep this device's keys"),
             Self::JoinAgain => ("n", "join again as a new device"),
@@ -1051,7 +1144,7 @@ impl OverviewAction {
 
     fn matches(self, code: KeyCode) -> bool {
         match (self, code) {
-            (Self::SetUp | Self::Adopt | Self::Unlock, KeyCode::Enter)
+            (Self::SetUp | Self::Adopt | Self::Unlock | Self::ReviewHeld, KeyCode::Enter)
             | (Self::Unlock | Self::Adopt, KeyCode::Char('u')) => true,
             (_, KeyCode::Char(c)) => self.hint().0.starts_with(c) && self.hint().0.len() == 1,
             _ => false,
@@ -1060,7 +1153,8 @@ impl OverviewAction {
 }
 
 /// The Overview's actions for `status`, most important first. `newer`:
-/// device files announce newer keys (RR5).
+/// device files announce newer keys (RR5). [`SyncPanel::actions`] adds
+/// "review held values" when values are held (B10).
 pub(crate) fn overview_actions(status: &SyncStatus, newer: bool) -> Vec<OverviewAction> {
     use OverviewAction as A;
     match status {
@@ -1113,15 +1207,22 @@ pub(crate) enum DeviceRow<'a> {
     Key(&'a SyncKeyEntry),
 }
 
-/// `epoch 3 · this sync` / `epoch 1 · another sync (9f0e…)`.
+/// `Old keys (rotation 1) · this sync · not in use` / `… · another sync
+/// (9f0e11aa) · not in use`, word for word as in the GUI (B12).
 pub(crate) fn key_entry_label(entry: &SyncKeyEntry) -> String {
-    if entry.this_bundle {
-        format!("Keys {} · this sync", entry.epoch)
+    let sync = if entry.this_bundle {
+        "this sync".to_owned()
     } else {
         let short: String = entry.bundle.chars().take(8).collect();
-        format!("Keys {} · another sync ({short})", entry.epoch)
-    }
+        format!("another sync ({short})")
+    };
+    format!("Old keys (rotation {}) · {sync} · not in use", entry.epoch)
 }
+
+/// Removing an old key from this keychain: the consequence, as in the
+/// GUI (B8).
+pub(crate) const OLD_KEY_CONSEQUENCE: &str =
+    "Files sealed only with it can no longer be read here.";
 
 #[derive(Debug)]
 pub(crate) struct SyncPanel {
@@ -1301,7 +1402,7 @@ impl SyncPanel {
     /// The selected received item has been read to its last line.
     pub(crate) fn read_to_end(&self, data: &SyncData) -> bool {
         self.selected_received(data)
-            .is_some_and(|item| self.seen_end.as_deref() == Some(item.hash()))
+            .is_some_and(|item| self.seen_end.as_deref() == Some(item.hash().as_str()))
     }
 
     /// Decisions on received hosts and snippets: the item has been on
@@ -1803,6 +1904,23 @@ impl SyncPanel {
         }
     }
 
+    /// The Overview's actions: [`overview_actions`], with "review held
+    /// values" first when a removed device's changes are held (B10).
+    pub(crate) fn actions(&self, status: &SyncStatus, data: &SyncData) -> Vec<OverviewAction> {
+        let mut actions = overview_actions(status, !self.newer_files().is_empty());
+        if matches!(
+            status,
+            SyncStatus::Alert {
+                kind: AlertKind::RevokedWrites,
+                ..
+            }
+        ) && !data.held.is_empty()
+        {
+            actions.insert(0, OverviewAction::ReviewHeld);
+        }
+        actions
+    }
+
     /// Rotation is offered while sync runs normally (not off, locked, nor
     /// waiting for a key decision).
     fn can_rotate(data: &SyncData) -> bool {
@@ -1876,8 +1994,8 @@ impl SyncPanel {
         let Some(status) = status else {
             return SyncOutcome::None;
         };
-        let newer = !self.newer_files().is_empty();
-        let Some(action) = overview_actions(status, newer)
+        let Some(action) = self
+            .actions(status, data)
             .into_iter()
             .find(|a| a.matches(key.code))
         else {
@@ -1886,6 +2004,12 @@ impl SyncPanel {
         let remember = Self::remember(data);
         match action {
             OverviewAction::SetUp => SyncOutcome::OpenWizard,
+            OverviewAction::ReviewHeld => {
+                self.tab = SyncTab::Received;
+                self.received = data.pending.len().saturating_add(data.snippets.len());
+                self.reselect(now);
+                SyncOutcome::None
+            }
             OverviewAction::Unlock => {
                 self.open_form(PassKind::Unlock);
                 SyncOutcome::None
@@ -1996,9 +2120,17 @@ impl SyncPanel {
                 return hints;
             }
             PanelMode::Ask { opened_at, .. } if !armed(*opened_at) => return Vec::new(),
-            PanelMode::Reset { .. } | PanelMode::Skip { .. } | PanelMode::Ask { .. } => {
-                return vec![("y", "confirm"), ("n / Esc", "keep")];
+            // The armed questions name their verb (B12).
+            PanelMode::Ask { ask, .. } => {
+                let verb = match ask {
+                    Ask::Restore => "restore key file",
+                    Ask::Discard { .. } => "remove file",
+                    Ask::RemoveKey { .. } => "remove key",
+                };
+                return vec![("y", verb), ("n / Esc", "keep")];
             }
+            PanelMode::Skip { .. } => return vec![("y", "skip here"), ("n / Esc", "keep")],
+            PanelMode::Reset { .. } => return vec![("y", "reset"), ("n / Esc", "keep")],
             PanelMode::Rename { .. } => return vec![("↵", "rename"), ("Esc", "back")],
             PanelMode::Disable { join_again, .. } => {
                 let enter = if *join_again {
@@ -2014,9 +2146,8 @@ impl SyncPanel {
         match self.tab {
             SyncTab::Overview => {
                 if let Some(status) = data.status() {
-                    let newer = !self.newer_files().is_empty();
                     hints.extend(
-                        overview_actions(status, newer)
+                        self.actions(status, data)
                             .into_iter()
                             .map(OverviewAction::hint),
                     );
