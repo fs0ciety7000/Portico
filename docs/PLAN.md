@@ -250,7 +250,11 @@ silence. Jamais synchronisés : clés privées, `known_hosts`, `~/.ssh/config`, 
     (`u` / `o`), appareil oublié (`D` / `n` rejoindre), fichiers d'époque supérieure (`x`), « Restore key file » (`b`),
     anciennes clés du trousseau, valeurs retenues dans Received (`m` / `t`), « Leave the device list », revue de
     rattachement « Review each » seul, libellés de statut dédiés ; exercice d'appareil perdu joué par les touches du
-    panneau (`lost_device_drill_through_the_panel`) ; détails et écarts en `docs/SYNC.md` §13.12.2
+    panneau (`lost_device_drill_through_the_panel`) ; détails et écarts en `docs/SYNC.md` §13.12.2.
+    Revues S2c-1 *(2026-10-28)* : sécurité (quatre faibles) et design (« presque ») corrigées dans les deux UIs ; cœur :
+    valeurs retenues liées à leur empreinte (`RevokedValueItem::hash`, valeurs affichées), `SyncOverview::epoch` (réponse
+    de rotation perdue : « Result unknown — Portico is checking ») ; TUI : alertes de clés toujours visibles à 80×24,
+    tons communs, textes de sécurité identiques, étape 1 lue jusqu'au bout ; tableaux en `docs/SYNC.md` §13.12.4–13.12.5
   - **S2b, mots de passe liés (moteur)** puis **S2c-2 (interfaces)** : à faire
 - **S3, plus tard** : emplacements de clé par appareil (rotation sans ressaisir la passphrase), signatures Ed25519, exclusions
   par réglage, options à décider

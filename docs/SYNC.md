@@ -1766,13 +1766,13 @@ Le panneau Sync de la TUI branche toute l'API de §13.12 « Ce que S2c-1 (UIs) d
 | Adoption | `↵` ou `u` sur « Keys changed — enter new passphrase » : « If you did not change the keys on another device, type nothing. » ; sur un appareil qui ne mémorise pas sa clé, champ « Previous » facultatif d'abord (RR4) : la TUI appelle `sync_unlock(précédente)` puis `sync_unlock(nouvelle)` ; un refus de la précédente se place sous son champ (« If Portico has not restarted since the keys changed, leave it empty. ») ; `sync_device_forgotten`, `sync_lineage_unknown`, `sync_rotation_conflict` ferment le formulaire, le statut dit la suite |
 | Conflit de rotation | « Key conflict » : `u` « Use the other device's keys » (sa passphrase, refus E2 sous le champ avec l'appareil nommé), `o` « Keep this device's keys » (texte R17, nouvelle passphrase, `y`) ; `sync_not_pending` ferme le formulaire et relit l'état |
 | Appareil oublié | « Removed from sync » : `D` désactive, `n` « Join again as a new device » désactive (« Forget the key » coché) puis ouvre l'assistant sur l'étape du dossier, prérempli |
-| Valeurs retenues | Onglet Received, après les snippets : « held · from <appareil> » (ou « unknown origin »), carte « From forgotten devices », `m` « keep as mine » / `t` « take the synced value », armés, un élément à la fois ; `SyncPendingChanged` les recharge (les décisions attendent) ; compte dans « to review » |
+| Valeurs retenues | Onglet Received, après les snippets : « held · from removed <appareil> » (ou « unknown origin »), carte « From removed devices · held until you decide, one by one », la valeur de cet appareil (« m keeps it ») et celle des autres (« t takes it », ou « None: t removes it from this device. »), `m` « keep as mine » / `t` « take the synced value », armés, un élément à la fois, décision liée à `RevokedValueItem::hash` (S2c-1 A3) ; `SyncPendingChanged` les recharge (les décisions attendent) ; compte dans « to review » |
 | Fichiers d'époque supérieure | Sous l'alerte, chaque fichier (`devices/….snap`, appareil, époque annoncée), `j` / `k` pour choisir, `x` puis `y` armé → `sync_discard_newer_file(device, fingerprint)` |
 | « Restore key file » | `b` sur `BundleTampered` et pendant `RotationPending`, `y` armé ; un refus (`sync_keys_rotated`, `sync_rotation_conflict`) s'affiche avec son indice |
-| Anciennes clés | Devices, section « Old keys in this keychain » (« Keys <époque> · this sync / another sync (<bundle>) », « not in use »), `x` puis `y` armé ; la clé en service n'est jamais listée (le texte le dit) |
+| Anciennes clés | Devices, section « Old keys in this keychain » (« Old keys (rotation <époque>) · this sync / another sync (<bundle>) · not in use »), `x` puis `y` armé (« Files sealed only with it can no longer be read here. ») ; la clé en service n'est jamais listée (le texte le dit) |
 | « Turn sync off » | Troisième case « Leave the device list » avec le texte R18 (sans rotation, l'appareil garde la clé jusqu'à la prochaine), cochée avec « Remove this device's file » comme dans la GUI (décochable seule) ; masquée pour « Join again » |
 | Rattachement (`JoinPreview::rejoin`) | Seul « Review each conflict » ; les deux autres choix « not offered » avec la raison ; `j` / `k` sans effet |
-| Statuts | Barre et panneau : « Keys changed — enter new passphrase », « Key conflict », « Removed from sync », « Changes from a removed device », « Finishing key rotation… », « New keys needed on <appareil> » ; textes et indices dédiés dans l'Overview |
+| Statuts | Barre et panneau : « Keys changed — enter new passphrase », « Key conflict », « Removed from sync », « Changes from a removed device », « Finishing the key rotation… », « New keys needed on <appareil> » ; textes et indices dédiés dans l'Overview ; tons du tableau §13.12.5 |
 | « Ne pas mémoriser » | `m` : « The key is no longer remembered, nor the key of a pending rotation: after a restart, Portico asks for the passphrase » |
 
 Tests : `sync_rotate.rs` (étapes, effacement des secrets, `y` armé, refus ramenés à leur champ),
@@ -1786,7 +1786,7 @@ formulaire). Captures : `PORTICO_CAPTURE_DIR=… cargo test -p portico-tui s2c1_
 | « Rotate keys » est `o`, pas `R` (§13.8) | `R` est déjà « reset passphrase » dans l'Overview ; `o` est aussi la touche de la GUI |
 | « Join again as a new device » est `n`, pas `J` | `J` fait défiler le panneau |
 | Adoption : la passphrase précédente est un champ facultatif (laisser vide), pas un bouton « I don't remember it » | Un champ secret vide suffit au clavier ; l'appareil ne peut pas savoir s'il détient encore la clé courante en mémoire (dans ce cas la précédente est refusée et le texte dit de la laisser vide) |
-| La valeur d'un enregistrement retenu n'est pas affichée | `RevokedValueItem` ne la porte pas (sujet et appareil seulement) |
+| ~~La valeur d'un enregistrement retenu n'est pas affichée~~ | Levé par les correctifs S2c-1 (A3) : `RevokedValueItem` porte `local`, `synced` et `hash` |
 
 #### 13.12.3 Livraison S2c-1 : GUI (2026-10-27)
 
@@ -1805,3 +1805,45 @@ La GUI branche la même API, avec les mêmes libellés que la TUI (§13.12.2) ; 
   élément à la fois.
 - **Fichiers d'époque supérieure et anciennes clés** : retirables après confirmation.
 - **« Turn sync off »** : case « Leave the device list » (texte R18), cochée avec « Remove this device's file ».
+
+#### 13.12.4 Revues S2c-1 et correctifs (2026-10-28)
+
+Revue de sécurité (`agent-security`, sur `48e9e00..341965f`) : aucun point critique ni élevé, quatre faibles, tous
+corrigés. Revue design (`agent-design-review`) : « presque », deux bloquants, tout appliqué. Cœur : deux petits
+changements additifs, chacun dans son propre commit.
+
+| Point | Constat | Correctif (TUI ; la GUI applique le même, §13.12.3) | Test |
+|---|---|---|---|
+| A1 | GUI : un `y` confirmait une suppression armée sur un autre onglet | GUI seule (questions exclusives, `y` limité à l'onglet de la question) | `panel_y_only_confirms_the_question_on_screen` (GUI) |
+| A2 | GUI : pas de délai d'armement avant le `y` final | GUI seule (150 ms après « prêt », `e.repeat` ignoré) ; la TUI arme déjà (`ARM_DELAY`) | `rotate_y_right_after_ticking_saved_is_ignored` (GUI) |
+| A3 | Valeur retenue : décision non réarmée quand la liste bouge, valeur non affichée, pas d'empreinte | Cœur : `RevokedValueItem` gagne `local` (valeur retenue ici, ce que `KeepAsMine` partage), `synced` (ce que tiennent les autres, ce que `TakeSynced` prend ; `None` : rien, la valeur est retirée ici ; jamais un secret) et `hash` (appareil, valeur locale et valeur synchronisée) ; `sync_revoked_value(key, choice, hash)` recalcule l'empreinte et refuse `sync_not_pending` si elle diffère. TUI : les deux valeurs affichées avant le choix, l'élément lu jusqu'au bout et armé lié à `key:hash`, l'empreinte envoyée, rechargement attendu après une décision | `revoked_value_refuses_a_stale_hash` (cœur), `held_decision_waits_after_list_change` (TUI) |
+| A4 | `sync_folder_timeout` pendant une rotation traité comme un refus, nouvelle passphrase demandée alors que la courante était consommée | Cœur : `SyncOverview::epoch` (époque de clés de cet appareil). TUI : étape « Result unknown — Portico is checking », aucun champ ; l'état relu tranche : `RotationPending` ou époque plus haute → résultat ; même époque → retour à l'étape de la passphrase consommée (la courante d'abord) ; dossier toujours muet → on attend (`Esc` ferme). Tout autre refus sans champ ramène aussi à la passphrase courante quand elle a été consommée | `rotation_timeout_does_not_ask_for_another_passphrase` (TUI, unitaire et application ; GUI) |
+| B1 | TUI 80×24 : alerte de clés invisible sur l'écran des hôtes | Élément de statut dégradé pas à pas (sans « N to review », sans « N conflicts », libellé coupé à « ▲ ⇅ Keys changed ») en gardant la première touche, puis les touches cèdent, puis le badge : jamais retiré pour une alerte, une erreur ou « New keys needed » ; bandeau « Sync » : l'alerte d'abord, dans son ton | `key_alerts_stay_visible_on_the_host_screen_at_80x24` |
+| B3 | Passphrase déjà acceptée : même indice partout | Indice par code (`sync_passphrase_reused`) et par dialogue : rotation « Portico accepted this passphrase before. Choose a new one, or generate one. », adoption « This is an old passphrase, not a new one… » ; problèmes sous la valeur (`LABEL + 1`) ; effacés à la saisie, à la génération, au retour | `a_reused_passphrase_gets_the_dialogs_own_hint`, `refusals_go_back_to_their_field` |
+| B4 | Adoption | Titre « <appareil> reports new keys », R1 en texte principal sous `▲`, puis qui interroger ; « remove the file… » seulement quand `sync_newer_files` en liste | captures `adopt*`, `keys-changed` |
+| B5 | Tons différents selon l'UI | Un seul tableau (§13.12.5) | `tones_of_the_key_states` (TUI), `test-sync.ts` (GUI) |
+| B7 | Vocabulaire | Action « Forget… », états « removed » : « From removed devices · held until you decide, one by one », « held · from removed <appareil> » ; phrase `m` / `t` | `held_values_are_decided_one_by_one_nothing_preselected` |
+| B8 | Textes de sécurité divergents | Mêmes chaînes dans les deux UIs : étape 1 de rotation, R18, résultat « Forgotten: X. It cannot read what is synced from now on. » et rappel RR7, conséquence du retrait d'une ancienne clé | `shared_security_texts_word_for_word` (TUI), `test-sync.ts` (GUI) |
+| B9 | Appareils 0.6, pli 80×24 | « <appareil> — update Portico first » (étape 1 et résultat) ; étape 1 : le premier `↵` fait défiler jusqu'à la fin, seul `↵` après la dernière ligne continue ; rappel RR7 en deux lignes sous 90 colonnes | `the_first_enter_scrolls_to_the_end_of_step_one` |
+| B10 | « Changes from a removed device » sans action primaire | `↵` « review held values » ouvre Received sur la première valeur ; l'indice nomme l'appareil (« Enter the new passphrase on workstation (a07d51c2). ») | `revoked_writes_review_held_values_first` |
+| B12 | Mineurs | « Finishing the key rotation… » partout ; « Old keys (rotation n) · this sync · not in use » ; questions armées nommant le verbe (`y` « remove file », « restore key file », « remove key », « skip here », « reset ») ; `↵` « rotate keys… » à l'étape 3 ; encadré de récupération en deux lignes à 24 rangées ; « ↓ N more » sur sa propre ligne ; ligne « Key » masquée dans « Removed from sync » et « Key conflict » | captures |
+
+#### 13.12.5 Tons des états de clés (les deux UIs)
+
+| État | Libellé | Ton TUI (`Tone`) | Ton GUI (`SyncTone`) |
+|---|---|---|---|
+| `Alert { KeysRotatedElsewhere }` | Keys changed — enter new passphrase | Warning | warning |
+| `Alert { RotationConflict }` | Key conflict | Error | error |
+| `Alert { DeviceForgotten }` | Removed from sync | Error | error |
+| `Alert { RevokedWrites }` | Changes from a removed device | Error | error |
+| `Waiting { RotationPending }` | Finishing the key rotation… | Busy (point fixe, sans animation) | busy (point fixe) |
+| `Waiting { NeedsNewKeys }` | New keys needed on <appareil> | Warning | warning |
+
+`▲` prend le ton de l'état. Dans la GUI, la pastille « ! » n'apparaît qu'en mode compact, dans le ton de l'élément.
+
+| Écart accepté (correctifs S2c-1) | Raison |
+|---|---|
+| Confirmation de niveau réinitialisation : la GUI fait taper `reset`, la TUI arme `y` | Décision du responsable : chacun garde le geste de « Reset passphrase » de son UI |
+| TUI : sous la ligne R1, « Ask who did: … » sans répéter la première phrase du texte GUI (« If you did not change the keys… type nothing ») | La ligne R1 la dit déjà juste au-dessus ; 80×24 |
+| TUI : sous 90 colonnes, le rappel RR7 de l'étape 1 prend sa forme courte (« Its cloud or Syncthing session: only that closes the remaining window. ») | Deux lignes à 80 colonnes (B9) ; la forme longue reste au-delà et dans la GUI |
+| TUI : l'issue d'une rotation dont la réponse s'est perdue n'a pas la liste « Enter the new passphrase on » | Le moteur ne la renvoie qu'avec la réponse ; l'onglet Devices la montre |
