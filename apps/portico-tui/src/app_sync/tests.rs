@@ -74,6 +74,7 @@ fn idle(conflicts: usize) -> SyncOverview {
         folder: Some("/home/alice/Dropbox/Portico".into()),
         device: Some("3f9c0ae1aa".into()),
         remember_key: true,
+        epoch: Some(1),
     }
 }
 
@@ -280,6 +281,7 @@ fn the_status_bar_says_how_sync_is_doing() {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     let wide = screen(&mut app, 160, 24);
     assert!(wide.last().unwrap().contains("⇅ Sync off"));
@@ -561,6 +563,7 @@ fn the_wizard_gates_create_on_the_recovery_box() {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     app.update(Action::OpenSync);
     let all = text(&mut app, 80, 24);
@@ -649,6 +652,7 @@ fn an_expired_review_asks_for_the_passphrase_again() {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     app.update(Action::SyncKey(key(KeyCode::Enter)));
     let wizard = app.sync_wizard.as_mut().unwrap();
@@ -923,6 +927,7 @@ fn sync_captures() {
                 folder: None,
                 device: None,
                 remember_key: true,
+                epoch: Some(1),
             });
             open_panel(a, SyncTab::Overview);
         }),
@@ -945,6 +950,7 @@ fn sync_captures() {
                 folder: None,
                 device: None,
                 remember_key: true,
+                epoch: Some(1),
             });
             a.update(Action::SyncKey(key(KeyCode::Enter)));
         }),
@@ -1029,6 +1035,7 @@ fn wizard_at_folder(app: &mut App) {
         folder: None,
         device: None,
         remember_key: true,
+        epoch: Some(1),
     });
     app.update(Action::OpenSync);
     app.update(Action::SyncKey(key(KeyCode::Enter)));

@@ -288,7 +288,8 @@ impl Engine {
             status,
             folder: config.as_ref().map(|c| c.folder.clone()),
             device: config.as_ref().map(|c| c.device.to_string()),
-            remember_key: config.is_none_or(|c| c.remember_key),
+            remember_key: config.as_ref().is_none_or(|c| c.remember_key),
+            epoch: config.as_ref().map(|c| c.epoch),
         })
     }
 

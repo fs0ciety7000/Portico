@@ -580,4 +580,9 @@ pub struct SyncOverview {
     pub folder: Option<PathBuf>,
     pub device: Option<String>,
     pub remember_key: bool,
+    /// The key epoch this device syncs with (`None`: sync off). A UI that
+    /// lost the answer of a rotation (folder timeout) compares it with the
+    /// epoch before to know whether the keys changed (A4, S2c-1 review).
+    #[serde(default)]
+    pub epoch: Option<u32>,
 }

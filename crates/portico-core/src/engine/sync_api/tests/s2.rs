@@ -2094,7 +2094,11 @@ async fn revoked_value_refuses_a_stale_hash() {
         engine: restart(&s, &sim),
         ..s
     };
+    let before = a.engine.sync_status().await.expect("status").epoch;
     forget(&a, vec![id_of(&l)], STRONG, STRONG_2).await;
+    // A4: a UI that lost the answer sees the epoch move.
+    let after = a.engine.sync_status().await.expect("status").epoch;
+    assert_eq!(after, before.map(|e| e + 1), "{before:?} → {after:?}");
     let _ = unlock(&s, STRONG).await.expect("previous keys");
     let _ = unlock(&s, STRONG_2).await;
     let _ = s.engine.sync_now().await;
